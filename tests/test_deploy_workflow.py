@@ -4308,7 +4308,8 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # above rather than retyped here), against the named sha.
     #
     # ⛔ AND IT MUST NOT RED ON A TREE THAT CANNOT SEE THE OBJECT (#11064 review, HIGH).
-    # This file is `tier1` (`config/ci-surfaces.yml:7593`), so it runs in python-ci's `test`
+    # This file is `tier1` (its `- test_deploy_workflow.py` entry under `tier1:` in
+    # `config/ci-surfaces.yml`), so it runs in python-ci's `test`
     # job, and that job's ONLY checkout is a bare `actions/checkout@v4`
     # (`.github/workflows/python-ci.yml:680` job header, `:898` the checkout) — the default
     # `fetch-depth: 1`. No step in that job unshallows it; the workflow's `fetch-depth: 0`

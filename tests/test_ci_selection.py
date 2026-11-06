@@ -249,14 +249,20 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
       this head (97 + 78 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
     * the **78** is `tier1`'s own size — the entire set an empty-surface diff
-      selects. It is NOT "the whole `full`-less fast pool", which is 1109 —
-      the same on `main`, so the pool does not move with these registrations —
-      and it moves for a third reason again, `len(fast_pool(manifest))`:
-      re-derive it rather than reading this sentence.
+      selects. It is NOT "the whole `full`-less fast pool" — that is a
+      DIFFERENT measurement, `len(fast_pool(manifest))`, and this bullet
+      deliberately carries no figure for it: that pool does not move with these
+      registrations (all three files were already classified, so it is the same
+      on `main`), and it moves for a third reason again, so re-derive it rather
+      than reading this sentence.
       The `60` this sentence carried was that same `tier1` set **18 rows ago**
       (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
       and 78 here), i.e. the very "a past state quoted as a current one"
-      defect the line below warns about.
+      defect the line below warns about — and the constant this bullet used to
+      publish for the pool decayed faster still (written `1109`, already `1110`
+      at the commits that wrote it, `1111` measured on this tree, which merges
+      `4f2d09778c`), which is why the figure is gone rather than corrected
+      again.
 
     Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
     trusting either — the assertions below are the pin, this
