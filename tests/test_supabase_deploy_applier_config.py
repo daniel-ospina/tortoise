@@ -142,17 +142,19 @@ def _applier_jobs() -> list[tuple[str, dict]]:
     Selected by what the job MUTATES, not by what it INSTALLS (review cycle 7). Keying on
     `supabase/setup-cli` only MOVED the false RED: a legitimate job that installs the CLI to drive
     the local stack — exactly the `supabase start` / `db reset` run #11100 defers the v3 bump to —
-    red the "exactly one installer" assertion, while a production-mutating job that reached the CLI
-    another way (`npx supabase@…`) was silently unguarded. Selecting on the mutation closes both:
+    red the "exactly one installer" assertion. Selecting on the mutation closes that:
     such a job IS the applier, so the pin assertion below then requires it to install a pinned CLI.
 
     The vacuity guard is the `len(jobs) == 1` assertion in `_applier_steps()`, NOT `assert mutating`
     in the apply test — that one is unreachable by construction, because this selection and
     `_mutating_steps_with_job()` share one predicate. Stated so the next reader does not lean on it.
 
-    Resident gap, stated rather than implied: a mutating command that does not begin with
-    `supabase ` (wrapped in `bash -c '…'`, or reached through a script) is not detected, so it would
-    not make its job the applier. `--db-url` IS covered (above).
+    Resident gap, stated rather than implied (and MEASURED, review cycle 11): a mutating command that
+    does not begin with `supabase ` is not detected, so it would not make its job the applier —
+    `npx supabase@2 db push --linked …`, `bash -c '… db push …'`, or a script wrapper all stay
+    GREEN. `--db-url` IS covered (above). Closing it would mean matching the subcommand anywhere in
+    a run body, which is exactly what makes a `::warning::` banner read as a command — the false RED
+    cycles 7-9 spent their time on. Stated, not hidden.
     """
     return [
         (name, job)
@@ -202,10 +204,17 @@ _EXIT_ZERO_TRAP = re.compile(r"trap\s+[^;\n]*exit\s+0")
 #: ⛔ The TARGET class excludes `| & ; ( ) < >`: a greedy `\S+` swallowed an operator glued to the
 #: target, so `>/dev/null||true`, `2>/dev/null|tee l` and `2>/dev/null||true` passed GREEN — the
 #: swallow this whole check exists to catch (measured, review cycle 9).
-_REDIRECTION = re.compile(r"(?:\d?>&\d?|&>>?|>?\|[^\s|&;()<>]+|\d?>>?\s*[^\s|&;()<>]+)")
+#: ⛔ And the `>` in the noclobber form is REQUIRED, not optional: `>?\|` also consumed a BARE pipe,
+#: so `--yes|tee /tmp/p` and `--yes|cat` were stripped as redirections and passed GREEN — a real
+#: swallow (a pipeline takes the LAST command's status), re-opening a case cycle 9 had closed
+#: (measured, review cycle 11).
+_REDIRECTION = re.compile(r"(?:\d?>&\d?|&>>?|>\|\s*[^\s|&;()<>]+|\d?>>?\s*[^\s|&;()<>]+)")
 #: A quoted span is DATA. `--memo "a&b"` is an argument, not a control operator, and scanning it
 #: as shell false-RED a correct body (measured, review cycle 10). Blanked before the operator scan.
-_QUOTED = re.compile(r"\"[^\"]*\"|'[^']*'")
+#: ⛔ The span must not cross a NEWLINE: `[^']*` did, so an apostrophe in one trailing comment paired
+#: with one in a later comment and blanked the lines between them — including a real `|| true` on the
+#: apply (measured GREEN, review cycle 11). Trailing comments are also stripped, below.
+_QUOTED = re.compile(r"\"[^\"\n]*\"|'[^'\n]*'")
 
 #: `set +e` / `set +o errexit` re-enable "keep going after a failure" — the errexit axis.
 #: ⛔ The flag is not always `e` ALONE: `set +eu` and `set +ex` disable errexit in a combined word, and
@@ -249,8 +258,21 @@ def _printed_remedies(text: str, pattern: str) -> list[str]:
     for line in text.replace("\\\n", " ").splitlines():
         if line.lstrip().startswith("#"):
             continue
-        found.extend(match.group(0) for match in re.finditer(pattern, line))
+        found.extend(match.group(0) for match in re.finditer(pattern, _strip_trailing_comment(line)))
     return found
+
+
+def _strip_trailing_comment(line: str) -> str:
+    """Drop a trailing `# …`, quote-aware, so a NOTE beside a printed line is not read as output.
+
+    `echo "…"  # cf. supabase migration repair --status applied <version>` had its comment scanned as
+    a printed remedy and RED the suite for text that is never echoed (measured, review cycle 11).
+    A `#` after the last quote closes a shell line and is a comment; a `#` INSIDE the quotes is
+    content and is left alone. With no quotes at all, any `#` is a comment.
+    """
+    quote_at = max(line.rfind('"'), line.rfind("'"))
+    hash_at = line.find("#", quote_at + 1)
+    return line[:hash_at] if hash_at != -1 else line
 
 
 def _mutating_steps_with_job() -> list[tuple[str, dict, dict]]:
@@ -358,8 +380,8 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         )
         assert "--linked" in cmd, (
             f"the production apply must pass `--linked` ({cmd!r}). On the pinned v2 CLI `db push`'s "
-            f"target flags are `--db-url` / `--linked` / `--local` — `--remote` is a SUBCOMMAND "
-            f"(`db remote`), not a `db push` flag, so accepting it here would bless a command that "
+            f"target flags are `--db-url` / `--linked` / `--local` / `--project-ref` — `--remote` is a "
+            f"SUBCOMMAND (`db remote`), not a `db push` flag, so accepting it would bless a command that "
             f"dies at flag parse. Without a target flag the default has moved to the LOCAL stack "
             f"(127.0.0.1:54322) on the v3 line, which is exactly the migration this pin defers "
             f"(#10896, #11100)"
@@ -413,6 +435,12 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"`bash -e`; `shell: bash -c 'exit 0'` takes the body as `$0` and exits 0 without running "
             f"it — a silent no-op that reads as a successful apply (measured, review cycle 9)"
         )
+        assert job.get("if") is not False and not _FALSE_CONDITION.fullmatch(
+            str(job.get("if") or "").lower()
+        ), (
+            f"job {job_name!r} is gated `if: false`: the whole job — including the app flip — is "
+            f"skipped and the run reads GREEN, while nothing was applied (measured, review cycle 11)"
+        )
         assert not job.get("continue-on-error"), (
             f"job {job_name!r} sets `continue-on-error` and runs a hosted mutation: a FAILED apply "
             f"then produces a GREEN RUN, and `Dispatch deploy-hosted` (#3627) fires over an "
@@ -457,8 +485,10 @@ def test_printed_remediations_pass_yes_too() -> None:
     Asserted PER OCCURRENCE, not as a whole-file substring: a substring assertion is satisfied by
     any one site, so reverting `--yes` at one of several printed remedies passed the whole-file
     form — a false PASS in the guard whose doctrine is that a printed remedy must be runnable.
-    The window is the token immediately after the remedy (`--status applied <version>`), which
-    prose cannot accidentally enter and a line reflow cannot split.
+    The match is anchored on the command ROOT plus the flag that makes it the RUNNABLE form (see
+    `_REPAIR_REMEDY`), so a MENTION of the command is not a remedy. It is per printed LINE, so a
+    remedy split across two printed lines is not asserted — the one site that was split was reflowed
+    into a single `echo`, which is also what makes it copy-pasteable.
     """
     governed = {
         ".github/scripts/check-migration-drift": (REPO_ROOT / ".github" / "scripts" / "check-migration-drift"),
