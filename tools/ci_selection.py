@@ -1652,6 +1652,22 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by
              # tests/test_ci_selection.py::test_worktree_report_tool_change_selects_core_not_tier1.
              "tools/worktree_report.py",
+             # #10936 review round 3, BLOCKING: tools/ci_cancel_guard.py owns
+             # tests/test_ci_cancel_guard.py (registered `core`), and the same silent
+             # drop bit it: `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY change selected NO
+             # surface, took the docs-only early return and landed on tier-1 smoke,
+             # where that file is not registered. That is the worst possible diff to
+             # drop: the file being edited is the gate in front of POST /cancel, so the
+             # PR that deletes the CURRENT-HEAD arm, the job allow-list or the sentinel
+             # refusal would merge green with every case in it never selected, and the
+             # guard would then cancel the open PR's current head. MEASURED before this
+             # entry: `--changed-files tools/ci_cancel_guard.py --event pull_request` ->
+             # surfaces=[], full=False, test_ci_cancel_guard.py ABSENT; after ->
+             # surfaces=['core'], present. Same
+             # #1349/#3332/#3616 class as the entries above. Pinned by
+             # tests/test_ci_selection.py::test_ci_cancel_guard_tool_change_selects_core_not_tier1.
+             "tools/ci_cancel_guard.py",
              # #11026: tools/gh_write_preflight.py owns tests/test_gh_write_preflight.py
              # (registered `core`), and it hit the SAME silent drop: `tools/` is swallowed by
              # NON_PYTHON_PREFIXES and no SOURCE_PATTERNS row matches the tool, so a TOOL-ONLY
@@ -1662,7 +1678,6 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # MEASURED before this entry: `select(["tools/gh_write_preflight.py"],
              # "pull_request", load_manifest())` -> surfaces=[], full=False, test file ABSENT;
              # after -> surfaces=['core'], present. Same #1349/#3332/#3616 class as above.
-             # ⚠️ n is a SNAPSHOT — re-measure, do not trust a count.
              # Pinned by TWO cases, and they do not cover the same thing:
              # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1
              # (the entry EXISTS; green under either the exact path or the prefix) and
@@ -2796,7 +2811,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # file in this PR and no `core`-registered test guards it, so its
              # `api` registration downgrades nothing (#10727 review).
              "tortoise/mcp_client.py",
-             # #2148: `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # [agent-infra#2148](dispatch): `tools/` is a flat NON_PYTHON_PREFIXES entry and no
              # SOURCE_PATTERNS row matches `tools/rail_detach.py`, so a
              # TOOL-ONLY change filtered to `changed == []` and took the
              # docs-only early return — the durability pin registered under

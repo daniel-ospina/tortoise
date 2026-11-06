@@ -2112,6 +2112,7 @@ surfaces:
   - test_9572_discriminator_not_clobbered.py
   - test_9555_session_narrative.py
   - test_9287_invisible_kind_write_door.py
+  - test_ci_cancel_guard.py
   - test_closes_landing.py
   # #10465 (review P1): the read-only instrument that scores `#5090`'s four DoD
   # bullets, and its falsifiers. `core` is where its subjects live —
@@ -2571,6 +2572,20 @@ surfaces:
   # `--changed-files tortoise/cypher_guard.py` → surfaces=['core']. `--integrity`
   # also requires every test file to be classified, which this entry satisfies.
   - test_9079_handle_write_authority.py
+  # #10807: the catalogue-SETTLE wait (`tests/_index_settle.index_rows_after_settle`
+  # / `index_kind_absent` / `index_cells` / `point_index_drops_visible`) that TWO
+  # fixtures share after they drop an index — the write-authority suite above and
+  # `tests/test_search_engine.py`.
+  # Its subject is test infrastructure, not a product module, so `core` is the
+  # arm that already owns both callers (both are registered here). `--integrity`
+  # requires every test file to be classified; this entry satisfies it. A change
+  # to `tests/_index_settle.py` (or to this new test file) falls through to the
+  # same arm — a `tests/`-prefixed path classifies to `core`.
+  # ⛔ `tests/_live_utils.py` is NOT that case and must not be named here: it is a
+  # declared `SHARED_MODULES` member (`tools/ci_selection.py`), so editing it
+  # selects the FULL CI matrix. That cost is exactly why the wait lives in
+  # `tests/_index_settle.py` instead — see that module's docstring.
+  - test_10807_index_settle.py
   # #9079 (the door ONE HOP BELOW the write handle): the client handle escapes —
   # `proj.g._g.query(...)` and `proj.db.select_graph(<g>).query(...)` — and the
   # registry that makes the client-level door judge the right (store, graph).
@@ -6031,15 +6046,15 @@ surfaces:
   # on the `tortoise/` arm the comment described.
   - test_substrate_map.py
   # [agent-infra#2148](dispatch, not this repo's #2148 — here that number is
-  # the tier-2 cost gates): `tests/test_rail_detach.py` pins the rail's
-  # DURABILITY — that `scripts/admin-merge.sh` runs in its own session (setsid)
-  # and outlives the lane that launched it, plus the fail-closed verdict
-  # vocabulary (a rail with no `EXIT=` line is `lost`, never `merged`;
-  # `ALREADY MERGED` never fabricates a `merge_sha`), the liveness probe's
-  # fail DIRECTION and the `flock` duplicate-rail guard. Before this row the file
-  # was in NO surface, so `ci_selection.py --integrity` listed it as drift
-  # (redding the REQUIRED `manifest-integrity` leg) and no leg selected the suite
-  # at all — the whole suite the change rests on had zero CI signal.
+  # the tier-2 cost gates): `tests/test_rail_detach.py` pins the rail's DURABILITY — that
+  # `scripts/admin-merge.sh` runs in its own session (setsid) and outlives the
+  # lane that launched it, plus the fail-closed verdict vocabulary (a rail with
+  # no `EXIT=` line is `lost`, never `merged`; `ALREADY MERGED` never fabricates
+  # a `merge_sha`), the liveness probe's fail DIRECTION and the `flock`
+  # duplicate-rail guard. Before this row the file was in NO surface, so
+  # `ci_selection.py --integrity` listed it as drift (redding the REQUIRED
+  # `manifest-integrity` leg) and no leg selected the suite at all — the whole
+  # suite the change rests on had zero CI signal.
   #
   # `core` is the right home: the subject is `tools/rail_detach.py`, and the
   # suite is hermetic (synthetic stub rail, temp dirs, no DB/network/FalkorDB),
@@ -6048,17 +6063,22 @@ surfaces:
   # the suite stubs `gh` on PATH via an autouse fixture — without it the file
   # made one real API call PER TEST (~1.9 s each on a quota-exhausted box) and
   # was neither hermetic nor fast. ⛔ Both counts in this row are stated WITHOUT
-  # a test count on purpose: a count re-derives at every revision and restales
-  # silently; the fix is to drop the number, not to refresh it.
+  # a test count on purpose: the numbers this row first carried ("the 25 tests",
+  # "25 real API calls") were re-derived at every revision and were stale again
+  # each time a test was added — the fix is to drop the number, not to refresh
+  # it.
   #
-  # ⚠️ The registration alone
-  # does NOT make the pin run on the file it guards: `tools/` is a flat
-  # `NON_PYTHON_PREFIXES` entry, and `tools/rail_detach.py` matches no
-  # `SOURCE_PATTERNS` row, so a tool-only diff filters to `changed == []` and
-  # takes the docs-only early return (measured: `select(["tools/rail_detach.py"])`
-  # → `surfaces=[]`, 72 files, this file ABSENT). That half is closed by the
-  # `CORE_ALSO` entry beside this one in `tools/ci_selection.py` — the
-  # #1349/#3332/#3616 silent-drop class.
+  # ⚠️ The registration alone does NOT make the pin run on the file it guards:
+  # `tools/` is a flat `NON_PYTHON_PREFIXES` entry, and `tools/rail_detach.py`
+  # matches no `SOURCE_PATTERNS` row, so a tool-only diff filters to
+  # `changed == []` and takes the docs-only early return (measured BEFORE that
+  # `CORE_ALSO` entry: `select(["tools/rail_detach.py"])` → `surfaces=[]`, this file
+  # ABSENT — and no count is restated here, on this row's own rule above: the tier-1
+  # fallback set changes when tests are REGISTERED into it, never by a test file
+  # merely being added, and a restated figure restales silently (the same reason the
+  # `CORE_ALSO` entries carry "a SNAPSHOT, re-measure" notes)). That half is closed
+  # by the `CORE_ALSO` entry beside this one in
+  # `tools/ci_selection.py` — the #1349/#3332/#3616 silent-drop class.
   - test_rail_detach.py
   # #10920: the runner-label coverage gate. `tools/ci_runner_labels.py` parses every
   # `runs-on:` in the tree and checks it against the committed runner snapshot
