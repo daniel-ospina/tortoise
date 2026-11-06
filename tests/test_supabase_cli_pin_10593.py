@@ -43,8 +43,10 @@ delivery without betting production on an unvalidated config migration. This tes
 that the two stay coupled — but the coupling is on the **MAJOR**, not on the section name: v3 also
 consent-gates every hosted mutation and fails unattended without `--yes`, so a major-3 pin that
 merely loads the config would still apply nothing. Retiring the `[inbucket]` refusal therefore must
-not retire the guard: the ceiling below keeps refusing major 3 until the workflow is v3-ready, and
-the PR that makes it so lifts the ceiling deliberately.
+not retire the guard: the ceiling below keeps refusing major 3 until a lane deliberately moves the
+pin. Both v3 prerequisites have LANDED (`#10896`'s rename, `#11104`'s consent flags), so the ceiling
+is no longer waiting on a missing capability — it is `#11100`'s ruling that the major moves in its
+own PR, with its own local validation.
 """
 from __future__ import annotations
 
@@ -447,7 +449,8 @@ def _violations(workflow_text: str, config_text: str) -> list[str]:
 
     DECLARED OUT OF SCOPE (not silently assumed covered): a `run:` step that installs or invokes a
     v3 CLI by itself (`npx supabase@3.0.0 …`, `npm i -g supabase@…`). That is a code change, and it
-    is reviewed as code; the mutating-command argument checks are open PR #11104's own suite. The
+    is reviewed as code; the mutating-command argument checks belong to #11104's own suite (`--yes`
+    has LANDED on `main`, so it is carried at this pin). The
     title above names the STEP for exactly this reason — do not read it as a claim about `run:`
     bodies.
 
@@ -483,10 +486,14 @@ def _violations(workflow_text: str, config_text: str) -> list[str]:
             f"setup-cli pins {version} (major {major}), but this workflow is not v3-ready: major 3 "
             "consent-gates every hosted mutation and cannot prompt in CI, so `db push` and "
             "`functions deploy` exit non-zero having applied nothing unless `--yes` is passed "
-            "(HostedMutationConsentRequiredError). The config half is migrated (#10896); the "
-            "consent half is open PR #11104, which owns those assertions in its own suite. Move "
-            "the pin in the PR that lands it and lift this arm there deliberately — a red here is "
-            "the coupling working, not a bug to relax."
+            "(HostedMutationConsentRequiredError). BOTH halves have landed — the config rename "
+            "(#10896) and the consent flags (#11104) — so this refusal is not a missing "
+            "capability: it is #11100's deliberate ruling that the major moves in its own PR, "
+            "because the config is not yet v3-NATIVE (3.0.0 still emits the "
+            "`auth.email.enable_signup`/`auth.sms.enable_signup` deprecations) and the local "
+            "harnesses have not been validated under v3 (`supabase start`/`db reset` + the "
+            "local-auth suites). Move the pin in the PR that lands it and lift this arm there "
+            "deliberately — a red here is the ceiling working, not a bug to relax."
         )
     return found
 
@@ -538,7 +545,8 @@ def test_a_major_the_committed_config_cannot_load_is_refused() -> None:
     if not _config_declares_inbucket(config):
         pytest.skip(
             "config.toml no longer declares [inbucket] — the CONFIG-LOAD half of the coupling is "
-            "retired; the major-3 ceiling still guards the pin (#10896, PR #11104)"
+            "retired; the major-3 ceiling still guards the pin (#10896; the retirement landed in "
+            "#11104)"
         )
     mutated = re.sub(
         r"(?m)^(\s*version:\s*).*$",
