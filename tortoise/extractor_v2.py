@@ -11605,7 +11605,17 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
             # the duplicate's channel-labelled ones, i.e. it fixed the address by
             # losing the provenance that says the cue derived it.
             kept = out[at[key]]
-            if kept.get("span_start") is None and m.get("span_start") is not None:
+            # ⛔ The ADDRESS is only adoptable for the SAME SPELLING of the surface: the
+            # key folds case and whitespace runs (`_norm`) while `_mention_span` is
+            # case-SENSITIVE, so a pair verified for `it` would otherwise ship under
+            # a survivor named `It` — an address that indexes a variant of the
+            # surface the record names (review at `1bc5847b4`, P3). The survivor
+            # keeps its (cue-derived) form and no address, which is the honest state;
+            # the published surfaces would demote such a pair to `"model"` anyway,
+            # one round later and only after disagreeing with the producer channel.
+            same_spelling = str(kept.get("surface") or "") == str(m.get("surface") or "")
+            if (same_spelling and kept.get("span_start") is None
+                    and m.get("span_start") is not None):
                 for field in ("span_start", "span_end", "span_source"):
                     if m.get(field) is not None:
                         kept[field] = m[field]

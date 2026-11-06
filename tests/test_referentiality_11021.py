@@ -2090,3 +2090,32 @@ def test_an_over_cap_claim_is_not_reported_as_CLAIMLESS():
     payload, _ = _mint(copy.deepcopy(el))
     assert [m["surface"] for m in _mentions_of(payload)] == ["it"], (
         f"the record was lost: {_mentions_of(payload)!r}")
+
+
+def test_a_deduped_pair_does_not_lend_its_address_to_a_DIFFERENT_SPELLING():
+    """⛔ The dedupe key folds case and whitespace runs (`_norm`), but
+    `_mention_span` is case-SENSITIVE — so a `quote`-space pair verified for `it`
+    was adopted by a survivor named `It`, shipping offsets that index a VARIANT of
+    the surface the record names. The published surfaces then demoted it to
+    `"model"` (losing cue provenance) while the producer channel kept `"quote"`:
+    the two-answers class, on the surface axis (review at `1bc5847b4`, P3)."""
+    from tortoise.extractor_v2 import _dedupe_mentions, _mention_record
+
+    account = "the server was down and it broke"
+    upper = _mention_record(surface="It", claim={"content": account},
+                            kind_guess=None, rule_id=ref.RULE_PRONOUN,
+                            reason="cue derived", narrative="",
+                            quote="nobody mentioned that here")
+    lower = _mention_record(surface="it", claim={"content": account},
+                            kind_guess=None, rule_id=ref.RULE_CHANNEL,
+                            reason="carried", narrative="", quote="he said it loudly",
+                            span={"span_start": 8, "span_end": 10,
+                                  "span_source": "quote"})
+    assert upper.get("span_start") is None and lower["span_start"] == 8
+    merged = _dedupe_mentions([upper, lower])
+    assert len(merged) == 1, f"case variants were not deduped: {merged!r}"
+    rec = merged[0]
+    assert rec["surface"] == "It", f"the survivor's spelling was replaced: {rec!r}"
+    assert rec.get("span_start") is None, (
+        "an address verified for `it` was adopted by a record named `It`: "
+        f"{rec!r}")
