@@ -121,8 +121,10 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import json
+import os
 import posixpath
 import re
+import stat
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -153,6 +155,25 @@ _BLOCKER_RE = re.compile(r"^#\d+$")
 BLOCKER_STATES_DEFAULT = Path("docs/evidence/7949-capstone/blocker-states.json")
 BLOCKER_STATES_SCHEMA = "capstone-blocker-states-v1"
 BLOCKER_STATE_WORDS = ("OPEN", "CLOSED")
+
+#: The RUN-block keys that carry a MEASUREMENT, as the emitter writes them
+#: (``docs/evidence/7949-capstone/probes/capstone_measure.py``). `_blocker_exempt`
+#: refuses the exemption when ANY of these is present and non-empty, so a table
+#: cannot hide a real run behind `evidence_kind: "refusal"` by nulling one or two
+#: cells. The shipped REFUSAL record (``capstone.log``) carries NONE of them;
+#: a record emptied of every one is a fabricated file, which is the residual
+#: limit stated in `_record_carries_a_measurement`.
+_MEASUREMENT_RUN_KEYS = (
+    "sessions",
+    "step_witnesses",
+    "steps_observed",
+    "e3_census",
+    "e4_receipt",
+    "e5_rescore",
+    "e1_e2_artifact",
+    "errors",
+    "corpus_sha256",
+)
 
 #: The nested blocks ``check()`` reads as OBJECTS. Declared so the type guard is
 #: derived from one list rather than repeated per call site.
@@ -266,10 +287,70 @@ def _blocker_exempt(run: dict, kind: object, num: object, den: object) -> bool:
     JSON `true` that `_count` also refuses) is a claim a state can be checked
     against, so it fails CLOSED into V12. The shipped `capstone.log` refusal
     rows carry `null`/`null`, which is what keeps them exempt.
+
+    ⛔ AND THE READER OF A ROW'S TWO CELLS IS NOT THE RECORD'S READER (#10601
+    review P1). The two legs above read only the ROW, and the run block sits in
+    the same record carrying the measurement those cells were nulled from —
+    measured on the review: a copy of the scored log with E4 set to BLOCKED,
+    `evidence_kind: "refusal"`, `blocked_by: "#8503"` (CLOSED) and both counts
+    nulled still EXITED 0 with `e4_receipt: {"numerator": 2, "denominator":
+    15}` and all eight `steps_observed` in the run block, because the same
+    one-field edit also turns V10's receipt arm off. A row whose RECORD still
+    carries a counted measurement is not a refusal that measured nothing, so
+    the record is checked too: `e4_receipt`'s own counts and a non-empty
+    `steps_observed` are both evidence the population exists. The shipped
+    REFUSAL record (`capstone.log`) carries neither key, which is what keeps it
+    exempt.
     """
+    if _record_carries_a_measurement(run):
+        return False
     return (run.get("status") == "REFUSED"
             and kind == "refusal"
             and num is None and den is None)
+
+
+def _record_carries_a_measurement(run: dict) -> bool:
+    """Does the RUN block itself still hold a counted measurement?
+
+    One question, one place: `_blocker_exempt` asks it, and nothing else may
+    restate it. Absence of a KEY and a `null` value are the same answer ("no
+    measurement here") — the shipped refusal record has neither key, and a
+    writer that emits `"e4_receipt": null` is saying the same thing. Anything
+    present (an int, a float, a string, `0`) is a claim, so it fails CLOSED
+    into V12 rather than being read as "nothing measured".
+
+    ⛔ THE KEY SET IS THE EMITTER'S, NOT THE TWO KEYS THE FIRST FIX NAMED
+    (#10601 review round 2, P1). Reading only `e4_receipt` and `steps_observed`
+    closed the construction the first review found and left the RECORD's own
+    census behind: emptying exactly those two keys and flipping
+    `status`/`evidence_kind` still exited 0 over five CLOSED blockers while
+    `run.sessions` held 7 sessions / `sum(extracted) = 150`, `step_witnesses`
+    held all eight, `e5_rescore.raw_recovery = 0.48` and
+    `e1_e2_artifact.after_share = 0.6` — and every row's `note` went on printing
+    its number. `probes/capstone_measure.py` writes ALL of these, so the honest
+    test is "does the run block carry ANY of the emitter's measurement keys",
+    not "does it carry the two this arm happens to look at". A record that has
+    been emptied of every one of them is a fabricated file — the residual limit
+    this gate states about itself — rather than a stale pointer.
+    """
+    for key in _MEASUREMENT_RUN_KEYS:
+        value = run.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            if value:
+                return True
+            continue
+        if isinstance(value, dict):
+            # A dict with any counted/valued cell is a claim. An EMPTY dict is
+            # the writer's way of saying it produced nothing.
+            if value:
+                return True
+            continue
+        # Any scalar present — an int, a float, a string, `0`, `True` — is a
+        # claim, so it fails CLOSED into V12.
+        return True
+    return False
 
 
 def load_blocker_states(path: Path) -> dict:
@@ -1320,9 +1401,55 @@ def main(argv: list[str] | None = None) -> int:
 
     repo = Path(args.repo).resolve()
     blocker_states = None
-    states_path = (Path(args.blocker_states) if args.blocker_states
+    #: ⛔ THE OPTION'S PRESENCE, NOT ITS TRUTHINESS (#10601 review round 5, P3).
+    #: `args.blocker_states` was tested for truthiness twice — for the path and
+    #: for "load it" — so `--blocker-states ""` (a `$RECORD` that is unset, the
+    #: realistic trigger) silently fell back to the COMMITTED DEFAULT and the OK
+    #: line went on saying "every cited blocker verified" about a file the caller
+    #: never named. `is not None` is the honest test for "the caller supplied
+    #: this", and an empty path then loads `Path("")` and fails closed at exit 2.
+    explicit_states = args.blocker_states is not None
+    states_path = (Path(args.blocker_states) if explicit_states
                    else repo / BLOCKER_STATES_DEFAULT)
-    if args.blocker_states or states_path.is_file():
+    # ⛔ `is_file()` IS NOT "IS THE PATH FREE" (#10601 review round 3, P1).
+    # The presence test was `states_path.is_file()`, so a DIRECTORY or a
+    # DANGLING SYMLINK at the same path made it False — the loader was never
+    # called, `blocker_states` stayed None, V12 did not apply, and the gate
+    # exited 0 printing "no …blocker-states.json" over a path that EXISTS.
+    #
+    # ⛔ AND `lexists()` IS NOT EITHER (round 4, P1). `os.path.lexists` swallows
+    # EVERY OSError from `lstat` and answers False, so one `chmod 000` on an
+    # ANCESTOR directory — or an ancestor symlink into `/proc/1/root/...`, or a
+    # symlink loop, both of which git can carry — made a record that is on disk
+    # and valid read as "no record": V12 disarmed, exit 0, and a sentence
+    # asserting the file is absent over a file that is right there.
+    #
+    # `lstat` is asked directly instead, because only ONE errno means "nothing
+    # is at this path": ENOENT. Anything else (EACCES, ELOOP, ENOTDIR) is a
+    # record somebody put there and this tool cannot read, so it is loaded, the
+    # loader raises, and the gate exits 2.
+    #
+    # ⛔ AND A NON-REGULAR FILE IS NOT LOADED (round 5, P2). Round 4's comment
+    # claimed a FIFO "exits 2"; measured, `read_text()` BLOCKS on a FIFO with no
+    # writer (no exit code, no output, a CI job wedged until its timeout). The
+    # `lstat` result is therefore inspected: anything that is not a regular file
+    # (and not a symlink, which `read_text` follows) is a present-but-unreadable
+    # record and exits 2 like the rest of that class, without ever opening it.
+    absent = False
+    if not explicit_states:
+        try:
+            mode = os.lstat(states_path).st_mode
+        except FileNotFoundError:
+            absent = True
+        except OSError:
+            mode = None  # present but unreadable -> let the loader say so
+        else:
+            if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+                print(f"capstone-verdict-check: cannot use blocker states "
+                      f"{states_path}: not a regular file (mode {mode:#o})",
+                      file=sys.stderr)
+                return 2
+    if not absent:
         # A record that is PRESENT but unreadable is exit 2, never "no V12".
         # Downgrading a malformed record to "not applicable" would make
         # `{"blockers": []}` a way to disarm the arm the bundle depends on.
