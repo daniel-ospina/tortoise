@@ -3779,6 +3779,84 @@ def duplicate_entries(manifest: dict) -> list[str]:
     return dupes
 
 
+def duplicate_mapping_key_issues(
+    manifest_path: Path | None = None,
+    *,
+    text: str | None = None,
+    shown: str | None = None,
+) -> list[str]:
+    """#5373: a duplicate MAPPING key — invisible to every reader in this module.
+
+    :func:`load_manifest` goes through ``yaml.safe_load``, which keeps only the
+    LAST of two duplicate keys, so ``integrity()``/``duplicate_entries()`` and
+    every selection path are structurally blind to the class. Meanwhile
+    ``tools/ci_timing.py --refresh-durations`` updates the FIRST occurrence in
+    the TEXT (its own contract,
+    ``tests/test_ci_timing.py::test_durations_bridge_updates_a_quoted_key_instead_of_appending_a_duplicate``),
+    so the post-landing sweep rewrites a weight the shard packer never reads.
+
+    It is not hypothetical: ``config/ci-surfaces.yml`` is ``merge=union``
+    (``.gitattributes``), so a replay in which BOTH sides changed the SAME
+    ``durations:`` row to DIFFERENT values keeps both copies — a merge, a
+    rebase, or a re-applied commit. An identical change on both sides, or a
+    replay only one side touched, emits the row once. This batch PR (#10726)
+    has re-created the class on repeated forward-merges; each occurrence is
+    recorded, dated, in that PR body's fold ledger — a record of what happened,
+    not a claim about the next merge.
+
+    ⛔ DO NOT RESTATE THOSE COUNTS HERE. A series of event counts describes a
+    mechanism that fires on every merge, so it is guaranteed to go stale — and
+    it did, twice within an hour, before this paragraph replaced it. What
+    belongs here is the CONDITION (above) and the instruction (below); the
+    numbers belong where they are dated, one entry per event.
+
+    ``--integrity`` — the check that PR body cited as proof of "0 duplicates" —
+    did not compose this walk until ``dd4f66e6a`` (``02133e21b`` has no
+    ``duplicate_mapping_key_issues`` in ``tools/ci_selection.py``, though
+    ``tools/registry_integrity.py::check_registry`` already walked for duplicate
+    keys, and
+    ``tests/test_registry_integrity.py::test_the_real_registries_are_clean``
+    — registered in BOTH the ``api`` and ``core`` surfaces — already asserted
+    ``check() == []``). That is why the walk is now COMPOSED INTO
+    ``--integrity`` (``dd4f66e6a``).
+
+    ⛔ A GREEN RUN FROM BEFORE A REPLAY DOES NOT COVER THE REPLAY. Measured at
+    ``13a53ef7e``: that head is AFTER ``dd4f66e6a``, and it still carried
+    duplicates of this class, because the replay itself created them and that
+    merge was pushed BEFORE the check ran (``c660ffcee`` records it). Re-run
+    ``--integrity`` after every merge, rebase or re-applied commit into this
+    branch, and judge the COMMITTED TREE rather than a commit subject: a fold
+    merge's subject announces the duplicates its own resolution then removes.
+
+    The walk lives in ``tools/registry_integrity.py`` and is imported rather
+    than re-spelled, so the two entry points cannot disagree about what a
+    duplicate is. A check that cannot run returns a problem and never an empty
+    list: an unrunnable gate must not read as a passing one.
+
+    ``text`` grades a document held in memory instead of one on disk. It exists
+    for ``tools/ci_timing.py::integrity_problems``, which validates the
+    REFRESHED manifest BEFORE ``--refresh-durations`` writes it. Grading the
+    text is a deliberate design choice rather than the only possible one: in the
+    shape that actually reaches that writer — a duplicated TOP-LEVEL
+    ``durations:`` key, which the renderer emits twice and
+    ``validate_refreshed_manifest`` does not report — the duplicate is already
+    in the INPUT file, so a path-based composition would also catch it. Grading
+    the text simply keeps the gate's question ("is the document I am about to
+    write valid?") the one it answers.
+    """
+    path = Path(manifest_path or MANIFEST)
+    tools_dir = str(Path(__file__).resolve().parent)
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    try:
+        import registry_integrity
+    except Exception as exc:  # pragma: no cover - it ships beside this file
+        return [f"{path}: duplicate-key check UNAVAILABLE ({exc}) — not clean"]
+    if text is not None:
+        return registry_integrity.check_registry_text(text, shown or str(path))
+    return registry_integrity.check([path])
+
+
 def unlisted_tests(tests_dir: Path, manifest: dict) -> list[str]:
     """Top-level tests/test_*.py absent from every surface in the manifest.
 
@@ -6757,7 +6835,16 @@ def main() -> int:
         # at this call site so the union of the two pipelines drops neither — the
         # same rule the folded-in checks followed. Both entry points compose it,
         # so it stays single-sourced.
-        problems = missing + slow_file_issues(manifest) \
+        #
+        # `duplicate_mapping_key_issues` (#5373) is composed FIRST for the same
+        # reason: `ci_manifest` does not own it either — the walk lives in
+        # `tools/registry_integrity.py` and is imported rather than re-spelled.
+        # Without it here, `--integrity` was structurally blind to a duplicate
+        # MAPPING key, which is the one class `config/ci-surfaces.yml`'s
+        # `merge=union` produces on every replay, and the weekly
+        # `--refresh-durations` then rewrites the FIRST copy in the text while
+        # every reader loads the LAST.
+        problems = duplicate_mapping_key_issues() + missing + slow_file_issues(manifest) \
             + _manifest_contract_issues(manifest) \
             + carve_shard_issues(manifest) \
             + slow_shard_issues(manifest) \
