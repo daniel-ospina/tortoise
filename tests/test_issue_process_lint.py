@@ -180,6 +180,68 @@ def test_a_statement_about_the_reference_is_still_a_decline(body, why):
     assert L.classify_pr(body + "\n", 1) == [], why
 
 
+@pytest.mark.parametrize("body,why", [
+    ("Refs #1234 — the sprint is not closed.", "an ordinary subject ('the sprint')"),
+    ("Refs #1234 — the trading window is not closed.", "an ordinary subject ('the window')"),
+    ("Refs #1234 — the incident is not resolved.", "`resolv` in a decline shape"),
+    ("Refs #1234 — the outage on the other box is not fixed.", "a long subject phrase"),
+    ("Refs #1234 — the flaky test is not fixed.", "a subject with an adjective"),
+])
+def test_a_negated_closing_verb_about_another_subject_does_not_delete_the_claim(body, why):
+    """Measured at `d580a3401` (review, P2): anchoring the negation's TAIL left its SUBJECT free.
+
+    `DECLINE_RE`'s ordinary-English alternative only ever checked what FOLLOWED the closing word, so
+    any `<not|no|non-> <closing-verb>.` at end of line matched — and because a decline cleared every
+    ref on its line, `Refs #1234 — the sprint is not closed.` read **CLEAN** while the bare control
+    `Refs #1234` flagged. Appending one word restores the flag (`… not closed yet.` -> rc 3), which
+    is what shows the drop was the tail anchor and not the sentence.
+
+    These are false PASSes in the #10534 direction (delivered work never closes, and nothing says
+    so) — the direction this module's docstring ranks worst. The bridge between the reference and
+    the negation now admits punctuation, a one-word subject OF THE REFERENCE (`this`/`it`/`that`)
+    and a copula; a real subject noun there is prose about that noun, so the claim survives.
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body + "\n", 1)] == [[1234]], why
+
+
+def test_a_decline_clears_only_the_reference_it_is_about():
+    """Measured at `d580a3401` (review, P2): the decline was applied PER LINE to EVERY ref on it.
+
+    Round 12 fixed *when* the phrase matches and left the amplification alone, so the repo's own
+    mandated words cleared a SIBLING claim: in `Refs #100, #200 — #200 is deliberately not Closes.`
+    the `#200` sentence removed `#100`'s unresolved claim too, and the run read CLEAN. `#100` is
+    claimed and resolved by nothing — that is the whole defect this arm exists to report.
+
+    Both directions are pinned: the declined ref still clears (so the refusal above is not a blanket
+    one), and a claim on a DIFFERENT line is untouched.
+    """
+    body = "Refs #100, #200 — #200 is deliberately not Closes.\n"
+    assert L.claims(body, 1)["declined"] == [200]
+    assert [[f.evidence["unresolved"] for f in L.classify_pr(body, 1)]] == [[[100]]]
+    # the control: when the sentence IS about the only reference, it clears it
+    assert L.claims("Refs #1234 — #1234 is deliberately not Closes.\n", 1)["declined"] == [1234]
+    assert L.classify_pr("Refs #1234 — #1234 is deliberately not Closes.\n", 1) == []
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #1234 — deliberately not closing it.", "pronoun object"),
+    ("Refs #1234 — deliberately not closing #1234.", "the reference itself as the object"),
+    ("Refs #1234 — deliberately not closing them.", "plural pronoun object"),
+])
+def test_the_object_of_an_honest_decline_may_be_the_reference_itself(body, why):
+    """The false-positive half of the same round (review, P3), measured at `d580a3401`.
+
+    The closed `_REF_NOUN` list admitted `the issue` / `a closing keyword` / `this one` but not `it`
+    or a literal `#N` — so the two most natural ways to write "this PR does not close #N" were
+    FLAGGED at that head, while the pre-round-12 grammar declined both. Flagging honest work is the
+    direction this module treats as worse than the defect, so the object list gains them and the
+    controls below prove the refusal is not blanket.
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [1234], why
+    assert L.classify_pr(body + "\n", 1) == [], why
+
+
 def test_the_prs_own_number_is_never_a_claim():
     assert L.classify_pr("Refs #77\n", 77) == []
 
@@ -565,6 +627,47 @@ def test_the_label_filter_is_refused_with_pr_sweep():
     assert r.returncode != L.RC_CLEAN
     assert r.returncode == 2, r.stderr
     assert "--label applies to --sweep-issues" in r.stderr
+
+
+def test_the_label_filter_is_refused_on_the_single_subject_modes_too(tmp_path):
+    """The `--sweep` refusal above was the ONLY one, so `--issue 4282 --label x` still ran.
+
+    The same silent-no-op class: the flag is dropped, the population is unfiltered, and nothing in
+    the output says the population is not the one the flags named. Measured at `d580a3401`.
+    """
+    body = tmp_path / "i.md"
+    body.write_text("# an issue body\n", encoding="utf-8")
+    for argv in (("--issue", "4282"), ("--issue-body-file", str(body)), ("--pr", "1"),
+                 ("--body-file", str(body))):
+        r = _run(*argv, "--label", "P0-blocker")
+        assert r.returncode == 2, (argv, r.returncode, r.stderr)
+        assert "--label applies to --sweep-issues" in r.stderr, (argv, r.stderr)
+    # the control: the mode that DOES read the filter still accepts it
+    r = _run("--sweep-issues", "--label", "P0-blocker")
+    assert r.returncode in (L.RC_CLEAN, L.RC_FINDINGS, L.RC_UNMEASURABLE), r.stderr
+
+
+def test_comments_file_is_refused_on_every_mode_that_never_reads_it(tmp_path):
+    """Measured at `d580a3401`: `--comments-file` was read by `--issue-body-file` ALONE.
+
+    Every other mode dropped it in silence, and `--issue 11077 --comments-file c.json` — the
+    combination a caller would actually reach for — then printed `1 issue (0 comment(s) + body)`, a
+    count of *gh* comments, with nothing saying the supplied file had been ignored. That is the same
+    false-confidence shape `--wip` and `--label` are refused for, on the sibling flag.
+    """
+    comments = tmp_path / "c.json"
+    comments.write_text(json.dumps([{"body": "IN FLIGHT: 9999 — branch from-the-FILE"}]),
+                        encoding="utf-8")
+    body = tmp_path / "i.md"
+    body.write_text("# an issue body\n", encoding="utf-8")
+    for argv in (("--issue", "4282"), ("--pr", "1"), ("--body-file", str(body)),
+                 ("--sweep",), ("--sweep-issues",)):
+        r = _run(*argv, "--comments-file", str(comments))
+        assert r.returncode == 2, (argv, r.returncode, r.stderr)
+        assert "--comments-file supplies the comment bodies of --issue-body-file only" in r.stderr
+    # the control: the one mode that consumes it still does
+    r = _run("--issue-body-file", str(body), "--comments-file", str(comments), "--wip")
+    assert r.returncode in (L.RC_CLEAN, L.RC_FINDINGS), r.stderr
 
 
 @pytest.mark.parametrize("marker", [

@@ -242,20 +242,52 @@ _CLOSING_STEM = (r"(?:clos(?:e[sd]?|ing)|fix(?:e[sd]?|ing)?"
                  r"|resolv(?:e[sd]?|ing)?|satisf(?:y|ies|ied|ying))\b")
 # What a decline may name AFTER the closing word: the reference, and nothing else. Closed and short
 # on purpose — every word admitted here widens the silent-dropped-claim surface, and a `closing`
-# followed by one of them is a sentence about the reference by construction.
+# followed by one of them is a sentence about the reference by construction. `it`/`them`/`this`/
+# `that` and a literal `#N` are the four most natural ways to write the same honest sentence
+# (`deliberately not closing it.`, `deliberately not closing #1234.`) — measured as FLAGGED by the
+# round-12 grammar, i.e. a false positive on exactly the honesty the block asks for.
 _REF_NOUN = (r"(?:one|ones|ref|refs|reference|references|issue|issues|keyword|keywords"
-             r"|commit|commits|pr|prs)\b")
+             r"|commit|commits|pr|prs|it|them|this|that)\b")
+_REF_OBJ = rf"(?:{_REF_NOUN}|#\d{{1,7}})"
 _DET = rf"(?:an?{_EMPH}|the{_EMPH}|this{_EMPH}|these{_EMPH}|those{_EMPH})?"
 DECLINE_RE = re.compile(
     # (a) the author's convention: `deliberately not …`
     rf"deliberately{_EMPH}not"
     rf"(?={_DECLINE_TAIL}$"
-    rf"|{_EMPH}{_DET}{_CLOSING_STEM}(?:{_EMPH}{_DET}{_REF_NOUN})?{_DECLINE_TAIL}(?:$|[,;]))"
+    rf"|{_EMPH}{_DET}{_CLOSING_STEM}(?:{_EMPH}{_DET}{_REF_OBJ})?{_DECLINE_TAIL}(?:$|[,;]))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
-    rf"(?:{_EMPH}{_DET}{_REF_NOUN})?{_DECLINE_TAIL}$",
+    rf"(?:{_EMPH}{_DET}{_REF_OBJ})?{_DECLINE_TAIL}$",
     re.IGNORECASE,
 )
+# ⛔ A DECLINE IS ABOUT *ITS OWN* REFERENCE — the two properties the grammar alone cannot express,
+# both measured as false PASSes (claim silently dropped, arm 1 CLEAN) at `d580a3401`:
+#
+#   1. WHICH reference. `declined_lines` was line-scoped and cleared EVERY ref on the line, so
+#      `Refs #100, #200 — #200 is deliberately not Closes.` read CLEAN while `#100` was claimed and
+#      resolved by nothing. The decline now clears only the REF its clause is about — the nearest
+#      reference PRECEDING it (a decline before any reference is about something else, and absent
+#      evidence is the flag, never the clear).
+#   2. WHETHER the clause is about it at all. Anchoring the negation's TAIL left its SUBJECT free:
+#      `Refs #1234 — the sprint is not closed.` still read CLEAN, because any `<not|no|non-> <verb>.`
+#      at end of line declined the line whatever preceded it. The bridge between the reference and
+#      the negation now admits punctuation, an optional one-word subject of the reference (`this`,
+#      `it`, `that`, `which`) and an optional copula (`is`, `does`, `was`, …) — and nothing else. A
+#      real subject noun there (`the sprint is`, `the outage on the other box is`) is prose about
+#      that subject, so the reference is NOT declined and the claim stays flagged.
+_DECLINE_TAIL_BRIDGE = _DECLINE_TAIL
+_SUBJECT_WORD = r"(?:this|it|that|which)"
+_COPULA = (r"(?:is|was|are|were|does|do|did|has|have|had|will|would|should|must|could|can"
+           r"|may|might)")
+_DECLINE_BRIDGE_RE = re.compile(
+    rf"^{_DECLINE_TAIL_BRIDGE}"
+    rf"(?:(?:{_SUBJECT_WORD}{_EMPH})?(?:{_COPULA}{_EMPH})?)?"
+    rf"{_DECLINE_TAIL_BRIDGE}$",
+    re.IGNORECASE,
+)
+# Ref TOKENS with positions, for deciding which reference a decline is about. Deliberately dumber
+# than CLAIM_RE: this answers "where is the reference", never "does it claim".
+_REF_POS_RE = re.compile(r"#(?P<num>\d{1,7})\b")
 SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNORECASE | re.MULTILINE)
 # The task-list marker SET is the sibling grammar's (`closes_landing._TASK_ITEM_RE`), including
 # `+` and ordered markers: GitHub renders all four as task lists, so counting only `-`/`*` reads a
@@ -343,6 +375,38 @@ def claims(body: str, own_number: int | None = None,
     return _claims_in(strip_code(body)[0], own_number, repo)
 
 
+def _decline_targets(text: str) -> dict[int, set[int]]:
+    """The references each decline is ABOUT, keyed by line — `DECLINE_RE` alone is not enough.
+
+    A decline clears the refs it names and NO OTHERS. Computed here, once, so arm 1 and `claims()`
+    cannot disagree about which claim an author answered (a second copy of this rule would be a
+    second definition of "the author answered", and the disagreement would show up as a false PASS).
+
+    The two tests are stated on `_DECLINE_BRIDGE_RE` and its comment block; the shape here is:
+      * no reference BEFORE the decline on its line -> no target. A decline that precedes every
+        reference (`Not closing this one.` on its own line) is not evidence about anything on the
+        line, and the flag is the safe direction;
+      * the bridge between that reference and the negation must be punctuation plus at most a
+        one-word subject and copula — anything else means the sentence has a SUBJECT OF ITS OWN.
+    """
+    out: dict[int, set[int]] = {}
+    for i, line in enumerate(text.splitlines()):
+        refs = [(m.start(), m.end(), int(m.group("num"))) for m in _REF_POS_RE.finditer(line)]
+        if not refs:
+            continue
+        targets: set[int] = set()
+        for m in DECLINE_RE.finditer(line):
+            before = [r for r in refs if r[1] <= m.start()]
+            if not before:
+                continue
+            _, end, num = max(before, key=lambda r: r[1])
+            if _DECLINE_BRIDGE_RE.match(line[end:m.start()]):
+                targets.add(num)
+        if targets:
+            out[i] = targets
+    return out
+
+
 def _claims_in(text: str, own_number: int | None = None,
                repo: str | None = None,
                skipped: list[int] | None = None) -> dict[str, list[int]]:
@@ -357,13 +421,13 @@ def _claims_in(text: str, own_number: int | None = None,
     """
     found: dict[str, list[int]] = {"closing": [], "satisfies": [], "weak": [], "declined": [],
                                    "continued_resolving": []}
-    declined_lines = {i for i, line in enumerate(text.splitlines()) if DECLINE_RE.search(line)}
+    decline_targets = _decline_targets(text)
     line_starts = [0]
     for line in text.splitlines(keepends=True):
         line_starts.append(line_starts[-1] + len(line))
     for m in CLAIM_RE.finditer(text):
         line_no = sum(1 for st in line_starts if st <= m.start()) - 1
-        into = found["declined"] if line_no in declined_lines else None
+        declined_here = decline_targets.get(line_no, ())
         word = re.sub(r"\s+", " ", (m.group("kw") or m.group("ckw")).lower())
         # The claiming word governs its WHOLE same-line list (F3) — but a list continuation is a
         # CLAIM, never a RESOLUTION. GitHub credits only the FIRST ref of a closing keyword (its
@@ -386,8 +450,8 @@ def _claims_in(text: str, own_number: int | None = None,
                 continue
             if qual and qual.lower() != repo.lower():
                 continue  # `owner/repo#N` for another repo is not this PR's business
-            if into is not None:
-                into.append(num)
+            if num in declined_here:
+                found["declined"].append(num)
             elif word in CLOSING_WORDS:
                 (found["weak"] if continued else found["closing"]).append(num)
                 if continued:
@@ -724,11 +788,22 @@ def main(argv: list[str] | None = None) -> int:
         # population than the one the flags name (the doctrine `--label`/`--sweep` and the
         # population modes already follow).
         ap.error("--wip/--no-wip answer ONE issue: they apply to --issue and --issue-body-file only")
-    if args.label and args.sweep:
-        # `--label` filters the ISSUE population (`sweep_issues`); `--sweep` reads PRs and has no
-        # label filter — so the combination silently swept 50 unfiltered PRs while the doc's own
-        # example implied a filtered population (F4). Refuse it, as `--wip` is refused above.
-        ap.error("--label applies to --sweep-issues, not --sweep")
+    if args.label and not args.sweep_issues:
+        # `--label` filters the ISSUE population (`sweep_issues`); `--sweep` reads PRs and the
+        # single-subject modes read one subject, so neither has a label filter — so the combination
+        # silently ran unfiltered while the caller believed the population was restricted (F4 for
+        # `--sweep`; the same no-op on `--pr`/`--issue`/the two file modes). Refuse it everywhere it
+        # cannot be honoured, as `--wip` is refused above.
+        ap.error("--label applies to --sweep-issues only; the other modes read a fixed subject or "
+                 "an unfiltered population, so the filter would be dropped in silence")
+    if args.comments_file is not None and args.issue_body_file is None:
+        # `--comments-file` supplies the COMMENT BODIES of the offline issue mode, and that is the
+        # one mode that reads it. Elsewhere the file was dropped without a word, and `--issue` —
+        # the mode a caller would reach for — then reported `0 comment(s)` (a count of gh comments)
+        # with nothing saying the operator's file had been ignored. Same doctrine as `--wip` above:
+        # a flag that cannot be honoured is refused, never read as a smaller population.
+        ap.error("--comments-file supplies the comment bodies of --issue-body-file only; "
+                 "the other modes read their comments themselves (or have none)")
 
     findings: list[Finding] = []
     measured_rows: list[dict] = []
