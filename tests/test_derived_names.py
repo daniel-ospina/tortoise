@@ -745,6 +745,18 @@ def _non_owned_handles(block: str) -> list[str]:
     PASS this arm exists to close, in the shape that skips its matcher. Both are
     read here.
 
+    ⛔ The arm is SHAPE-AGNOSTIC, because "two shapes" was a claim about how a
+    name is BUILT and the inert record is a property of the NAME (#11217 review,
+    measured at `ede858414a`: concat, `%`, `.format` and the inline concat form
+    all still read GREEN — five ways to journal `evict_…` past a matcher that
+    only knew the f-string). What is read now is the LITERAL an expression
+    STARTS from — the binding's right-hand side, or the journal call's argument —
+    so `+`, `%`, `.format()` and the f-string are one shape: `"evict_" + …`,
+    `"evict_%s" % …`, `"evict_{}".format(…)` and `f"evict_{…}"` all carry the
+    same literal prefix and all take the same test. Declared fail-open: an
+    expression that does NOT start with a literal (`p = "evict_"; f"{p}{hex}"`)
+    is undecidable without constant propagation, so it is not reported.
+
     DECLARED fail-open on a prefix that could still COMPLETE into an owned one
     (`te` → `test_`): the built name starts with the prefix, so an unownable
     prefix of an owned prefix is undecidable from the literal alone, and this arm
@@ -757,28 +769,72 @@ def _non_owned_handles(block: str) -> list[str]:
     from tests._embedded import _SWEEP_OWNED_PREFIXES
 
     masked = _mask_strings_and_comments(block)
-    exprs: list[str] = []
-    # shape 1: `name = f"<prefix>{os.urandom(...)}"`
-    for m in re.finditer(
-            r"(?m)^[ \t]*(?P<name>\w+)\s*=\s*f([\"'])(?P<rhs>[^\n]*)", block):
+
+    def _literal_prefix_at(pos: int) -> str | None:
+        """The literal prefix the expression starting at `pos` builds on, or
+        None when it does not start with a string literal (a variable, a call —
+        undecidable here) or the literal is not on a line carrying
+        `os.urandom` (then it is not a per-test handle's name).
+
+        SHAPE-AGNOSTIC: `f"p{hex}"`, `"p" + hex`, `"p%s" % hex` and
+        `"p{}".format(hex)` all begin with the SAME literal, so the separator is
+        cut off rather than matched as a form.
+        """
+        m = re.match(r"[rbfuRBFU]{0,2}(?P<q>[\"'])", block[pos:])
+        if not m:
+            return None
+        body = re.match(r"[^\"'\n]*", block[pos + m.end():]).group(0)
+        line_start = block.rfind("\n", 0, pos) + 1
+        line_end = block.find("\n", line_start)
+        raw_line = block[line_start:len(block) if line_end < 0 else line_end]
+        masked_line = masked[line_start:line_start + len(raw_line)]
+        if "os.urandom" not in raw_line:
+            return None
+        # PROSE is not a site in either direction (#11182). The comment starts at
+        # the FIRST place the raw line and its masked twin differ AND the raw
+        # char there is `#`; a `#` INSIDE a string differs one char earlier (at
+        # the opening quote), so it cannot masquerade as a comment start.
+        for i, (rc, mc) in enumerate(zip(raw_line, masked_line)):
+            if rc != mc:
+                if rc == "#" and line_start + i < pos:
+                    return None
+                break
+        return body.split("{", 1)[0].split("%", 1)[0]
+
+    # The two places a name-building expression STARTS: a binding's right-hand
+    # side, and the journal call's argument (the inline shape that has no
+    # assignment line at all).
+    starts: list[int] = []
+    # Read the BINDING off the RAW block, not the masked one: masking blanks the
+    # literal, so a `[ \t]*` after `=` runs straight past the (now space-filled)
+    # string and lands on the operator after it — every `"p" + hex` binding then
+    # resolves its start to `+` and reads as undecidable (measured at this head
+    # before the fix). Comment lines cannot match this anchored shape (`#` is not
+    # `\w`), and a binding inside a multi-line STRING is rejected by the masked
+    # identity check below.
+    for m in re.finditer(r"(?m)^[ \t]*(?P<name>\w+)[ \t]*=[ \t]*", block):
         if masked[m.start("name")] == " ":
-            continue  # inside a comment or a string literal
-        exprs.append(m.group("rhs"))
-    # shape 2: the f-string handed STRAIGHT to the journal
-    for call in re.finditer(r"_journal_append\(", masked):
+            continue  # inside string material, not code
+        starts.append(m.end())
+    # Same reason: the CALL is located on the RAW block (masking turns the
+    # argument into spaces, so a masked `\s*` jumps the literal and lands on the
+    # operator), and its occurrence must be CODE — a mention inside a comment or a
+    # string literal leaves `masked` blank at that offset.
+    for call in re.finditer(r"_journal_append\(\s*", block):
+        if masked[call.start()] == " ":
+            continue  # prose, not a use of the symbol
         line_start = masked.rfind("\n", 0, call.start()) + 1
         if re.fullmatch(r"\s*(?:async\s+)?def\s+", masked[line_start:call.start()]):
             continue  # a definition of the symbol, not a use of it
-        m = re.match(r"_journal_append\(\s*f([\"'])(?P<rhs>[^\n]*)",
-                     block[call.start():])
-        if m:
-            exprs.append(m.group("rhs"))
+        starts.append(call.end())
 
     out: list[str] = []
-    for rhs in exprs:
-        if "os.urandom" not in rhs:
+    seen: set[str] = set()
+    for pos in starts:
+        prefix = _literal_prefix_at(pos)
+        if prefix is None or not prefix or prefix in seen:
             continue
-        prefix = rhs.split("{", 1)[0]
+        seen.add(prefix)
         if prefix.startswith(_SWEEP_OWNED_PREFIXES):
             continue
         if any(p.startswith(prefix) for p in _SWEEP_OWNED_PREFIXES):
@@ -931,6 +987,68 @@ def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
     )
     assert not _raw_detach_violations(root=tmp_path), (
         "the inline shape with an owned prefix must be clean")
+
+    # SHAPES 3+ (#11217 review, measured at `ede858414a`): the inert record is a
+    # property of the NAME, not of how it was BUILT. Every one of these journals
+    # `evict_…` and read **GREEN** under the f-string-only matcher.
+    for label, expr in (
+            ("concat", '"evict_" + os.urandom(6).hex()'),
+            ("percent", '"evict_%s" % os.urandom(6).hex()'),
+            ("format", '"evict_{}".format(os.urandom(6).hex())'),
+    ):
+        site.write_text(
+            "def test_evictor_lane():"
+            "\n    import os"
+            "\n    from falkordb import FalkorDB"
+            f"\n    name = {expr}"
+            "\n    _journal_append(name)"
+            "\n    c = FalkorDB(host=\"h\")"
+            "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+            "\n",
+            encoding="utf-8",
+        )
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad and "'evict_'" in bad[0], (
+            f"the {label} shape journaled a NON-OWNED handle and read clean: {bad}")
+        # the OWNED twin of the same shape must stay clean, so the arm is
+        # flagging the PREFIX and not the style of expression
+        site.write_text(
+            site.read_text(encoding="utf-8").replace("evict_", "test_evict_", 1),
+            encoding="utf-8",
+        )
+        assert not _raw_detach_violations(root=tmp_path), (
+            f"the OWNED {label} shape was reported: {_raw_detach_violations(root=tmp_path)}")
+
+    # the inline CONCAT form, the shape-2 hole one expression over
+    site.write_text(
+        "def test_evictor_lane():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    _journal_append(\"evict_\" + os.urandom(6).hex())"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n",
+        encoding="utf-8",
+    )
+    assert _raw_detach_violations(root=tmp_path), (
+        "an INLINE-concat journaled non-owned handle was accepted as a record")
+
+    # DECLARED fail-open: a name built from a VARIABLE prefix is undecidable here
+    # without constant propagation, so it is clean rather than a false block.
+    site.write_text(
+        "def test_evictor_lane():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    p = \"evict_\""
+        "\n    name = f\"{p}{os.urandom(6).hex()}\""
+        "\n    _journal_append(name)"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n",
+        encoding="utf-8",
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        "a variable-prefix name was reported as a violation (declared fail-open)")
 
     # PROSE is not a site in either direction (#11182): a comment showing an
     # unowned handle must not make the census red, exactly as it must not make it
