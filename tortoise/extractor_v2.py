@@ -11573,6 +11573,12 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
       ``"model"`` ("the model asserted these bytes"), never shipped as an address
       of a text it does not index. ``"quote"`` verifies against the record's own
       quote, ``"narrative"`` against the narrative this run was extracted from.
+      ⚠️ TWO exceptions, both stated rather than implied:
+      an absent **quote** is a MISMATCH (``"quote": null`` is in the output
+      contract, so there is no text to address), while an absent **narrative**
+      is UNKNOWABLE — no haystack was supplied, so the declaration stands
+      unchecked instead of being relabelled ``"model"``, which would tell a
+      consumer the cue invented offsets it derived.
       ⚠️ Demotion is not dropping: an unverifiable declaration keeps its offsets
       under the honest label, so a consumer still sees what the model claimed.
 
@@ -11634,6 +11640,13 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
         # A `quote` address is ALWAYS checkable (an empty quote is a definite
         # mismatch); a `narrative` one only when a haystack was supplied — the
         # offsets cannot be checked here, so that declaration stands.
+        # ⚠️ KNOWN, DELIBERATE DIVERGENCE: :func:`_mention_record` DEMOTES the
+        # same declared-narrative-with-no-haystack entry, because it always
+        # holds the narrative `route_mentions` received. The two builders
+        # therefore disagree on that one input, and this side is the correct
+        # one: relabelling to `"model"` asserts the model invented offsets the
+        # cue derived. Cheaply re-aligned by passing `narrative=` from every
+        # `execute_embed` caller (the product path already does).
         checkable = declared == "quote" or bool(haystack)
         if checkable and _mention_span(haystack, surface) != want:
             record["span_source"] = "model"
@@ -11652,8 +11665,10 @@ def _mentions_for_claim(embed_list: dict, content: str,
     entirely, so an unmeasured run's payload is genuinely unchanged (the comment
     that claimed this without doing it was a review P2). ``narrative`` is only the
     haystack a declared ``narrative`` span is verified against
-    (:func:`_clamped_mention`); absent, such a declaration is demoted to
-    ``"model"`` rather than trusted.
+    (:func:`_clamped_mention`); when it is ABSENT that declaration stands
+    unchecked (an unknowable haystack is not a failed verification — see the
+    exception note there), and when a narrative IS supplied but does not put the
+    surface at the declared offsets, the label is demoted to ``"model"``.
     """
     if not armed:
         return []
