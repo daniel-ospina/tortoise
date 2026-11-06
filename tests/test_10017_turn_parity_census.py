@@ -1390,6 +1390,60 @@ def test_a_transport_failure_is_NOT_reported_as_a_permission_refusal(
     assert "credential" not in err, err
 
 
+def test_a_REFUSED_BIND_is_diagnosed_as_the_credential_too(monkeypatch):
+    """#11113 review P3: the tenant user is refused EARLIER than the listing.
+
+    Measured against a real server with the ACL layer's own grant recipe
+    (`-@all +GRAPH.QUERY +GRAPH.RO_QUERY +PING`): the pinned client's constructor
+    issues `INFO`, the grant denies it, and the run dies in the BIND — so it
+    never reached `_refuse_unless_graph_present` and reported "the graph could
+    not be read", the same blame-the-wrong-side shape the listing arm repaired.
+    """
+    from redis.exceptions import NoPermissionError
+
+    import tortoise.projection as projection
+
+    def _refuse(*a, **k):
+        raise NoPermissionError("User tenant_x has no permissions to run the "
+                                "'info' command")
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        types.SimpleNamespace(from_uri=staticmethod(_refuse)))
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns("docker://tenant_x:pw@127.0.0.1:1/g", None, "g")
+    err = str(exc.value)
+    assert "credential" in err, err
+    assert "INFO" in err, err
+    assert "GRAPH.LIST" in err, err
+    assert "could not be read" not in err, err   # the STORE is not at fault
+    assert "#2113/#8617" in err, err
+
+
+def test_a_transport_failure_IN_THE_BIND_keeps_the_generic_wording(monkeypatch):
+    """NON-VACUITY for the arm above: an outage must stay an outage.
+
+    Without this, "a refused bind names the credential" would hold for every
+    bind failure and would say nothing about the NOPERM arm — the same false PASS
+    the listing arm's twin test closes.
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    import tortoise.projection as projection
+
+    def _down(*a, **k):
+        raise RedisConnectionError("Error connecting to 127.0.0.1:1")
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        types.SimpleNamespace(from_uri=staticmethod(_down)))
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, "g")
+    err = str(exc.value)
+    assert "could not be read" in err, err
+    assert "credential" not in err, err
+
+
 def test_the_permission_predicate_is_the_ACL_layer_s_own():
     """⛔ ONE rule, not a second spelling — pinned STRUCTURALLY.
 
