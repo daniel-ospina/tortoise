@@ -4509,3 +4509,50 @@ def test_an_INDENTED_line_blanked_as_code_does_not_close_the_open_paragraph():
     # and its own text is prose (control for "the fix did not make every blank line lazy").
     control = "- [ ] a\n>     \n> <span>\n>   -     Closes #100\n"
     assert cl.parse_closing_refs(control, None, strict=True) == [100], control
+
+
+def test_a_TYPE1_opener_ENDS_the_paragraph_and_a_type7_block_can_then_OPEN():
+    """Round 48 review (F2/P2) — the interrupt set was a TYPE short, and it lost a real close.
+
+    §4.6's types 1-6 CAN interrupt a paragraph; only type 7 cannot. `_HTML_BLOCK_INTERRUPT_RE` — the
+    regex the paragraph question reads — carried the sigil types and the type-6 TAG LIST but no
+    type-1 arm, so `<pre>` was read as prose that leaves a paragraph OPEN. The next line was then a
+    type-7 `<span>` that cannot interrupt one, so no block opened over the marker line and it was
+    blanked as a wide-gap code line:
+
+        `> - item` + `>` + `>   <pre>` + `> <span>` + `> -     Closes #100`
+            renderer: `<span>` is a type-7 `html_block` whose raw TEXT is the marker line  (PROSE)
+            `origin/main` `[100]`, round-48 head `[]` in BOTH arms
+
+    The type-1 tag names are now ONE constant (`_HTML_TYPE1_TAGS`) read by the start test, the
+    interrupt test and the closer table, so the pair cannot drift apart again — the START set has
+    carried the arm since round 44 and the INTERRUPT set never did.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body in ("> - item\n>\n>   <pre>\n> <span>\n> -     Closes #100\n",
+                 "<pre>\n<span>\n-     Closes #100\n"):
+        assert token_type(body) == "html_block", body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+    # CONTROLS — type 7 is still NOT an ender (it cannot interrupt a paragraph), and the openers
+    # that were already in the interrupt set did not change answer.
+    assert token_type("<span>\n-     Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("<span>\n-     Closes #100\n") == [100]
+    for body in ("<div>\n-     Closes #100\n", "<script>\n-     Closes #100\n"):
+        assert token_type(body) == "html_block", body
+        assert cl.parse_closing_refs(body) == [100], body
+    # …and a wide-gap marker under an open paragraph still must not be credited: the arm ends a
+    # paragraph, it does not license one. Here the type-1 opener DOES open a block over the marker
+    # (so it is the block's own text), while the same body without it is `code_block` and blanked.
+    assert token_type("Notes\n<pre>\n-     Closes #100\n") == "html_block"
+    assert cl.parse_closing_refs("Notes\n<pre>\n-     Closes #100\n") == [100]
+    assert token_type("Notes\n-     Closes #100\n") == "code_block"
+    assert cl.parse_closing_refs("Notes\n-     Closes #100\n") == []

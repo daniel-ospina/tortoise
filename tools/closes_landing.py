@@ -945,18 +945,33 @@ _HTML_TYPE6_TAGS = (
     "h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|"
     "optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul"
 )
+#: §4.6 type 1's tag names, in ONE place: the start test, the interrupt test and the closer table all
+#: read this string, so the three cannot drift apart (round 48 review, P2 — the START set had the arm
+#: and the INTERRUPT set did not, which is what left `<pre>` not ending a paragraph).
+_HTML_TYPE1_TAGS = "script|pre|style|textarea"
 _HTML_BLOCK_INTERRUPT_RE = re.compile(
-    rf" {{0,3}}(?:<!--|<\?|<![A-Za-z\[]|<(?:{_HTML_TYPE6_TAGS})(?:[ \t]|/?>|$))", re.IGNORECASE)
+    rf" {{0,3}}(?:<!--|<\?|<![A-Za-z\[]|<(?:{_HTML_TYPE1_TAGS})(?:[ \t]|/?>|$)"
+    rf"|<(?:{_HTML_TYPE6_TAGS})(?:[ \t]|/?>|$))", re.IGNORECASE)
 
 #: ⛔ §4.6's SIX TYPES DO NOT END THE SAME WAY, AND THE START SET IS NOT ONE REGEX (round 44 review,
 #: P2 — a fail-open: crediting a CODE line). Types 2-5 end at their OWN closing token (`-->`, `?>`,
 #: `>`, `]]>`), type 1 at its closing tag, and only type 6 at a blank line. A state machine that
 #: ended every block at a blank line kept `<!-- c -->` open over the NEXT line, so
 #: `<!-- c -->` + `-     Closes #100` (renderer `code_block`) was CREDITED in both arms — 600
-#: fail-open bodies over one grid. And `_HTML_BLOCK_INTERRUPT_RE` has no type-1 arm at all (its
+#: fail-open bodies over one grid. And `_HTML_BLOCK_INTERRUPT_RE` had no type-1 arm at all (its
 #: `<!` sigil is not `<script`), so `<pre>` + `-     Closes #100` stayed blanked while the renderer
 #: says `html_block` and `origin/main` credits it. One root, both halves, one table.
-_HTML_TYPE1_TAG_RE = re.compile(r" {0,3}<(script|pre|style|textarea)(?:[ \t]|/?>|$)", re.IGNORECASE)
+#: ⛔ …AND THE INTERRUPT SET WAS STILL A TYPE SHORT (round 48 review, P2 — a LOST close, and it is
+#: the reason the `blank_carried` state lost one). The table above fixes the START set; the
+#: paragraph question reads the OTHER regex, and type 1 does interrupt a paragraph (§4.6: types 1-6
+#: do, only type 7 does not), so `<pre>` left a paragraph "open" that the renderer had already
+#: ended. The next line — a type-7 `<span>` — was then refused as a block opener it could not be,
+#: and the marker under it was blanked:
+#:     `> - item` + `>` + `>   <pre>` + `> <span>` + `> -     Closes #100`
+#:     renderer: an `html_block` (`<span>`'s) whose raw text is the marker line — PROSE
+#:     `origin/main` `[100]`, round-48 head `[]`
+#: The tag list is now ONE constant shared by all three readers.
+_HTML_TYPE1_TAG_RE = re.compile(rf" {{0,3}}<({_HTML_TYPE1_TAGS})(?:[ \t]|/?>|$)", re.IGNORECASE)
 _HTML_TYPE1_CLOSERS = {"script": "</script>", "pre": "</pre>",
                        "style": "</style>", "textarea": "</textarea>"}
 
