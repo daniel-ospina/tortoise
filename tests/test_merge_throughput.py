@@ -4069,11 +4069,16 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         # one that checks out at `fetch-depth: 0` (#5086 review P1-1). It is
         # listed INSIDE the exact list rather than exempted — the exactness of
         # this assertion is the whole point.
-        "python3 tools/substrate_map_check.py --check"
+        "python3 tools/substrate_map_check.py --check\n"
+        # #11084: the surface map's own guard, BOTH arms. `--self-test` proves the
+        # checker still catches the mutations its "not trusted" claim rests on;
+        # an arm nothing runs would let a quietly weakened rule pass green.
+        "python3 tools/test_design_map_check.py\n"
+        "python3 tools/test_design_map_check.py --self-test"
     )
     assert code.strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the four "
-        "`--check` commands — no shell operator, no wrapper, no trailing "
+        "the drift step must invoke EXACTLY the installer, the four "
+        "`--check` commands and the map guard's two arms — no shell operator, "
         f"anything, or a real failure reports green (#2656); got {code!r}"
     )
     # The step may carry only the keys that cannot silence it. Enumerating the
