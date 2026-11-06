@@ -237,8 +237,8 @@ job, and it is a one-line diff a reviewer can see.
 **It runs on every edit, not only when someone remembers.** Both arms are wired into CI's `docs` job
 (`.github/workflows/ci.yml`, beside `tools/substrate_map_check.py`): the check, **and** `--self-test` —
 a rule that is quietly weakened in a way a *document* mutation can reach (a lowered word floor, a
-reverted width or parity rule, a removed population pin) reds the self-test rather than passing
-silently, because the arm nothing runs is not a guard. That job is the **REQUIRED,
+reverted width or parity rule) reds the self-test rather than passing silently, because the arm
+nothing runs is not a guard. That job is the **REQUIRED,
 path-filter-free** context, and it is the only one that can see a docs-only edit, because such an edit
 selects no test surface. So a lane that deletes a row here gets a red `docs` check rather than a green
 one and a smaller checklist. `.github/workflows/*` is a surface worth naming explicitly: the change that
