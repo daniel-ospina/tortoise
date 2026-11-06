@@ -347,7 +347,9 @@ same step with the same tail is the investigation.
 - **It does not reduce jobs per run.** A `python-ci` run is 20 jobs (max 28) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question. It does now bound how
-  many of those jobs ONE run may hold at once — §7 — which moves the queue, not the work.
+  many of those jobs ONE run may hold at once — §7 — which moves the queue, not the work. It bounds
+  a `batch-fold` run too: 3 per matrix, so a fold with dedicated capacity for all 8 wall-carrying
+  legs still runs them 3 at a time (§7, "What the cap does NOT exempt").
 - **It does not restore post-merge validation.** §4 — 17 of 20 recent push-to-main runs never
   ran, for reasons that predate this change.
 - **It does not make a superseded PR cheap.** Cancelling the superseded run frees the slot it was
@@ -420,11 +422,19 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 
 | cap (fast/slow/carve) | per-PR peak (p50 / max) | matrix-band end delta (p50 / max) |
 | --- | --- | --- |
-| 2 / 2 / 2 | 8 / 9 | +31.8 m / +38.5 m |
+| 2 / 2 / 2 ⛔ | 8 / 9 | +31.8 m / +38.5 m |
 | **3 / 3 / 3 (shipped)** | **9 / 12** | **+17.9 m / +23.2 m** |
 | 4 / 4 / 3 | 10 / 13 | +10.1 m / +14.4 m |
 | 5 / 3 / 3 | 10 / 12 | +8.1 m / +9.6 m |
 | unset | 11 / 18 | 0 / 0 |
+
+⛔ **The `2 / 2 / 2` row is the one candidate this section's own pin rejects.** `ceil(9 / 2)` = 5
+waves exceeds the `max_waves = 4` ceiling invariant 1 pins
+(`tests/test_ci_selection.py::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`), so a
+re-derivation from a fresh measurement that picks the row with the most pool headroom (`8 / 9`) is
+redded by the pin shipped in this same section. The two rows that fail the other side are the
+mirror case: `4 / 4 / 3` and `5 / 3 / 3` each hold 11 matrix slots, past `12 - 3 = 9`, so they fail
+invariant 2.
 
 **The accepted regression has two components, and only the run-level number judges it.** The slow
 matrix gains its second wave (`ceil(5/3)` = 2): one wave of the measured slow-leg wall is ~8.9 m
@@ -464,6 +474,22 @@ outside it. That is how a run was measured at **18 simultaneous jobs against a 1
 (table above): the overflow is answered outside the pool. The cap is a fairness bound on the FAN-OUT (which is
 what was unbounded, and what made one PR own the pool); it is not a total concurrency budget, and
 reading 9 as one would understate the hold by nearly half (it is 9 of 17).
+
+⛔ **What the cap does NOT exempt: a `batch-fold` run.** The three caps are bare integer literals
+(`python-ci.yml:817`, `:2049`, `:3188`) with no condition, so they apply to a fold's validation run
+exactly as to any other PR. That matters because a fold is the one run this repo deliberately
+saturates capacity for: `docs/ops/batch-integration.md` §3 (mechanism 3) gives the fold's own matrix
+rows a dedicated runner class, and the emitter that applies it —
+`tools/ci_selection.py::fast_matrix_include` — states the scope in its own words — *"A fold gets
+priority on the eight legs that carry the wall"* (the nine fast shards less the `canary_producer`
+row). **The class buys those legs a class, not parallel slots:** on a fold run with dedicated
+capacity for all eight, at most three run at once, and the matrix-band delta above (`+17.9 m p50 /
++23.2 m max`) applies to the fold's own band as well. So a
+later reader of mechanism 3 must not assume the dedicated class buys parallel legs. Nothing here
+exempts a fold, and exempting one is NOT the route taken: `max-parallel` is a JOB-level `strategy`
+key rather than per-row data like `runs-on`, so an exemption would have to be an expression on the
+key itself — a shape this document does not verify GitHub accepts, and one that would also have to
+be pinned so a silent re-tune cannot reinstate the other behaviour.
 
 ⛔ **Why it cannot false-red a shard.** `max-parallel` limits start order only. Every bound in
 these jobs is measured from runner pickup — the in-step watchdog is started INSIDE the job — so a
