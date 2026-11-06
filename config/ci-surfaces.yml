@@ -603,8 +603,12 @@ surfaces:
   # `TORTOISE_RECORD_DSN` resolves in this process, publishes the value's 8-hex
   # fingerprint (never the value) and the record counters, and degrades
   # `status` only for a set-but-unusable DSN. The POSITIVE pair
-  # (`record_writes_applied` / `record_last_write_at`) is pinned here too, so a
-  # rename that leaves the docstring and runbook false reds this suite. Same dual
+  # (`record_writes_applied` / `record_last_write_at`) is pinned here against
+  # `metrics()`'s own key names and against `_record_health`'s docstring, so a
+  # rename that leaves the docstring false reds this suite. ⚠️ The RUNBOOK half of
+  # that claim is deliberately NOT here: a runbook-only diff selects no surface and
+  # runs `tier1` only, so the field-row pin lives in `test_deploy_workflow.py`
+  # (tier1), where that diff actually runs it. Same dual
   # registration as the guards
   # above and for the same reason: the file it guards is `tortoise/hosted_api.py`,
   # which selects the `api` surface — and the arming state is invisible from

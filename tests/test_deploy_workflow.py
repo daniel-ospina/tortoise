@@ -2501,32 +2501,25 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # witness this bar exists to add (#9548's `record_writes_applied`) was one it
     # omitted, leaving the delta it demands uncomputable from the reading it
     # prescribed (#9548 review P2).
-    # ⛔ Anchored to the BOLD imperative and paired with a NEGATION GUARD: `re.search`
-    # on the bare fragment matched inside a sentence that FORBIDS the baseline, so a
-    # runbook saying "⛔ Do not **read every record counter BEFORE the capture and
-    # again after**" stayed GREEN under a pin whose own message promises it demands
-    # one — measured by applying exactly that mutation (#9548 review P2). The bold
-    # anchor alone does not fix it: the negation sits before the bold span. So the
-    # sentence the imperative lives in is negated-checked, case-insensitively and by
-    # clause rather than by a fixed word list at a fixed offset.
-    imperative = re.search(
-        r"\*\*read every record counter BEFORE\s+the capture and again after\*\*", flat
-    )
-    assert imperative, (
+    # ⛔ The WHOLE clause is pinned — lead-in, imperative and the sentence that
+    # says what the two readings are FOR — and that is deliberate. Two earlier
+    # forms failed here, both measured: a bare fragment matched inside a sentence
+    # that FORBADE the baseline ("So ⛔ Do not **read every record counter …**"
+    # stayed green), and a negation-vocabulary guard bolted onto the fragment then
+    # false-blocked accurate wording ("So never skip the baseline: **read every…**"
+    # red). Pinning the clause needs no vocabulary: any negation inserted before
+    # the imperative breaks the match, and a rewording reds, which is the trade the
+    # sibling clauses in this test make too. `flat` still tolerates a reflow.
+    assert re.search(
+        r"So \*\*read every record counter BEFORE\s+the capture and again after\*\*:"
+        r"\s+presence and growth are the \*difference\* between the two reads",
+        flat,
+    ), (
         "the bar says 'growth' but never tells the operator to take a reading "
         "BEFORE the capture — an absolute count left from earlier in the "
         "process's life then reads as this capture's growth — or it names a "
         "subset of the counters the presence list then requires"
     )
-    # The sentence containing it, from the last sentence boundary before it.
-    sentence = flat[max(0, flat.rfind(".", 0, imperative.start()) + 1):imperative.end()].lower()
-    for negation in ("never", "do not", "don't", "must not", "should not",
-                     "need not", "not required", "not necessary", "no need"):
-        assert negation not in sentence, (
-            f"the baseline's own sentence NEGATES it ({negation!r}) — an operator "
-            "following that sentence takes no pre-capture reading, so the 'growth' "
-            f"the bar requires has no referent: {sentence.strip()!r}"
-        )
     assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", flat), (
         "the bar has no arm for an empty reading — an operator landing there is "
         "told nothing, and that state is the whole point of the section"
@@ -4710,4 +4703,35 @@ def test_the_health_gate_header_states_the_budgets_its_knobs_derive() -> None:
         assert "3 min" not in segment and "3-minute" not in segment, (
             "the gate's BEHAVIOUR header still says 3 min for a phase whose "
             "derived window is not 180 s"
+        )
+
+
+def test_the_runbook_field_row_documents_the_positive_pair():
+    """#9548: the operator's FIELD ROW must name the two fields the payload publishes.
+
+    ⛔ Registered on `tier1` — that is the whole point. `docs/infra-runbook.md` is under
+    `docs/`, which is in `NON_PYTHON_PREFIXES` and matches no `SOURCE_PATTERNS` entry, so
+    a runbook-only diff selects NO surface and runs `tier1` only (#4309). The same
+    assertion lived in `tests/test_9548_record_arming_health.py`, which is registered on
+    `api`/`core` and therefore does not run on that diff: measured, renaming the row to
+    keys the payload never publishes (`record_applied_total` / `record_last_commit_at`)
+    left every selected suite GREEN — the #9548-review P1 shape this file's own
+    `tier1` registration comment records, re-introduced one file over.
+
+    Scoped to the section's TABLE ROWS — and to each row's **HEAD CELL**, not its prose — so it
+    pins the operator's row without pinning its punctuation: a head cell that annotates the types
+    (`record_writes_applied` (int) / …) or a pair split across two rows is a better doc and still
+    passes, while a rename (or a deletion) reds. ⚠️ Head-cell scope is not fussiness: a same-row
+    substring test was measured GREEN on a rename of the pair in the head cell, because the row's
+    own explanation still names both fields further along it.
+    """
+    section = _record_arming_section()
+    rows = [line for line in section.splitlines() if line.lstrip().startswith("|")]
+    assert rows, "the arming section has no table rows at all — the field docs vanished"
+    heads = [row.split("|")[1] for row in rows if len(row.split("|")) > 1]
+    for name in ("record_writes_applied", "record_last_write_at"):
+        assert any(f"`{name}`" in head for head in heads), (
+            f"the arming section's field table documents no `{name}` row — the "
+            "operator has no reading to take for the positive channel, however "
+            "correct the `/health` payload is"
         )
