@@ -96,8 +96,8 @@ def _bench_opted_in() -> bool:
     deliberate act, unlike the default it overrides). The ambient
     `~/.cache/tortoise-longmemeval/` default alone arms nothing, so the SKIP
     path is deterministic on every runner and the run path is where someone
-    opted in. The bench is not weakened: `UV`-free, it still runs end-to-end
-    with `TORTOISE_LME_BENCH=1` wherever the dataset is cached.
+    opted in. Nothing is weakened: with the opt-in set the bench still runs
+    end to end wherever the dataset is cached.
     """
     return (os.environ.get(_BENCH_OPT_IN_ENV) == "1"
             or bool(os.environ.get("TORTOISE_LME_DATASET")))
@@ -227,7 +227,7 @@ def test_the_bench_is_armed_explicitly_never_by_an_ambient_home_cache(
     no opt-in anywhere and this file cost 1,252 s of a 1,560 s shard watchdog
     (run 42120750405, job `test (c)`) — on a diff that never touched it.
 
-    Non-vacuous in BOTH directions:
+    Non-vacuous in THREE directions:
 
     * ARM 1 reds the PRE-FIX code, which had no predicate at all — there
       `_recorded_questions()` returned `{qid}` with the dataset merely
