@@ -4563,11 +4563,19 @@ jobs:
           # in the list on purpose: D10's policy drill re-applies the tenancy
           # migration, so nothing another file asserts on may run after it
           # without its own re-read.
+          #
+          # #9881: `test_9881_rename_reaches_the_record.py` is armed HERE for
+          # the same reason — its end-to-end leg (public `update_entity(name=…)`
+          # -> journal -> record row, live == replay) SKIPS without this job's
+          # DSN, and this job's leg gate FAILS on ANY skip (#9551), which is
+          # what makes it run rather than pass by absence. It sits BEFORE the
+          # capstone because the capstone is last on purpose (D10, above).
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
             tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
             tests/test_record_searchkeys_10620.py \
+            tests/test_9881_rename_reaches_the_record.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
             --junitxml="$SCRATCH/junit.xml" -o junit_family=xunit1 \
