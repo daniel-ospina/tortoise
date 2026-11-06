@@ -1760,7 +1760,11 @@ def _build_parser() -> _UsageParser:
     parser.add_argument("--sample", type=int, default=3,
                         help="sample size per session in the census report")
     parser.add_argument("--expect-empty", action="store_true",
-                        help="allow a graph holding zero episodic nodes")
+                        help="allow a graph holding zero episodic nodes to "
+                             "certify. ⚠️ Presence proves the NAME exists, not "
+                             "that it is the graph you MEANT: a wrong name the "
+                             "store DOES hold still certifies under this flag. "
+                             "Use it only for the drained graph you purged")
     parser.add_argument("--execute", action="store_true",
                         help="PURGE the approved set. Refuses unless every "
                              "precondition is asserted at runtime and the "
@@ -1847,10 +1851,14 @@ def main(argv: list[str] | None = None) -> int:
                     and not args.expect_empty):
                 sys.stderr.write(
                     "purge_legacy_turns: the graph holds ZERO is_episodic "
-                    "nodes — an absence is NOT established (a wrong "
-                    "--graph-name/--db-path is indistinguishable from a "
-                    "drained graph). Pass --expect-empty if the graph is known "
-                    "to hold no turn nodes.\n")
+                    "nodes — an absence is NOT established. The graph DOES "
+                    "exist (presence is checked first, #11112); what presence "
+                    "proves is that the NAME exists, NOT that it is the graph "
+                    "you meant: a name the store DOES hold (another tenant's "
+                    "graph of that name, a stub an earlier run created, a "
+                    "wrong --db-path) still certifies under --expect-empty. "
+                    "Pass --expect-empty only if this is the drained graph "
+                    "you purged.\n")
                 return 3
             report = census_mod.census(
                 graph, record, sample=args.sample,
