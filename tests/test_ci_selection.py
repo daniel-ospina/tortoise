@@ -11841,6 +11841,138 @@ def test_the_wall_clock_record_states_no_cap_the_workflow_does_not_ship():
         + "\n  ".join(offenders))
 
 
+#: Arm 1's floor, exactly as `ci-wall-clock.md` §2 states it ("floored at 15 m").
+_WALL_CLOCK_ARM1_FLOOR_MIN = 15
+
+
+def _arm1_cap(measured_max: float) -> int:
+    """Arm 1 of the doc's own rule: `2 × max`, nearest 5 m, floored at 15 m.
+
+    Written as the doc writes it — "rounded to the nearest 5 minutes", i.e. half UP. The
+    builtin `round()` is banker's rounding and would turn a 22.5 m doubling into 20 m
+    rather than the 25 m the rule names.
+    """
+    return max(_WALL_CLOCK_ARM1_FLOOR_MIN, int((2 * measured_max) / 5 + 0.5) * 5)
+
+
+def _wall_clock_table_rows() -> dict[str, tuple[float, int]]:
+    """`{job: (published max, cap in force)}` from every 6-column row of the doc.
+
+    Read MECHANICALLY out of the table instead of restated, so this pin cannot drift from
+    the document it audits. Only rows whose job cell is a bare `` `job-name` `` (optionally
+    bold, optionally with ONE trailing parenthetical) are returned: the shard rows
+    (`test (a…i)` (9 shards), `test-slow (a…e)` (5 legs)) aggregate several workflow jobs
+    and publish a RANGE, so they have no single `timeout-minutes` to compare against. A row
+    whose max cell carries no number (`ci-introduced-failure` publishes "not yet
+    measured") is skipped rather than guessed at.
+    """
+    rows: dict[str, tuple[float, int]] = {}
+    for line in (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text().splitlines():
+        cells = [cell.strip() for cell in line.split("|")[1:-1]]
+        if len(cells) != 6:
+            continue
+        job_cell, max_cell, cap_cell = cells[0], cells[4], cells[5]
+        named = re.fullmatch(r"`([a-z0-9][a-z0-9-]+)`(?: \(.*\))?",
+                             job_cell.replace("**", ""))
+        if not named:
+            continue
+        max_digits = re.findall(r"\d+(?:\.\d+)?", max_cell.replace("**", ""))
+        cap_digits = re.findall(r"\d+", cap_cell.replace("**", ""))
+        if max_digits and cap_digits:
+            rows[named.group(1)] = (float(max_digits[0]), int(cap_digits[0]))
+    return rows
+
+
+def test_every_row_the_record_attributes_to_arm_1_satisfies_arm_1s_arithmetic():
+    """P3 (#11195 review, ISSUE 2): arm 1 must reproduce the cap it is credited with.
+
+    §2 states ONE rule with two arms. Arm 1 is `cap = 2 × measured max`, rounded to the
+    nearest 5 minutes, floored at 15 m, and §1 publishes each row's measured max beside
+    the cap in force — so every row the record credits to arm 1 can be recomputed. At the
+    reviewed head `8aac7cb8d` it could not: the arm-1 bullet read "**restore-only since
+    #11063**, so it no longer pays a save and now IS arm-1 shaped — which is why its cap
+    is 20 and not 50", while the row it names publishes max **15.43 m**, which arm 1
+    doubles to 30.86 → **30**. The 20 actually comes from the arm-2 SUM derivation in the
+    note (12 m watchdog + ~1 m setup ≈ 13 m; × 1.5 = 19.5 → 20), so one file stated two
+    mutually exclusive justifications for one number — five sections apart, in the edit
+    whose whole point is that the record stops contradicting itself.
+
+    The sibling pin above (`…states_no_cap_the_workflow_does_not_ship`) covers the OTHER
+    finding by checking `X → Y` moves against the workflow; it cannot see this one, because
+    an arm-1 attribution is prose with no move arrow in it. This pin is the missing arm.
+
+    Two checked sets, each declared:
+
+    - **arm 1's stated examples.** Every `` `job` <2×max> → <cap> `` pair inside arm 1's
+      own bullet (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20) is recomputed from that job's
+      §1 row: the stated doubling must equal `2 × published max`, and `_arm1_cap` of that
+      max must equal the stated cap. This set KEEPS THE PIN ALIVE on the shipped tree (if
+      it empties, this reds) and it reds if any of those maxima drift.
+    - **arm-1 attributions.** Any job the doc calls "arm-1 shaped" must satisfy
+      `_arm1_cap(<its published max>) == <its published cap>`. ⛔ NON-VACUOUS ON THE
+      PRE-FIX TREE, verified by running it against `8aac7cb8d`'s document: it reds with
+      `assert 30 == 20` for `test-record-postgres`. On the shipped tree that phrasing is
+      gone (the bullet now says "not an arm-1 reading" and names the disagreement), so
+      this set is legitimately empty — which is why the first set carries the liveness.
+
+    Not covered, declared rather than hidden: an arm-1 claim phrased in words neither arm
+    matches (there is no lexical definition of "credits to arm 1"). The two sets above are
+    the wordings this document actually uses; a third one re-enters by adding it here, and
+    the liveness assertion on the first set makes that failure loud rather than silent.
+    """
+    doc = (REPO / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    rows = _wall_clock_table_rows()
+
+    assert "2 × measured max" in doc, (
+        "ci-wall-clock.md no longer states arm 1's formula (`cap = 2 × measured max`), so "
+        "neither this pin nor its readers can check an arm-1 row against anything — "
+        "re-anchor this pin rather than deleting the rule")
+
+    halves = doc.split("- **The job's cold save IS that archive**", 1)[0].rsplit(
+        "- **The job's cold save is NOT the 3.6 GB", 1)
+    assert len(halves) == 2, (
+        "arm 1's bullet is no longer locatable between its two headers — a rule that "
+        "cannot be found is a rule that cannot be checked")
+    bullet = halves[1]
+
+    # (1) arm 1's stated examples, recomputed from the table they are derived from.
+    examples = {
+        named.group(1): (float(named.group(2)), int(named.group(3)))
+        for named in re.finditer(
+            r"`([a-z0-9][a-z0-9-]+)`\s+([\d.]+)\s*(?:→|->)\s*\**`?(\d+)", bullet)
+        if named.group(1) in rows
+    }
+    assert examples, (
+        "arm 1's bullet states no `job <2 × max> → <cap>` example any more — this pin "
+        "would be vacuous, so re-anchor it instead of letting it pass on an empty set")
+    for job, (stated_doubling, stated_cap) in sorted(examples.items()):
+        published_max, published_cap = rows[job]
+        assert stated_doubling == 2 * published_max, (
+            f"ci-wall-clock.md's arm-1 example for `{job}` states {stated_doubling} m as "
+            f"`2 × max`, but the max its own §1 row publishes is {published_max} m "
+            f"(2 × that = {2 * published_max}). One of the two has drifted.")
+        assert _arm1_cap(published_max) == stated_cap == published_cap, (
+            f"arm 1 on `{job}`'s published max {published_max} m gives "
+            f"{_arm1_cap(published_max)} m, but the document states {stated_cap} m and "
+            f"publishes {published_cap} m. Arm 1 cannot be the justification for a cap "
+            "it does not reproduce (#11195 review, ISSUE 2).")
+
+    # (2) anything CALLED arm-1 shaped must survive arm 1's own arithmetic.
+    for claim in re.finditer(r"arm-1 shaped", doc):
+        named = re.findall(r"`([a-z0-9][a-z0-9-]+)`", doc[max(0, claim.start() - 700):claim.start()])
+        if not named or named[-1] not in rows:
+            continue
+        job = named[-1]
+        published_max, published_cap = rows[job]
+        assert _arm1_cap(published_max) == published_cap, (
+            f"ci-wall-clock.md calls `{job}` arm-1 shaped, but arm 1 (2 × max, nearest "
+            f"5 m, floored at {_WALL_CLOCK_ARM1_FLOOR_MIN}) turns the max it publishes "
+            f"({published_max} m) into {_arm1_cap(published_max)} m, not the "
+            f"{published_cap} m that ships. Attribute the number to the derivation that "
+            "produces it — the arm-2 SUM, if the row still saves — instead of asserting "
+            "two justifications for one cap (#11195 review, ISSUE 2).")
+
+
 def test_every_required_merge_check_carries_an_outer_cap():
     """A job EMITTING a required merge context must carry a literal cap.
 
