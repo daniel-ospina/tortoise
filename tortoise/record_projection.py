@@ -749,12 +749,18 @@ class RecordStatementError(RecordProjectionError):
     ``str(cause)``, which on a driver error is the protocol's fields
     CONCATENATED: the ``DETAIL``/``CONTEXT`` clause quotes the refused row or a
     prefix of its values, so the withhold documented above was true of the
-    message arm and false of the cause arm, and every value
-    :func:`_column_pair` names-by-length came back verbatim through the one
-    line a caller logs. ``record_writer._bounded_cause`` cannot repair it either
-    — it narrows on the OUTER exception's ``diag``/``pgcode``, and a
-    ``RecordStatementError`` carries neither, so it takes its ``str(exc)``
-    branch with the driver's ``DETAIL`` already embedded here.
+    message arm and false of the cause arm. The leak is entirely the DRIVER's
+    clause — the cause arm's own half (:meth:`Statement.attribution`) renders
+    ``value_types()`` and carries no bound value at all, and
+    :func:`_column_pair` is reached only from the message arm — so what came
+    back verbatim is *whatever the driver chose to quote*, not every withheld
+    value: measured on this PR's own fixture, the refused ``search_keys`` token
+    reappears while the ``content`` value, withheld by the same
+    :func:`_column_pair` on the message arm, does not. ``RecordStatementError``
+    carries neither ``diag`` nor ``pgcode``, and ``record_writer._bounded_cause``
+    narrows only on the OUTER exception's own ``diag``/``pgcode``, so it cannot
+    repair this either — it takes its ``str(exc)`` branch with the driver's
+    ``DETAIL`` already embedded here.
 
     ⚠️ AND THE NARROWING IS NOW SHAPE-BLIND, which is the one thing this fix
     costs (#11124 review P3). :func:`_primary_message` falls back to the FIRST
