@@ -4589,6 +4589,27 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     _CLAUSE_DELIM = re.compile(
         r"[.;\u2014\u2013]|,?\s*\b(?:and|but|while|whereas|yet)\b", re.I
     )
+    #: ⛔ AN ANCESTRY RELATION IS NOT THE EQUIVALENCE (#11191 review r11, P1 — MEASURED
+    #: false RED, and a REGRESSION against `origin/main`). The defect is the COPULA —
+    #: "`ff6379eb2` IS the tree before #9548". A sentence that instead states that
+    #: `ff6379eb2` is an ANCESTOR OF the true tree makes a different, TRUE claim:
+    #: `git merge-base --is-ancestor ff6379eb2 047c91f7a` exits 0 and
+    #: `git rev-list --count ff6379eb2..047c91f7a` is 12. The referent rule reads the
+    #: bare sha before the phrase and refused it anyway — `origin/main` accepts it, so
+    #: this head was strictly worse than the guard it replaces, which is the false-RED
+    #: class this file names as the way a pin gets deleted. Measured REFUSED at
+    #: `c281ea64a` (the r11 head), i.e. the r10/r11 rounds did not reach this one.
+    #: The kinship vocabulary is CLOSED on purpose (never an open `\w+`), and the
+    #: exemption additionally requires the TRUE tree in the SAME CLAUSE — so a bare
+    #: "`ff6379eb2` is an ancestor of the tree before #9548" with no referent stated is
+    #: still refused, and the relation cannot become an alibi for the equivalence.
+    _ANCESTRY_OF_TREE = re.compile(
+        r"\b(?:is|was)\s+(?:\d+\s+commits?\s+before"
+        r"|(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)"
+        r"|the\s+parent\s+of)\s+the\s+tree"
+        r"|\b(?:an?|the)\s+(?:ancestor|predecessor)\s+(?:of|to)\s+the\s+tree",
+        re.I,
+    )
     #: A parenthetical, dash-delimited or comma-delimited INCISE — an ASIDE, i.e. a
     #: different proposition from the one the phrase is predicated of. BLANKED before the
     #: REFERENT is read, so naming the true tree inside an aside cannot become the referent
@@ -5463,7 +5484,27 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                 # another guard: see the issue referenced in the residual note below.
                 # The class therefore stays OPEN and DOCUMENTED (a characterisation test
                 # pins the current behaviour so a future fix cannot move it silently).
-                return _TRUE_TREE.startswith(_ref) or _ref.startswith(_TRUE_TREE)
+                return (
+                    _TRUE_TREE.startswith(_ref)
+                    or _ref.startswith(_TRUE_TREE)
+                    # ⛔ AN ANCESTRY RELATION NAMING THE TRUE TREE IS A DIFFERENT, TRUE
+                    # PROPOSITION (#11191 review r11, P1 — MEASURED false RED and a
+                    # REGRESSION against `origin/main`). Without this arm the referent
+                    # rule refuses two truthful sentences `main` accepts:
+                    #   "`ff6379eb2` is an ancestor of the tree before #9548, `047c91f7a`."
+                    #   "`ff6379eb2`, an ancestor of the tree before #9548 (`047c91f7a`),
+                    #    reads 5 lines."
+                    # Both halves are required — the kinship relation AND the true tree
+                    # in THIS clause — so the relation cannot be used as an alibi for a
+                    # bare equivalence: "`ff6379eb2` is an ancestor of the tree before
+                    # #9548" with no referent stated is still refused, and so is the same
+                    # clause that re-asserts the false sha as the tree.
+                    or (
+                        _ANCESTRY_OF_TREE.search(clause) is not None
+                        and _TRUE_TREE in clause.lower()
+                        and _FALSE_TREE not in clause.lower().replace(_ref, "", 1)
+                    )
+                )
             # ⛔ …AND THE REFERENT MAY FOLLOW THE PHRASE, but ONLY as an APPOSITIVE
             # immediately after it (#11191 review r3, P1 — measured). An unanchored
             # "any true-sha later in the clause" window re-admitted the equivalence it
@@ -6603,6 +6644,67 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         "cutting at the conjunction detached the phrase from the tree it attributes to — "
         "the boundary is for DENIALS, and the referent rule must stay sentence-wide "
         "(#11191 review, A3: a false RED on a correction is how this pin gets deleted)"
+    )
+    # ⛔ CONTROLS FOR THE r11 ANCESTRY FIX (#11191 review r11, P1 — each MEASURED REFUSED
+    # at `c281ea64a`, the head the r10/r11 rounds left, and each ACCEPTED by `origin/main`,
+    # so the arm they pin closes a REGRESSION rather than a hardening nit). The kinship
+    # relation is a TRUE claim and the defect is the COPULA; `git merge-base
+    # --is-ancestor ff6379eb2 047c91f7a` exits 0, `git rev-list --count
+    # ff6379eb2..047c91f7a` is 12.
+    assert not _refuses_before_9548(
+        "`ff6379eb2` is an ancestor of the tree before #9548, `047c91f7a`."
+    ), (
+        "a TRUE ancestry relation is refused — the referent rule reads the bare sha "
+        "before the phrase and stops there, so the one sentence that CORRECTS the "
+        "misreading by stating what `ff6379eb2` actually is to the true tree reads as the "
+        "defect (#11191 review r11, P1)"
+    )
+    assert not _refuses_before_9548(
+        "`ff6379eb2`, an ancestor of the tree before #9548 (`047c91f7a`), reads 5 lines."
+    ), (
+        "the APPOSITIVE spelling of the same true ancestry is refused — it is the natural "
+        "way to state a lineage without fronting a copula, and `origin/main` accepts it "
+        "(#11191 review r11, P1)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` is an ancestor of the tree before #9548."
+    ), (
+        "the ancestry exemption becomes an ALIBI: with the true tree absent from the clause "
+        "the kinship relation must not buy a pass — every truthful sentence above names the "
+        "tree it is an ancestor OF, and that referent is what makes the claim checkable "
+        "(#11191 review r11, P1)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` is an ancestor of the tree before #9548, `047c91f7a`, and the tree "
+        "immediately before #9548 is `ff6379eb2`."
+    ), (
+        "the ancestry relation exempts a clause that ALSO re-asserts the equivalence — the "
+        "exemption is per OCCURRENCE like every other arm, and a true sha named beside the "
+        "false claim does not make the claim true (#11191 review r11, P1)"
+    )
+    # ⛔ THE ANAPHORA RESIDUAL, PINNED AS A CHARACTERISATION — NOT AS CORRECT BEHAVIOUR
+    # (#11191 review r11, P3 — the PR body states this residual but the CODE did not, and
+    # an unpinned residual cannot red when a future fix moves it). A sentence that names
+    # BOTH trees with the false one predicated of the phrase is refused even when anaphora
+    # makes it truthful. No word-level rule separates it from the defect, because the
+    # defect IS `ff6379eb2` predicated of that phrase; the remedy is a reword, which is
+    # what the epic's own §A8 row already does ("that is `047c91f7a`, the arming commit's
+    # parent"). `origin/main` accepts it — that is the blunt-substring exemption the rest
+    # of this predicate exists to remove, not a behaviour worth restoring.
+    _anaphora_known_refused = (
+        "`047c91f7a` (10 lines) versus `ff6379eb2` (5 lines): the former is the tree "
+        "before #9548.",
+    )
+    _anaphora_moved = [
+        s for s in _anaphora_known_refused if not _refuses_before_9548(s)
+    ]
+    assert not _anaphora_moved, (
+        "the anaphora residual is a KNOWN, DOCUMENTED RESIDUAL (see the note above), not a "
+        "closed class: this assertion pins today's behaviour so a future fix — the one that "
+        "resolves the anaphor to the tree it names — must move it deliberately rather than "
+        "silently. If it now refuses... it already did; if it now PASSES, delete this pin "
+        "and the residual note together (#11191 review r11, P3):\n  "
+        + "\n  ".join(_anaphora_moved)
     )
     # ⛔ A1 — A FIGURE DATED TO THE PHRASE WITH NO TREE NAMED IS THE DEFECT (#11191
     # review, A1, P1 — measured: `main` refused 15 of 15 of this family, the previous
