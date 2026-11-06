@@ -10971,21 +10971,31 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # The arm therefore enforces the rule ("nothing references a retired key"),
     # which is the property that stays true regardless of which `path` a later
     # edit happens to carry.
-    def _legacy_uv_pip_refs(jobs: dict) -> list:
-        """Every step in `jobs` that still points at the retired `uv-pip-` key.
+    def _legacy_uv_pip_refs(workflow: dict) -> list:
+        """Every step in the workflow that still points at the retired key.
 
-        A thin specialization of the module-level `_steps_naming_key` (one
-        implementation), extracted from the assertion below so the CALL SITE can
-        be pinned: a probe that only exercises the accessor directly stays green
-        if THIS scan is later narrowed back to `_key_of`, which is the actual
-        regression (measured — see the synthetic-arm check).
+        Takes the WHOLE workflow, not a jobs dict, so the population is inside
+        the pinned unit: a scan that walks only `jobs["test"]` is a real
+        regression (the `pip-` writers live in sibling jobs) and the probes
+        below fail for exactly that. A thin specialization of the module-level
+        `_steps_naming_key` (one implementation), extracted from the assertion
+        below for the same reason the call site is pinned at all: a probe that
+        only exercises the accessor directly stays green if THIS scan is later
+        narrowed back to `_key_of` — measured on the revision before the pin,
+        where the reverted scan passed on BOTH the clean and the mutated
+        workflow, which is the silent regression the probe exists for.
         """
-        return _steps_naming_key(jobs, "uv-pip-")
+        return _steps_naming_key(workflow.get("jobs") or {}, "uv-pip-")
 
-    # ⛔ PIN THE CALL SITE, not just the accessor. Reverting the scan above from
-    # `_refs_of` to `_key_of` while leaving an accessor-only probe in place was
-    # measured GREEN both on the clean workflow and on the mutated one — i.e. the
-    # silent regression the probe was supposed to catch survived it.
+    # ⛔ PIN THE CALL SITE — all three halves of it, one assertion each. Each of
+    # these fails for exactly ONE plausible regression of this arm, and each
+    # mutation was measured on a copy of this file:
+    #   · the scan reads `key:` alone instead of both fields -> the
+    #     `restore-keys` probes stop seeing the marker;
+    #   · the refs primitive is narrowed to `restore-keys` alone -> the `key`
+    #     probe stops seeing it;
+    #   · the scan walks only `jobs["test"]`             -> the sibling-job
+    #     probe stops seeing it.
     _combined_path_step = {
         "name": "Restore uv dependency cache",
         "with": {"path": "~/.cache/uv\n~/.cache/pip",
@@ -10996,27 +11006,57 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "with": {"path": "~/.cache/uv",
                  "key": "uv-cache-Linux-abc",
                  "restore-keys": "uv-pip-Linux-"}}
+    _key_axis_step = {
+        "name": "Restore uv dependency cache",
+        "with": {"path": "~/.cache/uv\n~/.cache/pip",
+                 "key": "uv-pip-Linux-abc",
+                 "restore-keys": "uv-cache-Linux-"}}
     _clean_step = {
         "name": "Restore uv dependency cache",
         "with": {"path": "~/.cache/uv",
                  "key": "uv-cache-Linux-abc",
                  "restore-keys": "uv-cache-Linux-"}}
 
-    assert _legacy_uv_pip_refs({"test": {"steps": [_combined_path_step]}}), (
-        "the retirement scan cannot see a `restore-keys` reference while the "
-        "step keeps the combined `path:` list — that step still reaches the "
-        "retired 3.88 GB combined entry (same `path` list ⇒ same cache "
-        "version) and the pin would read green (#11063)")
-    assert _legacy_uv_pip_refs({"test": {"steps": [_narrowed_path_step]}}), (
-        "the retirement scan cannot see a `restore-keys` reference at all — "
-        "`restore-keys` is a key axis like `key`, and the rule this arm "
-        "enforces is that NOTHING references a retired key, whichever `path` "
-        "a later edit happens to carry")
-    assert not _legacy_uv_pip_refs({"test": {"steps": [_clean_step]}}), (
+    # Both `path:` shapes are probed and both must be flagged, because the rule
+    # this arm enforces is path-INDEPENDENT — but keep the fixtures' markers on
+    # `restore-keys` ALONE, or the probe stops demonstrating the axis it adds.
+    for _probe in (_combined_path_step, _narrowed_path_step):
+        assert "uv-pip-" not in _key_of(_probe), (
+            "this probe must be invisible on the `key` axis, or it does not "
+            "demonstrate the axis the refs primitive adds")
+        assert _legacy_uv_pip_refs({"jobs": {"test": {"steps": [_probe]}}}), (
+            "the retirement scan cannot see a `restore-keys` reference "
+            f"({_probe['with']['path']!r}): `restore-keys` is a key axis like "
+            "`key`, and the rule is that NOTHING references a retired key, "
+            "whichever `path` a later edit carries (#11063)")
+
+    # …and the OTHER axis, which the probes above cannot cover: with every
+    # marker on `restore-keys`, narrowing the refs primitive to `restore-keys`
+    # alone would leave all of them green while a `key: uv-pip-` step kept
+    # restoring the retired combined archive.
+    assert "uv-pip-" not in str(_key_axis_step["with"]["restore-keys"]), (
+        "this probe must carry its marker on the `key` axis alone, or it does "
+        "not demonstrate that the refs primitive reads `key` too")
+    assert _legacy_uv_pip_refs({"jobs": {"test": {"steps": [_key_axis_step]}}}), (
+        "the retirement scan cannot see a `key: uv-pip-` reference — the refs "
+        "primitive must read BOTH axes, and narrowing it to `restore-keys` "
+        "alone leaves the retired key usable and this pin green (#11063)")
+
+    # …and the POPULATION: the scan has to walk every job, not just `test`. The
+    # live workflow's retired-key writers sit in sibling jobs, and a check that
+    # only reads `test` would call that clean.
+    _sibling_legacy = {
+        "jobs": {"test": {"steps": [_clean_step]},
+                 "test-slow": {"steps": [_key_axis_step]}}}
+    assert _legacy_uv_pip_refs(_sibling_legacy), (
+        "the retirement scan does not walk every job — a legacy reference in a "
+        "sibling job would read green (#11063)")
+
+    assert not _legacy_uv_pip_refs({"jobs": {"test": {"steps": [_clean_step]}}}), (
         "the retirement scan flags a step that references nothing retired — a "
         "false red here would push the next editor to drop the axis again")
 
-    legacy = _legacy_uv_pip_refs(wf["jobs"])
+    legacy = _legacy_uv_pip_refs(wf)
     assert not legacy, (
         f"`uv-pip-` is still referenced {legacy} (on `key` or `restore-keys`). "
         "The key is retired: pip is read "
