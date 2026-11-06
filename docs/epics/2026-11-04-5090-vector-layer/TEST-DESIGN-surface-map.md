@@ -218,7 +218,7 @@ shrinking the checklist.
 
 ## 9. Findings recorded while building this map
 
-**F1 — the epic docs' line cites have drifted at this head, and three of the differences a first
+**F1 — the epic docs' line cites have drifted at this head, and two of the differences a first
 pass read as drift are NOT.** Spread across three artifacts: `04-plan.md` §5 cites
 `projection/__init__.py:18491`, `:18570`, `:18577` and `embeddings.py:1268`; `03-scope.md:66` (S4) cites
 `:18570`, `:18577`, `:18582`; `05-decompose.md:112` (C4) cites `:18570` and `:18577`. At `af864a42a` the
