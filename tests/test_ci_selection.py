@@ -12869,8 +12869,8 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     check on a diff that never touched this job.
 
     Nothing is lost by not saving here: the key is SHARED
-    (`pip-<os>-<hash uv.lock>`) and is still written on EVERY run by
-    `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`, so this
+    (`pip-<os>-<hash uv.lock>`), written on EVERY run by `test-d14-hosted-api`
+    (unconditional, PR + push) and by `test-slow` only under `slow_run`, so this
     job only ever READ it. The ~90 MB HF embedding cache in the same job is
     deliberately left alone (measured 1m38s to save, and it is the leg's
     provisioning path — an uncached load skip-reds the dense assertion #4387);
@@ -13043,7 +13043,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     3,616,385,308 B in a PR scope and 397,897,273 B in `refs/heads/main`, while
     `uv-pip-Linux-8755d72f…` is 662,393,744 B in `refs/heads/main` — so pip (the
     torch wheel set, #7612's own payload, installed by `install-cpu-torch` with
-    `pip`) is 93% of the uploaded payload on its own, and FOUR other jobs write
+    `pip`) is 93% of the uploaded payload on its own, and TWO other jobs write
     `pip-<os>-<hash uv.lock>`, so this job reads it and writes nothing. The uv
     half has no other writer (`refs/heads/main` puts it at 252 MiB, an order of
     magnitude rather than a bound — scope variance is large), so this job keeps
@@ -13365,10 +13365,10 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "Use `actions/cache/restore@` plus an explicit, BOUNDED "
         "`actions/cache/save@` — for a NEW key. The two keys this job already "
         "carries are pinned separately and a save is REJECTED for both: `pip-` "
-        "because four other jobs write it, and `uv-cache-` because it must keep "
+        "because two other jobs write it, and `uv-cache-` because it must keep "
         "exactly one bounded writer (the next two arms).")
 
-    # ── The pip half: READ ONLY, because FOUR other jobs write it ──────────────
+    # ── The pip half: READ ONLY, because TWO other jobs write it ──────────────
     pip_steps = [s for s in steps if "~/.cache/pip" in _path_of(s)]
     assert pip_steps, (
         "the `test` job no longer touches ~/.cache/pip at all — the torch wheel "
@@ -13389,7 +13389,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert _path_of(pip_restore).strip() == "~/.cache/pip", (
         f"the pip restore reads {_path_of(pip_restore).strip()!r}, not "
         "`~/.cache/pip`. `path` is part of the cache's VERSION, so the entry the "
-        "four writer jobs produce can never match it — a permanent MISS with the "
+        "two writer jobs produce can never match it — a permanent MISS with the "
         "step green, which is a cold 3.6 GB torch download on every shard "
         "(#7612 reverted, #11063 cycle 5 finding 2).")
     assert pip_restore.get("continue-on-error") is True, (
@@ -13401,14 +13401,14 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert pip_key_root == "pip-", (
         f"the pip cache key is {pip_key!r}; the SHARED key other jobs write is "
         "`pip-<os>-<hash uv.lock>` — any other spelling silently unships it from "
-        "the four writers that populate it")
+        "the two writers that populate it")
     pip_writers_here = [s.get("name") for s in steps
                         if _is_writer(s) and pip_key_root in _key_of(s)]
     assert not pip_writers_here, (
         f"the `test` job WRITES the shared pip cache again {pip_writers_here}. "
         "That archive measured 3,616,385,308 B in a PR scope — restoring it and "
         "re-saving it is what put a 3.88 GB upload inside a 90 m cap (#11063), "
-        "and it buys nothing: FOUR other jobs already write the key (#10327's "
+        "and it buys nothing: TWO other jobs already write the key (#10327's "
         "argument, applied to the bigger half).")
     pip_writer_rows = [(jid, s.get("name"), _key_of(s))
                        for jid, jd in wf["jobs"].items() if jid != "test"
@@ -13466,12 +13466,11 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"own run: {[(jid, _gate_of(jid)) for jid in pip_writers_elsewhere]} vs "
         f"this job's `{test_gate}`. A writer that needs `slow_run`/`carve_out_run` "
         "to be true does not populate the key on a run that still executes `test`, "
-        "so this job reads an entry nothing wrote. The unconditional writers are "
-        "`test-d14-hosted-api` and `test-record-postgres` (`always() && "
-        "needs.changes.result == 'success'`), and `test-concurrency-falkor` shares "
-        "this job's own gate; `test-slow` (`slow_run`) is the only diff-gated pip "
-        "writer, and `test-carve-out` is NOT a writer — its pip step is "
-        "restore-only by its own pin.")
+        "so this job reads an entry nothing wrote. The unconditional writer is "
+        "`test-d14-hosted-api` (`always() && needs.changes.result == 'success'`); "
+        "`test-slow` (`slow_run`) is the only diff-gated pip writer, and "
+        "`test-carve-out`, `test-record-postgres` and `test-concurrency-falkor` are NOT "
+        "writers — their pip steps are restore-only (`_PIP_CACHE_READER_JOBS`).")
 
 
     # ── The uv half: ONE reader, ONE writer, bounded in size AND time ─────────
@@ -13539,7 +13538,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     assert save_paths == ["~/.cache/uv"], (
         f"the uv save archives {save_paths}; it must archive `~/.cache/uv` ALONE. "
         "Adding `~/.cache/pip` re-creates the 3.88 GB payload (#11063) — that half "
-        "measured 3,616,385,308 B and is written by THREE other jobs.")
+        "measured 3,616,385,308 B and is written by TWO other jobs.")
     gate = str(uv_save.get("if") or "").strip()
     # ⛔ DERIVE the `install-extras` id, never restate it (#11065 cycle 6,
     # finding 3). The literal let a rename or a deletion read GREEN — and a
