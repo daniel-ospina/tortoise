@@ -424,7 +424,10 @@ class RecordReconcileResult:
     #: (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` — authority the record keeps
     #: and the cache must not materialise, ``#10394``), PLUS one population no
     #: declaration names — a property a SECOND WRITER put on a placed node the
-    #: record does not carry (``#11221``; it reads `clean`, and its repair is
+    #: record does not carry, or on a cache-only node the record does not own at
+    #: all (``#11221``; the bucket is partitioned OUT of ``field_mismatches``, so
+    #: the placed-node case reads `clean` while a cache-only node is an
+    #: ``extra_in_cache`` divergence and reads DIVERGENT; either way the repair is
     #: *find the writer*) — as
     #: ``(name, node count)``. Kept OUT of ``field_mismatches``
     #: (counting them
