@@ -814,6 +814,26 @@ def _content_column(rest: str) -> int | None:
     return m_indent + marker_w + (gap if gap <= 4 else 1)
 
 
+def _marker_gap(rest: str) -> int:
+    """The spaces between this line's list marker and its content (0 when it opens no item).
+
+    ⛔ NOT AN INDENTATION, A CONTENT OFFSET (round 32 review, P2). §5.2 collapses a gap wider than
+    four spaces to ONE column, so `-     x` has its content at the item's content column + 4 — and §4.4
+    says that IS an indented code block starting on the marker line itself. Measured, with
+    `MarkdownIt("commonmark")` as the oracle: `-     [ ] x` renders as `<pre><code>[ ] x</code>`.
+
+    This is the one place the marker-line case has to be read from, because the blanking test below
+    looks at `rest_indent` — the indentation BEFORE the marker, which is 0 for such a line. Reading
+    only the indent left the widest family of "quoted" lines as PROSE in both arms: a quoted
+    `Closes #100`, `IN FLIGHT:` or checklist on a 5+-space marker line was credited as a claim, a
+    live marker and a real criterion. Parity with the parent head rather than a regression, and no
+    instance in this repo's own docs — but a false PASS is a false PASS, and the condition is already
+    computed here.
+    """
+    marker = _LIST_MARKER_RE.match(rest)
+    return len(marker.group("gap")) if marker else 0
+
+
 def _fence_candidate(prefix: str, rest: str,
                      list_items: list[_ListItem]) -> _Fence | None:
     """The fence `(prefix, rest)` opens, or None if the line is prose.
@@ -954,6 +974,8 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     # The list item the CURRENT line sits inside (None at top level). Set per line, before the
     # line can push its own item — see the `indented_code` branch at the end of the loop.
     container: _ListItem | None = None
+    # The spaces after this line's own list marker (0 = not a marker line, or a blank one).
+    own_gap = 0
     # Lines the CURRENTLY OPEN block has hidden from the scan. Reset when a block
     # opens or closes, so the value at the end is the unterminated block's tail.
     hidden_lines = 0
@@ -1055,6 +1077,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             container = list_items[-1] if list_items else None
             rest_col = _content_column(rest)
             pushed = rest_col is not None
+            own_gap = _marker_gap(rest)
             if pushed:
                 list_items.append(
                     _ListItem(_quote_depth(prefix), rest_col,
@@ -1097,20 +1120,48 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # CODE LINE from being measured against the item it opens itself, but the item stayed on the
         # stack, so the NEXT line of the same block was measured against a PHANTOM content column and
         # came out as prose:
-        #     `- item` + `      - [ ] example` + `        - [ ] nested example`
-        #   renderer: ONE `<pre><code>` holding BOTH boxes
+        #     `- item` + blank + `      - [ ] example` + `        - [ ] nested example`
+        #   renderer: ONE `<pre><code>` holding BOTH boxes (the blank line is load-bearing: WITHOUT it
+        #             the boxes are a paragraph continuation, §4.4 — the round-31 comment printed the
+        #             body without it and claimed a code block it does not get)
         #   before:   the first line was blanked, the second was kept -> arm 2 saw an issue with WIP and
         #             no criteria as CLEAN (rc 0), and `in_flight_markers` read a QUOTED marker as live
         #   after:    both blanked
-        # The population is not exotic: 224 of 720 marker-led two-line shapes (markers `-`/`1.`/`10.`)
-        # counted a box the renderer puts in code. The FENCE branch above deliberately KEEPS its push —
-        # a marker line that opens a fence really does open its item.
-        blank = rest_indent > _MAX_FENCE_INDENT and (
+        # The sweep lives in the test, not here, because a prose number is exactly what rotted twice
+        # already: `test_a_two_line_indented_example_is_hidden_by_BOTH_of_its_lines` enumerates the
+        # family (markers `-`/`*`/`1.`/`10.` x gaps 1,2,4,5,8 x first-line indents 4,5,6,7,8,10 x
+        # second line +2/+3/+4) and asserts, over all of it, that no body the PARSER puts in a
+        # `code_block` is counted and that no prose body is over-hidden — so the property is checked
+        # on every run instead of being quoted. (Two earlier revisions of this comment carried other
+        # lanes' figures — "224 of 720", then "177 of 177" — that do not reproduce from the
+        # enumeration they name; the numbers were never the evidence, the sweep is.)
+        # The FENCE branch above deliberately KEEPS its push — a marker line that opens a fence really
+        # does open its item.
+        # ⛔ AND THE MARKER LINE ITSELF CAN BE CODE, WHICH NO INDENT TEST CAN SEE (round 32 review,
+        # P2). `rest_indent` is the indentation BEFORE the marker, so it is 0 for `-     [ ] x` — but
+        # §5.2 collapses that 5-space gap to ONE column, so the content sits 4 columns past the item's
+        # content column and §4.4 makes it an indented CODE block, starting on the marker line:
+        #     `-     [ ] x`                 renderer `<pre><code>[ ] x</code>`
+        #     `-     IN FLIGHT: 3.2c`       renderer `<pre><code>…</code>`
+        #     `-     Closes #100`           renderer `<pre><code>…</code>`
+        # All three were read as PROSE — a quoted checklist cleared a criteria-less `## Satisfies`, a
+        # quoted marker read as live, a quoted close credited (in BOTH arms, so `strict` did not save
+        # it either). Arm-independent: this is a fact about the renderer, not a strictness choice.
+        # `gap <= 4` stays prose, which is the control the pin asserts.
+        own_code = own_gap > 4
+        blank = own_code or (rest_indent > _MAX_FENCE_INDENT and (
             strict or (indented_code
                        and (container is None
-                            or rest_indent > container.rest_col + _MAX_FENCE_INDENT)))
+                            or rest_indent > container.rest_col + _MAX_FENCE_INDENT))))
         if blank:
-            if pushed:
+            # ⛔ A LINE BLANKED FOR ITS INDENT IS CODE INSIDE THE CONTAINER THAT IS ALREADY OPEN, so it
+            # opens no item — undo the push (round 31). A MARKER LINE whose own CONTENT is code is a
+            # different case: the renderer still opens the `<li>` (content column 2, the code inside
+            # it), so its push STAYS and the next line is measured against a real item rather than
+            # against nothing — popping it there made a genuine nested list look like a top-level
+            # indented block and blanked a real criterion (measured: `-     item` + `     - [ ] x`
+            # renders as a nested `<ul>`, and the pop made arm 2 say "no criteria").
+            if pushed and not own_code:
                 list_items.pop()
             out.append("")
             continue
