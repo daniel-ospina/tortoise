@@ -179,7 +179,7 @@ read the cap against the SUM of the job's caps, not against its median.
 paragraph above opens.** Run 42154769896 (PR #11032, head `8f32c5255`) reddened **two** required
 checks with no failing test in either artifact, and both terms are the ones this section names:
 
-* `test-d14-hosted-api` (job 127701854811) — the in-step `15m` was eaten by **COLLECTION**: 11 m 10 s
+- `test-d14-hosted-api` (job 127701854811) — the in-step `15m` was eaten by **COLLECTION**: 11 m 10 s
   (04:23:22 → 04:34:32) before a single test ran, against 4 m 59 s for the same 46,906-item
   collection on run 42135045069. The run then finished CLEAN — verbatim
   `256 passed, 39 skipped, 46812 deselected, 14 warnings in 855.20s (0:14:15)` — and the watchdog SIGINT-killed the process at 900 s while it unwound —
@@ -187,7 +187,7 @@ checks with no failing test in either artifact, and both terms are the ones this
   #10212 predicted exactly this and is what sizes the in-step cap: 14 m 30 s at the worst observed
   collect cost → **15 → 20 m** (1.38×), and the save arm then sizes the job cap:
   20 + ~1 + ~9 = 30 m × 1.5 = 45 → **50**.
-* `test-track-b` (job 127701854910) — `4 passed, 9 deselected in 44.96s`, then
+- `test-track-b` (job 127701854910) — `4 passed, 9 deselected in 44.96s`, then
   `setup-python cache: pip` tarred the SAME shared archive in its POST step and GitHub cancelled the
   job at 10 m 15 s against a 10 m cap. **This row was missed by the audit above for a structural
   reason worth keeping: its save surface is created by a third-party action**, not by an
