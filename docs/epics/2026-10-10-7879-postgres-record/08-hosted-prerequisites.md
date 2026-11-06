@@ -240,7 +240,10 @@ Sizes are single-lane estimates: **S** ≤ 1 day · **M** ≤ 1 week · **L** > 
 > table states the same bound. ⚠️ **Do not go hunting for a brand-new ROLE** — a bypassing role
 > already exists; what is missing is a DIRECT connection string for one. The runbook's Secrets-Matrix section
 > carries the same correction as a table (row-by-row, gate-by-gate). The accurate state is **`AUTHORISED-BUT-BLOCKED-CRED`, not postponed**; a lane
-> reading this item must report the missing backup credential on `#9548`, never re-derive "postponed".
+> reading this item must report the missing backup credential on `#11193`, never re-derive "postponed".
+> ⛔ **That pointer used to name `#9548`, which was CLOSED `COMPLETED` on 2026-11-06T01:57:25Z** — the
+> arming it names did land, so the residual blocker had no open home and a lane following this sentence
+> reported into a closed issue. `#11193` is the provisioning act's issue (`TORTOISE_RECORD_BACKUP_DSN`).
 >
 > ---
 >
