@@ -4544,7 +4544,7 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         r"\b(?:nothing|no\s+one|nobody)\s+(?:suggests?|says?|shows?|indicates?)\b"
         r"|\bit\s+is\s+(?:not\s+the\s+case|not\s+true|false|not\s+correct|untrue)\s+that\b"
         r"|\bit\s+would\s+be\s+(?:wrong|false)\s+to\s+say\b"
-        r"|\bno\s+(?:evidence|indication|basis|data)\b"
+        r"|\bno\s+(?:evidence|indication|basis|data|signs?|hints?|traces?|proof)\b"
         r"|\bno\s+reason\s+to\s+(?:think|believe|say|suggest|conclude)\b",
         re.I,
     )
@@ -4671,7 +4671,7 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # about the month it shipped in" PASSED, because `wrong` was enough. A refutation
         # of the EQUIVALENCE ends its claim there; one that goes on to qualify WHAT is
         # wrong is refuting something else.
-        + r"(?:is|was)\s+(?:false|wrong|mistaken|incorrect)\b"
+        + r"(?:is|was)\s+(?:(?:false|wrong|mistaken|incorrect)\b|not\s+true\b|untrue\b)"
         # ⛔ …AND THE SAME QUALIFIER SET AS THE NEXT-CLAUSE ARM (#11191 review r4, P3 —
         # measured): "wrong WITH RESPECT TO the count" / "wrong REGARDING the count" is
         # a refutation of the FIGURE, and this arm is reached FIRST for a `;`-joined
@@ -4790,7 +4790,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         # it — so the quantifier must take a suggestive verb, never `doubt`.
         r"(?:\b(?:nothing|no\s+one|nobody|nowhere)\s+"
         r"(?:suggests?|says?|shows?|indicates?|implies|establishes|has\s+shown)\b"
-        r"|\bno\s+(?:evidence|indication|basis|data)\b"
+        r"|\bno\s+(?:evidence|indication|basis|data|signs?|hints?|traces?|proof)\b"
         r"|\bno\s+reason\s+to\s+(?:think|believe|say|suggest|conclude)\b"
         r"|\b(?:cannot|can't)\s+be\s+ruled\s+out\b)",
         re.I,
@@ -4852,7 +4852,8 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
     #: subject lives in; the cap stays only as a runaway guard (400) because the
     #: fronted-sha anchor is what bounds this arm.
     _CLEFT_PREDICATION = re.compile(
-        r"\b([0-9a-f]{7,40})\b\s*,?\s*(?:not|rather\s+than|instead\s+of)\b"
+        r"\b([0-9a-f]{7,40})\b\s*,?\s*(?:(?:and|but)\s+)?"
+        r"(?:not|rather\s+than|instead\s+of)\b"
         r"(?:(?!,?\s*\b(?:and|but|while|whereas|yet)\b)[^.;\u2014\u2013]){0,400}?"
         + _PHRASE_RE,
         re.I,
@@ -4916,6 +4917,28 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         # ("is, in practice, the arming commit itself"), in ANY position relative to the
         # adverbs. It must close on a comma, so it can never swallow the object.
         r"|,[^,.;\u2014\u2013]{1,40},\s*)*"
+    )
+    #: ⛔ THE MIRROR OF `_PREDICATED_OBJECT`: a PROSE TREE SUBJECT predicated OF the
+    #: phrase — "The arming commit itself IS the tree immediately before #9548"
+    #: (#11191 review, P1 — MEASURED, and a REGRESSION against `origin/main`, which
+    #: refuses all three). `_PREDICATED_OBJECT` reads the object AFTER the phrase, so
+    #: the pre-posed word order fell through every arm to step 5, which counts figures
+    #: only and saw nothing to refuse. The doc's own cell names the true pre-#9548 tree
+    #: as *"`047c91f7a`, the arming commit's parent"*, so `… itself` / `…'s son` / a bare
+    #: `… commit` is exactly the one-word decay this pin exists to catch.
+    #: The PARENT relation is the exemption, in either word order, so the truthful
+    #: sentences stay green: "the arming commit's parent is the tree immediately before
+    #: #9548" and "the parent commit of `785bb2b59` is …" (the latter does not match this
+    #: arm's `the <tree-noun>` anchor at all).
+    _PREPOSED_PREDICATED = re.compile(
+        r"(?:^|[,;:]|\band\b|\bbut\b)\s*(?:the|a|an)\s+"
+        r"(?P<subj>(?:(?:arming|merge|revert|fix|feature|squash|base)\s+)?"
+        r"(?:commit|merge|tree|branch|tip|revision))\b"
+        r"(?P<rel>\s+itself|[\u2019']s\s+(?:son|child|ancestor|offspring|parent))?"
+        r"\s*,?[^,.;]{0,30}?,?\s+(?:is|was|remains|stays|becomes)\s+"
+        r"(?:(?:still|now|definitely|actually|in\s+practice)\s+)?"
+        r"(?:the\s+)?(?:last\s+|only\s+|exact\s+)?(?:tree\s+)?(?:immediately\s+)?$",
+        re.I,
     )
     _PREDICATED_OBJECT = re.compile(
         r"\s*(?:is|was|are|were|means|denotes|refers\s+to|stays?|stayed|remains?|"
@@ -5710,6 +5733,19 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                 return not (
                     _states_a_figure(_between) or _asserts_false_tree(_tail)
                 )
+            # 4b. A PROSE SUBJECT PREDICATED OF THE PHRASE — the pre-posed mirror of
+            #     `_PREDICATED_OBJECT` (#11191 review, P1 — MEASURED). Keyed on the
+            #     subject of the phrase's OWN clause (the A2 doctrine every other arm
+            #     obeys), with the PARENT relation as the only exemption.
+            _hard_pre = max(
+                norm.rfind(";", 0, phrase.start()),
+                norm.rfind(".", 0, phrase.start()),
+                norm.rfind("\u2014", 0, phrase.start()),
+                norm.rfind("\u2013", 0, phrase.start()),
+            )
+            _preposed = _PREPOSED_PREDICATED.search(norm[_hard_pre + 1 : phrase.start()])
+            if _preposed and "parent" not in (_preposed.group("rel") or "").lower():
+                return False
             # 5. NO TREE IS NAMED. A figure dated to the phrase with no referent is the
             #    r4 defect verbatim (#11191 review, A1); a sentence that attributes
             #    NOTHING to the phrase — no figure and no tree anywhere in it — is not
@@ -6469,6 +6505,40 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         "an `instead of` cleft is read as a denial of the predication — same missing "
         "sha-object guard in `_NEG` (#11191 review r7, P1)"
     )
+    # ── #11191 review: the classes the r12 head still measured ACCEPTED, pinned ──
+    # Every assert below is RED on the head this round reviewed (`5a97fcf`): 7 fail-opens
+    # accepted and 2 false REDs. Reverting any one of the four arms this round adds turns
+    # one of them red again, which is what makes each arm load-bearing rather than
+    # decorative — the "declared rule with no control" finding previous rounds raised.
+    for _claim in (
+        "`ff6379eb2`, and not `047c91f7a`, is the tree before #9548.",
+        "`ff6379eb2`, but not `047c91f7a`, is the tree before #9548.",
+        "The arming commit itself is the tree immediately before #9548.",
+        "The arming commit itself was the tree immediately before #9548.",
+        "The arming commit's son is the tree before #9548.",
+        "There is no sign that `ff6379eb2` is not the tree immediately before #9548.",
+        "There is no hint that `ff6379eb2` is not the tree immediately before #9548.",
+    ):
+        assert _refuses_before_9548(_claim), (
+            f"ACCEPTED: {_claim!r}\n"
+            "the claim dates the false sha to the phrase and no arm refused it — a CLEFT "
+            "whose conjunction (`and`/`but`) defeats the fronted-sha separator, a PROSE "
+            "subject in the PRE-POSED word order (`_PREPOSED_PREDICATED`), or a "
+            "doubt-frame synonym one word past the closed set (#11191 review, P1 — "
+            "measured; `origin/main` refuses the prose rows, so they are a REGRESSION)"
+        )
+    for _truth in (
+        "`047c91f7a`, and not `ff6379eb2`, is the tree before #9548.",
+        "The arming commit's parent is the tree immediately before #9548.",
+        "The claim that `ff6379eb2` is the tree before #9548 is not true; the true tree is `047c91f7a`.",
+        "The claim that `ff6379eb2` is the tree before #9548 is untrue; it is `047c91f7a`.",
+    ):
+        assert not _refuses_before_9548(_truth), (
+            f"REFUSED: {_truth!r}\n"
+            "a TRUE sentence reds — the cleft must read the FRONTED sha, the pre-posed "
+            "arm must exempt the PARENT relation, and `is not true` / `is untrue` ARE "
+            "refutations (#11191 review, P1 — measured)"
+        )
     assert _refuses_before_9548(
         "The tree immediately before #9548 is the arming commit itself."
     ), (
