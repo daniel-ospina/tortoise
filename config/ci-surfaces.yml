@@ -2813,6 +2813,20 @@ surfaces:
   - test_sdk_retirement.py
   - test_4282_memory_graph_surface.py
   - test_record_schema_placement.py
+  # #11075 — the DECLARED-TYPE contract pin: every column the record's write
+  # path binds a Python value to is compared against the type its MIGRATION
+  # declares, and the derivation is CLOSED over the migration set, so a column
+  # added to any `*_record_*.sql` with no expectation reds. `core` (not
+  # `carve_out:` — see the #11075 comment on the issue: a carve-out-only entry
+  # is UNCLASSIFIED, and `manifest-integrity` reds on it, while `select()` does
+  # `files -= carve`, which REMOVES the file from the docker legs). DB-free by
+  # construction — the types come from `supabase/migrations/`, the values from
+  # `replay_plan` over the registry's producer-shaped corpus — so it also rides
+  # `TORTOISE_TEST_CARVE_OUT=1` with no skips. Registered rather than left to
+  # fall through because the subject IS `supabase/migrations/`, which no
+  # SOURCE_PATTERN rule names: a migration-only diff is exactly the change that
+  # must run this pin.
+  - test_11075_record_declared_type_contract.py
   # #8882 (Phase 2 mechanics): the OFFLINE re-typing of a logical dump —
   # `tortoise/retype.py` matches no SOURCE_PATTERN, so a module-only change
   # falls through to `core` and this guard runs with it. DB-free by
@@ -10722,6 +10736,7 @@ durations:
   test_record_projection.py: 3.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (2.9s) is a LOWER bound; kept 3.2
   test_record_reconcile_trigger.py: 2.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_record_schema_placement.py: 0.2
+  test_11075_record_declared_type_contract.py: 2.0  # PR-added file: the header's flat DEFAULT_FAST_WEIGHT, NOT a local reading (this map forbids a local reading as a shard input, #2818/#3419)
   test_record_writer_seam.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.4
   test_references_boundary_5213.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
   test_residency_marker.py: 1.3  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.5s) is a LOWER bound; kept 1.3

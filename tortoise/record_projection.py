@@ -175,6 +175,7 @@ __all__ = [
     "RefusedJournalOperation",
     "ReplayReport",
     "UnknownJournalRecordType",
+    "column_types",
     "jsonb_columns",
     "mutations_for",
     "refused_props_names",
@@ -1455,9 +1456,12 @@ assert set(RECORD_MUTATIONS) == set(JOURNAL_EVENT_TYPES), (
 # the journal carries it" — the projection is where that becomes executable.)
 # ════════════════════════════════════════════════════════════════════════════
 
-_COLUMN_RE = re.compile(r'^\s*("[a-z_][a-z0-9_]*"|[a-z_][a-z0-9_]*)\s+'
-                        r'(?:text|jsonb|integer|boolean|bigint|double precision|'
-                        r'timestamptz)\b', re.M)
+#: `table_columns()`'s column matcher — an ALIAS of `_COLUMN_TYPE_RE` below, not
+#: a second list (#11075 review P2). It used to carry its own seven-term type
+#: alternation, so widening the vocabulary for the declared-type pin would have
+#: left the PLACEMENT reader unable to see a `numeric`/`uuid`/`date` column: the
+#: column would be typed and closure-enforced by the pin while `_split_properties`
+#: still pushed its value into the `props` tail. One list, two readers.
 _DERIVED_CHECK_RE = re.compile(
     r"chk_[a-z_]+_props_no_derived\s+CHECK\s*\(\s*NOT\s*\(\s*props\s*\?\|"
     r"\s*ARRAY\[(.*?)\]\s*::text\[\]\s*\)\s*\)",
@@ -1562,14 +1566,67 @@ def _parse_added_columns(sql: str) -> dict[str, frozenset[str]]:
     return {table: frozenset(cols) for table, cols in added.items()}
 
 
+#: THE declared-type vocabulary. One place, read by all three statement-shape
+#: readers below (#11075).
+#:
+#: ⛔ A TYPE NOT IN THIS LIST IS INVISIBLE TO EVERY READER. `column_types()`,
+#: `jsonb_columns()` and (for the typed shapes) the narrowing reader all match
+#: through this alternation, so a column of an unlisted type is silently SKIPPED
+#: — it is neither typed nor `jsonb`, which means a bound parameter's encoding and
+#: the declared-type pin both stop seeing it. Before #11075 the list was seven
+#: terms (`text|jsonb|integer|boolean|bigint|double precision|timestamptz`), and
+#: the record's own migrations happened to use only those seven; a `numeric`,
+#: `uuid`, `date`, `smallint`, `real`, `json`, `varchar` or array column would
+#: have joined the schema outside every pin with nothing red. Widen it HERE,
+#: never at a call site, and never by adding a second list.
+#:
+#: Ordering is load-bearing: longer spellings precede their prefixes
+#: (`timestamp with time zone` before `timestamp`, `jsonb` before `json`), and a
+#: trailing `\b` keeps `json` from matching the `jsonb` that follows it.
+_DECLARED_TYPE_ALTERNATION = (
+    r"timestamp\s+with\s+time\s+zone"
+    r"|timestamp\s+without\s+time\s+zone"
+    r"|double\s+precision"
+    r"|character\s+varying"
+    r"|timestamptz|timestamp"
+    r"|bigserial|smallserial|serial|bigint|smallint|integer"
+    r"|numeric|decimal|real"
+    r"|boolean|jsonb|json|text|varchar|uuid|bytea|date"
+)
+
 #: One column definition of a `CREATE TABLE`, with its TYPE. The name-only
 #: reader above exists to answer "does the table have this column"; this one
 #: answers "what SHAPE does the column take", which is the question a bound
-#: parameter's encoding depends on (#9548).
+#: parameter's encoding depends on (#9548) and the whole of the declared-type
+#: contract pin (#11075). The `[]` suffix is part of the TYPE, not decoration:
+#: a PostgreSQL array column accepts a list and refuses a bare scalar, so a
+#: reader that dropped it would certify a list bound to `text` (#11075).
 _COLUMN_TYPE_RE = re.compile(
     r'^\s*("?([a-z_][a-z0-9_]*)"?)\s+'
-    r'(text|jsonb|integer|boolean|bigint|double precision|timestamptz)\b',
+    r'((?:' + _DECLARED_TYPE_ALTERNATION + r')\b(?:\[\])?)',
     re.M | re.I)
+
+_COLUMN_RE = _COLUMN_TYPE_RE
+
+#: A `--` line comment or a `/* … */` block comment, stripped before a migration
+#: is PARSED.
+#:
+#: ⛔ WHY THIS EXISTS AND WHY IT IS NOT COSMETIC. The narrowing migrations carry
+#: their own DOWN direction in a trailing SQL comment
+#: (`20261102000002_record_point_search_keys_text.sql`: "`ALTER TABLE public.point
+#: ALTER COLUMN search_keys TYPE jsonb`"), because a migration is never edited and
+#: the reversal has to be recorded somewhere. A reader that parses the raw file
+#: therefore sees the UP narrowing and the DOWN reversal **and keeps whichever
+#: comes last** — the DOWN — so it reports the superseded `jsonb` for a column
+#: that is `text` in the live database. It happens not to bite today only because
+#: each commented line is prefixed with `--`, which breaks the `\s+` joins the
+#: statement regexes need; that is an accident of the comment's formatting, not a
+#: property of the reader (#11075). Stripping comments first makes the property
+#: real. Quote-aware: `--` inside a string literal is not a comment, and a
+#: `$$ … $$` body is kept VERBATIM — it is where both narrowing migrations put
+#: the `ALTER COLUMN … TYPE` this reader needs, so editing inside it would be the
+#: thing that hid them.
+
 #: A forward migration that ADDS a COLUMN with a TYPE — the type is what
 #: `_ADDED_COLUMN_RE` above does not keep, and `table_columns()` unions the same
 #: statements (append-only history adds a column that way, #2782). ⛔ The TYPE
@@ -1579,8 +1636,8 @@ _COLUMN_TYPE_RE = re.compile(
 #: matches NONE of this repo's own forward migrations (measured).
 _ADDED_COLUMN_TYPED_RE = re.compile(
     r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)\"?\s+"
-    r"(text|jsonb|integer|boolean|bigint|double precision|timestamptz)\b",
-    re.I)
+    r"(" + _DECLARED_TYPE_ALTERNATION + r")\b(?:\[\])?",
+    re.I | re.S)
 
 #: A forward migration that NARROWS or WIDENS an existing column's type:
 #: `ALTER TABLE public.<t> ALTER COLUMN <c> TYPE <type> [NOT NULL] [USING …]`.
@@ -1596,7 +1653,7 @@ _ADDED_COLUMN_TYPED_RE = re.compile(
 _ALTER_COLUMN_TYPE_RE = re.compile(
     r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.([a-z_]+)\s+"
     r"ALTER\s+COLUMN\s+\"?([a-z_][a-z0-9_]*)\"?\s+TYPE\s+"
-    r"(text|jsonb|integer|boolean|bigint|double precision|timestamptz)\b",
+    r"(" + _DECLARED_TYPE_ALTERNATION + r")\b(?:\[\])?",
     re.S | re.I)
 
 
@@ -1629,26 +1686,140 @@ def _jsonb_cache_clear() -> None:
     _JSONB_CACHE.update({"at": float("-inf"), "names": frozenset()})
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """The migration text with `--` and `/* … */` comments removed.
+
+    Deliberately a scanner rather than one regex: a `--` or `/*` INSIDE a string
+    literal is data, not a comment, and a migration that stores a comment-holding
+    string (a `COMMENT ON COLUMN` right below one of these files does) would be
+    truncated by the regex form. The newline of a `--` comment is KEPT, so a
+    column definition on the following line stays `^`-anchored for
+    :data:`_COLUMN_TYPE_RE`.
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    quote = False
+    dollar = ""  # an open `$$` / `$tag$` delimiter, "" when none
+    while i < n:
+        char = sql[i]
+        if dollar:
+            if sql.startswith(dollar, i):
+                out.append(dollar)
+                i += len(dollar)
+                dollar = ""
+                continue
+            out.append(char)
+            i += 1
+            continue
+        if quote:
+            out.append(char)
+            if char == "\\" and i + 1 < n:
+                # A backslash escape (`E'it\'s'`) — WITHOUT this the scanner
+                # desynchronises for the rest of the file and every later `--`
+                # comment (the narrowing migrations' DOWN direction among them)
+                # is read as SQL (#11075 review P2).
+                out.append(sql[i + 1])
+                i += 2
+                continue
+            if char == "'":
+                if i + 1 < n and sql[i + 1] == "'":  # '' — an escaped quote
+                    out.append("'")
+                    i += 2
+                    continue
+                quote = False
+            i += 1
+            continue
+        if char == "$":
+            # `$tag$ … $tag$`: the shape every `DO $$ … $$` migration uses, and
+            # the body may legitimately contain `--` and `'`.
+            match = re.match(r"\$[A-Za-z_]*\$", sql[i:])
+            if match:
+                dollar = match.group(0)
+                out.append(dollar)
+                i += len(dollar)
+                continue
+        if sql.startswith("/*", i):
+            close = sql.find("*/", i + 2)
+            i = n if close == -1 else close + 2
+            continue
+        if sql.startswith("--", i):
+            while i < n and sql[i] != "\n":
+                i += 1
+            continue
+        if char == "'":
+            quote = True
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
+    """`{table: {column: declared_type}}` for ONE migrations directory.
+
+    THE one parse. Every reader of a column's DECLARED type answers through this
+    function — `column_types()` (the whole map, for the #11075 contract pin) and
+    `jsonb_columns()` (the `jsonb` names, for the #9548 encoding rule) are two
+    VIEWS of it, so the encoding and the pin can never disagree about what the
+    schema says.
+
+    Three statement shapes, in file order (append-only history: the LAST
+    declaration wins, which is the rule `key_properties()` applies):
+
+      1. `CREATE TABLE … ( <col> <type> … )` — the base;
+      2. `ALTER TABLE … ADD COLUMN [IF NOT EXISTS] <col> <type>` — a column a
+         landed table can only ever gain this way (#2782);
+      3. `ALTER TABLE … ALTER COLUMN <col> TYPE <type>` — a type DECISION
+         reversed (#9264). ⚠️ The load-bearing one: a reader that skips it
+         reports the superseded type, and the obvious "fix" for the resulting
+         false red — exempt the column, or revert the narrowing — re-creates the
+         outage the pin exists to prevent (#11075).
+
+    Comments are stripped first (:func:`_strip_sql_comments`), so a migration's
+    recorded DOWN direction cannot be read as its UP.
+    """
+    found: dict[str, dict[str, str]] = {}
+    for name in RECORD_MIGRATIONS:
+        path = migrations_dir / name
+        if not path.exists():
+            continue
+        sql = _strip_sql_comments(path.read_text(encoding="utf-8"))
+        for table, body in _TABLE_RE.findall(sql):
+            if table not in THE_RECORD_TABLES:
+                continue
+            here = found.setdefault(table, {})
+            for _quoted, column, type_name in _COLUMN_TYPE_RE.findall(body):
+                here[column] = type_name.lower()
+        for table, body in _ALTER_ADD_COLUMN_RE.findall(sql):
+            if table not in THE_RECORD_TABLES:
+                continue
+            here = found.setdefault(table, {})
+            for column, type_name in _ADDED_COLUMN_TYPED_RE.findall(body):
+                here[column] = type_name.lower()
+        # ⚠️ Matched against the WHOLE file, not an ALTER's `body`: the statement
+        # this shape needs is `ALTER TABLE public.<t> ALTER COLUMN …`, and the
+        # `[^;]*?` body `_ALTER_ADD_COLUMN_RE` yields has already consumed the
+        # `ALTER TABLE public.<t>` prefix the regex anchors on. Matching the body
+        # silently found NOTHING — so the narrowing read as the base `jsonb` and
+        # the pin would have reddened on a correct tree (#11075, measured).
+        for table, column, type_name in _ALTER_COLUMN_TYPE_RE.findall(sql):
+            if table not in THE_RECORD_TABLES:
+                continue
+            found.setdefault(table, {})[column] = type_name.lower()
+    return found
+
+
 def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
-    """`jsonb_columns()` for ONE already-resolved migrations directory."""
-    sql = _read_migrations(migrations_dir)
-    # `(table, column)` PAIRS, so a per-table narrowing cannot delete a column
-    # that is `jsonb` in ANOTHER record table; flattened to names at the end.
-    found: set[tuple[str, str]] = set()
-    for table, body in _TABLE_RE.findall(sql):
-        if table not in THE_RECORD_TABLES:
-            continue
-        for _quoted, column, type_name in _COLUMN_TYPE_RE.findall(body):
-            if type_name.lower() == "jsonb":
-                found.add((table, column))
-    for table, body in _ALTER_ADD_COLUMN_RE.findall(sql):
-        if table not in THE_RECORD_TABLES:
-            continue
-        for column, type_name in _ADDED_COLUMN_TYPED_RE.findall(body):
-            if type_name.lower() == "jsonb":
-                found.add((table, column))
-    if not any(table in THE_RECORD_TABLES
-               for table, _body in _TABLE_RE.findall(sql)):
+    """`jsonb_columns()` for ONE already-resolved migrations directory.
+
+    A VIEW of :func:`_declared_types_for_dir`, not a second parse (#11075): the
+    encoding rule and the declared-type contract pin then answer from ONE
+    reading of the migrations, so they cannot disagree about what the schema
+    says. Keyed by `(table, column)` while collecting, so a per-table narrowing
+    cannot delete a column that is `jsonb` in ANOTHER record table; flattened to
+    names at the end (the one caller is handed a column name and nothing else).
+    """
+    declared = _declared_types_for_dir(migrations_dir)
+    if not declared:
         # ⛔ FAIL CLOSED, like `table_columns()`. An EMPTY set is the worst
         # answer this function can give: it silently stops the #9548 encoding
         # and the row drops come back with no signal at all. A partial tree (a
@@ -1662,13 +1833,34 @@ def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
             "answer would silently stop serialising a scalar bound to a jsonb "
             "column — the row-drop class #9548 exists to end."
         )
-    for table, column, type_name in _ALTER_COLUMN_TYPE_RE.findall(sql):
-        if table not in THE_RECORD_TABLES:
-            continue
-        found.discard((table, column))
-        if type_name.lower() == "jsonb":
-            found.add((table, column))
-    return frozenset(column for _table, column in found)
+    return frozenset(
+        column
+        for table, columns in declared.items()
+        for column, type_name in columns.items()
+        if type_name == "jsonb"
+    )
+
+
+def column_types(migrations_dir: Path | None = None) -> dict[str, dict[str, str]]:
+    """`{table: {column: declared_type}}` for the record's tables (#11075).
+
+    The DECLARED TYPE half of the write path's contract: a column's declared
+    type has now refused its producer's value twice (#9264 `jsonb` ← integer,
+    #10593 `jsonb` ← the graph's flat string), both times dropping the row while
+    the journal stayed intact and `/health` read `ok: true`. This function is
+    what a pin compares the writer's BOUND VALUE against, and it answers from
+    the same parse the writer's own `jsonb` encoding uses.
+    Parsed, never restated — a hand-copied type table is a second declaration of
+    the schema, and the second declaration is the one that goes stale. The three
+    shapes (CREATE TABLE, ADD COLUMN, ALTER COLUMN … TYPE) and the widened
+    vocabulary are documented at :func:`_declared_types_for_dir` and
+    :data:`_DECLARED_TYPE_ALTERNATION`.
+
+    Like `table_columns()` this is UNCACHED and it is not a hot path: it is a
+    contract read, not a per-parameter decision (that one is `jsonb_columns`,
+    bounded by `_JSONB_CACHE_TTL_SECONDS`).
+    """
+    return _declared_types_for_dir(migrations_dir or _migrations_dir())
 
 
 def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
