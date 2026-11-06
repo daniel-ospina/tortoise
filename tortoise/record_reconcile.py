@@ -140,13 +140,36 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE CLEAR —
   ``record-restore`` / ``rebuild_from_record`` wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
-  legacy copy, and ``#10017`` is the targeted graph-side purge for an operator
-  who does not want the wipe — and it has NO route that RESTORES the value: the
-  record's COPY is intact (the column is PRIMARY there), so what is missing is a
-  PERMITTED WRITE — §9.1/D1 forbids any projection from materialising it in the
-  graph — not a source to re-derive it from.
-  ⛔ Not "no in-place repair": ``#10017``'s purge IS in place, and so is a
-  targeted clear — what is missing is a route that KEEPS the value. That is WHERE IT
+  legacy copy — and it has NO route that RESTORES the value. ⛔ BOUND THAT CLAIM,
+  because two populations reach this class and a clear costs them different
+  things:
+
+  (i) **the record's row CARRIES the value** (the column is a declared PRIMARY
+  field of ``public.source``/``public.event``, so any producer that lands one
+  fills it): the record's COPY is intact, and what is missing is a PERMITTED
+  WRITE — §9.1/D1 forbids any projection from materialising it in the graph —
+  not a source to re-derive it from. Here the clear frees a stale duplicate.
+
+  (ii) **the prose arrived by the pre-#10000 commit write's RAW CYPHER**
+  (``hosted_api.py``: ``SET s.story_arc=$arc`` / ``e.story_arc=$arc``, removed for
+  NEW writes by #10000): the value was never JOURNALLED by that write, and raw Cypher is not a
+  journal record
+  (``supabase/migrations/20261023000001_record_session_narrative.sql``). Measured
+  for #9555, the record's narrative home had its two COUNT columns filled and its
+  two TEXT columns NULL on every live capture. On this population the graph copy
+  is the ONLY copy, so a clear does not free a duplicate — it destroys the last
+  one, and there is nothing to restore it from. That cost belongs BEFORE the
+  repair advice, not after it.
+
+  ⛔ ``#10017`` is NOT this class's repair, and reading it as one is how a §9.1
+  narrative gets deleted: that tool purges the pre-#10000 **turn nodes**
+  (``MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) … DETACH DELETE t``,
+  ``tools/purge_legacy_turns.py``) and touches neither ``:Source`` nor ``:Event``
+  — ``rg story_arc tools/`` finds no purge at all.
+  ⛔ Not "no in-place repair": an explicit ``REMOVE n.story_arc`` on the anchor
+  node IS in place (it ships as no tool), and ``#10017``'s per-session turn purge
+  is in place for ITS class — what is missing here is a route that KEEPS the
+  value. That is WHERE IT
   DIFFERS from the declined pair, which does have one, shipped:
   ``session_source_prose_migration.reconcile_session_source_prose`` (#11070, via
   ``#11152``) repairs or clears the pair IN PLACE from the record, no wipe, the

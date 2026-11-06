@@ -2100,12 +2100,22 @@ also what makes `#10017`'s purge durable: purge → restore → `sum(size(n.stor
 
 **What a reader keeps seeing, and what a reconciler now reports.** The narrative is served to every reader
 from `public.session_narrative` (`record_text.serve_from_record` never consults the projection module), so
-nothing is lost. `record-reconcile` treats a legacy cache node still carrying the prose as a `graph_only`
+a READER loses nothing. ⛔ That is a claim about SERVING, not about the graph copy — do not run the two
+together, see the repair below. `record-reconcile` treats a legacy cache node still carrying the prose as a `graph_only`
 occurrence (one property the projection declines to write), NOT as a `field_mismatches` against a record
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
 pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
-a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
-whole-graph and therefore clears a legacy copy too. ⛔ **None** of the three classes has a repair that RESTORES the value, with two exceptions: the declined pair has one, shipped
+a DESTRUCTIVE CLEAR — a full `record-restore`, whose wipe is
+whole-graph and therefore clears a legacy copy too. ⛔ `#10017` is **not** this class's repair: that tool
+purges the pre-#10000 **turn nodes** (`MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) … DETACH DELETE t`,
+`tools/purge_legacy_turns.py`) and touches neither `:Source` nor `:Event`, so it deletes turns and leaves the
+narrative where it was. ⛔ And bound what the clear COSTS, because two populations reach this class: where the
+record's row CARRIES the value, the clear frees a stale duplicate and the only thing missing is a PERMITTED
+WRITE (§9.1/D1 forbids every projection from materialising it); where the prose arrived by the pre-#10000
+commit write's RAW CYPHER (`hosted_api.py`'s removed `SET s.story_arc=$arc` / `e.story_arc=$arc`), the value was
+never journalled by that write — raw Cypher is not a journal record, and measured for #9555 the record's narrative home had
+its two COUNT columns filled and its two TEXT columns NULL on every live capture — so the graph copy is the
+ONLY copy and the clear destroys the last one, with nothing to restore it from. ⛔ **One** of the three classes has a repair that RESTORES the value, plus one case: the declined pair has one, shipped
 (`session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place), and a cache-only `status` the mint CAN CARRY does too (re-assert it through the write door —
 `update_entity(id, status=<value>)` — which journals the `EntityMutated` state op the fold reads, so the value is
