@@ -4910,7 +4910,17 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
     )
     _PREDICATED_OBJECT = re.compile(
         r"\s*(?:is|was|are|were|means|denotes|refers\s+to|stays?|stayed|remains?|"
-        r"remained|becomes?|became|continues?\s+to\s+be|continued\s+to\s+be)"
+        r"remained|becomes?|became|continues?\s+to\s+be|continued\s+to\s+be|"
+        # ⛔ …AND THE MODAL SPELLINGS (#11191 review r11, P1 — MEASURED): the verb
+        # alternation covered the copula and its stative cousins but not `has to be` /
+        # `must be` / `would be`, so "The tree immediately before #9548 HAS TO BE the
+        # arming commit." was ACCEPTED while "…IS the arming commit." refused.
+        r"(?:has|have|had)\s+to\s+be|(?:must|should|would|will|can|could|may|might)\s+be)"
+        # ⛔ …AND A COMMA-DELIMITED ADVERBIAL SITS AS AN INCISE between the copula and
+        # the object ("is, in practice, the arming commit itself"), so a slot for it is
+        # required beside the one-word adverbs; a bounded comma incise cannot swallow the
+        # object, because it must CLOSE on a comma (#11191 review r10 residual 4).
+        r"\s*(?:,[^,.;\u2014\u2013]{1,40},\s*)?"
         # ⛔ ONE ADVERB IS ADMISSIBLE (#11191 review r9, P1 — MEASURED): with the copula
         # followed IMMEDIATELY by the object, "is STILL the arming commit itself" and
         # "stayed the arming commit's son" were ACCEPTED — the closure claim was one word
@@ -4938,6 +4948,32 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         r"^(?:['\u2019]s\s+parent\b|\s+of\s+(?:the\s+)?parent\b)", re.I
     )
     #: …and the `of <sha>` spelling, admissible ONLY behind a "parent" predicate.
+    #: ⛔ THE MIRROR OF `_PREDICATED_OBJECT`: the PHRASE may be the PREDICATE of a
+    #: tree-shaped SUBJECT (#11191 review r11, P1 — MEASURED). The object arm reads only
+    #: AFTER the phrase, so the same claim written the other way round named no tree, dated
+    #: no figure, and passed the default-deny digit test — ACCEPTED at `b0e8e2006d4` and
+    #: still ACCEPTED at `77d4a3eadd4`:
+    #:   "The arming commit is the tree immediately before #9548."
+    #:   "The arming commit itself is the tree immediately before #9548."
+    #:   "The arming commit's son is the tree immediately before #9548."
+    #:   "The arming commit must be the tree immediately before #9548."
+    #: All four assert a tree that is NOT the pre-#9548 tree — the A1 defect spelled
+    #: without a sha, which is why the numeral channel never saw it. The exemptions are the
+    #: object arm's: a subject carrying the PARENT relation ("the arming commit's parent is
+    #: the tree before #9548") is the true tree and stays accepted, and a sha subject is the
+    #: referent rule's business, not this arm's.
+    _PREDICATED_SUBJECT = re.compile(
+        r"\b(?:the|a|an)\s+"
+        r"(?:(?:arming|merge|revert|fix|feature|squash|base)\s+)?"
+        r"(?:commit|merge|tree|branch|tip|subject|revision|sha)\b"
+        r"(?:\s+['\u2019]s\s+(?:son|child|parent|successor|predecessor|descendant|"
+        r"ancestor))?"
+        r"(?:[^.;\u2014\u2013]{0,40}?)"
+        r"\b(?:is|was|are|were|means|denotes|refers\s+to|continues?\s+to\s+be|"
+        r"(?:has|have|had)\s+to\s+be|(?:must|should|would|will|can|could|may|might)\s+be)\b"
+        r"\s+(?:the\s+)?(?:tree\s+)?(?:immediately\s+)?$",
+        re.I,
+    )
     _PARENT_OF_SHA = re.compile(
         r"^\s+of\s+`?(?:785bb2b59|" + _TRUE_TREE + r")`?", re.I
     )
@@ -5262,13 +5298,13 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
                 # Falling through lets step 3 (the adjacency arm) refuse it.
                 if not _FALSE_SHA_ADJACENT.search(clause):
                     return True
-            if _NOT_FALSE_SHA.search(clause):  # "… is `047c91f7a`, not `ff6379eb2`"
+            if _NOT_FALSE_SHA.search(own):  # "… is `047c91f7a`, not `ff6379eb2`"
                 return True
-            if _RETIRED_ATTRIBUTION.search(clause):  # "no longer calls it"
+            if _RETIRED_ATTRIBUTION.search(own):  # "no longer calls it"
                 return True
-            if _INFERENCE_DENIAL.search(clause):  # "does not mean the census is 5"
+            if _INFERENCE_DENIAL.search(own):  # "does not mean the census is 5"
                 return True
-            if _CORRECTION_VERB.search(clause) and re.search(_TRUE_TREE, clause, re.I):
+            if _CORRECTION_VERB.search(own) and re.search(_TRUE_TREE, own, re.I):
                 return True  # "… is now corrected to `047c91f7a`"
             # 3. THE CLAIM ITSELF — the false sha adjacent to the phrase, in either order,
             #    with no copula required ("5 lines immediately before #9548 at
@@ -5353,6 +5389,27 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
             # before #9548 IS "the arming commit's parent", and the exemption is keyed on
             # the PARENT relation, so "… itself" / "…'s son" / "… the merge tip" are
             # refused while "…'s parent" and "the parent commit of `785bb2b59`" pass.
+            # ⛔ …AND THE SAME CLAIM WRITTEN THE OTHER WAY ROUND (#11191 review r11, P1 —
+            # MEASURED): the object arm reads only AFTER the phrase, so
+            #   "The arming commit is the tree immediately before #9548."
+            #   "The arming commit itself is the tree immediately before #9548."
+            #   "The arming commit's son is the tree before #9548."
+            # named no tree, dated no figure, and fell through to step 5's digit test —
+            # ACCEPTED. The subject is read from the phrase's OWN CLAUSE with asides
+            # blanked (an aside names a different proposition), and the exemptions are the
+            # object arm's: the PARENT relation is the true tree, and a sha subject is the
+            # referent rule's business.
+            _subject_span = _INCISE.sub(
+                lambda _m: " " * len(_m.group(0)),
+                _clause_before_phrase(norm, phrase.start()),
+            )
+            if (
+                _PREDICATED_SUBJECT.search(_subject_span)
+                and "parent" not in _subject_span.lower()
+                and _TRUE_TREE not in _subject_span.lower()
+                and not _SHA_LIKE_RE.search(_subject_span)
+            ):
+                return False
             _predicated = _PREDICATED_OBJECT.match(norm[phrase.end() : clause_end])
             if _predicated:
                 # ⛔ THE RELATION MUST BE THE PARENT ONE, AND NOTHING ELSE MAY BE NAMED BESIDE
@@ -7256,6 +7313,109 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
         + "\n  ".join(
             f"REFUSED={got} (wanted {want}) {s}" for s, want, got in _r11_wrong
         )
+    )
+    # ⛔⛔ CONTROLS FOR THE r11 FAIL-OPENS (#11191 review r11, P1 — every string below was
+    # run through THIS branch's own PRE-fix predicate, extracted with `ast` and exec'd out
+    # of process, and produced the verdict the comment names there). Same rule as every
+    # block above: a fix whose revert leaves the suite green has no test. Both directions
+    # are pinned wherever one arm decides OPPOSITE propositions from the same surface form.
+    #
+    # (1) THE COMMA SPLICE — the pin disabled by the cell's own correction. The predicate
+    # decides each phrase OCCURRENCE on its own, but a plain comma is deliberately not a
+    # clause boundary, so a denial was handed the whole clause and exempted a second,
+    # spliced occurrence beside it. PRE-FIX both claim splices were ACCEPTED.
+    _comma_splice = (
+        (
+            "It was NOT the tree immediately before #9548, `ff6379eb2` is the tree before "
+            "#9548.",
+            True,
+        ),
+        (
+            "`047c91f7a` is the arming commit's parent and NOT the tree immediately "
+            "before #9548, `ff6379eb2` is the tree before #9548.",
+            True,
+        ),
+        # …and the SAME splice of the TRUE tree — must stay GREEN, so the control measures
+        # the CLAIM and not the comma.
+        (
+            "It was NOT the tree immediately before #9548, `047c91f7a` is the tree before "
+            "#9548.",
+            False,
+        ),
+    )
+    _splice_wrong = [
+        (s, want, _refuses_before_9548(s))
+        for s, want in _comma_splice
+        if _refuses_before_9548(s) is not want
+    ]
+    assert not _splice_wrong, (
+        "a false equivalence COMMA-SPLICED beside a denial passes — the denial arms are "
+        "handed the whole clause, so the artefact's own `NOT the tree immediately before "
+        "#9548` exempts a second occurrence after a comma. The contract's first rule is "
+        "that EVERY occurrence is decided on its own (#11191 review r11, P1):\n  "
+        + "\n  ".join(
+            f"REFUSED={got} (wanted {want}) {s}" for s, want, got in _splice_wrong
+        )
+    )
+    # …and it must land on the artefact this pin exists to guard: spliced into the row's
+    # OWN sentence, the injection has to red, or the controls above prove something about
+    # a string and nothing about §A8.
+    _spliced_row = row.replace(
+        "the arming commit's parent)",
+        "the arming commit's parent), `ff6379eb2` is the tree before #9548",
+        1,
+    )
+    assert _spliced_row != row, (
+        "the comma-splice control no longer injects into §A8's evidence cell, so it proves "
+        "nothing (#11191 review r11, P1)"
+    )
+    assert any(
+        _refuses_before_9548(sentence)
+        for sentence in re.split(r"(?<=\.)\s+", _spliced_row)
+    ), (
+        "a false equivalence spliced onto §A8's own `NOT the tree immediately before "
+        "#9548` passes ON THE REAL ROW — the pin is disabled on the cell it exists to guard "
+        "by the cell's own correction (#11191 review r11, P1)"
+    )
+    #
+    # (2) THE MIRROR PREDICATION. The object arm reads only AFTER the phrase, so the same
+    # claim written the other way round named no tree, dated no figure and passed the
+    # default-deny digit test. PRE-FIX all six were ACCEPTED.
+    _subject_predications = (
+        "The arming commit is the tree immediately before #9548.",
+        "The arming commit itself is the tree immediately before #9548.",
+        "The arming commit was the tree immediately before #9548.",
+        "The arming commit must be the tree immediately before #9548.",
+        "The arming commit's son is the tree immediately before #9548.",
+        "The arming commit is the tree before #9548.",
+    )
+    _subject_passed = [
+        s for s in _subject_predications if not _refuses_before_9548(s)
+    ]
+    assert not _subject_passed, (
+        "a tree-shaped SUBJECT predicated of the phrase is accepted — `_PREDICATED_OBJECT` "
+        "reads only the text after the phrase, so the A1 defect spelled without a sha (and "
+        "without a figure) reaches step 5's digit test and passes (#11191 review r11, "
+        "P1):\n  " + "\n  ".join(_subject_passed)
+    )
+    # …and the mirror arm must not red the TRUE tree in the same position: the parent
+    # relation is the doc's own spelling of it.
+    assert not _refuses_before_9548(
+        "The arming commit's parent is the tree immediately before #9548."
+    ), (
+        "the mirror arm refuses the doc's own TRUE cell written subject-first — a false RED "
+        "in the arm that closes the fail-open (#11191 review r11, P1)"
+    )
+    #
+    # (3) THE MODAL VERB. The verb alternation carried the copula and its stative cousins
+    # but not `has to be` / `must be`, so the object arm never reached the object.
+    # PRE-FIX ACCEPTED.
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 has to be the arming commit."
+    ), (
+        "a MODAL spelling of the copula defeats the predication arm — `has to be` / "
+        "`must be` / `would be` were outside the verb alternation, so the same claim was "
+        "refused with `is` and accepted with `has to be` (#11191 review r11, P1)"
     )
 
 
