@@ -139,12 +139,22 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   (``cache_projection``'s own stated bound, #10852 review); and the
   NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
   — which the record's TABLE ALSO holds and which no projection may ever write,
-  because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE CLEAR —
-  ``record-restore`` / ``rebuild_from_record`` wipe the graph first
+  because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE
+  CLEAR — ``record-restore`` / ``rebuild_from_record`` wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
-  legacy copy, and ``#10017`` is the targeted graph-side purge for an operator
-  who does not want the wipe — and it has NO non-destructive route: nothing
-  writes the column any more, so no in-place repair can exist. That is WHERE IT
+  legacy copy, or the graph-side removal of the column itself (``REMOVE
+  n.story_arc``) — and it has NO repair that RESTORES the value. ⛔ That is the
+  PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
+  puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
+  forbids every projection from writing it into the graph and no in-tree route
+  re-derives it, so no repair can put the value back. ⛔ Not "no
+  IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
+  clear — what is missing is a route that KEEPS the value. ⚠️ No shipped
+  instrument performs that removal for THIS class: ``#10017``'s purge
+  (``tools/purge_legacy_turns.py``) is the precedent on a DIFFERENT population
+  (legacy episodic turn ``:Point``s — a ``DETACH DELETE``) and names no
+  ``story_arc`` at all, so citing it as the purger *for this class* sends an
+  operator to a tool that leaves the divergence in place. That is WHERE IT
   DIFFERS from the declined pair, which does have one, shipped:
   ``session_source_prose_migration.reconcile_session_source_prose`` (#11070, via
   ``#11152``) repairs or clears the pair IN PLACE from the record, no wipe, the
@@ -601,7 +611,7 @@ def reconcile_record_and_cache(
     a record-sourced clear IN PLACE for the declined pair —
     ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
     ⛔ NOT a re-projection, which is additive and leaves an existing pair on the
-    node, the graph-side purge for a not-projectable column (below), or *find
+    node, the graph-side ``REMOVE`` for a not-projectable column (below), or *find
     the writer* for the undeclared second-writer population the partition also
     counts.
 
@@ -613,11 +623,18 @@ def reconcile_record_and_cache(
     that still carries the prose reads as a ``graph_only`` occurrence (one
     property the projection declines to write), NOT as a ``field_mismatches``
     against a record that is correct. The repair for that occurrence is a
-    DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full
-    ``record-restore`` (whose wipe is whole-graph, so it clears the copy too;
-    measured by `test_the_record_restore_writes_no_story_arc_on_any_node` arm
-    (3)) — never a non-destructive one, which is the only sense in which this
-    class differs from the declined pair. Nothing here performs it. ⚠️ **What the exclusion CAN and
+    DESTRUCTIVE CLEAR — a full ``record-restore`` (whose wipe is whole-graph, so
+    it clears the copy too; measured by
+    `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3)), or a
+    graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today.
+    ⛔ NOT ``#10017``'s purge: ``tools/purge_legacy_turns.py`` deletes legacy
+    episodic turn ``:Point``s — a different population, though a legacy turn
+    ``:Point`` that carries the prose is cleared by it, by node deletion — and
+    it never matches ``:Source``/``:Event``; what it contributes is durability
+    for those ``:Point`` copies (its journaled turn removals stop a replay
+    resurrecting them), not the clearing of this class. Never a
+    non-destructive one, which is one sense in which this class differs from the
+    declined pair. Nothing here performs it. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
     divergence in a caller-supplied ``props``-tail property. ⚠️ For `summary`,
@@ -777,8 +794,11 @@ def log_result(result: RecordReconcileResult,
         # record-owned: the §9.1/D1 pair the narrowing DECLINES (the record
         # holds it, its repair is the IN-PLACE reconciler #11070 — ⛔ not a
         # re-projection, whose write is additive —) and the not-projectable
-        # column (the record holds it and the graph must NOT — its repair is
-        # #10017's purge). Calling them all "owned" sends the operator to the
+        # column (the record holds it and the graph must NOT — its repair is a
+        # destructive clear: a full restore's wipe, or a graph-side
+        # REMOVE n.story_arc that no instrument ships today; #10017's purge is
+        # a DIFFERENT population — legacy episodic turn :Points — and names no
+        # story_arc). Calling them all "owned" sends the operator to the
         # wrong repair.
         line += (f" [graph_only={result.graph_only_total} cache-held "
                  f"property occurrence(s) not compared ({names}{more})]")

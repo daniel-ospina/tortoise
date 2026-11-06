@@ -452,8 +452,11 @@ consults; nothing a reader sees is lost by the deny.
 The entry is keyed by TABLE because the statement is about the two stores, not about a row's provenance:
 a row-derived test (the shape `_EPISODIC_SOURCE_PROSE_COLUMNS` uses) would answer the wrong question
 here. The placement class came first and the projection could not express it, which is exactly how the
-RECORD → CACHE restore re-materialised the prose on every rebuild and made `#10017`'s graph-side purge
-non-durable. **The seam is the fix, and a post-restore sweep is not an alternative**: a purge pass would
+RECORD → CACHE restore re-materialised the prose on every rebuild and undid `#10000`'s write deletions,
+non-durably. ⚠️ `#10017`'s purge is NOT the lane that was undone (`#11325`): its single destructive
+statement deletes legacy episodic turn `:Point`s, never `:Source`/`:Event`, and names no `story_arc` — so
+this class's targeted repair is a graph-side `REMOVE n.story_arc` that no instrument ships, or the full
+restore's whole-graph wipe. **The seam is the fix, and a post-restore sweep is not an alternative**: a purge pass would
 rent the RAM for the duration of the write and would have to run on every restore forever.
 
 Three consumers align on the same constant rather than each re-deciding it, and all three are pinned:

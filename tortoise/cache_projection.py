@@ -1566,8 +1566,12 @@ def _refused(table: str) -> frozenset[str]:
 #: the Postgres half. Authority in the source store is not projectability into
 #: this cache, and a projection with no vocabulary for that distinction
 #: re-materialises the prose on every RESTORE — which is `#10394` door 2, and it
-#: undoes `#10000` (the write deletions) and `#10017` (the destructive purge) at
-#: once: a purge that the next routine recovery reverses is not a purge.
+#: undoes `#10000` (the write deletions) at once: a write deletion that the next
+#: routine recovery reverses is not a deletion. ⚠️ `#10017`'s purge is NOT the
+#: lane this undoes (#11325): its single destructive statement deletes legacy
+#: episodic turn `:Point`s, never `:Source`/`:Event`, and names no `story_arc` —
+#: so this class's targeted repair is a graph-side `REMOVE` that no instrument
+#: ships, or the full restore's whole-graph wipe.
 #:
 #: So an entry here is a statement about the CACHE, not about the record: the
 #: placement table keeps the row's class (`P` — the record does store it) and
