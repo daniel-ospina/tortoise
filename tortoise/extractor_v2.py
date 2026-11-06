@@ -9288,7 +9288,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # rides the claim as `surface` + the span it addressed, and nothing here
         # is ever minted as an :Object.
         _mentions = _mentions_for_claim(
-            embed_list, content, armed=_referentiality.enabled())
+            embed_list, content, armed=_referentiality.enabled(),
+            narrative=story_arc or summary)
         if _mentions:
             pt_entry["mentions"] = _mentions
         # #2684 (Slice B): a VALUE-BEARING point carries the verbatim source
@@ -11152,8 +11153,81 @@ def _prompt_contract(*, core_only: bool = False) -> str:
                             1)
 
 
+def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
+    """ONE mention entry in the committed shape, with every model CLAIM re-derived.
+
+    ⛔ **The single clamp, called by BOTH surfaces that publish a record.** It was
+    inline in :func:`_mentions_for_claim`, so only the payload was clamped and
+    ``result["mentions"]["records"]`` — assembled from the merged ``mentions[]`` in
+    :func:`extract_session_v2` — kept the model's raw claims. One run then reported
+    two answers to "what did this hold", and the unverified one was the one plan
+    R1's arming measurement reads (review at `11039b1bd8`, P2).
+
+    Two things a model entry may CLAIM and neither is trusted:
+
+    - ``rule_id`` — re-derived by :func:`_mention_rule`, which returns the same
+      rule only when :func:`referentiality.judge` agrees with it for THAT surface,
+      else ``referentiality.channel``. This is the last door: ``execute_embed``
+      keeps the raw channel whenever ``route_mentions`` raises, so a record can
+      reach here without ever passing :func:`_mention_record`.
+    - ``span_source`` — a declared space is honoured only when the offsets are
+      EXACTLY where that haystack puts the surface; otherwise it is demoted to
+      ``"model"`` ("the model asserted these bytes"), never shipped as an address
+      of a text it does not index. ``"quote"`` verifies against the record's own
+      quote, ``"narrative"`` against the narrative this run was extracted from.
+      ⚠️ Demotion is not dropping: an unverifiable declaration keeps its offsets
+      under the honest label, so a consumer still sees what the model claimed.
+
+    Returns ``None`` for an entry with no ``surface`` (nothing to record).
+    """
+    record: dict = {}
+    for k in _MENTION_FIELDS:
+        v = m.get(k)
+        if v is None or v == "":
+            continue
+        if k in _MENTION_CAPS:
+            record[k] = str(v)[:_MENTION_CAPS[k]]
+        elif k in ("span_start", "span_end"):
+            record[k] = v if isinstance(v, int) else None
+        elif k == "rule_id":
+            record[k] = _mention_rule(str(m.get("surface") or ""), v)
+        else:
+            # `claim_ref`/`span_source` are `str` on the model: a non-str value
+            # 422'd the payload (review cycle 3, P3).
+            record[k] = str(v)
+    if record.get("span_start") is None:
+        record.pop("span_start", None)
+    if record.get("span_end") is None:
+        record.pop("span_end", None)
+    surface = str(record.get("surface") or "")
+    if not surface:
+        return None
+    # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
+    # one `commit_schema.Mention` accepts — otherwise the whole payload 422s.
+    # Both halves are dropped rather than 422 (review cycle 2, P1: an over-cap
+    # pair and a junk `span_source` each lost the session).
+    s0, s1 = record.get("span_start"), record.get("span_end")
+    # ⛔ ``isinstance(True, int)`` is ``True``: a boolean offset coerces to ``1``
+    # on the model and names bytes the surface never occupied.
+    if not (isinstance(s0, int) and not isinstance(s0, bool)
+            and isinstance(s1, int) and not isinstance(s1, bool)
+            and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
+        record.pop("span_start", None)
+        record.pop("span_end", None)
+    declared = record.get("span_source")
+    if declared not in _MENTION_SPAN_SOURCES:
+        record.pop("span_source", None)
+    elif declared in ("quote", "narrative") and "span_start" in record:
+        haystack = (str(record.get("quote") or "") if declared == "quote"
+                    else str(narrative or ""))
+        if _mention_span(haystack, surface) != (record["span_start"],
+                                               record["span_end"]):
+            record["span_source"] = "model"
+    return record
+
+
 def _mentions_for_claim(embed_list: dict, content: str,
-                        *, armed: bool) -> list[dict]:
+                        *, armed: bool, narrative: str = "") -> list[dict]:
     """The mentions whose ``claim_ref`` is THIS claim — in the committed shape.
 
     Resolution is by the claim's own text (:func:`_norm`), never by position: S4
@@ -11162,7 +11236,10 @@ def _mentions_for_claim(embed_list: dict, content: str,
 
     ``armed`` is the cue's own switch: with it OFF the attachment is skipped
     entirely, so an unmeasured run's payload is genuinely unchanged (the comment
-    that claimed this without doing it was a review P2).
+    that claimed this without doing it was a review P2). ``narrative`` is only the
+    haystack a declared ``narrative`` span is verified against
+    (:func:`_clamped_mention`); absent, such a declaration is demoted to
+    ``"model"`` rather than trusted.
     """
     if not armed:
         return []
@@ -11176,51 +11253,9 @@ def _mentions_for_claim(embed_list: dict, content: str,
         ref = str(m.get("claim_ref") or "").strip()
         if not ref or _norm(ref) != key:
             continue
-        record: dict = {}
-        for k in _MENTION_FIELDS:
-            v = m.get(k)
-            if v is None or v == "":
-                continue
-            if k in _MENTION_CAPS:
-                record[k] = str(v)[:_MENTION_CAPS[k]]
-            elif k in ("span_start", "span_end"):
-                record[k] = v if isinstance(v, int) else None
-            elif k == "rule_id":
-                # ⛔ THE LAST DOOR, and the only one every stored record passes.
-                # A cue ``rule_id`` is a CLAIM about a rule that may never have
-                # run, so it is re-verified HERE as well as in
-                # :func:`_mention_record` — because a record can reach this
-                # function without ever going through that builder when
-                # ``route_mentions`` did not process the channel (review at
-                # `591906397`, P2: a mention-only response shipped
-                # ``referentiality.pronoun`` on a surface ``judge()`` calls a
-                # REFERENT, and no cue ran on it at all).
-                record[k] = _mention_rule(str(m.get("surface") or ""), v)
-            else:
-                # `claim_ref`/`rule_id`/`span_source` are `str` on the model: a
-                # non-str value 422'd the payload (review cycle 3, P3).
-                record[k] = str(v)
-        if record.get("span_start") is None:
-            record.pop("span_start", None)
-        if record.get("span_end") is None:
-            record.pop("span_end", None)
-        if not record.get("surface"):
-            continue
-        # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
-        # one the model declares — otherwise `commit_schema.Mention` rejects the
-        # whole payload. Both halves are dropped rather than 422 (review cycle 2,
-        # P1: an over-cap pair and a junk `span_source` each lost the session).
-        s0, s1 = record.get("span_start"), record.get("span_end")
-        # ⛔ ``isinstance(True, int)`` is ``True``: a boolean offset coerces to
-        # ``1`` on the model and names bytes the surface never occupied.
-        if not (isinstance(s0, int) and not isinstance(s0, bool)
-                and isinstance(s1, int) and not isinstance(s1, bool)
-                and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
-            record.pop("span_start", None)
-            record.pop("span_end", None)
-        if record.get("span_source") not in _MENTION_SPAN_SOURCES:
-            record.pop("span_source", None)
-        out.append(record)
+        record = _clamped_mention(m, narrative=narrative)
+        if record is not None:
+            out.append(record)
     return out
 
 
@@ -11786,10 +11821,19 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ⛔ FLAG-GATED: unarmed, the list still holds the model's raw `mentions[]`
     # entries (route_mentions returns the list unchanged), and publishing those as
     # "the mentions held" claimed a hold that never ran (review cycle 4, P3).
+    # ⛔ `records` is the surface plan R1's arming measurement READS, so it is
+    # clamped by the SAME function the payload uses (`_clamped_mention`), not
+    # copied from the merged list: on the fail-open path the entries there are
+    # the model's raw channel, and publishing them as "the mentions held"
+    # reported a cue rule and a span address that nothing had verified (review at
+    # `11039b1bd8`, P2 — the payload said `referentiality.channel`, this surface
+    # said `referentiality.pronoun`, for one run).
     result["mentions"] = {
         "stats": mention_s2_stats,
-        "records": ([m for m in (complete_list.get("mentions") or [])
-                     if isinstance(m, dict)]
+        "records": ([r for r in (_clamped_mention(m, narrative=story)
+                                 for m in (complete_list.get("mentions") or [])
+                                 if isinstance(m, dict))
+                     if r is not None]
                     if _referentiality.enabled() else []),
     }
     # #1933 (E2E-4 negative a): the chain-completeness evidence surface +

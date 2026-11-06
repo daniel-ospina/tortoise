@@ -575,10 +575,14 @@ class Mention(BaseModel):
     ``claim_id``**, because the point carrying the property IS the claim.
 
     ⛔ **PAYLOAD-ONLY TODAY — this is not graph state, and must not be read as it.**
-    The record reaches the extraction payload and ``result["mentions"]["records"]``
-    (``extractor_v2._mentions_for_claim``), and then STOPS: neither declared write
+    The record reaches two in-memory surfaces and then STOPS: the extraction payload
+    (``points[].mentions``, built by ``extractor_v2._mentions_for_claim``) and the
+    run's own evidence block (``result["mentions"]["records"]``, assembled in
+    ``extract_session_v2``; both go through ``extractor_v2._clamped_mention``, so
+    neither can carry an unverified ``rule_id`` or span). Neither declared write
     door carries it. ``hosted_api``'s ``create_point`` calls enumerate their
-    properties, and the SDK capture whitelist
+    properties — ``CreatePointRequest`` has no ``mentions`` field at all — and the
+    SDK capture whitelist
     (``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s response-parity surface) holds
     ``quote/when/search_keys/source_turn_id/span_start/span_end`` only. So a
     capture's ``stats["mentions_recorded"]`` counts records the write DISCARDS.

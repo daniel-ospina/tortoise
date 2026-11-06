@@ -1183,6 +1183,9 @@ def test_the_mention_record_is_payload_only_and_says_so():
     boundary cannot become a silent claim: adding `mentions` to the whitelist (or
     removing the disclosure) REDs here and forces the docstring, the PR body and
     `#11239` to be updated together."""
+    import inspect
+
+    from tortoise import hosted_api
     from tortoise.commit_schema import Mention
     from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS
 
@@ -1190,11 +1193,22 @@ def test_the_mention_record_is_payload_only_and_says_so():
     payload, _ = _mint(_embed_list("it"))
     assert [m["surface"] for m in _mentions_of(payload)] == ["it"]
 
-    # …and the write door does not take it, which is the whole deferral
+    # …and NEITHER declared write door takes it, which is the whole deferral.
+    # ⛔ BOTH doors, because the docstring names both and the REST door is the one
+    # most likely to grow a field: pinning only the SDK whitelist let
+    # `CreatePointRequest.mentions` be added with all rows green (review at
+    # `11039b1bd8`, P3).
     assert "mentions" not in _CAPTURE_PASSTHROUGH_PROPS, (
         "the capture whitelist now carries mentions: the payload-only deferral "
         "is over — update Mention's docstring and #11239, and turn this row into "
         "a persistence assertion")
+    assert "mentions" not in hosted_api.CreatePointRequest.model_fields, (
+        "CreatePointRequest now accepts `mentions`: the REST write door takes a "
+        "record that has no store-side home yet — update Mention's docstring and "
+        "#11239, and turn this row into a persistence assertion")
+    assert "mentions" not in inspect.getsource(hosted_api.create_point), (
+        "create_point now writes `mentions`, so the payload-only deferral is "
+        "over — see #11239 and turn this row into a persistence assertion")
     assert "11239" in (Mention.__doc__ or ""), (
         "Mention's docstring no longer names the slice that owns persistence, so "
         "the model reads as graph state")
@@ -1316,3 +1330,87 @@ def test_the_last_door_clamps_a_rule_when_the_selection_FAILED_OPEN(monkeypatch)
     assert records[0]["rule_id"] == ref.RULE_CHANNEL, (
         "the fail-open path shipped the model's unverified cue rule as evidence: "
         f"{records[0]!r}")
+
+
+# ── the EVIDENCE SURFACE, not just the payload ─────────────────────────────
+# `result["mentions"]["records"]` is built from the merged embed list, not from
+# `_mentions_for_claim`, so every clamp the last door performs had to be applied
+# twice or the run's own evidence surface kept the model's raw claim. Driven
+# through `extract_session_v2` (the only place that block is assembled) on the
+# FAIL-OPEN path, where the raw channel is all `execute_embed` ever sees.
+
+def _fail_open_session(monkeypatch, mentions: list[dict]) -> dict:
+    """One session whose `route_mentions` RAISES, with `mentions` as the model's
+    raw channel. The fail-open handler keeps the list unchanged, so nothing has
+    verified the entries — which is exactly the state the last door defends."""
+    from tortoise.extractor_v2 import extract_session_v2
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("selection exploded — the fail-open path")
+
+    monkeypatch.setattr("tortoise.extractor_v2.route_mentions", _boom)
+    payload_json = json.dumps({
+        "entities": [], "events": [], "operators": [],
+        "points": [{"content": "the budget is 40k", "pointKind": "statement"}],
+        "chain_notes": [], "link_before_create": [], "mentions": mentions,
+    })
+
+    class _M:
+        last_finish_reason = None
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.last_finish_reason = "stop"
+            if "STORY SUMMARIZER" in system:
+                return "A narrative."
+            if "GAP REVIEWER" in system:
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [], "chain_notes": [], '
+                        '"link_before_create": []}')
+            return payload_json
+
+    return extract_session_v2(_M(), [{"role": "user", "content": "the budget is 40k"}],
+                              session_id="fail-open-evidence")
+
+
+def test_the_evidence_surface_does_not_carry_an_unverified_cue_rule(monkeypatch):
+    """⛔ `result["mentions"]["records"]` is the surface a lane reads to count
+    what the run held (plan R1's arming evidence). It was built straight from the
+    merged `mentions[]`, so on the fail-open path — `execute_embed` catches ANY
+    `route_mentions` exception and keeps the model's raw channel — it published
+    `referentiality.pronoun` for a surface `judge()` calls a REFERENT, while the
+    payload (clamped by the last door) said `referentiality.channel`. One run,
+    two answers, and the unverified one was the one being read."""
+    out = _fail_open_session(monkeypatch, [{
+        "surface": "the admin-merge rail",
+        "claim_ref": "the budget is 40k",
+        "quote": "the admin-merge rail",
+        "rule_id": ref.RULE_PRONOUN,      # a rule that never ran on this surface
+    }])
+    records = out["mentions"]["records"]
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        f"the fail-open evidence surface dropped the record: {records!r}")
+    assert records[0]["rule_id"] == ref.RULE_CHANNEL, (
+        "the evidence surface published a cue rule that never ran, on the one "
+        f"path where nothing verified it: {records[0]!r}")
+
+
+def test_the_evidence_surface_does_not_carry_an_unverified_span(monkeypatch):
+    """The same door, the neighbouring field: a `quote`-declared span is a claim
+    that the offsets index THE QUOTE. Allow-listing the value is not verification
+    — `span_source` is in `_MENTION_SPAN_SOURCES` either way — so an unverified
+    declaration has to be demoted to the space that actually holds it (`model`,
+    i.e. "the model asserted these bytes")."""
+    out = _fail_open_session(monkeypatch, [{
+        "surface": "the admin-merge rail",
+        "claim_ref": "the budget is 40k",
+        "quote": "a totally unrelated sentence with no rail in it",
+        "span_source": "quote",
+        "span_start": 0,
+        "span_end": 5,
+        "rule_id": ref.RULE_CHANNEL,
+    }])
+    records = out["mentions"]["records"]
+    assert records, "the fail-open evidence surface dropped the record"
+    assert records[0]["span_source"] == "model", (
+        "the evidence surface shipped an address whose declared provenance names "
+        f"a text it does not index: {records[0]!r}")
