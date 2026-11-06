@@ -541,6 +541,12 @@ def provenance_report(
     """
     sha = str(doc.get("cut_at_commit") or "")
     if not sha:
+        # ⛔ DO NOT "unify" this with `tools/surface-guard.py::_provenance_problems`, which
+        # REDS on absence (#11057 review FINDING 1). The deferral is correct HERE only
+        # because every caller reaches this function through `_read_manifest`, which refuses
+        # an absent/empty field before this line runs. The guard has no such caller and is
+        # the copy a PR cannot edit, so there the absence IS the defect — a pin that defers
+        # the presence half of its own rule to the un-pinned copy enforces nothing.
         return [], None  # its SHAPE is `_read_manifest`'s refusal, one verdict
     if not _is_object_id(sha):
         # #11057 review P1: a REF NAME is a valid revision, so both probes answer "yes" for
