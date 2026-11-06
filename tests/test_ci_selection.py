@@ -60,6 +60,17 @@ def _sel(changed, event="pull_request"):
     return select(changed, event, load_manifest())
 
 
+#: A string literal that IS a path to the operator runbook — the shape a test
+#: builds the path from (`REPO_ROOT / "docs" / "infra-runbook.md"`,
+#: `Path(__file__)… / "docs/infra-runbook.md"`). Deliberately anchored so it does
+#: NOT match a prose mention (`"docs/infra-runbook.md §4.6 …"`), which is a
+#: citation, not a reader. Used by
+#: `test_the_record_schema_placement_pins_run_on_a_doc_only_diff` to DERIVE the set
+#: of tests that read the doc (#11064 review round 9, P2: a hand-written census of
+#: that set was false — four readers were asleep on a runbook-only diff).
+_RUNBOOK_PATH_LITERAL = re.compile(r'''(["'])(?:[^"'\n]*/)?infra-runbook\.md\1''')
+
+
 def _expand(legs: dict) -> dict:
     """Compare leg membership without caring about the .py suffix.
 
@@ -514,13 +525,60 @@ def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
             "it binds that doc, and a `core`-only registration is asleep on "
             "every docs-only diff (#11064 review, #4309 class)"
         )
-    # ... and the pre-existing runbook owners must stay selected alongside it:
-    # these files pin DIFFERENT sections of the same doc, so none substitutes.
+    # ... and EVERY test that READS the runbook must stay selected alongside it:
+    # these files pin DIFFERENT sections of the same doc, so none substitutes for
+    # another.
+    #
+    # ⛔ The set is DERIVED, not enumerated (#11064 review round 9, P2). It used to
+    # be a hand-written assertion over "the pre-existing runbook owners" carrying
+    # the message "a third runbook reader … does not replace the earlier two" — a
+    # census that read as complete and was not: `test_record_backup.py` (the §9
+    # exit-1 row's failure class), `test_session_extraction_modes.py` (§4.6's
+    # `VENICE_API_KEY` row), `test_durability_posture.py` (the runbook in its
+    # `SCAN_FILES`) and `test_retention_promise.py` (it in `LINKED_FILES`) all READ
+    # the doc and NONE was selected on a runbook-only diff, so editing a row they
+    # pin merged green with the pin never run — the #4309 silent-drop class the
+    # registration exists to close. A census that is not one is not: the fix was to
+    # register them AND to make the list derive itself.
+    #
+    # The signal is a string literal that IS the doc's path — `"infra-runbook.md"`
+    # or `"docs/infra-runbook.md"`, the shape a path is built from
+    # (`REPO_ROOT / "docs" / "infra-runbook.md"`,
+    # `Path(__file__)… / "docs/infra-runbook.md"`). A PROSE mention inside a
+    # docstring or message (`"docs/infra-runbook.md §4.6 …"`, `` `…` ``) does not
+    # END at the extension and is correctly not a reader. Residual, stated because
+    # a derivation that cannot see a shape is not a proof of absence: a reader that
+    # builds the path by concatenation or from a variable is invisible here and must
+    # still be registered by hand.
+    runbook_readers = set()
     r = _sel(["docs/infra-runbook.md"])
-    for owner in ("test_fly_secret_drift.py", "test_deploy_workflow.py"):
+    for reader_path in sorted(Path(__file__).resolve().parent.rglob("*.py")):
+        if reader_path.name == Path(__file__).name:
+            # this pin names the doc as a `select()` INPUT and never reads it
+            continue
+        if _RUNBOOK_PATH_LITERAL.search(
+            reader_path.read_text(encoding="utf-8", errors="replace")
+        ):
+            runbook_readers.add(reader_path.name)
+    assert runbook_readers == {
+        "test_deploy_workflow.py",
+        "test_durability_posture.py",
+        "test_fly_secret_drift.py",
+        "test_record_backup.py",
+        "test_record_schema_placement.py",
+        "test_retention_promise.py",
+        "test_session_extraction_modes.py",
+    }, (
+        "the derived runbook-reader set changed — a NEW reader must be registered "
+        f"in tier1 (and added here) or a retired one removed: {sorted(runbook_readers)}"
+    )
+    for owner in sorted(runbook_readers):
         assert owner in r["test_files"], (
-            f"{owner} must stay in tier1 — #11064 adds a third runbook reader, "
-            "it does not replace the earlier two"
+            f"{owner} READS docs/infra-runbook.md but is NOT selected on a "
+            "runbook-only diff — its pins are asleep on the only diff that can "
+            "break them (a docs-only diff filters to `changed == []` and takes "
+            "the tier1 early return, so an `api`/`core` registration cannot reach "
+            "it; #4309 silent-drop class, #11064 review rounds 1 and 9)"
         )
 
 

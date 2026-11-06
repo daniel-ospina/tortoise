@@ -7591,7 +7591,13 @@ tier1:
 # tests/test_ci_selection.py::
 # test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff.
 - test_deploy_workflow.py
-# #11064 review (P1): the SAME shape AGAIN, and the third member of this family.
+# #11064 review (P1): the SAME shape AGAIN — one more `docs/` path that selects NO
+# surface, whose pins were registered only on a surface a docs-only diff can never
+# reach. (#11064 review round 9, P2: this line used to call the entry "the third
+# member of this family", and that was a census the tree falsified — two FURTHER
+# runbook readers were asleep on the same diff. They are registered below, and the
+# claim is now DERIVED by a test rather than counted in prose, because the count is
+# what went stale.)
 # `test_record_schema_placement.py` reads THREE doc paths that select NO surface
 # at all — `docs/infra-runbook.md` (the §9 drill row),
 # `docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`
@@ -7626,6 +7632,35 @@ tier1:
 # Pinned by tests/test_ci_selection.py::
 # test_the_record_schema_placement_pins_run_on_a_doc_only_diff.
 - test_record_schema_placement.py
+# #11064 review round 9 (P2): the two runbook readers that census left asleep. Same
+# mechanism as the entry above — `docs/infra-runbook.md` matches no SOURCE_PATTERNS
+# entry and `docs/` is in NON_PYTHON_PREFIXES, so a runbook-only diff filters to
+# `changed == []` and takes the docs-only early return: tier1 ONLY, and `select()`
+# emits a surface's test files only for a surface it MATCHED. Both were registered
+# on `api`/`core` alone, where a docs-only diff can never reach them, so their
+# runbook pins never ran on the one diff that can break them (the #4309 silent-drop
+# class this section exists for). Measured before these entries:
+# `select(['docs/infra-runbook.md'])` returned both as UNSELECTED.
+#   * `test_record_backup.py` pins §9's exit-1 row FAILURE CLASS — the row must keep
+#     `RecordRestoreFailed` and the 'nothing was published' sentence — and reads the
+#     same doc twice more (`:2206`, `:2262`). Edit that row and it merged green;
+#   * `test_session_extraction_modes.py` pins §4.6's `VENICE_API_KEY` row — the table
+#     an operator reads BEFORE setting the key on the hosted deployment. Delete the
+#     row and it merged green.
+# ⛔ The other runbook READERS are reachable already, each through its own tier1 arm
+# rather than through this block — `test_durability_posture.py` (`#2881` above) and
+# `test_retention_promise.py` (`#4179`) — which is exactly why a census that
+# enumerated only the *runbook-specific* owners could not see the whole set, and
+# why the set below is no longer asserted in prose at all:
+# tests/test_ci_selection.py::test_the_record_schema_placement_pins_run_on_a_doc_only_diff
+# DERIVES every reader from `tests/` and reds when any member is unselected, so a
+# NEW reader cannot be added silently and a retired one cannot linger. Two entries
+# were all that was missing; the derivation is what proves that, rather than a
+# reviewer's eye. The manifest's granularity is the FILE, so the cost is each whole
+# file; the durations map carries the weights and this comment does not copy them (a
+# copied figure is what went stale in this block twice — see the note above).
+- test_record_backup.py
+- test_session_extraction_modes.py
 # #8135 review (P1, twice): `test_b7_runbook_ok_semantics_8135.py` binds the B7
 # operator runbook's meaning of `mcp_tool_call.status == "ok"`
 # (`docs/runbook/b7-activation-scorecard.md` — the claim #8135 corrected, whose
