@@ -1962,7 +1962,11 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
-  - test_pack_hierarchy_11001.py
+  # ⛔ `test_pack_hierarchy_11001.py` is registered ONCE, further down this list
+  # beside the pack suites — three PRs (#11210, #11211, #11222) each independently
+  # registered it while repairing the same `main` drift, so `origin/main` at
+  # `eee753b48` carried THREE rows and `--integrity` reds on a duplicate. Removed
+  # here rather than left as a second (or third) row.
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   - test_8447_c3_ingest_door.py
   - test_9881_rename_reaches_the_record.py
@@ -5178,7 +5182,11 @@ surfaces:
   # (`tortoise/pack_hierarchy.py`, `tortoise/pack_registry.py`) match no
   # `SOURCE_PATTERNS` row and fall through to the `core` fallback; hermetic —
   # manifest YAML plus the two modules, no DB, no graph, no network.
-  - test_pack_hierarchy_11001.py
+  # (#11001: this file is ALSO registered above, beside the pack suites. Removed
+  # here — #11210, #11211 and #11222 each registered it independently while repairing
+  # the same `main` drift, so `origin/main` `eee753b48` carried three rows and
+  # `--integrity` reds on the duplicate. The `core` row beside the pack suites is
+  # the survivor; NOT a removal of the registration.)
   # #9068: the #5475 pack-approval-set residuals MEASURED — a :Pipeline row,
   # a journal-less fold, and the DECLARED offline re-typing. Registered beside
   # the pack tests it reads (`pack_state.graph_kind_namespaces` /
