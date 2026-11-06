@@ -339,9 +339,8 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
     echo "       (b) instead of (a) when the prefix holds two files — to free prefixes that"
     echo "       sort AFTER $REMOTE_MAX;"
     echo "    2. resolve each OUT OF ORDER version above (never applied -> forward migration;"
-    echo "       already applied but unrecorded -> supabase migration repair --linked"
-    echo "       --status applied <version> --yes — OWNER ACTION, a lane must not run prod DDL"
-    echo "       or repair, #2240);"
+    echo "       already applied but unrecorded -> supabase migration repair --linked --status applied <version> --yes"
+    echo "       — OWNER ACTION, a lane must not run prod DDL or repair, #2240);"
     echo "    3. then apply via supabase-deploy dispatch."
   else
     echo "  Remediation: pure-prefix rename — move the operand(s) printed above to a free"

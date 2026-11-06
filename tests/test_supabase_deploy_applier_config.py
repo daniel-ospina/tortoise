@@ -189,6 +189,10 @@ _MUTATING_ROOTS = ("supabase db push", "supabase functions deploy", "supabase mi
 #: (measured), so it is refused separately. This is not claimed to be exhaustive — it is the set
 #: measured, plus a refusal of the mechanism.
 _CONTROL_OPERATOR = re.compile(r"[|&;]|\$\(|`")
+#: A literal-false gate on a mutating step is the fourth measured no-op: `if: false` skips the apply
+#: and the job still passes, because the dispatch step's implicit `success()` is satisfied.
+_FALSE_CONDITION = re.compile(r"\s*(?:\$\{\{\s*)?false\s*(?:\}\})?\s*")
+
 #: `trap … exit 0` on ERR/EXIT re-zeroes the status with no control operator to catch (measured, bug:
 #: `set -e; trap 'exit 0' ERR; false` exits 0). A mutating step has no legitimate use for it.
 _EXIT_ZERO_TRAP = re.compile(r"trap\s+[^;\n]*exit\s+0")
@@ -198,10 +202,16 @@ _EXIT_ZERO_TRAP = re.compile(r"trap\s+[^;\n]*exit\s+0")
 #: ⛔ The TARGET class excludes `| & ; ( ) < >`: a greedy `\S+` swallowed an operator glued to the
 #: target, so `>/dev/null||true`, `2>/dev/null|tee l` and `2>/dev/null||true` passed GREEN — the
 #: swallow this whole check exists to catch (measured, review cycle 9).
-_REDIRECTION = re.compile(r"(?:\d?>&\d?|&>>?|\d?>>?\s*[^\s|&;()<>]+)")
+_REDIRECTION = re.compile(r"(?:\d?>&\d?|&>>?|>?\|[^\s|&;()<>]+|\d?>>?\s*[^\s|&;()<>]+)")
+#: A quoted span is DATA. `--memo "a&b"` is an argument, not a control operator, and scanning it
+#: as shell false-RED a correct body (measured, review cycle 10). Blanked before the operator scan.
+_QUOTED = re.compile(r"\"[^\"]*\"|'[^']*'")
 
 #: `set +e` / `set +o errexit` re-enable "keep going after a failure" — the errexit axis.
-_ERRETIT_DISABLED = re.compile(r"(?m)^\s*set\s+\+[eo]\b")
+#: ⛔ The flag is not always `e` ALONE: `set +eu` and `set +ex` disable errexit in a combined word, and
+#: `\+[eo]\b` cannot match `+e` followed by `u` (no word boundary), so both passed GREEN with a
+#: trailing `exit 0` (measured, review cycle 10). The class now allows surrounding flags.
+_ERRETIT_DISABLED = re.compile(r"(?m)^\s*set\s+\+[A-Za-z]*[eo][A-Za-z]*\b")
 
 
 def _run_body(step: dict) -> str:
@@ -346,10 +356,13 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"applies nothing, and it exits 0 — a deploy that looks successful and left the schema "
             f"unapplied (#10896, #3627)"
         )
-        assert re.search(r"--(linked|remote)\b", cmd), (
-            f"the production apply must name its REMOTE target ({cmd!r}): without `--linked`/"
-            f"`--remote`, `db push` addresses the local stack (127.0.0.1:54322) and applies nothing "
-            f"to production (#10896)"
+        assert "--linked" in cmd, (
+            f"the production apply must pass `--linked` ({cmd!r}). On the pinned v2 CLI `db push`'s "
+            f"target flags are `--db-url` / `--linked` / `--local` — `--remote` is a SUBCOMMAND "
+            f"(`db remote`), not a `db push` flag, so accepting it here would bless a command that "
+            f"dies at flag parse. Without a target flag the default has moved to the LOCAL stack "
+            f"(127.0.0.1:54322) on the v3 line, which is exactly the migration this pin defers "
+            f"(#10896, #11100)"
         )
         if "--linked" in cmd:
             assert any(
@@ -386,6 +399,15 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"would stop blocking, and the app flip at the end of the same job would fire over an "
             f"unapplied schema (#10896, #3627)"
         )
+        # YAML parses a bare `false` into the BOOLEAN, so compare the value too — `str(False)` is
+        # "False" and a lowercase-only regex missed it (measured, review cycle 10).
+        assert step.get("if") is not False and not _FALSE_CONDITION.fullmatch(
+            str(step.get("if") or "").lower()
+        ), (
+            f"{where} is gated `if: false`: the step never runs, the job is GREEN, and "
+            f"`Dispatch deploy-hosted` (#3627) fires over an unapplied schema. No legitimate "
+            f"condition on a mutating step is the constant `false` (measured, review cycle 10)"
+        )
         assert not step.get("shell"), (
             f"{where} overrides `shell:`. A mutating step must run under the runner's default "
             f"`bash -e`; `shell: bash -c 'exit 0'` takes the body as `$0` and exits 0 without running "
@@ -413,7 +435,7 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"control operator to catch (`set -e; trap 'exit 0' ERR; false` exits 0 — measured), so "
             f"the co-move dispatch fires over an unapplied schema (#10896, #3627)"
         )
-        operator = _CONTROL_OPERATOR.search(_REDIRECTION.sub(" ", body))
+        operator = _CONTROL_OPERATOR.search(_REDIRECTION.sub(" ", _QUOTED.sub('""', body)))
         assert operator is None, (
             f"{where} composes its apply with the shell control operator {operator.group(0)!r}: "
             f"that is how a failed apply is turned into a green one — `|| true`, `|| exit 0`, "
