@@ -3610,28 +3610,53 @@ _UNLANDED_STATUS_CUES = (
 )
 
 
+#: The clause separators the unlanded-status detector stops at. A cue is only
+#: about `issue` when it and the issue name sit in the SAME clause; a cue one
+#: clause away is about that clause's own subject.
+#:
+#: ⛔ `|` is here because the real site is a TABLE ROW (`CHANGELOG:55`), and a
+#: cell boundary is a clause boundary for exactly the same reason a `;` is.
+_UNLANDED_CLAUSE_BOUNDARY = re.compile(r"[.,;:()|\u2014\u2013]")
+
+
 def _lines_claiming_unlanded(text: str, issue: str) -> list[str]:
-    r"""The lines that NAME `issue` and call it unlanded — bound to the issue, not to the file.
+    r"""The lines that NAME `issue` and call it unlanded — bound to the issue's CLAUSE.
 
-    ⛔ BOUND, because the CHANGELOG legitimately records genuinely-open items and
-    the phrase *"still open"* about a DIFFERENT issue is the record working. What
-    may not happen is a LANDED change recorded as pending: `#10852` merged as
-    `ba87797c4`, so *"still-open"* of it is false wherever it appears.
+    ⛔ BOUND TWICE, and both bindings are load-bearing:
 
-    The trade is stated rather than hidden, the same way `_RETIRED_SUMMARY_BLUR`'s
-    is: the cue set is a SPELLING set, so a third spelling (*"awaiting"*,
-    *"unmerged"*) would evade it — a fail-OPEN residual, filed with the rest of
-    this file's. It cannot over-block, because the claim it refuses can never be
-    true of a merged PR: the only cost of the exact set is a false NEGATIVE, and
-    the accept cases below pin that the corrected wording is not among them.
+      1. to the ISSUE — the CHANGELOG legitimately records genuinely-open items,
+         and *"still open"* about a DIFFERENT issue is the record working. What
+         may not happen is a LANDED change recorded as pending: `#10852` merged
+         as `ba87797c4`, so *"still-open"* of it is false wherever it appears.
+      2. to that issue's own CLAUSE — because binding to the LINE alone
+         over-blocks, measured: `CHANGELOG:55`'s stated purpose is an open ruling
+         (*"**needs a ruling (V2)**"* … *"part of this V2 ruling"*) AND it names
+         `#10852` three times, so appending the TRUE sentence *"The V2 ruling is
+         still open"* to that row refused it — a false red on a docs-only PR,
+         reported against a line that states `#10852` merged. The cue is now
+         sought in the clause that carries the issue, never merely on the line.
+
+    The residual is stated rather than hidden, the same way
+    `_RETIRED_SUMMARY_BLUR`'s is, and it runs the OTHER way from a false red:
+
+      * the cue set is a SPELLING set, so *"awaiting"* / *"unmerged"* evade it;
+      * and a clause that INTERRUPTS itself around the issue (*"`#10852` — the
+        follow-up — is still open"*) puts the cue in a neighbouring clause, so
+        the bound form ACCEPTS it. That is a fail-OPEN residual, declared here
+        and pinned as such below, chosen because the alternative — reading the
+        whole line — reds on truthful prose in the one row this PR edits, and a
+        pin that reds on a correct sentence is a spelling lock, not a guard.
     """
-    lowered = text.lower()
-    return [
-        line
-        for line in lowered.splitlines()
-        if issue.lower() in line
-        and any(cue in line for cue in _UNLANDED_STATUS_CUES)
-    ]
+    needle = issue.lower()
+    offenders = []
+    for line in text.lower().splitlines():
+        if needle not in line:
+            continue
+        for clause in _UNLANDED_CLAUSE_BOUNDARY.split(line):
+            if needle in clause and any(c in clause for c in _UNLANDED_STATUS_CUES):
+                offenders.append(line)
+                break
+    return offenders
 
 
 def test_the_CHANGELOG_calls_the_LANDED_topic_lexicon_landed():
@@ -3670,10 +3695,14 @@ def test_the_CHANGELOG_calls_the_LANDED_topic_lexicon_landed():
         f"beside a document that says \"is\" is the two-answers defect this PR "
         f"exists to close, one file over. State the landed fact (and name the "
         f"merge) and keep any genuinely-open work on its own issue")
-    #: NON-VACUITY, both directions. The refuse list is the wording MEASURED at
-    #: `b328e65db` plus two re-spellings; the accept list is the correction and
-    #: two re-wordings of it, so a future loosening of the cue set cannot quietly
-    #: start refusing the sentence this pin requires.
+    #: NON-VACUITY, all three directions. The refuse list is the wording MEASURED
+    #: at `b328e65db` plus two re-spellings; the accept list is the correction and
+    #: two re-wordings of it, PLUS the two same-LINE-but-not-same-CLAUSE shapes
+    #: that a line-scoped detector got WRONG (measured at `27f9a2517`'s review:
+    #: appending the true sentence *"The V2 ruling is still open"* to the real
+    #: `CHANGELOG:55` row — whose stated purpose IS an open ruling, and which names
+    #: `#10852` three times — reddened this pin on a docs-only PR). Each direction
+    #: reds here rather than on a prose edit.
     for _refused in (
         "| §9.4 source summary vector | — | `#10852` is the still-open follow-up "
         "that makes an episodic `:Source.summary` a topic lexicon |",
@@ -3694,11 +3723,33 @@ def test_the_CHANGELOG_calls_the_LANDED_topic_lexicon_landed():
         "…`#10852` (merged `ba87797c4`, 2026-11-06) makes an episodic "
         "`:Source.summary` a topic lexicon…",
         "…see `#10852`, which covers the episodic `:Source.summary` lexicon…",
+        #: ⛔ THE OVER-BLOCK CONTROL (`27f9a2517`'s review, P3). The clause that
+        #: carries the cue here is about the V2 RULING, not about `#10852` — and
+        #: `CHANGELOG:55` is exactly this shape, so a line-scoped detector reds on
+        #: the row this PR edits the moment someone records the open ruling there.
+        "| §9.4 source summary vector | — | the V2 ruling is still open; refs "
+        "`#10000`, `#10978`, `#10852` |",
+        "`#10852` merged; the V2 ruling for document `:Source` vectors is still "
+        "open",
     ):
         assert not _lines_claiming_unlanded(_accepted, "`#10852`"), (
             f"the unlanded detector REFUSED a landed statement {_accepted!r} — "
             f"that is the correction this pin requires, and refusing it is a "
             f"false red on the record the CHANGELOG actually carries")
+    #: ⛔ THE DECLARED FAIL-OPEN RESIDUAL, pinned so it is visible rather than
+    #: discovered: a clause that INTERRUPTS itself around the issue (`#10852` — the
+    #: follow-up — is still open) puts the cue in a neighbouring clause, so the
+    #: clause-bound detector ACCEPTS a genuinely-unlanded statement. It is accepted
+    #: deliberately: the alternative (reading the whole line) reds on truthful prose
+    #: in the one row this PR edits, and a false red on correct docs is the defect
+    #: this file's guards were rewritten to remove. If this assertion ever fails,
+    #: the detector got STRICTER — which is fine, but then say so here.
+    assert not _lines_claiming_unlanded(
+        "`#10852` — the follow-up — is still open", "`#10852`"), (
+        "the clause-bound detector now reaches ACROSS a dash to find its cue, so "
+        "the declared fail-open residual recorded here has been closed — good, "
+        "but this control pins the DECLARED behaviour and must be moved to the "
+        "refuse list in the same commit")
     #: …and the SAME cue about a DIFFERENT issue is untouched: the binding to
     #: `#10852` is what keeps this pin from policing the record's genuinely-open
     #: rows, which are most of the file.
