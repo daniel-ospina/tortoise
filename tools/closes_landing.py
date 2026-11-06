@@ -2372,7 +2372,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                        # the term (a PASS arm blanks every indented line — round 30's choice).
                        and not (prev_prose and rest.strip()
                                 and container is prev_container
-                                and _quote_depth(prefix) >= prev_quote_depth
+                                and _quote_depth(prefix) == prev_quote_depth
                                 and (container is None
                                      or rest_indent <= container.rest_col + _MAX_FENCE_INDENT))
                        and (container is None
