@@ -449,6 +449,57 @@ class TestAMitigatesTargetIsPartOfTheEdge:
             f"second edge (and its target IMPL) is lost: {mitigates}")
         assert store.pending() == []
 
+    def test_the_drain_identity_folds_what_pass_2_emits(self, tmp_path):
+        """⛔ Review round 5 (P2): the identity must fold what pass 2 FOLDS.
+
+        Two ways the drain's twin goes unrecognised, both measured: a re-emitted
+        edge spelled in a different CASE resolves to the same point ids, and two
+        MITIGATES whose targets differ only by the DECLARED `op_type` are one edge
+        once pass 2 coerces every target to `IMPL`. Either one emitted the same
+        edge twice, and `reconcile_payload` counts both as `new`.
+        """
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        points = [{"content": c, "pointKind": "statement"} for c in
+                  ("the budget is 40k", "gamma claim", "delta claim")]
+        held = {"entities": [], "events": [], "chain_notes": [],
+                "link_before_create": [], "points": points, "operators": [
+                    {"src": _REF.lower(), "dst": "the budget is 40k",
+                     "op_type": "IMPL"}]}
+        v2.execute_embed(held, {}, session_id="s1", hold_store=store)
+        assert len(store.pending()) == 1, store.summary()
+
+        # run 2 re-emits the SAME edge in another case, and the lookup resolves.
+        again = {**held, "operators": [
+            {"src": _REF.upper(), "dst": "the budget is 40k", "op_type": "impl"}]}
+        second = v2.execute_embed(again, _search(True), session_id="s2",
+                                  hold_store=store)
+        assert len(second["payload"]["operators"]) == 1, (
+            "the drained edge and the run's own re-emission were emitted as TWO "
+            f"operators: {second['payload']['operators']}")
+
+        # ...and two MITIGATES whose targets differ only by declared op_type are
+        # ONE edge once pass 2 coerces every target to IMPL.
+        store2 = hold.HoldStore(tmp_path / "hold2.jsonl")
+        both = {"entities": [], "events": [], "chain_notes": [],
+                "link_before_create": [], "points": points, "operators": [
+                    {"src": _REF, "dst": "gamma claim", "op_type": "MITIGATES",
+                     "target": {"src": "gamma claim", "dst": "delta claim",
+                                "op_type": "IMPL"}},
+                    {"src": _REF, "dst": "gamma claim", "op_type": "MITIGATES",
+                     "target": {"src": "gamma claim", "dst": "delta claim",
+                                "op_type": "NAND"}},
+                ]}
+        v2.execute_embed(both, {}, session_id="s3", hold_store=store2)
+        third = v2.execute_embed(
+            {"entities": [], "events": [], "chain_notes": [],
+             "link_before_create": [], "points": points, "operators": []},
+            _search(True), session_id="s4", hold_store=store2)
+        deduped = [o for o in third["payload"]["operators"]
+                   if o["op_type"] == "MITIGATES"]
+        assert len(deduped) == 1, (
+            "one MITIGATES was emitted twice because the declared target "
+            f"op_type was part of the drain identity: {deduped}")
+
 
 class TestTheAggregateHoldSentenceIsTrue:
     def test_a_store_that_cannot_write_is_not_reported_as_carried(self):

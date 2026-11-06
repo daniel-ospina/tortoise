@@ -9993,10 +9993,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     _run_ops = list(embed_list.get("operators", []) or [])
 
     def _op_identity(o: object) -> tuple:
-        # the store's own `operator_identity`: a MITIGATES' TARGET is part of the
-        # edge identity — on (src,dst,op_type) alone two MITIGATES on ONE pair
-        # collapsed and the second edge (plus its target IMPL) was dropped silently.
-        return _identity_hold.operator_identity(o)
+        # ⛔ The identity pass 2 EMITS on (`identity_hold.drain_identity`): _norm
+        # endpoints, op_type upper, a MITIGATES' target PAIR — NOT the store's
+        # `operator_identity`, whose case-preserving form missed its own twin.
+        return _identity_hold.drain_identity(o)
 
     # ⛔ And deduplicated AMONG THEMSELVES, not only against the run's own
     # operators (#10997 review round 4, P2). One operator whose `src` AND `dst`
@@ -10010,7 +10010,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # write itself idempotent, so this was census/budget inflation, not a
     # duplicate node.
     _run_op_ids = {_op_identity(o) for o in _run_ops}
-    _dropped_ids: set[tuple[str, str, str]] = set()
+    _dropped_ids: set[tuple] = set()
     _all_ops = list(_run_ops)
     for _held_op in _held_operators:
         _oid = _op_identity(_held_op)

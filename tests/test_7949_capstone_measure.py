@@ -4635,6 +4635,14 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("11603", "except Exception as e:  # noqa: BLE001, RUF100"),
             ("11606", '"(fail-open)"], {}'),
         )),
+        # ⛔ AND THE PROBE'S OWN COPY (#10997 review round 5, P2): the same range
+        # is baked into `_IDLE_CITES["vet"]`, i.e. into the cause a future run
+        # PRINTS to a reader — and it sat on a line the neighbouring row does not
+        # scope to, so a move would ship a stale number in machine-emitted prose.
+        ("probes/capstone_measure.py", "on its fail-open path", (
+            ("11603", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("11606", '"(fail-open)"], {}'),
+        )),
         ("docs/00_index.md", "refuses a value-free point at", (
             ("5168", "if not _carries_value(content, quote):"),
             ("5169", "return None"),

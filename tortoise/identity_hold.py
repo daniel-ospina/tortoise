@@ -204,6 +204,41 @@ def operator_identity(op: object) -> tuple[str, str, str, str]:
     )
 
 
+def drain_identity(op: object) -> tuple[str, str, str, str]:
+    """The identity the DRAIN dedupes a re-emitted edge on — pass 2's own.
+
+    ⛔ It is NOT `operator_identity` (#10997 review round 5, P2). That one is the
+    STORE's identity: whitespace-collapsed, case preserved, and carrying the
+    target's DECLARED `op_type`. The drain compares a restored edge against the
+    operator the run re-emitted, so it has to fold exactly what pass 2 folds or
+    it fails to recognise its own twin and emits it twice:
+
+    * endpoints are case-folded (the operator pass resolves through
+      `extractor_v2._norm`), so a re-emission spelled in a different case is the
+      SAME edge — `operator_identity` keeps them apart, and both reached
+      `payload_operators` byte-identical after resolution;
+    * the target's declared `op_type` is NOT part of it, because pass 2 coerces
+      every MITIGATES target to `IMPL` — two MITIGATES differing only there are
+      the same edge in the payload.
+
+    The target's endpoint PAIR still belongs in the identity: two MITIGATES on
+    one (src, dst) that attack different edges are two edges, and collapsing them
+    dropped the second plus its materialised target IMPL with no warning.
+    """
+    if not isinstance(op, dict):
+        return ("", "", "", "")
+    target = op.get("target") or op.get("target_edge") or {}
+    if not isinstance(target, dict):
+        target = {}
+
+    def _fold(value: object) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    return (_fold(op.get("src")), _fold(op.get("dst")),
+            str(op.get("op_type", "") or "").upper(),
+            f"{_fold(target.get('src'))}\0{_fold(target.get('dst'))}")
+
+
 def operators_of(rec: dict[str, Any]) -> list[dict[str, Any]]:
     """Every operator a held record carries, legacy-singular included.
 
