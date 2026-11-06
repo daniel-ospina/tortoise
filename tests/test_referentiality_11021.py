@@ -1163,7 +1163,8 @@ def test_an_EVENT_whose_only_carrier_is_a_slot_is_held_and_its_slot_stripped():
     routed = route_mentions(copy.deepcopy(el), "")
     stats = routed["mention_stats"]
     assert stats["hold_abandoned_no_claim"] == 0, (
-        "an event slot reference IS a claim to record the mention on")
+        "an event slot reference IS a carrier, so the hold is not abandoned — "
+        "it simply cannot carry the DM1 record (see mention_unrecorded_surfaces)")
     assert "it" not in {e["name"] for e in routed["entities"]}
     assert not (routed["events"][0].get("slots") or {}).get("subject"), (
         f"the event's dangling slot survived: {routed['events'][0].get('slots')}")
