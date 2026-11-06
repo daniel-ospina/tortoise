@@ -1209,6 +1209,15 @@ def test_the_mention_record_is_payload_only_and_says_so():
     assert "mentions" not in inspect.getsource(hosted_api.create_point), (
         "create_point now writes `mentions`, so the payload-only deferral is "
         "over — see #11239 and turn this row into a persistence assertion")
+    # ⛔ THE DOOR THE v2 PAYLOAD ACTUALLY USES. `extract_session_v2` POSTs its
+    # payload to /v1/sessions/commit, which writes points through
+    # `hosted_api._execute_commit_writes` → `sdk.create_point(...)`, NOT through
+    # the single-point route pinned above. Measured (review at `5da3575b7a`, P3):
+    # adding `mentions=` to that call left every row green, and the docstring
+    # cannot see the boundary move on the payload's own path.
+    assert "mentions" not in inspect.getsource(hosted_api._execute_commit_writes), (
+        "the commit route now writes `mentions`: the payload-only deferral is "
+        "over — see #11239 and turn this row into a persistence assertion")
     assert "11239" in (Mention.__doc__ or ""), (
         "Mention's docstring no longer names the slice that owns persistence, so "
         "the model reads as graph state")
@@ -1229,10 +1238,13 @@ def test_a_mention_only_response_is_verified_by_the_last_builder():
     mention-only response ships `span_source: "quote"` on offsets nothing supports:
     the exact provenance forgery `de036f2e` closed for the `entities[]` path.
 
-    Measured before this row existed: reverting ONLY the `route_mentions` half left
-    the suite green (81 passed) while shipping
-    `span_source='quote' span_start=0 span_end=5` for a quote that does not contain
-    the surface."""
+    ⚠️ WHAT THIS ROW ACTUALLY PINS (corrected at `5da3575b7a`, P3): the LAST DOOR,
+    not `route_mentions`' span half. `_clamped_mention` verifies the span too, so
+    reverting the `route_mentions` early-return fix leaves THIS row green — measured
+    (mutant A: 2 failed / 85 passed, and neither red is this row). Its sibling
+    `test_a_mention_only_response_is_deduped_like_any_other` is what reds for that
+    half. `route_mentions`' container half is pinned by
+    `test_a_mention_only_response_is_HELD_at_the_predicate_and_stripped`."""
     el = _embed_list("config/ci-surfaces.yml")
     el["mentions"] = [{
         "surface": "the admin-merge rail",
@@ -1414,3 +1426,74 @@ def test_the_evidence_surface_does_not_carry_an_unverified_span(monkeypatch):
     assert records[0]["span_source"] == "model", (
         "the evidence surface shipped an address whose declared provenance names "
         f"a text it does not index: {records[0]!r}")
+
+
+# ── the channel's decision has to be ENACTED, not just written ─────────────
+# The three rows above prove the RECORD is clamped. None of them proves the
+# surface is HELD: `hold` is a decision, and every consumer of it
+# (`_strip_reference_sets`, the operator prune, `by_rule`, `mention_held`, the
+# record loop) keys on `held_surfaces`. Arming `hold` without adding to
+# `held_surfaces` is a decision nothing reads — measured: deleting that arm left
+# this whole file GREEN (87 passed), because the clamp lives downstream at the
+# last door and the channel record loop.
+
+def test_a_mention_only_response_is_HELD_at_the_predicate_and_stripped():
+    """⛔ The PREDICATE, not a downstream filter: the model said "this phrase is
+    not a node", the cue was re-run on that surface and AGREED, so the hold is
+    the selection's own decision. If it is only written to `hold`, the surface
+    stays in `about_entities` (`validate_payload_dict`: "about_entities reference
+    unknown entities" — Layer-1 rejects the session), no `mention_held` reaches
+    the union pass, and `held_surfaces` reports 0 while a record names the cue.
+
+    Mutating the arm to `pass` reddens this row and nothing else in the file."""
+    el = _embed_list("it")
+    el["mentions"] = [{"surface": "it",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "it", "rule_id": ref.RULE_PRONOUN}]
+    del el["entities"]                      # the mention-only response
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 1, (
+        "the channel decided a hold and reported none held: "
+        f"{held['mention_stats']!r}")
+    assert held["points"][0]["about_entities"] == [], (
+        "the held surface is still named by the claim — Layer-1 rejects that")
+    assert held["mention_held"] == [{"surface": "it",
+                                     "rule_id": ref.RULE_PRONOUN}], (
+        f"the decision was not carried to the union pass: {held.get('mention_held')!r}")
+
+    payload, _ = _mint(el)
+    verdict, _parsed = validate_payload_dict(payload)
+    assert verdict.ok is True, (
+        f"the channel-only payload broke Layer-1: {verdict.errors}")
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"]
+
+    # …and the carry is what stops pass 2 minting it once an entity reappears
+    back = copy.deepcopy(held)
+    back["entities"] = [{"name": "it", "kind": "core:other"}]
+    twice = route_mentions(back, "")
+    assert "it" not in {e.get("name") for e in twice["entities"]}, (
+        "the carried channel hold did not survive the union pass: the phantom "
+        "node #11021 exists to delete came back")
+
+
+# ── the clamp must not manufacture a label it cannot check ────────────────
+
+def test_a_narrative_address_is_not_demoted_when_no_haystack_was_supplied():
+    """⛔ NO HAYSTACK is not a FAILED verification (review at `5da3575b7a`, P2).
+    `execute_embed`'s `story_arc` defaults to `""`, so any caller that omits it —
+    every test, and any seam — passed an empty haystack, `_mention_span` returned
+    `None`, and a genuinely cue-derived `narrative` address was relabelled
+    `"model"`: a consumer that resolves the span per `span_source` was told the
+    model invented offsets the cue had derived. Measured: the same held list
+    through `execute_embed(..., story_arc=story)` said `narrative`, without it
+    `model`."""
+    from tortoise.extractor_v2 import _clamped_mention
+
+    entry = {"surface": "it", "claim_ref": "c", "quote": "no pronoun here",
+             "span_source": "narrative", "span_start": 6, "span_end": 8}
+    assert _clamped_mention(dict(entry), narrative="")["span_source"] == "narrative", (
+        "an absent haystack demoted a cue-derived address to `model`")
+    # …and the guard is not a blanket amnesty: a haystack that DISAGREES still
+    # demotes, which is the whole point of the verification.
+    assert _clamped_mention(dict(entry), narrative="alpha it beta")["span_source"] == "narrative"
+    assert _clamped_mention(dict(entry), narrative="no pronoun here or there")["span_source"] == "model"

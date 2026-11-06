@@ -575,17 +575,35 @@ class Mention(BaseModel):
     ``claim_id``**, because the point carrying the property IS the claim.
 
     ⛔ **PAYLOAD-ONLY TODAY — this is not graph state, and must not be read as it.**
-    The record reaches two in-memory surfaces and then STOPS: the extraction payload
-    (``points[].mentions``, built by ``extractor_v2._mentions_for_claim``) and the
-    run's own evidence block (``result["mentions"]["records"]``, assembled in
-    ``extract_session_v2``; both go through ``extractor_v2._clamped_mention``, so
-    neither can carry an unverified ``rule_id`` or span). Neither declared write
-    door carries it. ``hosted_api``'s ``create_point`` calls enumerate their
-    properties — ``CreatePointRequest`` has no ``mentions`` field at all — and the
-    SDK capture whitelist
-    (``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s response-parity surface) holds
-    ``quote/when/search_keys/source_turn_id/span_start/span_end`` only. So a
-    capture's ``stats["mentions_recorded"]`` counts records the write DISCARDS.
+    The record reaches **four** in-memory surfaces and then STOPS, and they are not
+    interchangeable (review at `5da3575b7a`, P2):
+
+    - the extraction payload — ``points[].mentions``, built by
+      ``extractor_v2._mentions_for_claim``;
+    - the run's evidence block — ``result["mentions"]["records"]``, assembled in
+      ``extract_session_v2``;
+    - **the producer channel** — ``result["embed_list"]["mentions"]`` and
+      ``result["s2_embed"]["mentions"]``. ``s2_embed`` is S2's raw list by
+      definition and ``embed_list`` is ``route_mentions``' own output, so on the
+      fail-open path (``route_mentions`` raised) BOTH carry the model's entry
+      verbatim — an unverified ``rule_id`` and span included. Those two are
+      inputs, never a claim about what was held.
+
+    Only the first two go through ``extractor_v2._clamped_mention``, which
+    re-derives ``rule_id`` against ``referentiality.judge`` and ships a declared
+    ``quote``/``narrative`` address only where that text still puts the surface at
+    those offsets. ``span_source`` ``model`` is not a verification: it is the
+    honest label for "the model asserted these bytes" (an unverified offset pair
+    survives under it — it is demoted, never droppped).
+
+    No declared write door carries it, and there are **three** of them: the REST
+    ``CreatePointRequest`` (no ``mentions`` field at all), the SDK capture
+    whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s response-parity
+    surface: ``quote/when/search_keys/source_turn_id/span_start/span_end`` only),
+    and — the door the v2 payload actually uses —
+    ``hosted_api._execute_commit_writes``, which enumerates its ``sdk.create_point``
+    kwargs (``#11239``). So a capture's ``stats["mentions_recorded"]`` counts
+    records the write DISCARDS.
     DM1's home on the Point is declared but unfulfilled; persisting it (a
     flat/scalar projection, or an explicit session-evidence-only ruling) is
     **#11239**, deliberately not this slice. ``tests/test_referentiality_11021.py

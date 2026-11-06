@@ -10343,13 +10343,17 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
        ``mention_carrier_is_event``. The surface is still HELD (never minted) —
        only the DM1 record is missing, and that gap is the persistence slice's.
 
-    ⛔ **The record stops at the PAYLOAD, and that is stated, not implied.** Both
-    declared write doors — ``hosted_api.create_point``'s enumerated props and the
-    SDK capture whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``) — drop
-    ``mentions``, so an armed run's ``stats["mentions_recorded"]`` counts records
-    the WRITE discards. That is #11239's slice (DM1's home on the Point is
-    declared and unfulfilled): the count is an extraction measurement, never a
-    claim that the graph holds it.
+    ⛔ **The record stops at the PAYLOAD, and that is stated, not implied.** All
+    THREE write doors drop ``mentions`` — the REST ``CreatePointRequest``, the SDK
+    capture whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``), and
+    ``hosted_api._execute_commit_writes``, the ``sdk.create_point`` call the v2
+    payload actually rides — so an armed run's ``stats["mentions_recorded"]``
+    counts records the WRITE discards. That is #11239's slice (DM1's home on the
+    Point is declared and unfulfilled): the count is an extraction measurement,
+    never a claim that the graph holds it. There are also FOUR keys carrying a
+    record, and the two producer lists (``result["embed_list"]["mentions"]``,
+    ``result["s2_embed"]["mentions"]``) are the model's RAW channel on the
+    fail-open path — see ``commit_schema.Mention``'s docstring.
 
     **Held on the SURFACE, not on a live reference — because a hold removes the
     reference it was decided from.** An earlier draft required
@@ -10456,6 +10460,17 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     # (pass 1 kept a surface the model also mentioned, pass 2 removed it and
     # stripped it from every claim — a 70-reference must-keep referent deleted on
     # a model-supplied entry; #11021 review cycle 2, P1).
+    #: Surfaces the CHANNEL proved (the cue was re-run and agreed with the
+    #: model's rule on THAT surface). ⛔ Collected here and folded into
+    #: `held_surfaces` below, because writing `hold` alone is a decision nothing
+    #: enacts: `_strip_reference_sets`, the operator prune, `by_rule`,
+    #: `mention_held` and the record loop ALL key on `held_surfaces`. A
+    #: channel-only response (the shape this fix exists for) therefore kept the
+    #: surface in `about_entities` — `validate_payload_dict` returned
+    #: `about_entities reference unknown entities` — carried no `mention_held`
+    #: into the union pass, and reported `held_surfaces: 0` while writing a
+    #: record that named the cue rule (review at `5da3575b7a`, P1).
+    channel_held: set[str] = set()
     for m in channel:
         if not isinstance(m, dict):
             continue
@@ -10471,7 +10486,8 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         if (verdict is not None and verdict[0] == recorded_rule
                 and recorded_rule != _referentiality.RULE_CHANNEL):
             hold.setdefault(surface, (recorded_rule,
-                                      "already recorded on a claim"))
+                                      "recorded on the mention channel"))
+            channel_held.add(surface)
 
     def _claims_naming(surface: str) -> list[dict]:
         """Every carrier of this surface — claims AND events, in BOTH reference
@@ -10519,7 +10535,9 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     #: re-emits it — a bare `about_entities` reference S4 added would otherwise
     #: survive the union pass and 422 the whole session at Layer-1, downstream of
     #: the caller's fail-open guard (review cycle 4, P1-a).
-    held_surfaces: set[str] = set(carried_holds)
+    # ⛔ Seeded from the CARRIED decisions AND the channel's own: a surface the
+    # channel proved is held exactly like one an entity candidate proved.
+    held_surfaces: set[str] = set(carried_holds) | channel_held
     #: a surface whose hold was REFUSED (no claim to record it against). It is
     #: NOT held: it neither strips aboutness nor prunes operators nor counts as
     #: held, so `held_surfaces` says exactly what its name says.
@@ -11220,8 +11238,15 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
     elif declared in ("quote", "narrative") and "span_start" in record:
         haystack = (str(record.get("quote") or "") if declared == "quote"
                     else str(narrative or ""))
-        if _mention_span(haystack, surface) != (record["span_start"],
-                                               record["span_end"]):
+        # ⛔ NO HAYSTACK is not a failed verification. `execute_embed`'s
+        # `story_arc` defaults to `""`, so a caller that omits it (every test and
+        # any seam) would otherwise DEMOTE a genuinely cue-derived `narrative`
+        # address to `"model"` — telling a consumer that reads the span per
+        # `span_source` that the cue invented offsets it actually derived (review
+        # at `5da3575b7a`, P2). `"quote"` needs no such guard: the record's own
+        # quote is always present when it carries a quote-space address.
+        if haystack and _mention_span(haystack, surface) != (record["span_start"],
+                                                            record["span_end"]):
             record["span_source"] = "model"
     return record
 
@@ -11821,6 +11846,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ⛔ FLAG-GATED: unarmed, the list still holds the model's raw `mentions[]`
     # entries (route_mentions returns the list unchanged), and publishing those as
     # "the mentions held" claimed a hold that never ran (review cycle 4, P3).
+    # ⛔ FOUR keys carry a record, not two — and only the two PUBLISHED ones go
+    # through the clamp. `result["s2_embed"]` is S2's raw list by definition
+    # (`:11908`, "S2 raw (pre-S4) — owner loop") and `result["embed_list"]` is
+    # `route_mentions`' output, which on the fail-open path is the model's raw
+    # channel; both are the PRODUCER channel, and a reader who believed "two
+    # surfaces" would not look at them (review at `5da3575b7a`, P2).
     # ⛔ `records` is the surface plan R1's arming measurement READS, so it is
     # clamped by the SAME function the payload uses (`_clamped_mention`), not
     # copied from the merged list: on the fail-open path the entries there are
@@ -11828,13 +11859,25 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # reported a cue rule and a span address that nothing had verified (review at
     # `11039b1bd8`, P2 — the payload said `referentiality.channel`, this surface
     # said `referentiality.pronoun`, for one run).
+    # ⛔ `reason` is NOT a `commit_schema.Mention` field, so `_clamped_mention`
+    # drops it — but this surface published it before this clamp existed, and it
+    # is the only prose saying WHY a surface was held. Restored here, on this
+    # surface only (review at `5da3575b7a`, P3).
+    _evidence_records: list[dict] = []
+    if _referentiality.enabled():
+        for _m in complete_list.get("mentions") or []:
+            if not isinstance(_m, dict):
+                continue
+            _r = _clamped_mention(_m, narrative=story)
+            if _r is None:
+                continue
+            _reason = str(_m.get("reason") or "").strip()
+            if _reason:
+                _r["reason"] = _reason      # see the note above: THIS surface only
+            _evidence_records.append(_r)
     result["mentions"] = {
         "stats": mention_s2_stats,
-        "records": ([r for r in (_clamped_mention(m, narrative=story)
-                                 for m in (complete_list.get("mentions") or [])
-                                 if isinstance(m, dict))
-                     if r is not None]
-                    if _referentiality.enabled() else []),
+        "records": _evidence_records,
     }
     # #1933 (E2E-4 negative a): the chain-completeness evidence surface +
     # human-readable warnings (additive keys — the S5-failure branch above
