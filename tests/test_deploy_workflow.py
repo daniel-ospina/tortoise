@@ -4452,43 +4452,1096 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #     — reads 5 lines` — the same FALSE claim with one word paraphrased away —
     #     PASSED. A fail-open is the worse direction, so the key is `before #9548`.
     #
-    # One predicate, four executed controls below: RED on the bare equivalence and on
-    # the paraphrase, GREEN on a positive correction, on a denial-shaped correction,
-    # and on the three truthful shapes the r17 review measured.
-    def _refuses_before_9548(sentence: str) -> bool:
-        """True when the sentence NAMES "before #9548" and neither denies nor corrects it.
+    # ⛔ THE STRUCTURE IS DEFAULT-DENY, AND THAT IS THE POINT (#11191 review, A1, P1).
+    # Eight heads in one afternoon flipped this predicate between two shapes: keyed on
+    # TOKENS (a fail-open — mentioning the true sha bought a pass) and keyed on DISTANCE
+    # (a false RED — a truthful attribution longer than 60 characters was refused). Both
+    # were the same mistake: the question is not "which token is present" or "which is
+    # nearer" — it is WHICH TREE THE PHRASE REFERS TO, and whether the sentence says so.
+    # So a phrase-bearing sentence now passes ONLY if the phrase's own claim is
+    # CORRECTED — the true tree is its referent or its predicate, or a closed correction
+    # idiom applies — and a phrase with NO named referent at all is the defect (that is
+    # the accidental form a lane writes when it pastes a fresh figure: "the census
+    # returns 3 lines immediately before #9548"). `main` refused that family; the
+    # previous head accepted it, which is why this arm exists.
+    # ⛔ AND EVERY ARM THAT CAN BE SATISFIED BY A DIFFERENT PROPOSITION IS CLAUSE-SCOPED
+    # (#11191 review, A2, P1). The correction arms used to `return` for the WHOLE
+    # sentence, so the §A8 cell's own correct denial exempted a false equivalence
+    # injected beside it, and the `;`-closed denial was still open on `, and` and `—`.
+    # A denial is a claim about the clause it sits in; `;`, `.`, `—`/`–` and the
+    # coordinating `, and|but` end it. A plain comma does NOT — apposition ("10 lines at
+    # `047c91f7a`, the tree immediately before #9548") depends on the comma.
+    #: The tree that IS immediately before #9548 (the arming commit `785bb2b59`'s
+    #: parent), and the tree the defect falsely calls it.
+    _TRUE_TREE = "047c91f7a"
+    _FALSE_TREE = "ff6379eb2"
+    _PHRASE_RE = r"\bbefore\s+#9548"
+    #: A figure spelled in WORDS. Hoisted here so every arm that asks "is a figure stated"
+    #: asks it the same way — the earlier-clause guard below missed "three lines" while the
+    #: no-referent arm already refused it (#11191 review r4, P2 — measured).
+    #: ⛔ AND THE SPELLING IS NOT A CLOSED LIST THAT STOPS AT `twelve` (#11191 review,
+    #: F4, P2, re-confirmed live — MEASURED). Every figure above twelve (and `zero`)
+    #: walked past the list, so a phrase-dated figure with no referent was graded
+    #: "attributes nothing" one word past the guard:
+    #:   "The census returns thirteen lines immediately before #9548." -> ACCEPTED
+    #:   "The census returns zero lines immediately before #9548."     -> ACCEPTED
+    #: which is the A1 fail-open the comment above claims to close. The list is now the
+    #: FIGURE GRAMMAR a writer actually uses (0-99 compounds, hundreds, thousands,
+    #: dozens) rather than the first twelve, because a closed list that runs out is a
+    #: fail-open whose boundary is whatever number the next writer picks. Hoisting is
+    #: also what makes the widening reach BOTH arms that ask this question — this one and
+    #: the earlier-clause guard below — so they cannot disagree about what a figure is.
+    _FIG_ONES = r"one|two|three|four|five|six|seven|eight|nine"
+    _FIG_TEENS = (
+        r"ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+        r"eighteen|nineteen"
+    )
+    _FIG_TENS = r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
+    _WORD_FIGURE = (
+        r"\b(?:(?:" + _FIG_ONES + r")|(?:" + _FIG_TEENS + r")"
+        r"|(?:" + _FIG_TENS + r")(?:[-\s](?:" + _FIG_ONES + r"))?"
+        r"|hundred|thousand|dozen|dozens|hundreds|thousands|zero)\b"
+    )
+    #: ⛔ …AND A FIGURE IS A FIGURE ONLY IN A FIGURE POSITION (#11191 review, F4 — the
+    #: mirror direction, MEASURED). The grammar alone fires on any occurrence, so an
+    #: ordinary pointer was REFUSED: "Re-read the census note before #9548 ONE more
+    #: time." dates no figure at all, and `origin/main` accepts it. A word becomes a
+    #: FIGURE when a counted noun binds it or a counting verb takes it as its object;
+    #: `one more time` is neither. Both callers (the no-referent arm and the post-phrase
+    #: referent's `_between` guard) ask it THIS way.
+    _WORD_FIGURE_IN_POSITION = re.compile(
+        r"\b(?:returns?|returned|reads?|states?|stated|gives?|gave|shows?|"
+        r"showed|sees?|saw|yields?|yielded|reports?|reported|counts?|counted|"
+        r"has|have|holds?|held)\s+"
+        r"(?:about\s+|exactly\s+|only\s+|still\s+|just\s+|the\s+same\s+)?"
+        + _WORD_FIGURE
+        + r"|"
+        + _WORD_FIGURE
+        + r"\s+(?:lines?|rows?|entries|matches|occurrences|hits|results)\b",
+        re.I,
+    )
+    #: ⛔ A FIGURE MAY BE DENIED, AND A DENIAL IS NOT A READING (#11191 review r10, P2 —
+    #: MEASURED at `870951926e0`, `origin/main` ACCEPTS both):
+    #:   "The census was not one line immediately before #9548."            -> REFUSED
+    #:   "It was NOT empty immediately before #9548 — and it was not one line either."
+    #:                                                                       -> REFUSED
+    #: The spelled figure `one` in a FIGURE POSITION bound to a negated copula, so the
+    #: no-referent arm read a DENIAL of the reading as the reading itself: a truthful
+    #: sentence in the §A8 cell ("… it was not one line either") reds, which is the
+    #: false-RED class this file names as the way a pin gets deleted. The cue is the
+    #: negator DIRECTLY in front of the figure (one optional adverb allowed) — a closed
+    #: set, never a window, precisely so an assertion cannot borrow it: "no fewer than 3
+    #: lines" and "not more than 3 lines" keep their figure and stay refused, because
+    #: `fewer` / `more than` are not in the admitted set.
+    _DENIED_FIGURE = re.compile(
+        r"\b(?:not|never|nor)\s+(?:even\s+|just\s+)?$"
+        r"|\b\w+n['\u2019]t\s+(?:even\s+|just\s+)?$",
+        re.I,
+    )
+    #: …and the FRAMES THAT REVERSE IT: a denial of the denial is an assertion, so a
+    #: negator inside one may not buy the admission above (#11191 review r10, P2).
+    _POLARITY_FRAME = re.compile(
+        r"\b(?:nothing|no\s+one|nobody)\s+(?:suggests?|says?|shows?|indicates?)\b"
+        r"|\bit\s+is\s+(?:not\s+the\s+case|not\s+true|false|not\s+correct|untrue)\s+that\b"
+        r"|\bit\s+would\s+be\s+(?:wrong|false)\s+to\s+say\b"
+        r"|\bno\s+(?:evidence|indication|basis|data)\b"
+        r"|\bno\s+reason\s+to\s+(?:think|believe|say|suggest|conclude)\b",
+        re.I,
+    )
 
-        Kept as a predicate (not inlined) so the arm can be exercised in BOTH
-        directions on fixed strings — the red direction (the bare equivalence and its
-        paraphrase) and the green one (a correction naming the true pre-#9548 tree,
-        in both its positive and its denial phrasing). A predicate that is only ever
-        run against the artefact it guards can go vacuous without anything reding;
-        these controls are what make its greenness a measurement.
+    def _states_a_figure(text: str) -> bool:
+        """True when `text` STATES a figure (a reading dated to the phrase).
+
+        A figure the sentence DENIES — "it was not one line either" — is a correction of
+        the reading, not a reading, so it does not date anything to the phrase. Only a
+        negator directly in front of the figure counts as a denial (see `_DENIED_FIGURE`),
+        and only while no frame in front of it REVERSES the polarity (#11191 review r10,
+        P2 — MEASURED: "Nothing suggests the census was not 3 lines immediately before
+        #9548" and "It is not the case that the census was not 3 lines …" both ASSERT the
+        retirement and both borrowed the admission as first written). The frame check
+        reuses `_DOUBT_FRAME`, the arm this predicate already applies to the sha channel,
+        so the two channels cannot disagree about what a doubt frame is.
         """
-        if not re.search(r"\bbefore\s+#9548", sentence, re.I):
-            return False
-        if "047c91f7a" in sentence:
-            return False  # names the TRUE pre-#9548 tree — a correction, not the defect
-        # ADJACENT-anchored, not "anywhere in the sentence": the PRE-FIX cell carries
-        # "not empty and not one" AFTER the false clause, which is exactly what
-        # satisfied a whole-sentence test (the trap the manifest denial is windowed for).
-        return not re.search(r"\bnot\b[^.]{0,60}?before\s+#9548", sentence, re.I)
+        for _figure in list(re.finditer(_WORD_FIGURE_IN_POSITION, text)) + list(
+            re.finditer(r"\d", text)
+        ):
+            _cue_start = max(0, _figure.start() - 16)
+            _cue = _DENIED_FIGURE.search(text[_cue_start : _figure.start()])
+            if not _cue:
+                return True
+            _frame_end = _cue_start + _cue.start()
+            _frame = text[max(0, _frame_end - 60) : _frame_end]
+            if _DOUBT_FRAME.search(_frame) or _POLARITY_FRAME.search(_frame):
+                return True
+        return False
 
-    # ... and a cell that still NAMES the phrase must DENY the equivalence. Deleting
-    # the clause is equally correct, so both shapes pass — what may not pass is the
-    # bare equivalence, which is what the cell carried before this pin existed. The
-    # denial must sit ADJACENT to the phrase (a `not` anywhere in a 900-word cell
-    # sentence is not the correction — measured: the pre-fix sentence contains
-    # "not empty and not one" AFTER the false clause and satisfied a whole-sentence
-    # test, so this arm is windowed like the manifest denial above).
+    #: The clause boundaries, for every arm that must not cross one (#11191 review, A2).
+    #: ⛔ THE CONJUNCTION IS THE BOUNDARY, NOT THE COMMA (#11191 review A2's class,
+    #: measured on THIS head). With `,\s+and` only, the comma-less spelling was still one
+    #: clause, so "`ff6379eb2` is not the arming commit and the tree before #9548 is
+    #: `ff6379eb2`." was denied by its first clause and the false equivalence in the
+    #: second passed — and the same hole disabled the pin on the §A8 cell itself, because
+    #: the reviewer's injection ("… the arming commit's parent) and `ff6379eb2` is the
+    #: tree before #9548") lands in the SAME clause as the cell's own "**NOT** the tree
+    #: immediately before #9548", so `_DENIED_IN_PREDICATE` exempted the injected claim.
+    #: The comma is optional because writers omit it; the referent rule reads the whole
+    #: sentence, so cutting here cannot detach a phrase from the tree it attributes to.
+    _CLAUSE_DELIM = re.compile(
+        r"[.;\u2014\u2013]|,?\s*\b(?:and|but|while|whereas|yet)\b", re.I
+    )
+    #: A parenthetical, dash-delimited or comma-delimited INCISE — an ASIDE, i.e. a
+    #: different proposition from the one the phrase is predicated of. BLANKED before the
+    #: REFERENT is read, so naming the true tree inside an aside cannot become the referent
+    #: of a claim whose subject is `ff6379eb2` (#11191 review r4, P2 — measured ACCEPTED at
+    #: `46c01c324e8`: "`ff6379eb2` is (as `047c91f7a` shows) the tree before #9548").
+    #: Length-preserving on purpose — the caller's offsets are positions in `norm`.
+    _INCISE = re.compile(
+        r"\([^()]*\)"
+        # ⛔ BOTH DASHES — `_CLAUSE_DELIM` recognises `–` as a clause boundary, so a lane
+        # that writes the EN dash re-admitted the defect one character from the arm's own
+        # control (#11191 review r4, P1 — measured).
+        r"|[\u2014\u2013][^\u2014\u2013]*[\u2014\u2013]"
+        # …and the SPACED HYPHEN-MINUS is the ASCII rendering of the same aside (#11191
+        # review r5, P2 — measured): `_CLAUSE_DELIM` does not split on it, so without this
+        # the clause tier sees the aside's sha as the nearest referent.
+        r"|\s-\s[^-]{1,200}?\s-\s"
+        r"|, [^,;.]{1,200}, ",
+        re.I,
+    )
+    #: Any SHA-SHAPED token is a candidate REFERENT — not only the two trees, because
+    #: naming a THIRD tree as the pre-#9548 tree is the same defect (#11191 review, A1):
+    #: "`c5cbcbb4f` is the tree immediately before #9548." was REFUSED by `main` and
+    #: ACCEPTED at the previous head, whose referent rule could only see the two shas it
+    #: knew. A letter AND a digit are required so a digits-only token (a migration
+    #: version such as `20261102000002`, a date) is never read as a tree.
+    _SHA_LIKE_RE = re.compile(
+        r"\b(?=[0-9a-f]{7,40}\b)(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", re.I
+    )
+    #: A CLOSED set of post-phrase refutations — the sentence quotes the false claim and
+    #: then calls it false. Closed on purpose: a bare `not` after the phrase is how a
+    #: FIGURE gets corrected ("the census there returns 5, not 10"), so admitting that
+    #: would be a fail-open; `"<phrase> is false|wrong|…"` can only be a refutation.
+    #: ⛔ And it is matched AT the phrase occurrence (`match`, not a sentence-wide
+    #: search), so a refutation attached to one phrase cannot exempt another in the same
+    #: sentence (#11191 review, A2).
+    #: ⛔ AND CLOSED IN THE OTHER HALF TOO — the subject must be a DEMONSTRATIVE or a
+    #: named claim word, and the span may not be a free-floating clause (#11191 review r3,
+    #: P1 — measured). An open subject window re-admitted the exact claim this arm exists
+    #: to refuse, because ANY `<subject> is wrong` within reach bought the exemption:
+    #:   "`ff6379eb2` is the tree before #9548, but the 5-line figure is wrong."  -> PASS
+    #:   "`ff6379eb2` is the tree before #9548; the census prose is wrong."       -> PASS
+    #: A correction of a FIGURE or of the PROSE is not a refutation of the EQUIVALENCE,
+    #: and both of those shapes are controls below.
+    _REFUTED_AFTER = re.compile(
+        _PHRASE_RE
+        + r"\s*(?:[,;:\u2014\u2013-]\s*)?(?:(?:and|but)\s+)?"
+        + r"(?:(?:which|that|this)\s+|the\s+(?:claim|reading|statement)\s+)?"
+        # ⛔ AND IT MAY NOT TAKE AN OBJECT (#11191 review r4, P1 — measured):
+        # "…before #9548; the cell is wrong about the month" and "…, which is wrong
+        # about the month it shipped in" PASSED, because `wrong` was enough. A refutation
+        # of the EQUIVALENCE ends its claim there; one that goes on to qualify WHAT is
+        # wrong is refuting something else.
+        + r"(?:is|was)\s+(?:false|wrong|mistaken|incorrect)\b"
+        # ⛔ …AND THE SAME QUALIFIER SET AS THE NEXT-CLAUSE ARM (#11191 review r4, P3 —
+        # measured): "wrong WITH RESPECT TO the count" / "wrong REGARDING the count" is
+        # a refutation of the FIGURE, and this arm is reached FIRST for a `;`-joined
+        # refutation, so leaving the prepositional synonyms out of ONE of the two arms
+        # leaves the class open (extending only the next-clause arm changed nothing).
+        + r"(?!\s+(?:about|on|in|for|at|as\s+to|regarding|with\s+respect\s+to|"
+        r"concerning|as\s+regards|in\s+respect\s+of)\b)",
+        re.I,
+    )
+    #: …and the same refutation carried into the NEXT clause by a DEMONSTRATIVE — "The
+    #: idea that `ff6379eb2` is the tree before #9548 — that is wrong". Without this arm
+    #: clause-scoping reds the natural refutation (#11191 review, A2); with an OPEN
+    #: subject it would re-admit "…, and the 5-line figure is wrong" — so the subject is
+    #: the closed demonstrative set and nothing else.
+    #: ⛔ AND IT MAY NOT TAKE AN OBJECT EITHER — the guard `_REFUTED_AFTER` already
+    #: carries (#11191 review, P1, re-confirmed live — MEASURED). Moving the same
+    #: predicate one clause ahead LOST the guard, so a refutation of something else
+    #: bought the exemption one clause later:
+    #:   "`ff6379eb2` is the tree before #9548 — this is wrong about the month it
+    #:    shipped in."  ->  `_REFUTED_AFTER` rejects it, `_REFUTED_NEXT_CLAUSE` matched
+    #: `origin/main` refuses that sentence; the previous head ACCEPTED it. A refutation
+    #: of the EQUIVALENCE ends its claim there; one that goes on to qualify WHAT is wrong
+    #: is refuting something else, whichever clause it sits in.
+    _REFUTED_NEXT_CLAUSE = re.compile(
+        r"\A\W*(?:(?:and|but)\s+)?(?:that|this|which)\s+(?:is|was)\s+"
+        # ⛔ …AND THE OBJECT GUARD APPLIES HERE TOO (#11191 review r4, P1 — measured
+        # ACCEPTED at `46c01c324e8`): "`ff6379eb2` is the tree before #9548; this is wrong
+        # ON THE CENSUS COUNT" refutes the FIGURE, not the predication, and this arm
+        # exempted the equivalence it sits beside. `_REFUTED_AFTER` already carries this
+        # exact qualifier guard, so without it here that arm is the one open door in the
+        # set — and a control below pins it.
+        r"(?:false|wrong|mistaken|incorrect)\b"
+        r"(?!\s+(?:about|on|in|for|at|as\s+to|regarding|with\s+respect\s+to|"
+        r"concerning|as\s+regards|in\s+respect\s+of)\b)",
+        re.I,
+    )
+    #: The COMPLEMENT names the false sha as NOT the tree — "the tree before #9548 is
+    #: `047c91f7a`, NOT `ff6379eb2`". This is the fixer's most natural correction, and the
+    #: symmetric arm below would otherwise refuse it (#11191 review r4, P1).
+    _NOT_FALSE_SHA = re.compile(
+r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE), re.I
+    )
+    #: The denial tokens a correction can carry BETWEEN the sha and the phrase. `isn't`,
+    #: `cannot be` and `rather than` were dropped at `d4ba94671e` along with their
+    #: controls, and the whole truthful family went RED (#11191 review, A3, P2 —
+    #: measured). One alternation, so a spelling cannot be "temporarily" lost again.
+    #: ⛔ …AND A BARE `not` MAY NOT TAKE A SHA-SHAPED TOKEN AS ITS OBJECT (#11191
+    #: review, P1 — MEASURED, and it is the same ordering defect this PR already fixed
+    #: for the refutation arms, surviving one arm further along). `<sha>, not <sha>, is
+    #: the tree before #9548` is a CLEFT: the `not` negates the APPOSITIVE COMPLEMENT,
+    #: not the predication, so the sentence ASSERTS the equivalence about whichever sha
+    #: FRONTS it. Unguarded, the bare alternative decided both directions by surface form
+    #: and the phrase's owner became the appositive:
+    #:   "`ff6379eb2`, not `047c91f7a`, is the tree before #9548."  -> ACCEPTED (defect)
+    #:   "`047c91f7a`, not `ff6379eb2`, is the tree before #9548."  -> ACCEPTED (truth)
+    #: One arm, two OPPOSITE propositions — which is why a one-directional probe cannot
+    #: see it. Guarded, a bare `not` can only deny a PREDICATE ("not the tree …"); the
+    #: cleft is decided explicitly by `_CLEFT_PREDICATION` below, on the sha that is the
+    #: SUBJECT. The `is not` / `isn't` / `cannot be` / `rather than` alternatives are
+    #: untouched — each already binds the negator to a copula, which IS the predication.
+    #: ⛔ …AND THE OTHER TWO COMPLEMENT MARKERS TAKE THE SAME GUARD (#11191 review r7,
+    #: P1 — MEASURED). `rather than` and `instead of` were left unguarded, so a
+    #: sha-shaped OBJECT after them was read as a denial of the predication and the cleft
+    #: arm below was unreachable — the claim accepted, and its truth twin accepted too:
+    #:   "`ff6379eb2` rather than `047c91f7a`, is the tree before #9548."   -> ACCEPTED
+    #:   "`ff6379eb2` instead of `047c91f7a`, the tree before #9548, reads 5 lines."
+    #:                                                                        -> ACCEPTED
+    #: A sha-shaped object is the APPENDIX in every one of these spellings, so all three
+    #: markers must leave it to `_CLEFT_PREDICATION`, which reads the FRONTED sha. The
+    #: genuine denials (`rather than the tree before #9548`, `rather than the false sha`)
+    #: are untouched: their object is a phrase or the FALSE tree, neither true-sha-shaped.
+    #: ⛔ THE OBJECT MAY BE DECORATED (#11191 review r8, P2 — MEASURED). A bare `\s*`
+    #: lookahead only saw the UNDECORATED spelling, so a markdown link or a parenthetical
+    #: restored the very fail-open this guard closes — measured ACCEPTED at r7:
+    #:   "`ff6379eb2` rather than [`047c91f7a`](https://x/047c91f7a), is the tree before
+    #:    #9548."                                                          -> ACCEPTED
+    #:   "`ff6379eb2` rather than (see `047c91f7a`), is the tree before #9548." -> ACCEPTED
+    #: A `\b` cannot hold after `[` or `(`, so the sha set is preceded by the same closed
+    #: decoration set the appositive arm admits, not by raw whitespace.
+    #: A parenthesised span, blanked wherever an arm must not read an aside as prose
+    #: (mirrors `_INCISE`, which does the same for dash asides).
+    _PAREN = re.compile(r"\([^)]*\)")
+    _SHA_OBJECT = (
+        # ⛔ THE DECORATION IS A CLOSED WORD SET, UP TO THREE WORDS (#11191 review r9, P2 —
+        # MEASURED): a fixed list of four spellings ran out at "the tree sha `X`" /
+        # "its parent `X`" / "the true tree `X`", each of which restored the fail-open.
+        # A closed VOCABULARY with a length bound admits the decorations writers actually
+        # use and still cannot absorb a predicate (the words are nouns/determiners, not
+        # verbs).
+        r"[\s(\[]*(?:(?:see|namely|the|its|their|a|an|true|last|only|same|own|parent|"
+        r"tree|commit|sha|revision|tip|merge|arming)\s+){0,3}[`*_]{0,3}"
+        + _SHA_LIKE_RE.pattern
+    )
+    _NEG = (
+        r"(?:(?:is|was|are|were)\s*(?:n't|\s+not\b)"
+        r"|(?:cannot|can\s*not|could\s*not|can't)\s+be"
+        r"|never|neither"
+        r"|(?:rather\s+than|instead\s+of)(?!" + _SHA_OBJECT + r")"
+        # ⛔ `not` IS A WORD, NOT A SUBSTRING (#11191 review r11, P2 — MEASURED):
+        # without the boundaries, "the `ff6379eb2` commit is NOTABLE as the tree before
+        # #9548" and "per the NOTE, is the tree before #9548" read as denials and a false
+        # equivalence passed — the closed negation SET was matching inside ordinary prose
+        # words, which is the opposite of closed.
+        r"|\bnot\b(?!\s*" + _SHA_LIKE_RE.pattern + r"))"
+    )
+    #: A DOUBT FRAME — the sentence denies DOUBT, not the claim (#11191 review r4, P2 —
+    #: measured ACCEPTED at `46c01c324e8`). "Nothing suggests X is not Y" ASSERTS X is Y,
+    #: and `_DENIED_BY_SHA` sees only the inner `is not` and reads it as the correction.
+    #: Closed set, and consulted only BEFORE the false sha, so a denial that carries its
+    #: frame AFTERWARDS ("… is not the tree before #9548, no doubt") is untouched.
+    _DOUBT_FRAME = re.compile(
+        # ⛔ ONLY A NEGATIVE-QUANTIFIER FRAME **WITH A NEGATIVE-POLARITY VERB** (#11191
+        # review r4/r5, P1/P2 — measured): "nothing suggests X is NOT Y" asserts X is Y,
+        # because the frame cancels the complement's negation. But "Nobody DOUBTS that X is
+        # not Y" is AFFIRMATIVE (it endorses the denial), and a quantifier-only set reded
+        # it — so the quantifier must take a suggestive verb, never `doubt`.
+        r"(?:\b(?:nothing|no\s+one|nobody|nowhere)\s+"
+        r"(?:suggests?|says?|shows?|indicates?|implies|establishes|has\s+shown)\b"
+        r"|\bno\s+(?:evidence|indication|basis|data)\b"
+        r"|\bno\s+reason\s+to\s+(?:think|believe|say|suggest|conclude)\b"
+        r"|\b(?:cannot|can't)\s+be\s+ruled\s+out\b)",
+        re.I,
+    )
+    #: A denial whose SUBJECT is a sha — "`ff6379eb2` is not the tree before #9548",
+    #: `isn't`, `cannot be`, `is an ancestor rather than`, or `is not what "before
+    #: #9548" means`. Required as an arm of its own because the generic adjacent denial
+    #: cannot see past `is not what …`. ⛔ Evaluated against the PHRASE'S CLAUSE only
+    #: (#11191 review, A2, P1 — measured): with the previous sentence-wide window,
+    #: `"ff6379eb2` is not the arming commit; the tree before #9548 is `ff6379eb2`."
+    #: passed, because the denial of one proposition exempted the assertion in the next.
+    _DENIED_BY_SHA = re.compile(
+        r"\b(?:047c91f7a|ff6379eb2)\b[^.;\u2014\u2013]{0,30}?" + _NEG
+        + r"[^.;\u2014\u2013]{0,40}?" + _PHRASE_RE,
+        re.I,
+    )
+    #: A denial IN THE PREDICATE POSITION: `not` must be followed directly by the
+    #: predicate ("**NOT** the tree immediately before #9548" — the real §A8 cell's own
+    #: phrasing). ⛔ This is deliberately NOT "a `not` somewhere in the previous 60
+    #: characters": that window also swallows "It is not disputed that `ff6379eb2` is
+    #: the tree before #9548", which ASSERTS the equivalence inside a denial of doubt —
+    #: a fail-open no control would notice.
+    _DENIED_IN_PREDICATE = re.compile(
+        r"\b(?:not|never)\b\s*(?:the\s+)?(?:tree\s+)?(?:immediately\s+)?"
+        + _PHRASE_RE,
+        re.I,
+    )
+    #: THE CLEFT — `<sha>, not <sha>, is the tree before #9548` (#11191 review, P1 —
+    #: MEASURED). A fronted appositive negation does NOT negate the predication: it
+    #: negates the APPENDIX, so the sha that FRONTS the sentence is the SUBJECT of the
+    #: claim. That makes the two spellings OPPOSITE propositions decided by the same
+    #: surface form, which is why the arm is written on the fronted sha and not on the
+    #: negator:
+    #:   "`ff6379eb2`, not `047c91f7a`, is the tree before #9548."  -> the CLAIM
+    #:   "`047c91f7a`, not `ff6379eb2`, is the tree before #9548."  -> the correction
+    #: ⛔ The fronted sha is compared as a PREFIX, like the referent rule, so a full
+    #: 40-hex subject is the same tree as its 9-char spelling. A THIRD tree fronted is
+    #: the A1 defect (an invented pre-#9548 tree), so only the TRUE tree may front it.
+    #: ⛔ AND THE COMMA IS OPTIONAL (#11191 review, F1 — MEASURED on this head): the
+    #: arm as first written required it, so the comma-less spelling of the same cleft was
+    #: still ACCEPTED while the comma form was refused —
+    #:   "`ff6379eb2` not `047c91f7a` is the tree before #9548."  ->  PASSED
+    #: — and an incise rule cannot see that form either (there is no aside to blank), so
+    #: nothing else in the predicate reaches it. Writers omit the comma; the arm reads the
+    #: FRONTED sha, which is the subject in both spellings.
+    #: ⛔ AND THE GAP IS THE CLAUSE, NOT A CHARACTER COUNT (#11191 review r8, P2 —
+    #: MEASURED): a DECORATED complement (a markdown link, "the tree <sha>") puts the
+    #: phrase 31+ characters after the marker, so the 30-char window silently skipped the
+    #: sentence and it fell through to the referent rule — the same fail-open, one spelling
+    #: further out:
+    #:   "`ff6379eb2` rather than (the census row's own measured value) `047c91f7a`, is
+    #:    the tree before #9548."                                       -> ACCEPTED at 30
+    #: ⛔ …AND A PARENTHESISED `and` MAY NOT CLOSE THE CLAUSE ON IT (#11191 review r9, P2 —
+    #: MEASURED): `_clause_containing` cuts at `, and`, so
+    #:   "`ff6379eb2` rather than `047c91f7a` (and the census at both trees), is the tree
+    #:    before #9548."                                                -> ACCEPTED
+    #: handed the arm a FRAGMENT with the fronted sha outside it. The caller therefore
+    #: searches from the last HARD delimiter (`.`, `;`, a dash), which is the unit the
+    #: subject lives in; the cap stays only as a runaway guard (400) because the
+    #: fronted-sha anchor is what bounds this arm.
+    _CLEFT_PREDICATION = re.compile(
+        r"\b([0-9a-f]{7,40})\b\s*,?\s*(?:not|rather\s+than|instead\s+of)\b"
+        r"(?:(?!,?\s*\b(?:and|but|while|whereas|yet)\b)[^.;\u2014\u2013]){0,400}?"
+        + _PHRASE_RE,
+        re.I,
+    )
+    #: ⛔ THE PHRASE PREDICATED OF A NAMED NON-TREE OBJECT (#11191 review r7, P1 —
+    #: MEASURED). Step 5 decides "attributes nothing" by looking for a FIGURE, so a wrong
+    #: tree named in PROSE carried no digit and passed:
+    #:   "The tree immediately before #9548 is the arming commit itself."   -> ACCEPTED
+    #:   "The last tree before #9548 is the arming commit's son."          -> ACCEPTED
+    #: The doc's own cell names the true pre-#9548 tree as *"`047c91f7a`, the arming
+    #: commit's parent"*, so dropping `'s parent` is the one-word decay this pin exists to
+    #: catch — and it is the same A1 class the numeral channel already reds. Closed on
+    #: purpose: the object must be a tree-shaped noun, and the PARENT relation is the only
+    #: exemption (see `_PREDICATE_NAMES_TRUE_TREE`), so "the arming commit itself" and
+    #: "the arming commit's son" stay refused.
+    #: ⛔ THE ADVERB SLOT IS A GRAMMAR, NOT THE LIST OF WORDS THE EARLIER ROUNDS HAPPENED
+    #: TO PROBE (#11191 review r10 residual 4, P2 — MEASURED). The closed set stopped at
+    #: nine words, so the claim walked past the arm one adverb beyond it:
+    #:   "…is, IN PRACTICE, the arming commit itself"        -> ACCEPTED
+    #:   "…is INDISPUTABLY the arming commit itself"          -> ACCEPTED
+    #:   "…is EFFECTIVELY the arming commit's son"            -> ACCEPTED
+    #: — the list-runs-out fail-open that the FIGURE set and the decoration set were
+    #: widened for, in the one slot where a writer has unbounded choice. An `-ly` adverb
+    #: is the PRODUCTIVE class in English, so it is admitted AS A CLASS; it cannot swallow
+    #: the object, because no `commit`/`tree`/`merge`/`sha` noun ends in `-ly`. `never` is
+    #: deliberately OUT: "is never the arming commit itself" DENIES the predication, which
+    #: is a correction this arm must not read as the claim.
+    _PREDICATE_ADVERB = (
+        r"(?:(?:[A-Za-z][A-Za-z-]*ly|still|now|later|also|already|actually|really|"
+        r"apparently|instead|then|even|indeed|only|just|again|always|nonetheless|"
+        r"nevertheless|however|therefore|thus|hence|rather|quite|too|"
+        r"in\s+fact|as\s+a\s+matter\s+of\s+fact|to\s+date)\b\s*){0,2}"
+    )
+    _PREDICATED_OBJECT = re.compile(
+        r"\s*(?:is|was|are|were|means|denotes|refers\s+to|stays?|stayed|remains?|"
+        r"remained|becomes?|became|continues?\s+to\s+be|continued\s+to\s+be)"
+        # ⛔ …AND A COMMA-DELIMITED ADVERBIAL SITS AS AN INCISE between the copula and
+        # the object ("is, in practice, the arming commit itself"), so a slot for it is
+        # required beside the one-word adverbs; a bounded comma incise cannot swallow the
+        # object, because it must CLOSE on a comma (#11191 review r10 residual 4).
+        r"\s*(?:,[^,.;\u2014\u2013]{1,40},\s*)?"
+        # ⛔ ONE ADVERB IS ADMISSIBLE (#11191 review r9, P1 — MEASURED): with the copula
+        # followed IMMEDIATELY by the object, "is STILL the arming commit itself" and
+        # "stayed the arming commit's son" were ACCEPTED — the closure claim was one word
+        # from failing open. Never an open `\w+` (that swallows the object itself); the
+        # productive `-ly` class above is the widening that does not.
+        + _PREDICATE_ADVERB
+        + r"(?:the\s+|a\s+|an\s+)?"
+        + r"(?:(?:arming|merge|revert|fix|feature|squash|base|parent)\s+)?"
+        + r"(?:commit|merge|tree|branch|sha|tip|subject|revision)\b",
+        re.I,
+    )
+    #: …and the EXEMPTION: a predication that goes on to name the TRUE tree by the
+    #: PARENT RELATION — "the arming commit's parent", "the parent commit of
+    #: `785bb2b59`". Naming the true tree is the correction, which is why this arm must
+    #: not refuse it (the false-RED direction this file names as the way a pin gets
+    #: deleted).
+    #: ⛔ THE RELATION IS NAMED BY THE WORD "parent", NOT BY A TRAILING SHA (#11191
+    #: review r8, P2 — MEASURED). Keying the `of …` spelling on "a sha follows `of`" made
+    #: the arm RELATION-BLIND, so every other relation bought the exemption:
+    #:   "The tree immediately before #9548 is the merge commit of `785bb2b59`."  -> ACCEPTED
+    #:   "The tree immediately before #9548 is the revert commit of `785bb2b59`." -> ACCEPTED
+    #: so the `of <sha>` form is admitted only when the PREDICATE already says "parent".
+    _PARENT_RELATION = re.compile(
+        r"^(?:['\u2019]s\s+parent\b|\s+of\s+(?:the\s+)?parent\b)", re.I
+    )
+    #: …and the `of <sha>` spelling, admissible ONLY behind a "parent" predicate.
+    _PARENT_OF_SHA = re.compile(
+        r"^\s+of\s+`?(?:785bb2b59|" + _TRUE_TREE + r")`?", re.I
+    )
+    #: A correction that RETIRES the attribution — "§A8 no longer calls `ff6379eb2` the
+    #: tree before #9548", "… does not call it …". Closed on purpose: the verb set is
+    #: attributive, so "It is not disputed that `ff6379eb2` is the tree before #9548"
+    #: (which ASSERTS the equivalence inside a denial of doubt) cannot use it.
+    _RETIRED_ATTRIBUTION = re.compile(
+        r"\b(?:(?:no\s+longer|never)\s+"
+        r"(?:calls|called|describes|described|names|named|states|stated|says|said|"
+        r"holds|held|treats|treated|reads|records|recorded)"
+        r"|(?:does|do|did)\s+not\s+(?:call|describe|name|state|say|hold|treat|read|record))\b"
+        r"[^.;\u2014\u2013]{0,30}?" + re.escape(_FALSE_TREE),
+        re.I,
+    )
+    #: A denial of the INFERENCE the claim is used to draw — "That `ff6379eb2` is the
+    #: tree before #9548 does not mean the census is 5". Closed verb set; returns with
+    #: its own control, because the previous head lost it and went RED on the shape.
+    #: ⛔ AND IT IS SUBJECT-BOUND (#11191 review, P1, re-confirmed live — MEASURED). A
+    #: clause-wide `search` for the cue fires on the ASSERTION, not on the quotation:
+    #:   "`ff6379eb2` is the tree before #9548, which does not mean the census is 5."
+    #: `origin/main` refuses that sentence; the previous head ACCEPTED it, because a
+    #: denial of the INFERENCE was read as a denial of the EQUIVALENCE. Every other
+    #: correction arm in this predicate is subject-bound for exactly this reason
+    #: (`_RETIRED_ATTRIBUTION`'s verb set, `_REFUTED_AFTER`'s demonstrative/claim-word
+    #: subject); this one was a blank cheque. The binding is the `that`-clause the arm was
+    #: written for: the claimed equivalence must be the SUBJECT of the denied inference.
+    _INFERENCE_DENIAL = re.compile(
+        r"\bthat\s+[^.;\u2014\u2013]{0,60}?"
+        + _PHRASE_RE
+        + r"[^.;\u2014\u2013]{0,40}?\b(?:does|do|did)\s+not\s+"
+        r"(?:mean|imply|establish|show|prove)\b",
+        re.I,
+    )
+    #: A CORRECTION VERB, admissible as a correction only when the clause also names the
+    #: TRUE tree — "the row that said … is now corrected to `047c91f7a`", "replaced with
+    #: `047c91f7a`", "is disproven by `047c91f7a`". Requiring the true tree is what
+    #: keeps the verb from buying a pass for a stale figure on its own.
+    _CORRECTION_VERB = re.compile(
+        r"\b(?:corrected|replaced|superseded|refuted|disproven|disproved|retracted|"
+        r"falsified)\b",
+        re.I,
+    )
+    #: The INVERTED form: "the tree (immediately) before #9548 IS `ff6379eb2`", and its
+    #: truthful twin (… IS `047c91f7a`, the most natural fix). `[^.;—–]` keeps the
+    #: predicate inside the clause — the copula may admit insertions ("the tree before
+    #: #9548 is, per the note, `ff6379eb2`" is the same claim) but not a new clause.
+    _INVERTED_FALSE = re.compile(
+        _PHRASE_RE
+        + r"\s*(?:is|was|means|denotes)\b[^.;\u2014\u2013]{0,40}?"
+        + re.escape(_FALSE_TREE),
+        re.I,
+    )
+    _INVERTED_TRUE = re.compile(
+        _PHRASE_RE
+        + r"\s*(?:is|was|means|denotes)\b[^.;\u2014\u2013]{0,40}?"
+        + re.escape(_TRUE_TREE),
+        re.I,
+    )
+    #: The false sha ADJACENT to the phrase, in either order — the claim, with no copula
+    #: required ("5 lines immediately before #9548 at `ff6379eb2`"). ⛔ `;` and `,` are
+    #: NOT in the separator class (#11191 review, A3, P2 — measured): with `;` in it, the
+    #: `;`-separated two-tree comparison "`047c91f7a` is the tree immediately before
+    #: #9548; `ff6379eb2` is the #9601 merge" was REFUSED while the adjacent comment
+    #: claimed it stayed green. The caller searches the phrase's CLAUSE, so a comparison
+    #: in the next clause is out of this arm's reach by construction.
+    _FALSE_SHA_ADJACENT = re.compile(
+        _PHRASE_RE
+        + r"(?:[\s`*_\u2014\u2013-]|\b(?:the|tree|at|of|is|was)\b){0,6}"
+        + re.escape(_FALSE_TREE)
+        + r"|"
+        + re.escape(_FALSE_TREE)
+        + r"(?:[\s`*_\u2014\u2013-]|\b(?:the|tree|at|of|is|was)\b){0,6}"
+        + _PHRASE_RE,
+        re.I,
+    )
+
+    def _normalise(sentence: str) -> str:
+        """Strip markdown emphasis/code ticks and collapse whitespace.
+
+        Emphasis is TYPOGRAPHY, not meaning, so it is removed before any claim is read.
+
+        ⛔ It is load-bearing for the INVERTED arm specifically, and that is measured,
+        not assumed: this doc bolds fragments as house style (the real §A8 row carries
+        `**NOT** the tree immediately before #9548`), and with this call reduced to a
+        whitespace collapse the control `"The tree immediately before #9548 is
+        `ff6379eb2`, not `047c91f7a`"` stops being refused — the backticks sit between
+        the copula and the sha. The ATTRIBUTIVE arm does not need it: it compares
+        which sha precedes the phrase, and asterisks around a copula change nothing
+        there (also measured — the emphasis controls stay green under that same
+        mutation, so the two arms are independently covered).
+        attributable prose. A markdown LINK TARGET is metadata, not prose (#11191 review
+        r8, P2 — MEASURED): a dotted URL carries a `.` that ends every clause class in this
+        predicate, and often a sha of its own — so `[`047c91f7a`](https://example.invalid/…)`
+        was read as a clause BOUNDARY, each arm saw a different sentence from the author's,
+        and the cleft arm went unreachable. Collapsing to the link's TEXT is the same rule
+        the emphasis strip already follows.
+        """
+        return re.sub(
+            r"\[([^\]]*)\]\([^)]*\)",
+            r"\1",
+            re.sub(
+                r"\s+", " ", sentence.replace("*", "").replace("_", "").replace("`", "")
+            ),
+        )
+
+    def _refuses_before_9548(sentence: str) -> bool:
+        """True when the sentence NAMES "before #9548" and does not correct it.
+
+        Kept as a predicate (not inlined) so every arm can be exercised in BOTH
+        directions on fixed strings — the red direction (the bare equivalence, its
+        paraphrase, a figure dated to the phrase with no tree named, a THIRD tree
+        named as the pre-#9548 tree, every shape that names the true sha while keeping
+        the false claim, and every correction that would have to cross a clause to
+        apply) and the green one (a correction naming the true pre-#9548 tree in its
+        positive, denial, comparison, refutation and true-tree-first phrasings). A
+        predicate that is only ever run against the artefact it guards can go vacuous
+        without anything reding; the control blocks are what make its greenness a
+        measurement.
+
+        ⛔ THREE STRUCTURAL DECISIONS, each measured by a review finding:
+
+        1. DEFAULT-DENY (A1, P1). A phrase-bearing sentence passes only when the
+           phrase's OWN CLAIM is corrected. Treating "no named referent" as "not this
+           defect" was the fail-open that let "The census returns 3 lines immediately
+           before #9548" — the accidental form of the r4 defect — pass at the previous
+           head while `main` refused 15 of 15 of that family.
+        2. CLAUSE-SCOPED CORRECTIONS (A2, P1). The correction arms used to return for
+           the whole sentence, so any correct denial anywhere exempted the false
+           equivalence — including the §A8 cell's own `**NOT** the tree immediately
+           before #9548`, which disabled the pin on the exact sentence it guards. A
+           denial is a claim about its own clause; `;`, `.`, `—`/`–` and `, and|but`
+           end it. Only the refutation arms may look one clause ahead, and only through
+           a demonstrative ("— that is wrong"), because that is the shape the
+           refutation of a quoted claim actually takes.
+        3. REFERENCE, NOT TOKENS OR DISTANCE (P2). The referent of the phrase is the
+           nearest sha written BEFORE it, either tree's name being equally readable;
+           the predicate position ("… IS <sha>") is read explicitly. A bare
+           `"047c91f7a" in sentence` exemption passed sentences that only MENTIONED the
+           true sha; a distance cutoff refused the sentence a fixer should write.
+        """
+
+        def _clause_containing(norm: str, pos: int) -> tuple[str, int]:
+            """The clause around `pos`, and its end offset — the unit a denial lives in."""
+            start = 0
+            for _delim in _CLAUSE_DELIM.finditer(norm):
+                if _delim.end() <= pos:
+                    start = _delim.end()
+                elif _delim.start() > pos:
+                    return norm[start : _delim.start()], _delim.start()
+            return norm[start:], len(norm)
+
+        def _clause_before_phrase(norm: str, pos: int) -> str:
+            """The part of the phrase's OWN clause that sits BEFORE it.
+
+            The clause boundary is `_clause_containing`'s — one definition of "clause" for
+            the whole predicate (#11191 r3).
+            """
+            start = 0
+            for _delim in _CLAUSE_DELIM.finditer(norm):
+                if _delim.end() <= pos:
+                    start = _delim.end()
+                elif _delim.start() >= pos:
+                    break
+            # ⛔ THE PHRASE ITSELF IS NOT "BEFORE" IT. Returning the clause up to its
+            # END (a first cut of this helper did) puts `#9548` — four digits — into the
+            # text the digit guard reads, so EVERY phrase-bearing clause looked like a
+            # figure dated to the phrase and every truthful attribution went RED.
+            return norm[start:pos]
+
+        def _sentence_tail(text: str) -> str:
+            """`text` cut at its first SENTENCE end, with abbreviations protected.
+
+            `_CLAUSE_DELIM` splits on `.`, so a clause ends INSIDE `i.e.`/`e.g.` — the one
+            idiom whose own abbreviation carries the delimiter. One definition of "the rest
+            of this sentence" for every arm that has to read past it (#11191 review r7/r8).
+            """
+            sentinel = "\ue000"
+            src = re.sub(
+                r"\b(i\.e|e\.g|viz|cf|vs)\.",
+                lambda _m: _m.group(1) + sentinel,
+                text,
+                flags=re.I,
+            )
+            return re.split(r"[;:\u2014\u2013]|\.(?=\s|$)", src, maxsplit=1)[0].replace(
+                sentinel, "."
+            )
+
+        def _sentence_tail_hard(text: str) -> str:
+            """`text` cut at its first SENTENCE-ENDING full stop, abbreviations protected.
+
+            `_sentence_tail` also cuts at `:` `;` and the dashes — right for "the rest of a
+            clause", wrong for "the rest of the claim": this doc writes its cells with em
+            dashes, so a tree named after one is still named (#11191 review r9, P1).
+
+            ⛔ AND IT DELIBERATELY STILL READS ACROSS `;`/`:` — DO NOT "fix" that by
+            cutting here (#11191 review r10 residual 2). The `;`-separated two-tree
+            comparison this file requires to stay green ("…is the arming commit's parent;
+            the #9601 merge is `ff6379eb2`") is refused by the CALLER's `_admits`, which
+            admits a sha in a `;`-clause that NAMES its own subject while still refusing
+            the clause that opens with the sha or with a demonstrative. Cutting the tail
+            at `;` would accept `"; `ff6379eb2` is the parent"` and `"; that is
+            `ff6379eb2`"`, which both assert the equivalence.
+            """
+            sentinel = "\ue000"
+            src = re.sub(
+                r"\b(i\.e|e\.g|viz|cf|vs)\.",
+                lambda _m: _m.group(1) + sentinel,
+                text,
+                flags=re.I,
+            )
+            return re.split(r"\.(?=\s|$)", src, maxsplit=1)[0].replace(sentinel, ".")
+
+        def _occurrence_span(norm: str, phrase: re.Match[str], clause: str, clause_end: int) -> str:
+            """The clause text that belongs to THIS phrase occurrence alone.
+
+            ⛔ A DENIAL BELONGS TO THE OCCURRENCE IT CORRECTS (#11191 review r11, P1 —
+            MEASURED). The per-occurrence loop above decides each phrase on its own, but
+            the denial arms were still handed the WHOLE clause — and a comma is not a
+            clause boundary (deliberately: that is what closes the A2 conjunction hole), so
+            the false equivalence SPLICED onto the artefact's own "**NOT** the tree
+            immediately before #9548" sat in the clause that carries the denial and was
+            exempted by it. Measured on the REAL §A8 row before this arm existed:
+              "…the arming commit's parent), `ff6379eb2` is the tree before #9548"  -> accepted
+            i.e. the pin was disabled on the cell it exists to guard by the cell's own
+            correction — the exact A2 class the contract's first rule declares ("every
+            phrase occurrence is decided on its own"), reached through the comma splice
+            the `and`-keyed fix does not cover. The span starts after the PREVIOUS
+            occurrence in the same clause, so a denial may exempt only the predication it
+            sits in front of, never a second one after a comma.
+            """
+            clause_start = clause_end - len(clause)
+            previous_end = clause_start
+            next_start = clause_end
+            for _other in re.finditer(_PHRASE_RE, norm[clause_start:clause_end], re.I):
+                _pos = clause_start + _other.start()
+                if _pos < phrase.start():
+                    previous_end = clause_start + _other.end()
+                elif _pos > phrase.start() and next_start == clause_end:
+                    next_start = _pos
+            # ⛔ BOTH SIDES (#11191 review r11, P1 — MEASURED): a left-only bound still hands the
+
+            # FIRST occurrence every denial written after it, so the mirror of the splice above
+            # passed — "`ff6379eb2` is the tree before #9548, **NOT** the tree immediately before
+            # #9548" was ACCEPTED, exempted by the SECOND occurrence's denial. The span ends at
+            # the next occurrence's start for the same reason it begins after the previous one's
+            # end: a correction belongs to the predication it sits beside.
+            return norm[previous_end:next_start]
+
+        def _is_corrected(norm: str, phrase: re.Match[str]) -> bool:
+            """True when THIS phrase occurrence's claim is corrected, denied or refuted."""
+            clause, clause_end = _clause_containing(norm, phrase.start())
+            own = _occurrence_span(norm, phrase, clause, clause_end)
+            # 1. A REFUTATION of the predication — "… is false|wrong|…", or a
+            #    demonstrative carrying it into the next clause ("— that is wrong").
+            if _REFUTED_AFTER.match(norm, phrase.start()):
+                return True
+            if _REFUTED_NEXT_CLAUSE.match(norm[clause_end:]):
+                return True
+            # 2. A DENIAL, in the phrase's own clause. Each arm is a CLOSED set: an open
+            #    "any `not` nearby" is how a denial of doubt came to excuse a sentence
+            #    that asserts the equivalence.
+            #    ⛔ AND A DOUBT FRAME IS NOT A DENIAL OF THE CLAIM (#11191 review r4, P2 —
+            #    measured): "nothing suggests `ff6379eb2` is NOT the tree before #9548"
+            #    asserts the equivalence, and the arm below would read that inner `is not`
+            #    as the correction. Checked FIRST, and only where the frame opens the
+            #    clause BEFORE the false sha.
+            _false_at = clause.lower().find(_FALSE_TREE)
+            if _false_at >= 0 and _DOUBT_FRAME.search(clause[: _false_at]):
+                return False
+            # ⛔ EVERY denial arm reads the OCCURRENCE span, not the clause: leaving
+            # `_DENIED_BY_SHA` clause-wide re-opened the same hole one arm over (#11191
+            # review r11, P1 — measured: the prepend splice was exempted by this arm while
+            # `_DENIED_IN_PREDICATE` had already been narrowed).
+            if _DENIED_BY_SHA.search(own):  # "`ff6379eb2` is not / isn't / cannot be"
+                return True
+            if _DENIED_IN_PREDICATE.search(own):  # "… NOT the tree before #9548"
+                return True
+            # 2b. THE CLEFT — `<sha>, not <sha>, is the tree before #9548` (#11191
+            #     review, P1 — MEASURED). It is decided BEFORE the complement arm, because
+            #     the complement arm (`_NOT_FALSE_SHA`) also fires on the appositive half
+            #     of a cleft and would answer `True` for a THIRD tree fronted
+            #     ("`c5cbcbb4f`, not `ff6379eb2`, is the tree before #9548" — the A1
+            #     invented-tree defect). A fronted appositive negation does not negate the
+            #     predication; the sha that FRONTS the sentence is its SUBJECT, so the
+            #     fronted sha, not the negator, decides:
+            #       `ff6379eb2`, not `047c91f7a`, is the tree before #9548  -> REFUSE
+            #       `047c91f7a`, not `ff6379eb2`, is the tree before #9548  -> accept
+            #     `_NEG`'s bare-`not` alternative is guarded against a sha-shaped object,
+            #     which is what leaves the cleft to THIS arm instead of being swallowed by
+            #     the generic denial one arm above. Both directions and the third-tree case
+            #     are pinned by controls: one arm producing opposite verdicts from the same
+            #     surface form is exactly the fail-open a single-direction probe cannot see.
+            # ⛔ FROM THE LAST HARD DELIMITER, not from `_clause_containing`'s clause
+            # (#11191 review r9, P2 — MEASURED): a parenthesised `and` inside the
+            # complement ends the clause and hands this arm a fragment whose FRONTED sha is
+            # outside it, so the cleft went unread and the referent rule accepted the claim.
+            _hard = max(
+                norm.rfind(";", 0, phrase.start()),
+                norm.rfind(".", 0, phrase.start()),
+                norm.rfind("\u2014", 0, phrase.start()),
+                norm.rfind("\u2013", 0, phrase.start()),
+            )
+            # ⛔ …AND A PARENTHESISED SPAN IS BLANKED FIRST (#11191 review r10, P1 —
+            # MEASURED). The conjunction bound above stops the gap at `, and` — which is
+            # what keeps a truthful later clause from being read as part of this claim —
+            # but an aside's `(and …)` is not a clause boundary, so the bound must not see
+            # it. Blanking the aside is the same rule `_INCISE` applies to a dash aside.
+            _gap_src = _PAREN.sub(lambda _m: " " * len(_m.group(0)), norm[_hard + 1 : phrase.end()])
+            _cleft = _CLEFT_PREDICATION.search(_gap_src)
+            if _cleft:
+                _fronted = _cleft.group(1).lower()
+                if not (_TRUE_TREE.startswith(_fronted) or _fronted.startswith(_TRUE_TREE)):
+                    return False
+                # ⛔ A TRUE-FRONTED CLEFT MAY NOT SHORT-CIRCUIT A FALSE SHA IN THE CLAUSE
+                # (#11191 review r10, P1 — MEASURED): a sentence can carry a correction of
+                # a DIFFERENT issue in its first clause and the §A8 defect in its second,
+                # and returning True on the first match masked the second:
+                #   "`047c91f7a` rather than `ff6379eb2` is the tree before #9601, and
+                #    `ff6379eb2` is the tree before #9548."              -> ACCEPTED
+                # Falling through lets step 3 (the adjacency arm) refuse it.
+                if not _FALSE_SHA_ADJACENT.search(clause):
+                    return True
+            if _NOT_FALSE_SHA.search(clause):  # "… is `047c91f7a`, not `ff6379eb2`"
+                return True
+            if _RETIRED_ATTRIBUTION.search(clause):  # "no longer calls it"
+                return True
+            if _INFERENCE_DENIAL.search(clause):  # "does not mean the census is 5"
+                return True
+            if _CORRECTION_VERB.search(clause) and re.search(_TRUE_TREE, clause, re.I):
+                return True  # "… is now corrected to `047c91f7a`"
+            # 3. THE CLAIM ITSELF — the false sha adjacent to the phrase, in either order,
+            #    with no copula required ("5 lines immediately before #9548 at
+            #    `ff6379eb2`" — the pre-fix row's own idiom). Checked BEFORE the referent
+            #    rule, because a sentence can name the true tree as the referent of one
+            #    clause and still assert the false equivalence in another. Clause-scoped,
+            #    so the `;`-separated two-tree comparison is out of its reach (#11191
+            #    review, A3, P2 — measured REFUSED while `;` sat in the separator class).
+            if _FALSE_SHA_ADJACENT.search(clause):
+                return False
+            # THE INVERTED PREDICATE names the false tree as the phrase's predicate —
+            # but only when the TRUE tree is not named before it in the same span
+            # (#11191 review r4, P1: with the wide window, "the tree immediately
+            # before #9548 is `047c91f7a`, not `ff6379eb2`" was refused — a false RED
+            # on the natural correction).
+            for _hit in _INVERTED_FALSE.finditer(clause):
+                _span = _hit.group(0)
+                if _TRUE_TREE not in _span[: _span.lower().index(_FALSE_TREE)]:
+                    return False
+            if _INVERTED_TRUE.search(clause):
+                return True  # "the tree before #9548 IS `047c91f7a`"
+            # 4. A REFERENT. The phrase refers to the nearest sha written before it — that
+            #    is what apposition and attribution mean in prose, with no distance
+            #    cutoff (a truthful attribution is not disqualified by being long).
+            #    ⛔ AN INCISE IS NOT A REFERENT (#11191 review r4, P2 — measured): an aside
+            #    names a different proposition, so the text inside one is BLANKED before
+            #    the referent is read. Without this, "`ff6379eb2` is (as `047c91f7a`
+            #    shows) the tree before #9548" took the aside's sha as the referent and
+            #    the claim passed. In the sentence the aside replaces spaces only, so the
+            #    offsets `phrase.start()` / `clause_end` still address `norm`.
+            _unincised = _INCISE.sub(lambda _m: " " * len(_m.group(0)), norm)
+            _own_before = _clause_before_phrase(norm, phrase.start())
+            _own_start = phrase.start() - len(_own_before)
+            # ⛔ THREE-TIER REFERENT, and the tiers are what make the aside rule safe
+            # (#11191 review r5, P1/P2 — each tier fixes a MEASURED false RED or false
+            # PASS the previous two-tier rule produced):
+            #   1. the phrase's OWN CLAUSE, OUTSIDE any aside — the subject the clause
+            #      actually predicates. This is the defect discriminator: "`ff6379eb2` is
+            #      (as `047c91f7a` shows) the tree before #9548" keeps `ff6379eb2` here.
+            #   2. the phrase's OWN CLAUSE, inside an aside — when the clause's only
+            #      attribution is the aside, it IS the attribution: "the arming commit's
+            #      parent, `047c91f7a`, is the tree immediately before #9548" (the §A8
+            #      cell's own idiom) and "The census (taken at `047c91f7a`) returns 10
+            #      lines immediately before #9548" both stay ACCEPTED.
+            #   3. the whole SENTENCE, ignoring asides — a true tree named in an earlier
+            #      clause is still a correction for the pinned shape "`047c91f7a` is the
+            #      arming commit's parent and the tree before #9548 reads 10 lines".
+            preceding = [
+                m
+                for m in _SHA_LIKE_RE.finditer(_unincised)
+                if m.end() <= phrase.start() and m.start() >= _own_start
+            ]
+            if not preceding:
+                preceding = [
+                    m
+                    for m in _SHA_LIKE_RE.finditer(norm)
+                    if m.end() <= phrase.start() and m.start() >= _own_start
+                ]
+            if not preceding:
+                # ⛔ TIER 3 — THE WHOLE SENTENCE, but asides are blanked only from the LAST
+                # `;`/`.` forward (#11191 review r6, P1 — measured false RED: the flat
+                # `_unincised` read lost an aside-borne attribution in an EARLIER clause:
+                # "The census (measured at `047c91f7a`) is the one that matters; the tree
+                # before #9548 reads 10 lines" was REFUSED while base and `origin/main`
+                # accept it). A dash aside between the sha and the phrase is still blanked
+                # — there is no `;`/`.` between them — so the em/en-dash and hyphen
+                # variants stay refused. Offsets are preserved, so `phrase.start()` and
+                # `clause_end` still address `norm`.
+                _hard = max(norm.rfind(";", 0, phrase.start()), norm.rfind(".", 0, phrase.start()))
+                _tail_from = max(0, _hard)
+                _tier3 = norm[:_tail_from] + _unincised[_tail_from:]
+                preceding = [
+                    m for m in _SHA_LIKE_RE.finditer(_tier3) if m.end() <= phrase.start()
+                ]
+            # ⛔ A PREDICATION IS CHECKED BEFORE THE REFERENT (#11191 review r7, P1 —
+            # MEASURED): inside the "named referent" branch below, a TRUE tree named in an
+            # EARLIER clause returned first and exempted it — the alibi class this change
+            # closes for figures, reproduced in prose:
+            #   "`047c91f7a` is the arming commit's parent; the tree immediately before
+            #    #9548 is the arming commit itself."                          -> ACCEPTED
+            # Placing it here also keeps the row's own truthful idiom green: the tree
+            # before #9548 IS "the arming commit's parent", and the exemption is keyed on
+            # the PARENT relation, so "… itself" / "…'s son" / "… the merge tip" are
+            # refused while "…'s parent" and "the parent commit of `785bb2b59`" pass.
+            _predicated = _PREDICATED_OBJECT.match(norm[phrase.end() : clause_end])
+            if _predicated:
+                # ⛔ THE RELATION MUST BE THE PARENT ONE, AND NOTHING ELSE MAY BE NAMED BESIDE
+                # IT (#11191 review r8, P1/P2 — MEASURED). The first cut of this exemption
+                # matched `'s parent` at its START and returned, so the sha that FOLLOWS the
+                # relation was never read — and that is the A1 claim itself, riding the
+                # exemption:
+                #   "The tree immediately before #9548 is the arming commit's parent, i.e.
+                #    `ff6379eb2`."                                        -> ACCEPTED (must red)
+                #   "…is the arming commit's parent, `785bb2b59`."         -> ACCEPTED (must red)
+                # (`_INVERTED_FALSE` cannot catch either: its span class stops at the `.`
+                # inside `i.e.`, so no other arm reaches the trailing sha.) So the exemption
+                # is admitted only for the PARENT relation, and any sha named AFTER it must
+                # be the true tree.
+                _pred_span = _predicated.group(0)
+                _after = norm[phrase.end() + _predicated.end() :]
+                # ⛔ THE TAIL IS THE REST OF THE SENTENCE, not the rest of the CLAUSE
+                # (#11191 review r9, P1 — MEASURED). `_sentence_tail` splits on `:` `;`
+                # and the dashes, so a wrong tree named after a DASH — the house style of
+                # this very cell — was never read: "…is the arming commit's parent —
+                # `ff6379eb2`, as the note says." was ACCEPTED while the comma spelling
+                # reddened. Only a sentence-ENDING full stop cuts this tail.
+                _after_sentence = _sentence_tail_hard(_after)
+                # (a) the object's sha is named OUTRIGHT — "…the arming commit, i.e.
+                #     `047c91f7a`" is the correction, and this file's own controls admit
+                #     it, so the exemption must not depend on the word "parent" alone.
+                _named_true = re.match(
+                    r"^\s*,?\s*(?:i\.e\.|that\s+is)?\s*`?" + _TRUE_TREE, _after_sentence, re.I
+                )
+                # (b) the PARENT relation, or `of <sha>` behind a "parent" predicate.
+                _relation = _PARENT_RELATION.match(_after_sentence)
+                if not _relation and "parent" in _pred_span.lower():
+                    _relation = _PARENT_OF_SHA.match(_after_sentence)
+                _resolved = _named_true or _relation
+                if not _resolved:
+                    return False
+                # ⛔ AN APPOSITIVE NAMED RIGHT AFTER THE RELATION IS THE OBJECT'S *NAME*
+                # (#11191 review r10 residual 1, P1 — MEASURED). The r10 cut read the
+                # co-reference with `_INCISE` blanked, and `_INCISE` blanks a
+                # COMMA-delimited incise — which is exactly how apposition is written — so
+                # the appositive became invisible and a `since`-rationale beside it bought
+                # the exemption:
+                #   "…is the arming commit's parent, `785bb2b59`, since `785bb2b59` is the
+                #    arming commit."                                     -> ACCEPTED (must red)
+                # A PARENTHESIS or a DASH aside names a different proposition; a COMMA
+                # incise immediately behind the relation is the relation's object, so the
+                # token there must be the true tree. This is checked on the UNBLANKED
+                # text, before any aside is removed.
+                _apposed = re.match(
+                    r"^\s*,?\s*(?:(?:i\.e\.|that\s+is|namely|viz\.)\s*)?`?([0-9a-f]{7,40})\b",
+                    _after_sentence[_resolved.end() :],
+                    re.I,
+                )
+                if _apposed:
+                    _apposed_tok = _apposed.group(1).lower()
+                    if not (
+                        _TRUE_TREE.startswith(_apposed_tok)
+                        or _apposed_tok.startswith(_TRUE_TREE)
+                    ):
+                        return False
+                # ⛔ A RELATION OF A RELATION IS A DIFFERENT TREE (#11191 review r9, P1 —
+                # MEASURED): "…the arming commit's parent's parent" passed, because the arm
+                # stopped reading at `'s parent`. The grandparent is not the pre-#9548 tree.
+                if re.match(r"^['\u2019]s\s+", _after_sentence[_resolved.end() :], re.I):
+                    return False
+                # ⛔ …AND THE CO-REFERENCE IS READ WITH ASIDES BLANKED, like every other arm
+                # (#11191 review r9, P2 — MEASURED false RED): "…the parent commit of
+                # `785bb2b59` (the arming commit is `785bb2b59`)" was REFUSED because the
+                # aside's sha was read as a rival tree. An aside names a different
+                # proposition. The arming commit's OWN sha is admissible beside the true
+                # tree when the sentence says so explicitly: naming the parent AS the
+                # arming commit is the defect, identifying the arming commit SEPARATELY is
+                # the truth.
+                _rest = _INCISE.sub(lambda _m: " " * len(_m.group(0)), _after_sentence[_resolved.end() :])
+                _arming_id = re.compile(
+                    r"\b`?785bb2b59`?\s*(?:is|was)\s+the\s+arming\s+commit\b", re.I
+                )
+                def _admits(_named: re.Match[str]) -> bool:
+                    """True for the true tree, or for a tree the sentence attributes to a
+                    DIFFERENT SUBJECT, or for `785bb2b59` where the sentence IDENTIFIES it
+                    as the arming commit in a SEPARATE assertion.
+
+                    ⛔ IDENTIFYING IT SEPARATELY IS THE TRUTH; NAMING IT AS THE PARENT IS THE
+                    DEFECT (#11191 review r10, P1 — MEASURED). The first cut admitted any
+                    `785bb2b59` in the remainder as soon as `_arming_id` matched ANYWHERE, so
+                    the appositive the r8 control refuses rode the identification beside it:
+                      "…is the arming commit's parent, `785bb2b59`, since `785bb2b59` is the
+                       arming commit."                                -> ACCEPTED (must red)
+                    while the truthful separate assertion must still pass. The separator is
+                    the CONNECTIVE: an appositive is introduced by punctuation alone, a new
+                    assertion by `and` / `since` / `because` / a `;`.
+                    ⛔ …AND A `;`/`:` CLAUSE WITH ITS OWN NAMED SUBJECT IS A DIFFERENT TREE
+                    (#11191 review r10 residual 2, P2 — FALSE RED, MEASURED). Reading the
+                    whole sentence tail made the `;`-separated two-tree comparison this file
+                    requires to stay green REFUSED:
+                      "…is the arming commit's parent; the #9601 merge is `ff6379eb2`."
+                    A clause that NAMES its subject ("the #9601 merge") is not about the
+                    phrase's object; a clause that opens with the sha itself, or with a
+                    DEMONSTRATIVE, still is — so `"; `ff6379eb2` is the parent"` and
+                    `"; that is `ff6379eb2`"` stay refused.
+                    """
+                    _tok = _named.group(0).lower()
+                    if _TRUE_TREE.startswith(_tok) or _tok.startswith(_TRUE_TREE):
+                        return True
+                    _lead = _rest[: _named.start()]
+                    if len(re.split(r"[;:]", _lead)) > 1:
+                        _head_clause = re.split(r"[;:]", _lead)[-1]
+                        _head = [
+                            _word
+                            for _word in re.findall(
+                                r"#\d+|[A-Za-z][A-Za-z'-]*", _head_clause
+                            )
+                            if _word.lower()
+                            not in {
+                                "the", "a", "an", "is", "was", "are", "were", "be",
+                                "been", "that", "this", "these", "those", "it", "they",
+                                "which", "and", "but", "of", "in", "at", "on", "for",
+                            }
+                        ]
+                        if _head:
+                            return True
+                    if not "785bb2b59".startswith(_tok):
+                        return False
+                    return bool(
+                        re.search(r";|,?\s*\b(?:and|since|because|as|which|given)\b", _lead, re.I)
+                    ) and _arming_id.search(_rest) is not None
+
+                return all(_admits(_named) for _named in _SHA_LIKE_RE.finditer(_rest))
+            if preceding:
+                # ⛔ PREFIX, not equality (#11191 review round 2, P1 — measured): a
+                # FULL 40-hex referent (what `git rev-parse` prints) was REFUSED,
+                # because the rule compared a 40-char token to the 9-char `_TRUE_TREE`.
+                # Comparing both directions keeps the short and long spellings equal.
+                _ref = preceding[-1].group(0).lower()
+                # ⛔ …BUT A FIGURE DATED TO THE PHRASE IS NOT EXCUSED BY A TREE NAMED IN AN
+                # EARLIER CLAUSE (#11191 review r4, P1 — measured ACCEPTED at
+                # `46c01c324e8`): the referent rule answered for the SENTENCE, so
+                # `047c91f7a` named before a `;` exempted "the census returns 3 lines
+                # immediately before #9548" in the NEXT clause — a figure dated to the
+                # phrase in a clause that corrects nothing, i.e. the A1 defect with an
+                # alibi beside it. Fail-open is the worse direction, so the ambiguous case
+                # reds. The sentence-wide referent is NOT withdrawn: a figure AFTER the
+                # phrase is the measurement OF it, not an alibi beside it, so the pinned
+                # green shape ("`047c91f7a` is the arming commit's parent and the tree
+                # before #9548 reads 10 lines") is untouched.
+                _own_before = _clause_before_phrase(norm, phrase.start())
+                # ⛔ THE EARLIER-CLAUSE FIGURE GUARD IS WITHDRAWN AGAIN, and this time the
+                # reason is a MEASUREMENT rather than a taste in spellings (#11191 review
+                # r6, P1). It cannot distinguish the alibi from the honest reading: the
+                # sentence it was added to refuse — "`{T}` is the arming commit; the census
+                # returns 3 lines immediately before #9548" — and the truth —
+                # "`{T}` is the arming commit's parent; it returns 10 lines immediately
+                # before #9548" — differ in NOTHING but whether the figure is the census's
+                # answer, and refusing both (which is what it did: base and `origin/main`
+                # accept the second) is the false-RED class this file names as the way a
+                # pin gets deleted. Settling this shape needs the MEASURED count, not
+                # another guard: see the issue referenced in the residual note below.
+                # The class therefore stays OPEN and DOCUMENTED (a characterisation test
+                # pins the current behaviour so a future fix cannot move it silently).
+                return _TRUE_TREE.startswith(_ref) or _ref.startswith(_TRUE_TREE)
+            # ⛔ …AND THE REFERENT MAY FOLLOW THE PHRASE, but ONLY as an APPOSITIVE
+            # immediately after it (#11191 review r3, P1 — measured). An unanchored
+            # "any true-sha later in the clause" window re-admitted the equivalence it
+            # sits under: "the tree immediately before #9548 (`047c91f7a`) is actually
+            # `ff6379eb2`" passed, because `(` is not in `_FALSE_SHA_ADJACENT`'s
+            # separator class. So the sha must be the token right after the phrase
+            # (optionally parenthesised), and no false sha may follow it in the clause.
+            # ⛔ AND IT NEED NOT BE THE VERY NEXT TOKEN (#11191 review, F3, P2 — measured
+            # REFUSED at `46c01c324e`, while `origin/main` accepts both):
+            #   "The census returns 10 lines before #9548, measured at `047c91f7a`."
+            #   "The tree immediately before #9548 is the arming commit, i.e. `047c91f7a`."
+            # Anchoring to `match` red the two most natural truthful corrections — the
+            # false-RED class this file names, and a regression against `main`. The
+            # referent may sit later, but the FIRST sha-like token after the phrase must
+            # be it, with no figure between the phrase and it (a figure there is a reading
+            # dated to the phrase with no referent — the A1 defect), and no false sha
+            # anywhere after it. SIM103 shape: one expression, so the arm reads as a rule.
+            _tail = norm[phrase.end() :]
+            _appositive = _SHA_LIKE_RE.search(_tail)
+            if _appositive and (
+                _TRUE_TREE.startswith(_appositive.group(0).lower())
+                or _appositive.group(0).lower().startswith(_TRUE_TREE)
+            ):
+                _between = re.sub(r"#\d+", " ", _tail[: _appositive.start()])
+                # ⛔ …and a DENIED figure is not a reading here either (r10, P2): the
+                # denial spelling is asked through the same helper as the no-referent
+                # arm so the two cannot disagree about what a figure IS.
+                return not (
+                    _states_a_figure(_between) or _FALSE_TREE in _tail.lower()
+                )
+            # 5. NO TREE IS NAMED. A figure dated to the phrase with no referent is the
+            #    r4 defect verbatim (#11191 review, A1); a sentence that attributes
+            #    NOTHING to the phrase — no figure and no tree anywhere in it — is not
+            #    this defect, and reding it would be the false-RED class this file names.
+            attribution = re.sub(_PHRASE_RE, " ", norm, flags=re.I)
+            # ⛔ A `#…` PR/issue reference is a SUBJECT, not noise (#11191 review
+            # round 2, P1 — measured): stripping `#\d+` made "The #9601 merge is the
+            # tree immediately before #9548" read as attributing NOTHING and pass.
+            # ⛔ …and a figure may be SPELLED (#11191 review round 2, P1 — measured):
+            # `re.search(r"\d")` alone let "The census returns five lines immediately
+            # before #9548" pass, which is the A1 defect with the numeral written out.
+            # The set is `_WORD_FIGURE`, shared with the earlier-clause guard above so the
+            # two arms cannot disagree about what a figure IS (#11191 review r4, P2);
+            # `_WORD_FIGURE_IN_POSITION` decides where one COUNTS, so an ordinary pointer
+            # ("one more time") is not a reading (#11191 review, F4 — measured).
+            # ⛔ …AND A DENIED FIGURE DATES NOTHING (r10, P2 — MEASURED false RED on the
+            # doc's own prose: "it was not one line either" was REFUSED while base and
+            # `origin/main` accept it). `_states_a_figure` is the one place that decides,
+            # so the denial set cannot drift between the two arms.
+            return not _states_a_figure(attribution)
+
+        norm = _normalise(sentence)
+        # ⛔ EVERY phrase occurrence is decided on its own. A sentence can carry the
+        # corrected claim AND the defect (that is exactly the §A8 injection case), so an
+        # early `return` for the sentence is the A2 hole in another spelling.
+        return any(
+            not _is_corrected(norm, _phrase)
+            for _phrase in re.finditer(_PHRASE_RE, norm, re.I)
+        )
+    # ... and a cell that still NAMES the phrase must CORRECT it — deny the equivalence,
+    # or name the tree the phrase actually refers to. Deleting the clause is equally
+    # correct, so all three shapes pass — what may not pass is the bare equivalence,
+    # which is what the cell carried before this pin existed, and what a figure dated to
+    # the phrase with no tree named re-introduces. The correction must sit in the
+    # phrase's own CLAUSE (a `not` anywhere in a 900-word cell sentence is not the
+    # correction — measured: the pre-fix sentence contains "not empty and not one" AFTER
+    # the false clause and satisfied a whole-sentence test, so this arm is windowed like
+    # the manifest denial above; and #11191 review A2 measured that the cell's own denial
+    # exempted an equivalence injected beside it while the window was the whole sentence).
     #
-    # ⛔ AND NAMING THE TRUE TREE IS THE CORRECTION, not a violation of it (#11064
-    # review r17, P2). The arm as first written required a denial in EVERY sentence
-    # that named the phrase, so the most natural fix — "the tree immediately before
-    # #9548 is `047c91f7a`" — was refused: a false RED produced by a guard whose
-    # purpose is to stop false GREENs, the same class this file warns about ~130
-    # lines above. A sentence that names `047c91f7a` is exempt, and the three
-    # truthful shapes are EXECUTED below so the exemption cannot be the whole arm.
+    # ⛔ AND NAMING THE TRUE TREE AS THE REFERENT IS THE CORRECTION, not a violation of it
+    # (#11064 review r17, P2). Requiring a denial in EVERY sentence that named the phrase
+    # refused the most natural fix — "the tree immediately before #9548 is
+    # `047c91f7a`" — a false RED produced by a guard whose purpose is to stop false
+    # GREENs, the same class this file warns about ~130 lines above. ⚠️ But MENTIONING the
+    # true sha is not enough: the exemption is the REFERENT (or the predicate), which is
+    # why the substring form and the distance form were both wrong and the shapes are
+    # EXECUTED below.
     offenders = [
         sentence
         for sentence in re.split(r"(?<=\.)\s+", row)
@@ -4499,6 +5552,158 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "denying it applies to `ff6379eb2` or naming `047c91f7a` (the arming "
         "commit `785bb2b59`'s parent, where the same path set returns 10 lines, "
         "not the 5 stated at `ff6379eb2`):\n  " + "\n  ".join(offenders)
+    )
+    # ⛔ …AND THE FIGURE THE CELL STATES AT THE TRUE TREE IS MEASURED THERE, not
+    # merely printed (#11187 review, F1 "stronger"). The §G note above is EXECUTED —
+    # `pre_count` is read out of `_census_count_at(_REPO_ROOT, pre_sha, paths)` — but
+    # §A8's evidence cell publishes the SAME claim a second time, and its figure was a
+    # bare numeral checked at most against the OTHER tree's count. So the cell could
+    # name `047c91f7a` and state a number no tree returns: the stale-flag class this
+    # cell exists to close, one layer down from where it was closed. The census is run
+    # at the cell's OWN tree over the cell's OWN path set (`paths`, read out of the
+    # doc's baseline command above rather than retyped).
+    #
+    # The check collects EVERY figure the cell dates to that tree and requires the SET to
+    # agree with the measurement — it does not "find the measured value" (the previous
+    # arm did, and one right occurrence bought a pass for a second, different one: the
+    # cell stated 7 and 10 at the same tree, #11191 review A4, P2 — measured). It also
+    # accepts a cell that states NO figure there (#11191 review A5, P3): the failure
+    # message has always offered "or state no figure at all" as a remedy, and the arm
+    # used to refuse exactly that, which is how a fixer takes the offered remedy and gets
+    # the same red. The claim is "if a figure is dated to this tree, it is the reading
+    # that tree returns" — a figure-less cell states no claim to be wrong.
+    #
+    # A scan for "any number 12 characters from the sha" would happily return `#9548`
+    # itself (measured — the first cut of this arm did exactly that), so the window
+    # excludes a `#`-prefixed integer — and, with `(?<![\w#])`, a digit glued to a word:
+    # measured, with only `[\d#]` excluded, the `2` at the end of `ff6379eb2` was read as
+    # a stated figure once the text between it and the true sha was edited.
+    if not _census_deepen_to(_REPO_ROOT, _TRUE_TREE):
+        pytest.skip(
+            f"`{_TRUE_TREE}` is not an object in this checkout (shallow: "
+            f"{_census_is_shallow(_REPO_ROOT)}) and a bounded fetch to depth "
+            f"{_CENSUS_SHALLOW_DEPTHS[-1]} did not reach it, so §A8's figure cannot "
+            "be MEASURED here. The textual pins above still ran; this SKIP is not a "
+            "pass"
+        )
+    _row_measured = _census_count_at(_REPO_ROOT, _TRUE_TREE, paths)
+    #: A figure stated AT `_TRUE_TREE` — either order, within 12 non-word characters.
+    #: ⛔ A DIGIT RUN IS NOT A STATED FIGURE (#11191 review round 2, P1 — measured): the
+    #: doc's own house-style DATE beside the tree was read as a census reading
+    #: (`047c91f7a` (2026-10-23) -> figures=['2026']), and the leading digits of a SECOND
+    #: sha were read as one (`047c91f7a` and `047c91f7a` -> figures=['047']). So a figure
+    #: may not continue into a date tail (`-10-23`) nor into a hex tail (`c91f7a`).
+    _FIGURE_NEAR_TRUE_TREE = re.compile(
+        rf"(?<![\w#])(\d{{1,5}})(?!\d)(?!-\d{{2}}-\d{{2}})(?![0-9a-f]{{2,}}\b)"
+        rf"\D{{0,12}}`?{_TRUE_TREE}`?"
+        rf"|`?{_TRUE_TREE}`?\D{{0,12}}(?<![\w#])(\d{{1,5}})(?!\d)"
+        rf"(?!-\d{{2}}-\d{{2}})(?![0-9a-f]{{2,}}\b)",
+        re.I,
+    )
+
+    def _figures_at_true_tree(text: str) -> set[int]:
+        """EVERY figure `text` states at `_TRUE_TREE` — a SET, not one occurrence."""
+        return {
+            int(_hit.group(1) or _hit.group(2))
+            for _hit in _FIGURE_NEAR_TRUE_TREE.finditer(text)
+        }
+
+    # ⛔ CONTROLS FOR THE FIGURE REGEX ITSELF (#11191 review r3, P1 — MEASURED). The §A8
+    # row yields `figures=[10]` under the old regex AND the new one, so the artefact
+    # exercised neither exclusion: reverting the fix left the suite green. These two
+    # shapes are the measured defects, and they are pinned here.
+    assert _figures_at_true_tree(f"`{_TRUE_TREE}` (2026-10-23) is the arming commit") == set(), (
+        "the figure regex reads the doc's house-style DATE beside the tree as a census "
+        "reading — reverting the date-tail exclusion leaves the suite green "
+        "(#11191 review r3, P1)"
+    )
+    assert _figures_at_true_tree(f"`{_TRUE_TREE}` and `{_TRUE_TREE}`") == set(), (
+        "the figure regex reads the leading digits of a SECOND sha as a stated figure "
+        "— reverting the hex-tail exclusion leaves the suite green "
+        "(#11191 review r3, P1)"
+    )
+
+    def _figure_gate(text: str) -> bool:
+        """THE GATE — a cell may state the measurement, or no figure at all, and nothing else.
+
+        Factored out of the assertion below so it can be driven by its own inputs
+        (#11191 review, F5, P2 — measured: with the predicate INLINED, `<=` → `==`,
+        `_row_measured in _row_figures` and deleting the gate statement outright each
+        left the whole suite GREEN, because the controls exercised only the helper). The
+        behaviour the gate controls is its SET relation, so the controls below call it
+        with a strict subset, the full set and a superset.
+        """
+        return _figures_at_true_tree(text) <= {_row_measured}
+
+    _row_figures = _figures_at_true_tree(row)
+    assert _figure_gate(row), (
+        f"§A8's evidence cell states a figure at `{_TRUE_TREE}` that its own census "
+        f"does not return there — running that census with the cell's own path set "
+        f"returns {_row_measured} line(s), and the cell states "
+        f"{sorted(_row_figures)}: a figure that no tree returns is exactly what this "
+        "cell was corrected for, and the §G note executes the same reading, so the "
+        "document would otherwise answer one question twice with two different "
+        f"answers. Either state {_row_measured} — and nowhere else in the cell — or "
+        "state no figure at all: the derivation pointer is the durable form, and "
+        "re-correcting a numeral is what produced the decay chain (#11187)"
+    )
+    # ⛔ …and that arm is EXECUTED in both directions on the REAL row, because a set test
+    # that can only pass is not a gate. A4: change ONE of the cell's two figures and the
+    # SET must show both — a single-occurrence arm stays green here, which is the
+    # measured defect.
+    _one_figure_changed = row.replace(
+        f"not one: {_row_measured}**", f"not one: {_row_measured + 1}**"
+    )
+    if _one_figure_changed == row:
+        # ⛔ THE CELL TAKING THIS ARM'S OWN OFFERED REMEDY IS NOT A FAILURE (#11191
+        # review round 2, FINDING 1 — measured: deleting the numeral, which the failure
+        # message offers and #11187 chose, made this assert red). The control's job is to
+        # prove the SET arm reads every occurrence, so build its input when the artefact
+        # no longer carries the shape — never red on the artefact's legitimate content.
+        _one_figure_changed = (
+            f"`{_TRUE_TREE}` reads {_row_measured}, and `{_TRUE_TREE}` also reads "
+            f"{_row_measured + 1}"
+        )
+    assert _figures_at_true_tree(_one_figure_changed) == {
+        _row_measured,
+        _row_measured + 1,
+    }, (
+        "the arm reads ONE occurrence of the figure, so a cell that states the right "
+        "number once and a wrong number once passes — the cell would answer its own "
+        "question twice with two different numbers (#11191 review A4, P2)"
+    )
+    # A5: and a cell that states NO figure must pass — that is the alternative the old
+    # failure message explicitly offered ("or state no figure at all") and then REFUSED,
+    # which is the "remedy does not fit" class this file names (#11191 review A5, P3).
+    _no_figure = _FIGURE_NEAR_TRUE_TREE.sub(f"`{_TRUE_TREE}`", row)
+    if _no_figure == row:
+        # Same rule as A4 above: the cell already states no figure here, which is the
+        # remedy this arm exists to ACCEPT — synthesise the input instead of reding
+        # (#11191 review round 2, FINDING 1).
+        _no_figure = f"`{_TRUE_TREE}` reads the derivation, the numeral lives above"
+        assert _figures_at_true_tree(_no_figure) == set(), (
+            "the A5 control's own synthetic input is not figure-free, so it proves "
+            "nothing (#11191 review round 2)"
+        )
+    assert _figures_at_true_tree(_no_figure) == set(), (
+        "the arm refuses a cell that states NO figure at the true tree, which is the "
+        "remedy its own failure message offers — reding the fix is the false-RED class "
+        "this pin exists to remove, and #11187's chosen option is exactly to delete the "
+        "numerals (#11191 review A5, P3)"
+    )
+    # ⛔ …and the GATE ITSELF is driven with its own inputs (#11191 review, F5, P2 —
+    # measured: three rewrites of the gate statement left the whole suite GREEN while the
+    # A4/A5 blocks above only exercised the HELPER). These two rows red when the set
+    # relation narrows to equality or to membership.
+    assert _figure_gate(_no_figure), (
+        "the GATE refuses a cell that states NO figure at the true tree — the remedy its "
+        "own failure message offers, and #11187's chosen option. A `==` gate turns the "
+        "offered fix red, which is how a fixer takes the remedy and gets the same red "
+        "(#11191 review, F5)"
+    )
+    assert not _figure_gate(_one_figure_changed), (
+        "the GATE accepts a cell that states a second, WRONG figure at the true tree — "
+        "measured on the gate itself, not on its helper (#11191 review, F5)"
     )
     # Controls, executed — the arm must still RED on the shape it was written for …
     assert _refuses_before_9548(
@@ -4528,12 +5733,958 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "repair, and banning that phrasing reds the fix (#11064 review r17, P3):\n  "
         + "\n  ".join(_refused_denials)
     )
+    # ⛔ … and the exemption may not be a bare SUBSTRING test (#11191 round 2, P2).
+    # Naming the true sha while still asserting the false equivalence is the defect,
+    # not the correction, and both shapes below were measured PASS under
+    # `if "047c91f7a" in sentence: return False`.
+    _named_but_still_false = (
+        "`047c91f7a` is the arming commit's parent, and `ff6379eb2` is the tree before #9548.",
+        "The arming commit's parent is `047c91f7a`; `ff6379eb2` is immediately before #9548.",
+    )
+    _still_refused_offenders = [
+        s for s in _named_but_still_false if not _refuses_before_9548(s)
+    ]
+    assert not _still_refused_offenders, (
+        "the exemption is the sha's PRESENCE, not its proximity to the phrase: a "
+        "sentence that names `047c91f7a` somewhere and then calls `ff6379eb2` the tree "
+        "before #9548 passes, which is the fail-open the r17 exemption introduced "
+        "(#11191 round 2, P2):\n  " + "\n  ".join(_still_refused_offenders)
+    )
+    # … while a COMPARISON that names both, the true one nearest the phrase, is a
+    # correction and must stay GREEN — the other direction the proximity rule could
+    # get wrong by treating any `ff6379eb2` mention as an equivalence.
+    assert not _refuses_before_9548(
+        "`ff6379eb2` returns 5 lines; `047c91f7a`, immediately before #9548, returns 10."
+    ), (
+        "the proximity rule refuses a COMPARISON that names both trees with the true "
+        "one nearest the phrase — that is a correction, not an equivalence assertion "
+        "(#11191 round 2, P2)"
+    )
+    # ⛔ … and the FALSE equivalence is refused EVEN WHEN the true sha is also named and
+    # sits NEARER the phrase (#11191 review, P2). Every shape below predicated
+    # `ff6379eb2` of the phrase and merely APPENDED the true sha; the four marked
+    # EMPHASIS/PARAPHRASE/APPOSITIVE were measured PASS under the token-path veto this
+    # rewrite replaced, so they are the regression controls for THAT defect, not padding.
+    _asserted_false_with_true_appended = (
+        # plain
+        "`ff6379eb2` is the tree immediately before #9548 (see also `047c91f7a`).",
+        "`ff6379eb2` is the tree before #9548 — note `047c91f7a` for contrast.",
+        "The tree immediately before #9548 is `ff6379eb2`, not `047c91f7a`.",
+        # EMPHASIS — the doc's own house style (`**NOT** the tree immediately before …`)
+        "`ff6379eb2` **is** the tree immediately before #9548 (see also `047c91f7a`).",
+        "`ff6379eb2` is **the tree immediately before #9548** (see also `047c91f7a`).",
+        # PARAPHRASE — one adverb away from the shape the other controls pin
+        "`ff6379eb2` is the tree just before #9548 (see `047c91f7a`).",
+        "`ff6379eb2` is the tree that comes immediately before #9548 (see `047c91f7a`).",
+        # APPOSITIVE — the PRE-FIX row's own idiom, re-admitted by naming the true sha
+        "**5 lines at `ff6379eb2`** — the `origin/main` this branch merges, i.e. the "
+        "tree immediately before #9548 — and `047c91f7a` is the arming commit's parent.",
+        "`ff6379eb2` (the tree immediately before #9548) reads 5 lines; `047c91f7a` returns 10.",
+    )
+    # ⛔ …AND AN INCISE IS NOT A REFERENT (#11191 review r4, P2 — measured ACCEPTED at
+    # `46c01c324e8`). The referent rule takes the nearest sha written before the phrase,
+    # so a parenthetical/dash/comma ASIDE naming the true tree became the referent of a
+    # claim whose subject is `ff6379eb2` — and `(` is in no separator class either, so no
+    # other arm saw the false sha. An aside is a different proposition from the one the
+    # phrase is predicated of; the file's own clause-scoping rule says so.
+    _incise_is_not_a_referent = (
+        "`ff6379eb2` is (as `047c91f7a` shows) the tree before #9548.",
+        "`ff6379eb2` (see `047c91f7a`) is the tree before #9548.",
+        "`ff6379eb2` \u2014 see `047c91f7a` \u2014 is the tree before #9548.",
+        "`ff6379eb2` is, as `047c91f7a` shows, the tree before #9548.",
+    )
+    _incise_passed = [
+        s for s in _incise_is_not_a_referent if not _refuses_before_9548(s)
+    ]
+    assert not _incise_passed, (
+        "an INCISE naming the true tree is read as the phrase's referent, so a claim "
+        "whose subject is `ff6379eb2` passes — naming the true sha in an aside is not "
+        "correcting the predication (#11191 review r4, P2):\n  "
+        + "\n  ".join(_incise_passed)
+    )
+    # … while the SAME aside is still a correction when the phrase is predicated of the
+    # true tree, so the rule cannot be "any incise reds".
+    for _s in _incise_is_not_a_referent:
+        assert not _refuses_before_9548(_s.replace(_FALSE_TREE, _TRUE_TREE)), (
+            "the incise rule reds a sentence that predicated the phrase of `047c91f7a`, "
+            "so the control above proves nothing about the subject "
+            "(#11191 review r4, P2):\n  " + _s.replace(_FALSE_TREE, _TRUE_TREE)
+        )
+    # ⛔ …BUT AN ASIDE MAY BE THE ONLY ATTRIBUTION (#11191 review r4, P1 — measured RED
+    # with the unconditional blanking): the tree is named INSIDE the aside and nowhere
+    # else, so blanking destroys the referent and a TRUTHFUL sentence is refused. These
+    # stay green, and they are what the blanking had to be made conditional on.
+    _aside_is_the_attribution = (
+        "The census (taken at `047c91f7a`) returns 10 lines immediately before #9548.",
+        "The census, measured at `047c91f7a`, returns 10 lines immediately before #9548.",
+    )
+    _aside_reds = [s for s in _aside_is_the_attribution if _refuses_before_9548(s)]
+    assert not _aside_reds, (
+        "the incise blanking is unconditional, so a sentence whose ONLY attribution is "
+        "inside the aside loses its referent and is refused — a FALSE RED on a truthful "
+        "census citation (#11191 review r4, P1):\n  " + "\n  ".join(_aside_reds)
+    )
+    # ⛔ …AND AN ASIDE IN THE PHRASE'S OWN CLAUSE *IS* THE ATTRIBUTION even when a FALSE
+    # sha survives outside it in an EARLIER clause (#11191 review r5, P1 — measured false
+    # RED: base ACCEPT, the first two-tier fix REFUSED). This is §A8's own idiom — the row
+    # names both trees — and the file's rule is that a guard must not red the fix.
+    _aside_subject_of_the_clause = (
+        "`ff6379eb2` is the #9601 merge; the arming commit's parent, `047c91f7a`, is the "
+        "tree immediately before #9548.",
+        "`ff6379eb2` is the #9601 merge; 10 lines at `047c91f7a`, which is the tree "
+        "immediately before #9548.",
+    )
+    _aside_subject_reds = [
+        s for s in _aside_subject_of_the_clause if _refuses_before_9548(s)
+    ]
+    assert not _aside_subject_reds, (
+        "the aside tier only applies when NO sha survives outside it, so a truth that names "
+        "the false tree as something else in an earlier clause is refused — the §A8 row's "
+        "own idiom (#11191 review r5, P1):\n  " + "\n  ".join(_aside_subject_reds)
+    )
+    # … and the HYPHEN-MINUS aside is the same aside as the em dash: `_CLAUSE_DELIM` does
+    # not split on it either, so the clause tier is what refuses it (#11191 review r5, P2).
+    assert _refuses_before_9548(
+        "`ff6379eb2` - as `047c91f7a` shows - is the tree before #9548."
+    ), (
+        "the ASCII hyphen aside re-admits the defect while the typographic dashes are "
+        "refused, and it is the most common ASCII rendering of the same aside "
+        "(#11191 review r5, P2)"
+    )
+    # … and the EN dash is the same aside as the em dash (`_CLAUSE_DELIM` already treats
+    # both as clause boundaries), so it may not re-admit the defect.
+    assert _refuses_before_9548(
+        "`ff6379eb2` \u2013 see `047c91f7a` \u2013 is the tree before #9548."
+    ), (
+        "the incise rule keys on the EM dash alone, so the same aside written with the EN "
+        "dash re-admits the defect one character from the arm's own control "
+        "(#11191 review r4, P1)"
+    )
+    # ⛔ RESIDUAL, PINNED AS A CHARACTERISATION TEST — NOT AS CORRECT BEHAVIOUR. A tree
+    # named in an EARLIER clause still exempts a figure dated to the phrase in the next
+    # one, and this is DOCUMENTED rather than guarded because the guard that closed it
+    # could not tell the defect from the truth and began refusing truthful sentences
+    # (#11191 review r4 → r6: three fix rounds, three false-RED regressions, all on this
+    # one shape). The two sentences below differ in NOTHING but whether the figure is the
+    # census's answer, so settling it needs the MEASURED count — the arm already has
+    # `_census_count_at` — not another regex. Until that lands, the fail-open is
+    # pre-existing (base and `origin/main` accept all four shapes) and the assertions here
+    # state exactly what the code does today, so a future fix must come with a measurement
+    # and must move these deliberately.
+    _referent_alibi = (
+        "`047c91f7a` is the arming commit; the census returns 3 lines immediately before #9548.",
+        "`047c91f7a` is the arming commit, and the census returns 3 lines immediately before #9548.",
+        "`047c91f7a` is the arming commit \u2014 the census returns 5 lines immediately "
+        "before #9548.",
+    )
+    # … and its truthful twin, which a figure guard COULD NOT tell it apart from and
+    # therefore REFUSED — the false RED that cost the guard its place (#11191 review r6, P1).
+    _alibi_truthful_twins = (
+        "`047c91f7a` is the arming commit's parent; it returns 10 lines immediately "
+        "before #9548.",
+        "`047c91f7a` is the arming commit; as #9601 records, the tree before #9548 reads "
+        "10 lines.",
+        "`047c91f7a` is the arming commit; measured on 2026-10-23, the tree before #9548 "
+        "returns 10 lines.",
+    )
+    _twin_reds = [s for s in _alibi_truthful_twins if _refuses_before_9548(s)]
+    assert not _twin_reds, (
+        "the earlier-clause figure guard refuses a TRUTHFUL reading that differs from the "
+        "alibi only in its figure — a false RED on base and `origin/main`-accepted text, "
+        "which is how a pin gets deleted (#11191 review r6, P1):\n  " + "\n  ".join(_twin_reds)
+    )
+    assert all(not _refuses_before_9548(s) for s in _referent_alibi), (
+        "the earlier-clause alibi is a KNOWN, DOCUMENTED RESIDUAL (see the note above), not "
+        "a closed class: this assertion pins today's behaviour so the fix that measures the "
+        "census cannot change it silently. If it now refuses, a figure guard came back — "
+        "check that it does not also refuse the truthful twins above "
+        "(#11191 review r6, P1)"
+    )
+    # … and the sentence-wide referent is NOT withdrawn: a figure AFTER the phrase is a
+    # measurement OF it, not an alibi beside it.
+    assert not _refuses_before_9548(
+        "`047c91f7a` is the arming commit's parent and the tree before #9548 reads 10 lines."
+    ), (
+        "the referent rule reds a sentence whose figure sits AFTER the phrase — that is a "
+        "measurement of the phrase, not an alibi, and refusing it is the false-RED class "
+        "this pin exists to remove (#11191 review r4, P1)"
+    )
+    # …and an aside-borne attribution in an EARLIER clause is still a referent
+    # (#11191 review r6, P1 — measured false RED while tier 3 blanked sentence-wide).
+    assert not _refuses_before_9548(
+        "The census (measured at `047c91f7a`) is the one that matters; the tree before "
+        "#9548 reads 10 lines."
+    ), (
+        "tier 3 blanks asides for the whole sentence, so an attribution carried by an "
+        "aside in an EARLIER clause is lost and a truthful sentence is refused "
+        "(#11191 review r6, P1)"
+    )
+    _appended_still_passed = [
+        s for s in _asserted_false_with_true_appended if not _refuses_before_9548(s)
+    ]
+    assert not _appended_still_passed, (
+        "a sentence that predicates `ff6379eb2` of the pre-#9548 tree passes — naming "
+        "the true sha anywhere buys a pass for the false claim, which is this arm's own "
+        "P2 one shape further on (#11191 review, P2):\n  "
+        + "\n  ".join(_appended_still_passed)
+    )
+    # … and the referent rule is what refuses them, not an incidental denial: with the
+    # false sha REPLACED BY THE TRUE ONE in the referent position the same strings are
+    # exempt, so the refusal is attributable to which tree the phrase refers to. (The
+    # previous control swapped in NEUTRAL text instead, which was green only because a
+    # named-but-empty referent was treated as "not this defect" — the A1 fail-open. Under
+    # the default-deny rule that swap is correctly REFUSED too, and it proves nothing.)
+    for _s in _asserted_false_with_true_appended:
+        _swapped = _s.replace(_FALSE_TREE, _TRUE_TREE)
+        assert not _refuses_before_9548(_swapped), (
+            "the predicate reds a sentence whose phrase refers to `047c91f7a`, so the "
+            "control above proves nothing about the REFERENT (#11191 review, A1):\n  "
+            + _swapped
+        )
+    # … and a DENIAL is still a correction, not the defect.
+    assert not _refuses_before_9548(
+        "`ff6379eb2` is not the tree before #9548; that is `047c91f7a`."
+    ), (
+        "the referent rule refuses a DENIAL (`is not the tree before #9548`), which is a "
+        "repair — reding the fix is the false-RED class this pin exists to remove "
+        "(#11191 review, P2)"
+    )
+    # ⛔ … and the TRUE-TREE-FIRST correction — the sentence the fix SHOULD write — must
+    # stay GREEN (#11191 review, P2, measured REFUSED under the distance rule this
+    # replaces, because the false sha sat nearer the phrase than the true one it plainly
+    # refers to). The third case is the same defect with no distance involved at all:
+    # under the old `_LINK_WINDOW = 60` a truthful attribution was refused purely for
+    # being long.
+    _true_tree_first = (
+        "`047c91f7a` is the tree immediately before #9548 (10 lines); "
+        "`ff6379eb2` is the #9601 merge (5 lines).",
+        "`047c91f7a` is the tree immediately before #9548, and `ff6379eb2` is an "
+        "ancestor that reads 5.",
+        "10 lines at `047c91f7a`, the tree immediately before #9548; 5 lines at "
+        "`ff6379eb2`, an ancestor.",
+        "The census reads 10 lines at `047c91f7a`, the arming commit's parent, which is "
+        "what comes immediately before #9548 here.",
+    )
+    _true_first_reds = [s for s in _true_tree_first if _refuses_before_9548(s)]
+    assert not _true_first_reds, (
+        "the phrase's REFERENT is `047c91f7a` and the sentence says so — refusing it is "
+        "the false RED that teaches the next fixer to delete this pin, and it is what "
+        "distance-based proximity produced (#11191 review, P2):\n  "
+        + "\n  ".join(_true_first_reds)
+    )
+    # ⛔ A REFUTATION that quotes the false claim and then calls it false is a
+    # CORRECTION, and it is refused without a CLOSED post-phrase set (#11191 review,
+    # P2 — measured REFUSED before that arm existed, because the referent of the quote
+    # is `ff6379eb2`). Both spellings are pinned so the set cannot be narrowed away.
+    _refutations = (
+        "The claim that `ff6379eb2` is the tree before #9548 is false; the true tree is `047c91f7a`.",
+        "The idea that `ff6379eb2` is the tree before #9548 — that is wrong; `047c91f7a` is.",
+    )
+    _refuted_reds = [s for s in _refutations if _refuses_before_9548(s)]
+    assert not _refuted_reds, (
+        "the arm refuses a REFUTATION of the false claim — quoting a claim in order to "
+        "call it false is the correction, and the referent rule reads the quotation as "
+        "the defect (#11191 review, P2):\n  " + "\n  ".join(_refuted_reds)
+    )
+    # ⛔ …AND A REFUTATION WITH AN OBJECT REFUTES SOMETHING ELSE (#11191 review r4, P1 —
+    # measured ACCEPTED at `46c01c324e8`): "wrong ON THE CENSUS COUNT" corrects the
+    # FIGURE, not the predication, and the `;`-closed arm took it as a refutation of the
+    # equivalence. `_REFUTED_AFTER` already carries this qualifier guard; the next-clause
+    # arm did not, which made it the one open door in the refutation set.
+    _refutation_with_object = (
+        "`ff6379eb2` is the tree before #9548; this is wrong on the census count.",
+        "`ff6379eb2` is the tree before #9548, and that is wrong on the count.",
+        # ⚠️ NOT "…, which is wrong about the month it shipped in" — `_REFUTED_AFTER`
+        # already carries the same guard, so that shape was REFUSED at `46c01c324e8` and
+        # including it here overstated what THIS arm adds (#11191 review r4, P3 — measured).
+        "`ff6379eb2` is the tree before #9548; this is wrong with respect to the count.",
+        "`ff6379eb2` is the tree before #9548; this is wrong concerning the count.",
+    )
+    _object_refuted_passed = [
+        s for s in _refutation_with_object if not _refuses_before_9548(s)
+    ]
+    assert not _object_refuted_passed, (
+        "a refutation carrying an OBJECT refutes something else (the figure, the month), "
+        "so it may not exempt the equivalence it sits beside — the next-clause arm lacks "
+        "the qualifier guard `_REFUTED_AFTER` already has (#11191 review r4, P1):\n  "
+        + "\n  ".join(_object_refuted_passed)
+    )
+    # ⛔ … and that set is CLOSED on purpose: a bare `not` after the phrase is how a
+    # FIGURE gets corrected, so admitting it would be a fail-open. Both directions are
+    # pinned: the bare `not` does not exempt a false predication, and a figure dated to
+    # the phrase with no tree named is the A1 defect whether or not a `not` follows.
+    assert _refuses_before_9548(
+        "`ff6379eb2` is the tree before #9548 and returns 5 lines, not 10."
+    ), (
+        "a post-phrase `not` is being read as a refutation of the EQUIVALENCE — it is "
+        "how a FIGURE gets corrected, so admitting it lets a cell state the false "
+        "equivalence and then say `not 10` (#11191 review r4, P1)"
+    )
+    # A sentence that attributes NOTHING to the phrase — no figure, no tree — is not
+    # this defect (reding it is the false-RED class this file names); dating a figure to
+    # the phrase flips it, which is the A1 family below.
+    assert not _refuses_before_9548("Re-read the census note before #9548."), (
+        "the default-deny rule reds a sentence that attributes NOTHING to the phrase — "
+        "a bare pointer to the census note is not a stale claim (#11191 review, A1)"
+    )
+    # ⛔ …and an ordinary pointer that merely CONTAINS a spelled number dates no figure,
+    # so the spelled-figure rule may not fire outside a figure position (#11191 review, F4 —
+    # measured REFUSED at `46c01c324e`, accepted by `origin/main`).
+    assert not _refuses_before_9548(
+        "Re-read the census note before #9548 one more time."
+    ), (
+        "the spelled-figure arm fires outside a figure POSITION — `one more time` is not "
+        "a reading, and refusing an ordinary pointer is the false-RED class this pin "
+        "exists to remove (#11191 review, F4, P2)"
+    )
+    assert _refuses_before_9548("Before #9548 the census returned 3 lines."), (
+        "the \"attributes nothing\" exemption is swallowing a FIGURE dated to the "
+        "phrase, which is exactly the accidental stale-reading shape this pin exists to "
+        "catch (#11191 review, A1, P1)"
+    )
+    # ⛔ …AND A DENIED FIGURE IS NOT A READING (#11191 review r10, P2 — MEASURED at
+    # `870951926e0`: all three below were REFUSED while base and `origin/main` accept
+    # them). The doc's OWN prose says "it was not one line either"; a fixer who writes
+    # that inside the §A8 cell got a red for a true sentence, which is the false-RED
+    # class that gets a pin deleted. The admission is the negator DIRECTLY in front of
+    # the figure — the two assertions after these pin that an assertion cannot borrow it.
+    _denied_figures = (
+        "It was NOT empty immediately before #9548 — and it was not one line either.",
+        "The census was not one line immediately before #9548.",
+        "The census was not 3 lines immediately before #9548.",
+        "It was not even one line immediately before #9548.",
+    )
+    _denied_figure_reds = [s for s in _denied_figures if _refuses_before_9548(s)]
+    assert not _denied_figure_reds, (
+        "a DENIAL of a reading is refused as if it were the reading — refusing it is a "
+        "false RED on a truthful sentence the doc itself uses (#11191 review r10, P2):\n  "
+        + "\n  ".join(_denied_figure_reds)
+    )
+    _asserted_figure_behind_a_negation = (
+        "The census returns no fewer than 3 lines immediately before #9548.",
+        "The census returns not more than 3 lines immediately before #9548.",
+        # ⛔ …AND A REVERSED POLARITY IS AN ASSERTION TOO (#11191 review r10, P2 —
+        # MEASURED: every shape below was ACCEPTED by the first cut of this change, i.e.
+        # the retirement rode a doubt frame or a double negation into the exemption).
+        "Nothing suggests it is not 3 lines immediately before #9548.",
+        "Nothing suggests that the census was not 3 lines immediately before #9548.",
+        "It is not the case that the census was not 3 lines immediately before #9548.",
+        "It is false that the census was not 3 lines immediately before #9548.",
+        "It is not true that the census was not 3 lines immediately before #9548.",
+        "It is not correct that the census was not 3 lines immediately before #9548.",
+        "There is no evidence that the census was not 3 lines immediately before #9548.",
+        "There is no indication that the census was not 3 lines immediately before #9548.",
+    )
+    _borrowed_denial = [
+        s for s in _asserted_figure_behind_a_negation if not _refuses_before_9548(s)
+    ]
+    assert not _borrowed_denial, (
+        "an ASSERTION borrowed the denial cue (`fewer than` / `more than` is not a "
+        "negation of the figure), so the denial admission is a fail-open — the cue set "
+        "is closed for exactly this reason (#11191 review r10, P2):\n  "
+        + "\n  ".join(_borrowed_denial)
+    )
+    # ⛔ … and DENIAL is not a blanket escape: "not disputed that <sha> IS the tree"
+    # ASSERTS the equivalence inside a denial of doubt. The previous `not`-anywhere-in-60
+    # window exempted it — a fail-open no control would have noticed (#11191 review, P2).
+    _denial_of_doubt = (
+        "It is not disputed that `ff6379eb2` is the tree before #9548.",
+    )
+    _doubt_passed = [s for s in _denial_of_doubt if not _refuses_before_9548(s)]
+    assert not _doubt_passed, (
+        "the denial escape is a DISTANCE window again, not a predicate position — a "
+        "sentence that denies DOUBT while asserting the equivalence passes "
+        "(#11191 review, P2):\n  " + "\n  ".join(_doubt_passed)
+    )
+    # ⛔ …AND THE DOUBT FRAME IS THE ASSERTION WHICHEVER SIDE ITS NEGATION SITS ON
+    # (#11191 review r4, P2 — measured ACCEPTED at `46c01c324e8`). The arm above catches
+    # "not disputed that <sha> IS the tree", where the negation is in the FRAME. Move the
+    # same negation INSIDE the complement — "nothing suggests <sha> IS NOT the tree" —
+    # and the claim is identical, but `_DENIED_BY_SHA` reads that inner `is not` as the
+    # correction and exempts it. Every shape below asserts the equivalence.
+    _doubt_frame_with_inner_not = (
+        "Nothing suggests `ff6379eb2` is not the tree immediately before #9548.",
+        "It cannot be ruled out that `ff6379eb2` is not the tree before #9548.",
+        "No evidence says `ff6379eb2` is not the tree before #9548.",
+        "There is no reason to think `ff6379eb2` is not the tree before #9548.",
+    )
+    _inner_not_passed = [
+        s for s in _doubt_frame_with_inner_not if not _refuses_before_9548(s)
+    ]
+    assert not _inner_not_passed, (
+        "a DOUBT FRAME with the negation inside the complement passes — \"nothing "
+        "suggests X is not Y\" asserts X IS Y, and `_DENIED_BY_SHA` reads the inner "
+        "`is not` as the correction (#11191 review r4, P2):\n  "
+        + "\n  ".join(_inner_not_passed)
+    )
+    # … and the frame set is NEGATIVE-QUANTIFIER only: an AFFIRMATIVE frame in front of the
+    # same denial says the opposite (it endorses the correction), so it must stay green.
+    # Adding `not in doubt`/`undisputed`/`no doubt` to the set REDed all three
+    # (#11191 review r4, P2 — measured).
+    _fronted_affirmative_frame = (
+        "It is not in doubt that `ff6379eb2` is not the tree before #9548.",
+        "Undisputed: `ff6379eb2` is not the tree before #9548.",
+        "No doubt `ff6379eb2` is not the tree before #9548.",
+        # ⛔ AND A QUANTIFIER MUST NOT TURN AN AFFIRMATIVE FRAME INTO A NEGATIVE ONE
+        # (#11191 review r5, P1 — measured false RED): "nobody DOUBTS that X is not Y"
+        # endorses the denial; only a suggestive verb makes the quantifier a doubt frame.
+        "Nobody doubts that `ff6379eb2` is not the tree immediately before #9548.",
+        "No one doubts that `ff6379eb2` is not the tree before #9548.",
+        "There is no reason to doubt that `ff6379eb2` is not the tree before #9548.",
+    )
+    _affirmative_reds = [
+        s for s in _fronted_affirmative_frame if _refuses_before_9548(s)
+    ]
+    assert not _affirmative_reds, (
+        "the doubt-frame arm treats an AFFIRMATIVE frame as a doubt frame, so a denial that "
+        "fronts its certainty (\"it is not in doubt that X is NOT Y\") is refused — that is "
+        "a correction, and reding it is the false-RED class this pin exists to remove "
+        "(#11191 review r4, P2):\n  " + "\n  ".join(_affirmative_reds)
+    )
+    # … and the NEGATIVE-QUANTIFIER set covers the synonym that is the commonest spelling:
+    # "no indication" is "no evidence" (#11191 review r4, P3 — measured ACCEPTED).
+    assert _refuses_before_9548(
+        "There is no indication that `ff6379eb2` is not the tree before #9548."
+    ), (
+        "the doubt-frame set lists `no evidence` and `no reason` but not `no indication`, "
+        "so the same construction spelled the way writers usually spell it passes "
+        "(#11191 review r4, P3)"
+    )
+    # … and the SCOPE (frame before the false sha only) is load-bearing, not decoration
+    # (#11191 review r5, P3 — measured: deleting the scope left the suite green, because
+    # the only control carried its frame after an em dash, which already ends the clause).
+    assert not _refuses_before_9548(
+        "The cell says `ff6379eb2` is not the tree before #9548, no evidence suggests it."
+    ), (
+        "the doubt-frame arm is unscoped: a frame AFTER the denial (…\"is not the tree "
+        "before #9548, no evidence suggests it\") is read as the defect, so the scope is "
+        "load-bearing and must be measured (#11191 review r5 P3, r6 P2 — the earlier "
+        "control carried its frame after an EM DASH, which already ends the clause, so it "
+        "passed with the scope deleted and measured nothing)"
+    )
+    # … and the frame is scoped to what comes BEFORE the false sha, so a correction that
+    # carries a doubt frame AFTER its denial is untouched.
+    assert not _refuses_before_9548(
+        "`ff6379eb2` is not the tree before #9548 — no doubt about it; it is `047c91f7a`."
+    ), (
+        "the doubt-frame arm reds a DENIAL that carries its frame after the sha, which is "
+        "a correction — the false-RED class this pin exists to remove "
+        "(#11191 review r4, P2)"
+    )
+    # ⛔ ARM-DISCRIMINATION CONTROLS (#11191 review round 2, P1 — MEASURED). On this head
+    # `_NOT_FALSE_SHA` and `_FALSE_SHA_ADJACENT` could each be DELETED with the whole
+    # suite still green, so neither was a control: an arm whose deletion no test notices
+    # protects nothing. Each shape below was chosen by MUTATION, not inspection — it
+    # flips exactly when that one arm is removed.
+    assert not _refuses_before_9548(
+        "The tree before #9548 is not `ff6379eb2`; it is `047c91f7a`."
+    ), (
+        "the COMPLEMENT arm (`… is not `ff6379eb2``) is dead: with its regex deleted "
+        "this sentence is refused, so no control executed it (#11191 review r2, P1)"
+    )
+    assert _refuses_before_9548(
+        "10 lines at `047c91f7a` or 5 lines immediately before #9548 at `ff6379eb2`"
+    ), (
+        "the ADJACENCY arm no longer reds a false sha sitting in the phrase's own clause "
+        "while the true tree is named beside it — with the arm deleted this passes, so "
+        "the arm was unreachable (#11191 review r2, P1)"
+    )
+    # ⛔ CONTROLS FOR THE r3 FIXES (#11191 review r3, P1). Each of these was MEASURED
+    # unguarded: reverting its fix left the whole suite green, so the fix had no test.
+    assert _refuses_before_9548(
+        "The census returns five lines immediately before #9548."
+    ), (
+        "a SPELLED figure dated to the phrase passes — reverting the `_WORD_FIGURE` "
+        "guard leaves the suite green, so nothing pinned it (#11191 review r3, P1)"
+    )
+    assert _refuses_before_9548(
+        "The #9601 merge is the tree immediately before #9548."
+    ), (
+        "an ISSUE-NUMBER subject passes — stripping `#\\d+` from the attribution made "
+        "this read as 'attributes nothing' (#11191 review r3, P1)"
+    )
+    assert not _refuses_before_9548(
+        "The tree immediately before #9548 (`047c91f7a`) returns 10 lines."
+    ), (
+        "a post-phrase APPOSITIVE naming the true tree is refused — reversing the "
+        "prefix/appositive fix leaves the suite green (#11191 review r3, P1)"
+    )
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 (`047c91f7a`) is actually `ff6379eb2`."
+    ), (
+        "the appositive arm is UNANCHORED: naming the true tree in passing exempts the "
+        "false equivalence that follows it in the same clause (#11191 review r3, P1)"
+    )
+    assert not _refuses_before_9548(
+        "047c91f7a34e44a989cf47cb1541c62aad1b818b is the tree immediately before #9548 "
+        "and returns 10 lines."
+    ), (
+        "a FULL 40-hex referent (what `git rev-parse` prints) is refused — equality "
+        "against the 9-char `_TRUE_TREE` instead of a prefix compare (#11191 review "
+        "r3, P1)"
+    )
+    # ⛔ CONTROLS FOR THE r7 FIXES (#11191 review r7, P1/P2 — each MEASURED wrong at
+    # `5d0ad4f57ae`). Same rule as the block above: a fix with no control that flips when
+    # the arm is reverted has no test, and these arms were each reachable in BOTH the
+    # fail-open and the false-RED direction, so both are pinned.
+    assert _refuses_before_9548(
+        "`ff6379eb2` not `047c91f7a` is the tree before #9548."
+    ), (
+        "a COMMA-LESS cleft is read as a correction — reverting the optional comma in "
+        "`_CLEFT_PREDICATION` leaves the suite green, and the sentence falls through to "
+        "the REFERENT rule whose nearest sha is the appositive (#11191 review r7, P1)"
+    )
+    assert not _refuses_before_9548(
+        "`047c91f7a` not `ff6379eb2` is the tree before #9548."
+    ), (
+        "the comma-less cleft's TRUTH TWIN is refused — the arm is one-direction blind "
+        "again, so the same surface form decides both propositions (#11191 review r7, P1)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` rather than `047c91f7a`, is the tree before #9548."
+    ), (
+        "a `rather than` cleft is read as a denial of the predication — `_NEG`'s "
+        "`rather than` alternative has no sha-object guard, so `_DENIED_BY_SHA` answers "
+        "before the cleft arm (#11191 review r7, P1)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` instead of `047c91f7a`, the tree before #9548, reads 5 lines."
+    ), (
+        "an `instead of` cleft is read as a denial of the predication — same missing "
+        "sha-object guard in `_NEG` (#11191 review r7, P1)"
+    )
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 is the arming commit itself."
+    ), (
+        "a WRONG tree named in PROSE passes — step 5 decides 'attributes nothing' on "
+        "digits alone, so the one-word decay of the doc's own true cell (`047c91f7a`, "
+        "the arming commit's parent) carries no figure and is accepted (#11191 review "
+        "r7, P1)"
+    )
+    assert _refuses_before_9548(
+        "The last tree before #9548 is the arming commit's son."
+    ), (
+        "a wrong tree named by RELATION passes — `_PREDICATED_OBJECT` must red every "
+        "tree-shaped object that is not the parent relation (#11191 review r7, P1)"
+    )
+    assert _refuses_before_9548(
+        "`047c91f7a` is the arming commit's parent; the tree immediately before #9548 "
+        "is the arming commit itself."
+    ), (
+        "a TRUE tree named in an EARLIER clause exempts a wrong tree named in prose — "
+        "the predication check must sit BEFORE the referent branch (the same alibi the "
+        "numeral channel closes) (#11191 review r7, P1)"
+    )
+    assert not _refuses_before_9548(
+        "The tree immediately before #9548 is the arming commit's parent."
+    ), (
+        "naming the true tree by the PARENT RELATION is refused — a false RED produced "
+        "by the predication arm, on the doc's own true cell (#11191 review r7, P1)"
+    )
+    assert not _refuses_before_9548(
+        "The tree immediately before #9548 is the parent commit of `785bb2b59`."
+    ), (
+        "the same true tree named as a PARENT COMMIT is refused — `_PREDICATE_NAMES_"
+        "TRUE_TREE` must read the relation, not only the `'s parent` spelling "
+        "(#11191 review r7, P1)"
+    )
+    assert not _refuses_before_9548(
+        "The census returns 10 lines before #9548, measured at `047c91f7a`."
+    ), (
+        "a SPELLED-OUT attribution is refused while its bare twin passes — only the "
+        "bare appositive was admitted, and the refusal message tells the author to name "
+        "`047c91f7a`, which they did (#11191 review r7, P2)"
+    )
+    assert not _refuses_before_9548(
+        "The census returns 10 lines before #9548, i.e. at `047c91f7a`."
+    ), (
+        "an `i.e. at` attribution is refused — `_CLAUSE_DELIM` splits on `.`, so the "
+        "clause ends INSIDE the abbreviation and the appositive arm can never see it "
+        "(#11191 review r7, P2)"
+    )
+    #: ⛔ AND THIS SHAPE IS THE ONE THAT DISCRIMINATES THE POST-PHRASE GUARD (#11191 review
+    #: r8, P2 — MEASURED). The first cut of this control put the false sha INSIDE the
+    #: clause as well, so both readings of "the tail" agreed on it and the control passed
+    #: with the guard narrowed — it tested a branch it could not tell apart. A `, and`
+    #: boundary ends `_CLAUSE_DELIM`'s clause but NOT the sentence, so the false sha sits
+    #: outside the clause and only the sentence-wide tail sees it.
+    assert _refuses_before_9548(
+        "The tree immediately before #9548, measured at `047c91f7a`, and `ff6379eb2` is "
+        "what the note said."
+    ), (
+        "the post-phrase appositive guard is narrowed to the clause: naming the true tree in "
+        "an attribution exempts the false equivalence denied beside it in the same sentence "
+        "(#11191 review r8, P2)"
+    )
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 is the arming commit's parent, i.e. "
+        "`ff6379eb2`."
+    ), (
+        "a trailing sha AFTER the parent relation is never read — the exemption returns on "
+        "`'s parent`, so the A1 claim rides it and the false tree is asserted as the "
+        "relation's referent (#11191 review r8, P1)"
+    )
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 is the arming commit's parent, `785bb2b59`."
+    ), (
+        "the parent relation followed by the ARMING COMMIT's own sha passes — that names "
+        "the parent as the arming commit, which is the defect the relation exemption must "
+        "not buy (#11191 review r8, P1)"
+    )
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 is the merge commit of `785bb2b59`."
+    ), (
+        "a NON-PARENT relation is exempted as long as a sha follows `of` — the `of <sha>` "
+        "spelling keys on the sha instead of the relation (#11191 review r8, P2)"
+    )
+    assert not _refuses_before_9548(
+        "The tree immediately before #9548 is the arming commit\u2019s parent."
+    ), (
+        "the parent relation written with a CURLY APOSTROPHE is refused — dropping the "
+        "U+2019 width from `_PARENT_RELATION` flips only this shape (#11191 review r8, P2)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` rather than [`047c91f7a`](https://example.invalid/047c91f7a), is the "
+        "tree before #9548."
+    ), (
+        "a DECORATED complement (`[sha](url)`) restores the cleft fail-open — the sha-object "
+        "guard only saw the bare spelling, and a `\\b` cannot hold after `[` "
+        "(#11191 review r8, P2)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` rather than (see `047c91f7a`), is the tree before #9548."
+    ), (
+        "a PARENTHESISED-WITH-WORDS complement restores the cleft fail-open — the sha-object "
+        "guard's decoration set is the closed `see|namely|the tree|the commit` list, and "
+        "dropping it flips only this shape (#11191 review r8, P2)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` rather than (the census row's own measured value) `047c91f7a`, is "
+        "the tree before #9548."
+    ), (
+        "the cleft's gap is capped below prose length — narrowing the window to 30 characters "
+        "flips only this shape, which is the fail-open a bare character count produces on a "
+        "complement that is spelled out (#11191 review r8, P2)"
+    )
+    # ⛔ CONTROLS FOR THE r9 FIXES (#11191 review r9 — each MEASURED wrong at the head the
+    # previous round pushed). Same rule as every block above: no control, no fix.
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 is the arming commit's parent \u2014 "
+        "`ff6379eb2`, as the note says."
+    ), (
+        "a wrong tree named after an EM DASH passes — the exemption read a clause tail that "
+        "ends at the dash, and this cell writes its prose with dashes (#11191 review r9, P1)"
+    )
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 is the arming commit's parent's parent."
+    ), (
+        "a RELATION OF A RELATION passes — the grandparent is not the pre-#9548 tree, and "
+        "the arm stopped reading at `'s parent` (#11191 review r9, P1)"
+    )
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 is still the arming commit itself."
+    ), (
+        "one adverb defeats the predication arm — the copula had to be followed IMMEDIATELY "
+        "by the object, so `is STILL the arming commit itself` passed (#11191 review r9, P1)"
+    )
+    assert _refuses_before_9548(
+        "The last tree before #9548 stayed the arming commit's son."
+    ), (
+        "the predication arm only knows COPULAS — `stayed the arming commit's son` passed "
+        "because the verb set had no stative verb (#11191 review r9, P1)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` rather than `047c91f7a` (and the census at both trees), is the tree "
+        "before #9548."
+    ), (
+        "a PARENTHESISED `and` inside the complement closes the clause, so the cleft arm is "
+        "handed a fragment without the fronted sha and the referent rule accepts the claim "
+        "(#11191 review r9, P2)"
+    )
+    assert _refuses_before_9548(
+        "`ff6379eb2` rather than the tree sha `047c91f7a`, is the tree before #9548."
+    ), (
+        "one more decoration than the closed list admits restores the cleft fail-open — the "
+        "sha-object set had four fixed spellings (#11191 review r9, P2)"
+    )
+    assert not _refuses_before_9548(
+        "The tree immediately before #9548 is the arming commit's parent, and `785bb2b59` "
+        "is the arming commit."
+    ), (
+        "a sentence that co-references the ARMING COMMIT beside the true parent is refused — "
+        "the trailing-sha rule has no truthful direction pinned (#11191 review r9, P2)"
+    )
+    assert not _refuses_before_9548(
+        "The tree immediately before #9548 is the parent commit of `785bb2b59` (the arming "
+        "commit is `785bb2b59`)."
+    ), (
+        "a parenthetical that identifies the arming commit is read as a rival tree — every "
+        "other arm blanks an incise and this one did not (#11191 review r9, P2)"
+    )
+    # ⛔ … AND THE REFUTATION SET IS CLOSED IN ITS SUBJECT TOO (#11191 review r3, P1 —
+    # measured PASS before this): an open `<subject> is wrong` window re-admits the very
+    # claim the arm refuses, by correcting something ELSE in the same sentence. A figure
+    # or the prose is not the equivalence, so neither may buy the exemption.
+    _unrelated_refutation = (
+        "`ff6379eb2` is the tree before #9548, but the 5-line figure is wrong.",
+        "`ff6379eb2` is the tree before #9548; the census prose is wrong.",
+        "`ff6379eb2` is the tree before #9548, and the epic's guess about the month it "
+        "shipped in is wrong.",
+    )
+    _unrelated_passed = [
+        s for s in _unrelated_refutation if not _refuses_before_9548(s)
+    ]
+    assert not _unrelated_passed, (
+        "a refutation of something ELSE in the sentence exempts the false equivalence — "
+        "the refuted subject must be the claim itself (a demonstrative or a named claim "
+        "word), never any `is wrong` within reach (#11191 review r3, P1):\n  "
+        + "\n  ".join(_unrelated_passed)
+    )
+    # ⛔ … and the DENIAL arm may not cross a CLAUSE boundary — same class, same reason
+    # (#11191 review, A-grade false PASS — measured; and #11191 review A2, P1 for the
+    # `, and` and `—` spellings the `;` fix left open). Denying one proposition in the
+    # first clause must not exempt the equivalence asserted in the second. All three
+    # boundaries `_CLAUSE_DELIM` recognises are pinned here, because the previous head
+    # closed `;` alone and the reviewer measured the other two still passing.
+    _denial_across_clause = (
+        "`ff6379eb2` is not the arming commit; the tree before #9548 is `ff6379eb2`.",
+        "`ff6379eb2` is not the arming commit, and the tree before #9548 is `ff6379eb2`.",
+        "`ff6379eb2` is not the arming commit — the tree before #9548 is `ff6379eb2`.",
+        "**NOT** the tree immediately before #9548, and `ff6379eb2` is the tree before #9548.",
+        # ⛔ …AND THE COMMA-LESS CONJUNCTION IS THE SAME BOUNDARY (#11191 review A2's
+        # class, re-measured on this head): with `,\s+and` only, the denial's clause ran
+        # through the conjunction into the next proposition, so the first clause exempted
+        # the false equivalence in the second. The comma was never the boundary.
+        "`ff6379eb2` is not the arming commit and the tree before #9548 is `ff6379eb2`.",
+        "`ff6379eb2` is not the arming commit but the tree before #9548 is `ff6379eb2`.",
+    )
+    _denial_crossed = [s for s in _denial_across_clause if not _refuses_before_9548(s)]
+    assert not _denial_crossed, (
+        "the denial's window crosses a CLAUSE boundary, so a denial of a DIFFERENT "
+        "proposition in the first clause exempts the false equivalence in the second — a "
+        "false PASS in gate code (#11191 review, A2, P1):\n  " + "\n  ".join(_denial_crossed)
+    )
+    # ⛔ … AND THE A2 CASE ON THE ARTEFACT ITSELF (#11191 review, A2, P1 — measured
+    # PASS at the previous head): because the correction arms returned for the WHOLE
+    # sentence, §A8's own correct `NOT the tree immediately before #9548` exempted a
+    # false equivalence injected beside it — the pin was disabled on the exact sentence
+    # it guards. ⚠️ The injection goes into the SAME SENTENCE (a `, and` clause), not
+    # after the period: a new sentence is caught by the referent rule even at the pre-fix
+    # head (measured), so it would demonstrate nothing about the clause scope.
+    _injected_row = row.replace(
+        "the tree that answers this question.",
+        "the tree that answers this question, and `ff6379eb2` is the tree before #9548.",
+    )
+    assert _injected_row != row, (
+        "the A2 control no longer injects into §A8's evidence cell, so it proves nothing"
+    )
+    _injected_offenders = [
+        sentence
+        for sentence in re.split(r"(?<=\.)\s+", _injected_row)
+        if _refuses_before_9548(sentence)
+    ]
+    assert _injected_offenders, (
+        "a false equivalence injected into §A8's own evidence sentence passes, because "
+        "the cell's own denial exempts the whole sentence — the pin is disabled on the "
+        "artefact it exists to guard (#11191 review, A2, P1)"
+    )
+    # ⛔ …AND THE INJECTION MUST ALSO BE CAUGHT IN THE SAME CLAUSE, which is where the
+    # reviewer's own reproduction put it (#11191 review, A2 — measured PASS at every head
+    # before this one). The control above appends a whole new sentence, so it exercises
+    # the sentence split, not the clause scoping: appended with no full stop and no comma
+    # before the conjunction, the false equivalence sits INSIDE the cell's phrase-bearing
+    # clause, beside the cell's own `**NOT** the tree immediately before #9548`. With the
+    # clause boundary keyed on the `, and` comma, `_DENIED_IN_PREDICATE` then exempted it —
+    # the artefact's own correct denial disabling the pin on the artefact.
+    _same_clause_injected = row.replace(
+        "the arming commit's parent)",
+        "the arming commit's parent) and `ff6379eb2` is the tree before #9548",
+    )
+    assert _same_clause_injected != row, (
+        "the A2 in-clause control no longer injects beside §A8's own denial, so it "
+        "proves nothing (#11191 review, A2)"
+    )
+    assert any(
+        _refuses_before_9548(sentence)
+        for sentence in re.split(r"(?<=\.)\s+", _same_clause_injected)
+    ), (
+        "a false equivalence injected INSIDE the same clause as §A8's own `NOT the tree "
+        "immediately before #9548` passes — the denial is clause-scoped but the clause is "
+        "delimited on the COMMA, so a comma-less conjunction lets it reach the injected "
+        "claim (#11191 review, A2)"
+    )
+    # ⛔ …AND THE COMMA SPLICE, WHICH IS THE SAME INJECTION WITH NO CONJUNCTION AT ALL
+    # (#11191 review r11, P1 — MEASURED ACCEPTED on this row at `b0e8e2006d4`). The
+    # control above joins the injected claim with `and`, so it exercises the CLAUSE
+    # BOUNDARY; that boundary is deliberately keyed on the conjunction, so the splice —
+    # `… the arming commit's parent), `ff6379eb2` is the tree before #9548` — stayed in ONE
+    # clause with the cell's own `**NOT** the tree immediately before #9548`, and the
+    # occurrence-wide denial arm exempted the injected second occurrence with it. The pin
+    # was disabled on the cell it exists to guard, by the cell's own correction.
+    _comma_spliced = row.replace(
+        "the arming commit's parent)",
+        "the arming commit's parent), `ff6379eb2` is the tree before #9548",
+        1,
+    )
+    assert _comma_spliced != row, (
+        "the A2 comma-splice control no longer injects into §A8's evidence cell, so it "
+        "proves nothing (#11191 review r11, A2)"
+    )
+    assert any(
+        _refuses_before_9548(sentence)
+        for sentence in re.split(r"(?<=\.)\s+", _comma_spliced)
+    ), (
+        "a false equivalence COMMA-SPLICED beside §A8's own `NOT the tree immediately "
+        "before #9548` passes — the denial arm is handed the whole clause, so the cell's "
+        "own correction exempts a second occurrence after the comma. The contract's first "
+        "rule is that EVERY occurrence is decided on its own (#11191 review r11, A2)"
+    )
+    # …and the splice control cannot be satisfied by refusing the truthful splice: the
+    # same position, carrying the tree the phrase actually refers to, must stay green.
+    _comma_spliced_true = row.replace(
+        "the arming commit's parent)",
+        "the arming commit's parent), `047c91f7a` is the tree before #9548",
+        1,
+    )
+    assert not any(
+        _refuses_before_9548(sentence)
+        for sentence in re.split(r"(?<=\.)\s+", _comma_spliced_true)
+    ), (
+        "the comma-splice control refuses the TRUTHFUL splice as well, so it measures the "
+        "comma rather than the claim — a false RED in the same arm that closes the "
+        "fail-open (#11191 review r11, A3)"
+    )
+    # ⭕ THE MIRROR OF THE SPLICE — the false claim FIRST, the cell's denial second (#11191
+    # review r11, P1 — MEASURED ACCEPTED while the span above was left-bounded only). A
+    # denial is a claim about the predication it sits beside, so it must not reach
+    # BACKWARDS any more than it may reach forwards: the denial here belongs to the SECOND
+    # occurrence, and it was exempting the first.
+    assert _refuses_before_9548(
+        f"`{_FALSE_TREE}` is the tree before #9548, **NOT** the tree immediately before #9548."
+    ), (
+        "a false equivalence placed BEFORE §A8's own `NOT the tree immediately before #9548` "
+        "passes — the occurrence span is left-bounded only, so a LATER occurrence's denial "
+        "exempts an EARLIER one (the mirror of the comma splice above) "
+        "(#11191 review r11, A2)"
+    )
+    assert not _refuses_before_9548(
+        f"`{_FALSE_TREE}` is the tree before #9601, **NOT** the tree immediately before #9548."
+    ), (
+        "the mirror control refuses the truthful spelling too — a tree denied the #9548 "
+        "predication after denying a DIFFERENT claim is a correction, and refusing it is "
+        "the false-RED direction of the same arm (#11191 review r11, A3)"
+    )
+    # ⭕ `not` IS A WORD (#11191 review r11, P2 — MEASURED ACCEPTED). The closed negation
+    # set matched inside ordinary prose, so a false equivalence passed on the word
+    # NOTABLE / NOTE alone: the arm read "is notable" as "is not" and "the note" as "not".
+    for _negation_lookalike in (
+        f"The `{_FALSE_TREE}` commit is notable as the tree before #9548.",
+        f"The row at `{_FALSE_TREE}`, per the note, is the tree before #9548.",
+    ):
+        assert _refuses_before_9548(_negation_lookalike), (
+            "a false equivalence passes because a word CONTAINING `not` (notable, note) "
+            "was read as the negation token — the closed negation set is matching inside "
+            f"prose: {_negation_lookalike!r} (#11191 review r11, P2)"
+        )
+    assert not _refuses_before_9548(
+        f"`{_FALSE_TREE}` is notable, but it is not the tree before #9548."
+    ), (
+        "the `not`-is-a-word control refuses a truthful denial that merely shares a "
+        "sentence with the word `notable` — the word boundary must not cost the "
+        "correction it protects (#11191 review r11, A3)"
+    )
+    # … and the conjunction boundary does not detach a phrase from the tree it attributes
+    # to: the referent rule reads the whole sentence, so this truthful attribution stays
+    # green with the boundary in place. Without this control the fix above could tighten
+    # into the false-RED direction of the same rule.
+    assert not _refuses_before_9548(
+        "`047c91f7a` is the arming commit's parent and the tree before #9548 reads 10 lines."
+    ), (
+        "cutting at the conjunction detached the phrase from the tree it attributes to — "
+        "the boundary is for DENIALS, and the referent rule must stay sentence-wide "
+        "(#11191 review, A3: a false RED on a correction is how this pin gets deleted)"
+    )
+    # ⛔ A1 — A FIGURE DATED TO THE PHRASE WITH NO TREE NAMED IS THE DEFECT (#11191
+    # review, A1, P1 — measured: `main` refused 15 of 15 of this family, the previous
+    # head refused 0). It is the accidental form: a lane pastes a fresh number and dates
+    # it to the phrase without naming a tree, which is the r4 defect verbatim. It is also
+    # the case the referent-empty `return False` waved through, and the case a THIRD tree
+    # slipped past because the referent rule only knew the two shas it names.
+    _dated_with_no_referent = (
+        "The census returns 3 lines immediately before #9548.",
+        "The census returns 5 lines immediately before #9548.",
+        "It returns 5 lines before #9548.",
+        "The tree before #9548 returns 5 lines, not 10.",
+        "`c5cbcbb4f` is the tree immediately before #9548.",
+    )
+    _no_referent_passed = [
+        s for s in _dated_with_no_referent if not _refuses_before_9548(s)
+    ]
+    assert not _no_referent_passed, (
+        "a sentence dates a figure (or a third tree) to \"before #9548\" without naming "
+        "`047c91f7a`, so the stale reading re-enters §A8 and the pin goes green — the "
+        "default is DENY here, not accept (#11191 review, A1, P1):\n  "
+        + "\n  ".join(_no_referent_passed)
+    )
+    # ⛔ A3 — the correction SPELLINGS that were dropped at `d4ba94671e` together with
+    # their controls (#11191 review, A3, P2 — each one measured REFUSED at the previous
+    # head). Restored as ONE `_NEG` alternation plus the two idiom arms, with a control
+    # each, so no spelling can be "temporarily" lost without its control flipping — which
+    # is how the previous round's fix deleted the truthful half and went RED on it.
+    _restored_corrections = (
+        # the `;`-separated two-tree comparison (REFUSED while `;` sat in
+        # `_FALSE_SHA_ADJACENT`'s separator class, while the comment claimed it was green)
+        "`047c91f7a` is the tree immediately before #9548; `ff6379eb2` is the #9601 merge.",
+        "`ff6379eb2` is the #9601 merge, and the tree before #9548 is `047c91f7a`.",
+        # the contraction / modal / `rather than` denials
+        "`ff6379eb2` isn't the tree immediately before #9548.",
+        "`ff6379eb2` cannot be the tree immediately before #9548.",
+        "`ff6379eb2` is an ancestor rather than the tree before #9548.",
+        # a correction that RETIRES the attribution
+        "§A8 no longer calls `ff6379eb2` the tree before #9548.",
+        "§A8 does not call `ff6379eb2` the tree before #9548.",
+        "The row never said `ff6379eb2` is the tree before #9548.",
+        # the correction idioms: corrected / replaced / disproven / inference denied
+        'The row that said "the tree before #9548 is `ff6379eb2`" is now corrected to `047c91f7a`.',
+        "The retired reading was `ff6379eb2` for the tree before #9548, replaced with "
+        "`047c91f7a`.",
+        "That `ff6379eb2` is the tree before #9548 is disproven by `047c91f7a`.",
+        "That `ff6379eb2` is the tree before #9548 does not mean the census is 5.",
+    )
+    _restored_reds = [s for s in _restored_corrections if _refuses_before_9548(s)]
+    assert not _restored_reds, (
+        "the pin refuses a TRUTHFUL correction — this file's own remedy for a false RED "
+        "is to reword or delete the pin, so a correction spelling must never be the shape "
+        "it rejects (#11191 review, A3, P2):\n  " + "\n  ".join(_restored_reds)
+    )
+    # … and the idiom arms are CLOSED: a correction VERB alone must not buy a pass, or it
+    # would exempt a stale figure that merely mentions a replacement.
+    assert _refuses_before_9548("The census reading before #9548 was replaced with 3 lines."), (
+        "a correction verb exempts a FIGURE dated to the phrase with no true tree named — "
+        "the idiom arm is then a blank cheque (#11191 review, A3)"
+    )
+    # ⛔ … and the INVERTED arm admits a few words between the copula and the sha: with
+    # the sha required to follow `is` immediately, a five-word insertion walked past it and
+    # the sentence that ASSERTS `ff6379eb2` of the phrase passed (#11191 review r3, P1).
+    assert _refuses_before_9548(
+        "`047c91f7a` — the tree before #9548 is, per the note, `ff6379eb2`."
+    ), (
+        "the inverted arm requires the false sha to follow the copula immediately, so "
+        "`the tree before #9548 is, per the note, <false sha>` passes — the same "
+        "fail-open with one insertion (#11191 review r3, P1)"
+    )
     # … and must NOT red on any of the three truthful corrections the r17 review
     # measured RED before the exemption.
     _truthful = (
         "The tree immediately before #9548 is `047c91f7a`, where the same path set returns 10.",
         "`047c91f7a` is the tree immediately before #9548.",
         "Measured at `047c91f7a` — the tree immediately before #9548 — the census returns 10.",
+        # ⛔ …and the referent may FOLLOW the phrase without being its very next token
+        # (#11191 review, F3, P2 — measured REFUSED at `46c01c324e` while `origin/main`
+        # accepts both). These two are also the controls for the anchoring: re-anchoring
+        # the post-phrase referent arm to `re.match` reds them.
+        "The census returns 10 lines before #9548, measured at `047c91f7a`.",
+        "The tree immediately before #9548 is the arming commit, i.e. `047c91f7a`.",
     )
     _false_reds = [s for s in _truthful if _refuses_before_9548(s)]
     assert not _false_reds, (
@@ -4550,6 +6701,311 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     assert not any(_denial_arm.search(s) for s in _truthful), (
         "a control string carries a denial, so it no longer demonstrates that the "
         "exemption is what makes a truthful correction pass (review r17, P2)"
+    )
+    # ⛔⛔ CONTROLS FOR THE FAIL-OPENS THIS REVIEW MEASURED (#11191 review, F1-F4 — each
+    # one RE-CONFIRMED live on the head it reviewed, each one graded differently by the
+    # shipped predicate than by `origin/main`). Every block below is measured, not
+    # written from the fix: the string was run through the PRE-fix predicate and
+    # produced the bad verdict its comment names, so reverting the fix reds the arm.
+    # Both directions are pinned wherever the defect is one arm producing OPPOSITE
+    # verdicts from the same surface form, because a single-direction probe cannot see
+    # that class.
+    # ⚠️ F2's arm was already hardened in this branch before this commit landed (the
+    # `_REFUTED_NEXT_CLAUSE` object guard, with a WIDER qualifier set than the fix here
+    # proposed); what follows therefore PINS its em-dash boundary rather than claiming
+    # the fix, and it is kept because the sibling `;`-joined shapes are pinned beside it.
+    #
+    # F1 — a BARE `not` binds to the COMPLEMENT, so a fronted cleft that predicates the
+    # FALSE tree read as a correction. `_NEG`'s bare alternative is guarded against a
+    # sha-shaped object and the cleft is decided by `_CLEFT_PREDICATION` on the sha that
+    # FRONTS the sentence. Pre-fix, ALL THREE shapes below were ACCEPTED (one arm, three
+    # different propositions), which is why the hole was invisible to a one-sided probe.
+    _cleft_shapes = (
+        # the CLAIM, in a natural corrective register — must REFUSE
+        ("`ff6379eb2`, not `047c91f7a`, is the tree before #9548.", True),
+        # …and the A1 third-tree variant of the same cleft — must REFUSE, because the
+        # fronted sha is the SUBJECT and it is not the true tree
+        ("`c5cbcbb4f`, not `ff6379eb2`, is the tree before #9548.", True),
+        # its TRUTHFUL twin — must stay GREEN (pre-fix it passed by the same arm, which
+        # is exactly what made the fail-open invisible)
+        ("`047c91f7a`, not `ff6379eb2`, is the tree before #9548.", False),
+        # …and the complement order, which `_NOT_FALSE_SHA` must keep deciding
+        ("The tree before #9548 is `047c91f7a`, not `ff6379eb2`.", False),
+    )
+    # ⛔ …and the COMMA-LESS spelling of the same cleft, both directions: the comma form
+    # above is what an incise rule sees, so without this pair the arm could lose its
+    # optional-comma coverage and stay green (#11191 review, F1).
+    assert _refuses_before_9548(
+        "`ff6379eb2` not `047c91f7a` is the tree before #9548."
+    ), (
+        "the comma-less FRONTED CLEFT passes: the fronted sha is the SUBJECT, so the "
+        "sentence asserts `ff6379eb2` of the phrase and the appositive's true sha becomes "
+        "the referent (#11191 review, F1, P2)"
+    )
+    assert not _refuses_before_9548(
+        "`047c91f7a` not `ff6379eb2` is the tree before #9548."
+    ), (
+        "the comma-less cleft's TRUTHFUL twin is refused — the arm must decide by which "
+        "tree is PREDICATED of the phrase, never by the presence of a negation "
+        "(#11191 review, F1, P2)"
+    )
+    _cleft_wrong = [
+        (s, want, _refuses_before_9548(s))
+        for s, want in _cleft_shapes
+        if _refuses_before_9548(s) is not want
+    ]
+    assert not _cleft_wrong, (
+        "the CLEFT is decided by the negator instead of by the sha that FRONTS the "
+        "sentence, so `<false sha>, not <true sha>, is the tree before #9548` — the "
+        "claim this pin exists to refuse — passes, and its truthful twin is decided by "
+        "the same arm (one arm, opposite verdicts; a one-directional probe cannot see "
+        "it) (#11191 review, F1, P2):\n  "
+        + "\n  ".join(
+            f"REFUSED={got} (wanted {want}) {s}" for s, want, got in _cleft_wrong
+        )
+    )
+    # …and the guard that makes the cleft reachable is load-bearing in its OWN right: a
+    # bare `not` must still deny a PREDICATE (the `_NEG` alternative is narrowed, not
+    # deleted), or the fix above would trade this fail-open for a false RED on every
+    # `is not the tree …` correction.
+    assert not _refuses_before_9548("`ff6379eb2` is not the tree before #9548."), (
+        "narrowing `_NEG`'s bare-`not` alternative to reject a sha-shaped OBJECT also "
+        "removed the PREDICATE denial — `is not the tree before #9548` is the plainest "
+        "correction a fixer writes, and reding it is the false-RED class this pin "
+        "exists to remove (#11191 review, F1)"
+    )
+    # F2 — `_REFUTED_NEXT_CLAUSE` lost the object guard `_REFUTED_AFTER` carries, so a
+    # refutation of the WRONG proposition exempted the false equivalence one clause
+    # later. Pre-fix every string below was ACCEPTED while `origin/main` refused it.
+    # ⚠️ The guard itself landed in this branch before this commit (see the note above);
+    # these shapes pin the EM-DASH boundary, which the sibling `;`-joined controls do not
+    # reach, so a future narrowing of the qualifier set reds here first.
+    _unrelated_refutation_next_clause = (
+        "`ff6379eb2` is the tree before #9548 — this is wrong about the month it shipped in.",
+        "`ff6379eb2` is the tree before #9548 — which is wrong on the tree it names.",
+        "`ff6379eb2` is the tree before #9548 — that is incorrect in the census prose.",
+    )
+    _next_clause_passed = [
+        s for s in _unrelated_refutation_next_clause if not _refuses_before_9548(s)
+    ]
+    assert not _next_clause_passed, (
+        "the NEXT-CLAUSE refutation arm takes an OBJECT, so a refutation of something "
+        "else exempts the false equivalence — it is the same predicate as "
+        "`_REFUTED_AFTER`, which carries `(?!\\s+(?:about|on|in|for|at)\\b)` for exactly "
+        "this reason, and losing the guard one clause later is a regression against "
+        "`origin/main` on the phrase this pin guards (#11191 review, F2, P1):\n  "
+        + "\n  ".join(_next_clause_passed)
+    )
+    # …while the demonstrative refutation it was written for stays GREEN — the guard
+    # must not take the shape the arm exists to accept.
+    assert not _refuses_before_9548(
+        "The idea that `ff6379eb2` is the tree before #9548 — that is wrong; `047c91f7a` is."
+    ), (
+        "the object guard on the next-clause refutation also removed the DEMONSTRATIVE "
+        "refutation the arm exists for — the fix must not red its own purpose "
+        "(#11191 review, F2)"
+    )
+    # ⛔ …AND THE ARM ITSELF IS PINNED, not just the em-dash shape `_REFUTED_AFTER`
+    # already admits (#11191 review r10, P2 — MEASURED). Deleting `_REFUTED_NEXT_CLAUSE`
+    # left the suite GREEN while turning truthful refutations into false REDs, so the rule
+    # the Review Scope Contract lists had no control of its own; the em-dash spelling
+    # above never reaches it. ⚠️ Of the three strings below, ONLY the first depends on the
+    # arm — the other two are admitted by `_REFUTED_AFTER` and are here as the shape's
+    # neighbours, not as its controls (measured by deleting the arm and reading each
+    # verdict: the first flips accept→REFUSE, the other two stay accept). Asserting them
+    # is still what makes the block red when the arm goes: the arm's own string is in it.
+    _next_clause_refutation = (
+        "The row calls `ff6379eb2` the tree before #9548 in the note, and that is wrong.",
+        "The row calls `ff6379eb2` the tree before #9548, and that is wrong.",
+        "The note says `ff6379eb2` is the tree before #9548, and that is wrong.",
+    )
+    _next_clause_reds = [s for s in _next_clause_refutation if _refuses_before_9548(s)]
+    assert not _next_clause_reds, (
+        "the next-clause demonstrative refutation (`_REFUTED_NEXT_CLAUSE`) is refused — "
+        "that arm is the only thing that admits it, so deleting the arm must red HERE "
+        "instead of leaving the suite green (#11191 review r10, P2):\n  "
+        + "\n  ".join(_next_clause_reds)
+    )
+    # F3 — `_INFERENCE_DENIAL` was a clause-wide `search` with no subject binding, so a
+    # denial of an INFERENCE attached to the ASSERTION exempted the equivalence. Pre-fix
+    # both shapes below were ACCEPTED while `origin/main` refused them.
+    _unbound_inference_denial = (
+        "`ff6379eb2` is the tree before #9548, which does not mean the census is 5.",
+        "`ff6379eb2` is the tree before #9548, and it does not imply the count grew.",
+    )
+    _inference_passed = [
+        s for s in _unbound_inference_denial if not _refuses_before_9548(s)
+    ]
+    assert not _inference_passed, (
+        "the INFERENCE-DENIAL arm is a blank cheque: a `does not mean` anywhere in the "
+        "clause exempts the false equivalence, because the denial of what the claim is "
+        "USED FOR is read as a denial of the claim. Every other correction arm here is "
+        "subject-bound for this reason (#11191 review, F3, P1):\n  "
+        + "\n  ".join(_inference_passed)
+    )
+    # …and the QUOTED-claim shape the arm was written for stays GREEN: the denied
+    # inference's subject must be the claimed equivalence.
+    assert not _refuses_before_9548(
+        "That `ff6379eb2` is the tree before #9548 does not mean the census is 5."
+    ), (
+        "binding the inference denial to its `that`-clause subject also removed the "
+        "quoted-claim correction it exists for — the fix must not red its own purpose "
+        "(#11191 review, F3)"
+    )
+    # …and the binding is genuinely load-bearing: without it BOTH spellings pass, so the
+    # pair above is a discrimination test, not two independent assertions.
+    assert _INFERENCE_DENIAL.search(
+        "That `ff6379eb2` is the tree before #9548 does not mean the census is 5."
+    ) and not _INFERENCE_DENIAL.search(
+        "`ff6379eb2` is the tree before #9548, which does not mean the census is 5."
+    ), (
+        "the inference-denial binding does not discriminate the quoted claim from the "
+        "bare assertion, so the arms above prove nothing (#11191 review, F3)"
+    )
+    # F4 — the spelled-figure list was CLOSED at `twelve`, so every figure above twelve
+    # (and `zero`) walked past it. Pre-fix all four shapes below were ACCEPTED, which is
+    # the A1 fail-open one word past the guard.
+    _spelled_figures_past_twelve = (
+        "The census returns thirteen lines immediately before #9548.",
+        "The census returns zero lines immediately before #9548.",
+        "The census returns twenty-five lines immediately before #9548.",
+        "The census returns a hundred lines immediately before #9548.",
+    )
+    _spelled_passed = [
+        s for s in _spelled_figures_past_twelve if not _refuses_before_9548(s)
+    ]
+    assert not _spelled_passed, (
+        "a SPELLED figure above twelve (or `zero`) dated to the phrase with no referent "
+        "passes — the guard is a closed list that runs out, so its boundary is whatever "
+        "number the next writer picks, and the A1 fail-open it closes is one word away "
+        "(#11191 review, F4, P2):\n  " + "\n  ".join(_spelled_passed)
+    )
+    # …and the list must still not fire on prose that names NO figure: the sensitivity
+    # above is exactly what could turn this arm into a false RED on a bare pointer.
+    assert not _refuses_before_9548("Re-read the census note before #9548."), (
+        "the widened spelled-figure grammar reds a sentence that states no figure at "
+        "all — the false-RED direction of the F4 fix (#11191 review, F4)"
+    )
+    # ⛔ …BUT THE EARLIER-CLAUSE FIGURE GUARD IS WITHDRAWN IN THIS COMMIT, on a MEASURED
+    # basis rather than a preference: it cannot separate the alibi from the truth, and
+    # every spelling of it refused TRUTHS that `origin/main` accepts —
+    #   "`047c91f7a` is the arming commit's parent; it returns 10 lines immediately before
+    #   #9548."                                        main ACCEPT · guard REFUSE
+    #   "`047c91f7a` is the arming commit; as #9601 records, the tree before #9548 reads 10
+    #   lines."                                         main ACCEPT · guard REFUSE
+    # so F4's spelling widening reached an arm whose problem was never the spelling. The
+    # shapes below are therefore a CHARACTERISATION of today's behaviour, not a claim of
+    # correctness: the class stays OPEN and documented, and the fix is the MEASURED census
+    # (`_census_count_at`), not a fourth list. This overrides the F4 expectation ON PURPOSE
+    # — see the PR comment; the grammar F4 introduced is kept for the no-referent arm,
+    # which asks the same question about a sentence that names NO tree.
+    _alibi_known_open = (
+        "`047c91f7a` is the arming commit; the census returns thirteen lines immediately "
+        "before #9548.",
+        "`047c91f7a` is the arming commit; the census returns 3 lines immediately before "
+        "#9548.",
+    )
+    assert all(not _refuses_before_9548(s) for s in _alibi_known_open), (
+        "the earlier-clause alibi is a DOCUMENTED RESIDUAL: if it now refuses, a figure "
+        "guard came back and the truthful twins (pinned just above) must be re-checked for "
+        "the false RED it produced three rounds running (#11191 review r6, P1 / F4)"
+    )
+    _alibi_truthful = (
+        "`047c91f7a` is the arming commit's parent; it returns 10 lines immediately "
+        "before #9548.",
+        "`047c91f7a` is the arming commit; as #9601 records, the tree before #9548 reads "
+        "10 lines.",
+    )
+    _alibi_truthful_reds = [s for s in _alibi_truthful if _refuses_before_9548(s)]
+    assert not _alibi_truthful_reds, (
+        "a figure guard is refusing a TRUTHFUL reading that differs from the alibi only in "
+        "its figure — `origin/main` accepts it, and reding the fix is how this pin gets "
+        "deleted (#11191 review r6, P1):\n  " + "\n  ".join(_alibi_truthful_reds)
+    )
+    # ⛔⛔ THE FOUR r10 RESIDUALS — closed HERE, each one RE-MEASURED against the r10
+    # predicate (`b0e8e2006d4`) before it was fixed, so reverting a fix reds this block.
+    # The r10 review listed them as a CAP EXIT ("NOT CLEAN … not fixed"), so they are the
+    # difference between this head and an honest `clean` attestation.
+    #
+    # 1 (P1, FAIL-OPEN) — a comma APPOTITIVE behind the predicted relation is the object's
+    #   *NAME*, not an aside. It was blanked by `_INCISE` before the co-reference read, so
+    #   the appositive became invisible and a `since`-rationale beside it bought the
+    #   exemption: the sentence says the pre-#9548 tree is `785bb2b59` (the arming commit)
+    #   and calls it the arming commit's parent in the same breath.
+    # 2 (P2, FALSE RED) — the co-reference read the whole tail, so the `;`-separated
+    #   two-tree comparison this file requires to stay green was refused. A `;`/`:` clause
+    #   that NAMES its subject is a different tree; one that opens with the sha or a
+    #   DEMONSTRATIVE is still the phrase's object — both directions are pinned, because a
+    #   one-sided fix here would trade the false RED for the fail-open the `;`-blanket
+    #   exemption used to be.
+    # 4 (P2, FAIL-OPEN) — the adverb slot was a nine-word list, so the claim walked past it
+    #   one adverb further on ("in practice", "indisputably", "effectively") and
+    #   "continues to be" had no copula at all. The slot is now the productive `-ly` class
+    #   plus a bounded comma incise, and `never` is deliberately excluded — it DENIES the
+    #   predication.
+    _r10_residuals = (
+        (
+            "The tree immediately before #9548 is the arming commit's parent, "
+            "`785bb2b59`, since `785bb2b59` is the arming commit.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is, in practice, the arming commit itself.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is indisputably the arming commit itself.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is effectively the arming commit's son.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 continues to be the arming commit itself.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is the arming commit's parent; "
+            "the #9601 merge is `ff6379eb2`.",
+            False,
+        ),
+        (
+            "The tree immediately before #9548 is the arming commit's parent; "
+            "`ff6379eb2` is the parent.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is the arming commit's parent; "
+            "that is `ff6379eb2`.",
+            True,
+        ),
+        (
+            "The tree immediately before #9548 is the arming commit's parent "
+            "(the arming commit is `785bb2b59`).",
+            False,
+        ),
+        (
+            "The tree immediately before #9548 is never the arming commit itself; "
+            "it is `047c91f7a`.",
+            False,
+        ),
+    )
+    _r10_wrong = [
+        (s, want, _refuses_before_9548(s))
+        for s, want in _r10_residuals
+        if _refuses_before_9548(s) is not want
+    ]
+    assert not _r10_wrong, (
+        "the r10 cap-exit residuals are open: a comma APPOSITIVE behind the predicted "
+        "relation (a false equivalence — the appositive NAMES the object), a `;`-clause "
+        "with its own named subject (a false RED on the two-tree comparison), or a "
+        "predicating ADVERB / `continues to be` outside a nine-word list (a false "
+        "equivalence). Each was measured on `b0e8e2006d4` before it was fixed "
+        "(#11191 review r10):\n  "
+        + "\n  ".join(
+            f"REFUSED={got} (wanted {want}) {s}" for s, want, got in _r10_wrong
+        )
     )
 
 
