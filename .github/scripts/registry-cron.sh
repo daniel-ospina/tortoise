@@ -976,6 +976,7 @@ R2_OK=1
 # (enabled but 0 teams backed up) below.
 POOL_STALE=0        # a team's newest default archive is older than DRIVER_DOWN_MIN
 POOL_UNPARSEABLE=0  # a team's newest-archive timestamp could not be parsed (no healthy reading)
+UNPARSEABLE_TEAMS="" # the tenants that hit it, for the pooled body (#4994)
 R2_TEAM_COUNT=0     # team prefixes present under backups/
 # #4994: the direct-R2 leg's PER-TEAM staleness is accumulated here instead of
 # being filed as one `[DR] STALE` per tenant. One systemic pool fault therefore
@@ -1157,6 +1158,11 @@ if [ "$R2_OK" = "1" ]; then
           # on the pooled POOL_STALE, or a healthy custom-only team would red every
           # timeout run forever.
           POOL_UNPARSEABLE=1
+          # #4994: the pooled incident names its tenants. Record this one too, or
+          # an operator holding the incident cannot tell which LastModified to fix
+          # without the 90-day run log.
+          UNPARSEABLE_TEAMS="${UNPARSEABLE_TEAMS}- ${org_id} — newest archive timestamp '${newest}' could not be parsed
+"
         else
           age_min=$(( ($(date +%s) - newest_ts) / 60 ))
           if [ "$age_min" -gt "$STALE_MIN" ]; then
@@ -1254,7 +1260,7 @@ if [ "$STALE_TEAM_COUNT" != "0" ] || [ "${POOL_UNPARSEABLE:-0}" = "1" ]; then
     # STALE_TEAM_COUNT=0 hid the corrupt stamp whenever another team was stale, so
     # an operator fixed the named tenants and the incident stayed open with
     # nothing in its body saying why.
-    STALE_TEAMS="${STALE_TEAMS}- (a team's newest-archive timestamp could not be parsed — its pool AGE is UNMEASURABLE; fix the corrupt LastModified)
+    STALE_TEAMS="${STALE_TEAMS}${UNPARSEABLE_TEAMS}- a team's newest-archive timestamp could not be parsed (AGE UNMEASURABLE, see the log for the specific team); fix the corrupt LastModified
 "
   fi
   POOL_LIST_NOTE=""
@@ -1908,7 +1914,9 @@ esac
 PURGE_FAILED=0
 RECONCILE_FAILED=0
 # #4939: a timed-out sweep may still hold the per-org locks server-side, so the
-# ride-along is skipped for it exactly as for a held lock (already_running).
+# ride-along is skipped for it exactly as for a held lock (already_running). Since
+# #10234 the skip set is FOUR statuses: already_running, driver_timeout,
+# empty_response and transport_error.
 # #10234 review P1: `transport_error` (the connection died mid-response) is the
 # same situation for this purpose — a reset connection says nothing about
 # whether the server stopped the sweep, so the locks may still be held.
@@ -2019,7 +2027,8 @@ if [ "$RUN_STATUS" != "already_running" ] \
     RECONCILE_FAILED=1
   fi
 else
-  # #5028: name the ACTUAL status. This branch covers three distinct causes;
+  # #5028: name the ACTUAL status. This branch covers FOUR distinct causes
+  # (already_running, driver_timeout, empty_response, transport_error);
   # asserting a held lock for all of them sent an investigation after a stale
   # lock that did not exist (0 of 14 sampled runs reported already_running, and
   # /status.lock was null). A non-lock skip is not a lock.

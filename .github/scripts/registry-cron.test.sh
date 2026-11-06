@@ -2062,6 +2062,9 @@ export STUB_SWEEP_RC=28
 run_driver
 assert_eq "$RC" 1 "78g. a fresh stamp over an UNMEASURABLE pool is NOT green"
 assert_contains "$OUT" "could not read an archive timestamp" "78g. the red names the pool evidence, not a coverage claim"
+# Round 10: the PURE unparseable case has its own POOL_STALE title — pin it, or a
+# wrong-shape summary ("0 team default archive(s) older than 90m") passes CI.
+assert_file_match "$LOG" 'POOL_STALE — an archive timestamp could not be parsed' "78g. the TITLE names the unparseable stamp, not a zero-count stale claim"
 # "Filed" can take two shapes: a create POST, or a dedup adoption of an already
 # open POOL_STALE. Both record the condition; silence records nothing. Accept
 # either, and fail only on silence.
@@ -2104,7 +2107,7 @@ assert_contains "$OUT" "could not read an archive timestamp" "78i. the unparseab
 # Round 7: the create POST logs {title, body}, and round 6 added the phrase to
 # BOTH — so a single needle matched either half and the case proved nothing.
 # Assert one phrase unique to each.
-assert_file_match "$LOG" 'its pool AGE is UNMEASURABLE; fix the corrupt LastModified' "78i. the FILED body bullet names the corrupt stamp"
+assert_file_match "$LOG" 'AGE UNMEASURABLE, see the log for the specific team' "78i. the FILED body bullet names the corrupt stamp"
 assert_file_match "$LOG" 'and an archive timestamp could not be parsed' "78i. the TITLE covers both causes, not just the stale count"
 
 # ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
@@ -2145,6 +2148,10 @@ export STUB_SWEEP_RC=28
 run_driver
 assert_eq "$RC" 1 "78f. a future-dated last_sweep_at fails CLOSED, not open"
 assert_contains "$OUT" "dated in the FUTURE" "78f. the future stamp is reported as corruption"
+# Round 10: the TITLE of this arm's own incident must name corruption, not a
+# timeout (the phrase occurs only in the title).
+assert_contains "$(cat "$LOG")" 'last_sweep_at is in the future' "78f. the TITLE names the corrupt stamp"
+assert_not_contains "$(cat "$LOG")" 'sweep timed out' "78f. (control) no budget claim on corruption"
 
 # ── 78f-ii. #10234 review P2 (round 2): future stamp + MEASURED-EMPTY pool ──
 # Round 1 routed a future stamp into the same `else` as the benign pre-beta
