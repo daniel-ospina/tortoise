@@ -96,7 +96,23 @@ def launch(state_dir, co, pr=7, **kw):
     return rd.launch(pr, cwd=co, state_dir=state_dir, repo="o/r", **kw)
 
 
-def wait_state(state_dir, pr, want, timeout=15.0, pred=None):
+# ⛔ A WAIT BOUND HERE IS A **STALL BUDGET**, NEVER THE RAIL'S EXPECTED DURATION.
+# Every wait in this file returns on the first matching read, so a healthy run
+# pays none of it; the number only decides how long the BOX may freeze before a
+# healthy rail is reported as a verdict. Measured 2026-11-06 on shard `test (h)`
+# of run 42185502189 (head `e190cc73a2b2`): this file's own
+# `test_a_new_attempt_truncates_the_log` took **42.78 s** for a **1.03 s** local
+# call, and two setups in the same shard took 44-60 s — so the 2 s stub rail
+# outlived a 20 s wait, `test_start_returns_immediately_and_collect_sees_it_waiting`
+# read `waiting` at its deadline, and the shard went red with 3 854 tests passing.
+# 20 s was never the rail's duration; it was an unstated assumption that the box
+# is not stalled, and on a shared runner that assumption is false. A bound below
+# the largest measured stall CAN re-create that red, which is what the pin in
+# `test_the_wait_budget_exceeds_the_largest_measured_stall` refuses.
+STALL_BUDGET_S = 120
+
+
+def wait_state(state_dir, pr, want, timeout=STALL_BUDGET_S, pred=None):
     end = time.time() + timeout
     st = None
     while time.time() < end:
@@ -141,7 +157,40 @@ def test_start_returns_immediately_and_collect_sees_it_waiting(tmp_path, monkeyp
     st = wait_state(sd, 7, rd.WAITING)
     assert st.state == rd.WAITING, st.as_dict()
     assert st.line().startswith("RAIL(#7, waiting,")
-    assert wait_state(sd, 7, rd.MERGED, timeout=20).state == rd.MERGED
+    assert wait_state(sd, 7, rd.MERGED).state == rd.MERGED
+
+
+def test_the_wait_budget_exceeds_the_largest_measured_stall(tmp_path, monkeypatch):
+    """The 2026-11-06 shard red, reproduced in ~3 s instead of on a stalled box.
+
+    `test_start_returns_immediately_and_collect_sees_it_waiting` read `waiting` at
+    its deadline on shard `test (h)` of run 42185502189 — while that same file's
+    `test_a_new_attempt_truncates_the_log` paid 42.78 s for a 1.03 s local call and
+    two setups took 44-60 s. The box stalled; the WAIT BOUND, not the state
+    machine, turned that into a red shard for a PR that touches neither file.
+
+    Both halves are asserted so the constant cannot be quietly tightened back:
+    a bound SHORTER than the rail's own work reads `waiting` (the failure,
+    reproduced deterministically in half a second), and the SAME rail, the same
+    artifact, settles to `merged` under `STALL_BUDGET_S` — so the difference
+    between the two readings is the clock and nothing else.
+    """
+    co = make_checkout(tmp_path)
+    sd = tmp_path / "state"
+    monkeypatch.setenv("FAKE_RAIL_SLEEP", "2")
+    launch(sd, co, pr=78)
+    # A bound below the rail's own 2 s of work: `waiting`, which is exactly what
+    # the shard reported. Nothing is wrong with the rail here.
+    early = wait_state(sd, 78, rd.MERGED, timeout=0.5)
+    assert early.state == rd.WAITING, early.as_dict()
+    # …and the same rail reaches `merged` once the clock is allowed to run.
+    assert wait_state(sd, 78, rd.MERGED).state == rd.MERGED
+    # The pin: 42.78 s is the largest stall MEASURED on this file's own work, so a
+    # budget at or below it can re-create the red that shipped `test (h)`.
+    assert STALL_BUDGET_S > 42.78, (
+        f"STALL_BUDGET_S={STALL_BUDGET_S} is at or below the 42.78 s stall measured "
+        "on run 42185502189 — a healthy rail on a stalled box reads `waiting` "
+        "again, which is the 2026-11-06 `test (h)` red")
 
 
 def test_merged_state_names_the_sha_the_rail_printed(tmp_path):
@@ -221,7 +270,7 @@ def test_a_killed_wrapper_does_not_lose_a_live_rail(tmp_path, monkeypatch):
     time.sleep(0.2)
     st = rd.collect(sd, "o/r", 75)
     assert st.state != rd.LOST, st.as_dict()   # pre-fix: `lost` while it was merging
-    st = wait_state(sd, 75, rd.MERGED, timeout=25)
+    st = wait_state(sd, 75, rd.MERGED)
     assert st.state == rd.MERGED and st.merge_sha == "deadbeefcafe1234"
     assert st.exit_code is None
     assert "EXIT line was never written" in st.reason
@@ -2110,7 +2159,7 @@ def test_with_no_gh_the_rail_still_starts_and_the_head_reads_unreadable(tmp_path
     assert ln.pid > 0, "the rail did not start without `gh`"
     assert ln.head == "unreadable", ln.head
     assert "HEAD=unreadable" in Path(ln.artifact).read_text(encoding="utf-8")
-    assert wait_state(sd, 21, rd.MERGED, timeout=20).state == rd.MERGED
+    assert wait_state(sd, 21, rd.MERGED).state == rd.MERGED
 
 
 def test_a_gh_that_cannot_execute_is_not_reported_as_missing(tmp_path, monkeypatch):
@@ -2684,7 +2733,7 @@ def test_detachment_is_what_survives_the_lane(tmp_path, no_detach, expect):
     os.killpg(os.getpgid(lane.pid), signal.SIGKILL)   # the harness kills the lane + its group
     lane.wait(timeout=10)
 
-    st = wait_state(sd, pr, expect, timeout=25)
+    st = wait_state(sd, pr, expect)
     assert st.state == expect, (
         f"expected {expect} (no_detach={no_detach}): {st.as_dict()}\n{LANE_ENV_DOC}"
     )
@@ -2729,7 +2778,7 @@ def test_cli_collect_exit_codes(tmp_path, capsys):
     assert capsys.readouterr().out.strip() == "RAIL(#777, absent, -, -)"
     co = make_checkout(tmp_path)
     rd.main(["start", "42", "--repo", "o/r", "--cwd", str(co), "--state-dir", str(sd)])
-    wait_state(sd, 42, rd.MERGED, timeout=20)
+    wait_state(sd, 42, rd.MERGED)
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd)]) == 0
     # --assert-merged is the next fleet beat's gate: 0 only on a real merge
     assert rd.main(["collect", "42", "--repo", "o/r", "--state-dir", str(sd),
