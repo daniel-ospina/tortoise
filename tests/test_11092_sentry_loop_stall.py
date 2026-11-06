@@ -347,8 +347,12 @@ def test_unhandled_handler_treats_an_inbound_reset_as_a_disconnect(
         sentry_mod.capture_exception = real_capture  # type: ignore[assignment]
 
     assert captured == [], (
-        "an inbound ConnectionResetError is the caller hanging up — the handler "
-        "passes inbound_request=True, so it must not be captured"
+        "an exact-named reset at the request layer is admitted as benign — the "
+        "handler passes inbound_request=True, so this handler does not capture it. "
+        "That is an accepted attribution COST, not a claim about which end reset: "
+        "a caller hang-up arrives as ClientDisconnect, so this shape is an "
+        "app/upstream failure being classified benign, and the event still goes "
+        "out through the Starlette re-raise"
     )
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == [], (
         "and it must not be logged at ERROR — that is what feeds the Sentry "
