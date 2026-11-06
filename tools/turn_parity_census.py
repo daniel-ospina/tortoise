@@ -20,8 +20,8 @@ touched. It also leaves a
 `<db>.tortoise-construct.lock` beside the store (the suffix is a CONSTANT,
 not the graph's name — measured), and a `<db>.settings` that lives
 ONLY while the daemon does (measured: present mid-run, GONE after `close()`). A
-`--db-path` that does not exist gets an empty 118-byte store file plus that
-lock — the file has no graphs in it (`GRAPH.LIST` → `[]`), which is the claim
+`--db-path` that does not exist gets an empty store file (118 B on the version
+measured here) plus that lock — the file has no graphs in it (`GRAPH.LIST` → `[]`), which is the claim
 below, but a typo'd path still leaves FILE residue to explain. On the URI leg
 the bind issues no graph write (measured: `GRAPH.LIST` unchanged), but it IS a
 connection, and "no graph write" is not "no server-side effect" — the census
