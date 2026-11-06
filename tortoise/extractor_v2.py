@@ -11165,9 +11165,15 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             stats["channel_refused_no_claim"] += 1
             stats.setdefault("channel_refused_surfaces", []).append(surface)
             continue
+        # ⛔ BOTH sides through the write's window here too: a cut key compared to the
+        # model's RAW ref never matched an over-cap claim, so the unstripped `claim`
+        # fallback was used. Not observable today (only `claim["content"]` is read
+        # and both yield the same `claim_ref`), but the comment above claims a
+        # uniformity this line did not have (review at `2a1153519`, P3).
         carrier = next((p for p in kept_points
                         if isinstance(p, dict)
-                        and _norm(_mention_ref(p)) == _norm(claim_ref)), claim)
+                        and _norm(_mention_ref(p))
+                        == _norm(_mention_ref({"content": claim_ref}))), claim)
         records.append(_mention_record(
             surface=surface, claim=carrier,
             kind_guess=str(entry.get("kind_guess") or "").strip() or None,
@@ -11564,7 +11570,15 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
                 for field in ("span_start", "span_end", "span_source"):
                     if m.get(field) is not None:
                         kept[field] = m[field]
-                if not kept.get("quote") and m.get("quote"):
+                # ⛔ A `quote`-space address travels WITH its quote: the offsets were
+                # verified against the DUPLICATE's text, so filling the quote only
+                # "when absent" shipped `span_source: "quote"` beside the survivor's
+                # different quote — offsets that index bytes the record does not
+                # name, which is the forgery the whole clamp exists to refuse, and
+                # no later clamp can catch it because every published surface
+                # clamps BEFORE deduping (review at `2a1153519`, P2).
+                if m.get("quote") and (kept.get("span_source") == "quote"
+                                       or not kept.get("quote")):
                     kept["quote"] = m["quote"]
             continue
         at[key] = len(out)
