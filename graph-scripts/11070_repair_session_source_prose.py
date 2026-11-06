@@ -118,9 +118,18 @@ from tortoise.session_source_prose_migration import (  # noqa: E402, RUF100
 
 
 def derive_uri_graph(uri: str) -> str:
-    """The default graph a URI addresses — the same derivation sdk.py uses."""
+    """The default graph a URI addresses — the same derivation sdk.py uses.
+
+    ⛔ AN EMBEDDED/PATH URI HAS A NAMED DEFAULT, NOT AN EMPTY NAME. Returning
+    ``""`` here (round 6 briefly did) is not "let the projection choose": the empty
+    string is a REAL, distinct, empty FalkorDB graph, so `--db <path>` with no
+    `--graph` read that graph instead of the `tortoise` graph `sdk._derive_graph_name`
+    returns for an embedded checkout («``return uri_graph or "tortoise"``») — and
+    `--dry-run --assert-clean` then exited 0 over an unrepaired graph it never
+    opened (#11152 review round 7, MATERIAL false PASS).
+    """
     if "://" not in uri:
-        return ""
+        return "tortoise"
     return urlparse(uri).path.lstrip("/") or "tortoise"
 
 
@@ -131,7 +140,9 @@ def open_projection(uri: str, graph_name: str):
         # `--db <path> --graph X` open the DEFAULT embedded graph while the report
         # printed `graph: X` — a clean verdict over a graph the run never opened
         # (#11152 review round 6).
-        return FalkorProjection(uri, graph_name=graph_name,
+        # ⛔ `or "tortoise"` is the second half of the same guarantee: an empty
+        # graph NAME is a real graph, so it must never reach the constructor.
+        return FalkorProjection(uri, graph_name=graph_name or "tortoise",
                                 allow_nonstandard_path=True)
     return FalkorProjection.from_uri(uri, graph_name=graph_name)
 
@@ -163,10 +174,12 @@ def main() -> int:
                          "WRITING arm — the cache graph name is NOT the "
                          "record's scope)")
     ap.add_argument("--clear-without-record", action="store_true",
-                    help="allow the destructive clear-only arm (no lexicon "
-                         "re-derived) on EVERY candidate. Without it, a "
-                         "candidate the record cannot replace is REPORTED and "
-                         "LEFT ALONE. Required when no record scope is given.")
+                    help="authorise CLEARING a candidate the record cannot "
+                         "answer for. Where the record DOES answer the pair is "
+                         "still RE-DERIVED, so this is not 'clear everything' "
+                         "when a scope is also supplied. Without it such a "
+                         "candidate is REPORTED and LEFT ALONE. Not required on "
+                         "a census (--dry-run), which never writes.")
     ap.add_argument("--assert-clean", action="store_true",
                     help="exit 1 if any candidate remains (dry run only) — the "
                          "step-3 verification; without it a dry run always exits 0")

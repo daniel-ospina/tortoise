@@ -1313,8 +1313,6 @@ def test_the_embedded_arm_honours_graph_and_the_report_names_what_it_opened(
     machine-readable record of a DESTRUCTIVE run could not say which cache graph
     it wrote (#11152 review round 6).
     """
-    from tortoise import projection as projection_mod
-
     seen = {}
 
     class _Proj:
@@ -1325,12 +1323,13 @@ def test_the_embedded_arm_honours_graph_and_the_report_names_what_it_opened(
         def close(self):
             pass
 
-    real = projection_mod.FalkorProjection
-
     class _Capturing:
         def __init__(self, *a, **kw):
             seen["graph_name"] = kw.get("graph_name")
-            self._inner = _Proj(kw.get("graph_name") or "tortoise")
+            # ⛔ NO `or "tortoise"` HERE. That normalisation is what let the
+            # empty-name regression through round 6: the fake reinstated the
+            # default the real constructor no longer receives (#11152 r7).
+            self._inner = _Proj(kw.get("graph_name"))
 
         def __getattr__(self, item):
             return getattr(self._inner, item)
@@ -1346,7 +1345,45 @@ def test_the_embedded_arm_honours_graph_and_the_report_names_what_it_opened(
         "the embedded branch dropped --graph and opened the default graph")
     assert payload["graph"] == "org_acme_tortoise", (
         "--json could not name the cache graph the run addressed")
-    assert real is projection_mod.FalkorProjection
+
+
+def test_the_embedded_DEFAULT_graph_is_tortoise_not_the_empty_name(
+        monkeypatch, capsys):
+    """⛔ `--db <path>` with NO `--graph` must open `tortoise`, not `""`.
+
+    The empty string is a REAL, distinct, empty FalkorDB graph, so a default of
+    `""` made `--dry-run --assert-clean` exit 0 over an unrepaired graph the run
+    never opened — a no-op verification gate, on the arm round 6 touched
+    (#11152 review round 7, MATERIAL). `sdk._derive_graph_name` returns `tortoise`
+    for an embedded checkout, and so must this.
+    """
+
+    seen = {}
+
+    class _Inner:
+        def __init__(self):
+            self.graph_name = "tortoise"
+            self.g = _RecordingGraph([(_session_node(),)])
+
+        def close(self):
+            pass
+
+    class _Capturing:
+        def __init__(self, *a, **kw):
+            seen["graph_name"] = kw.get("graph_name")
+            self._inner = _Inner()
+
+        def __getattr__(self, item):
+            return getattr(self._inner, item)
+
+    monkeypatch.setattr(_cli, "FalkorProjection", _Capturing)
+    monkeypatch.setattr(sys, "argv", [
+        _CLI_PATH.name, "--db", "/tmp/embedded-11070", "--dry-run", "--json"])
+
+    _cli.main()
+    assert seen["graph_name"] == "tortoise", (
+        "the embedded default reached the projection as an empty graph name")
+    assert json.loads(capsys.readouterr().out)["graph"] == "tortoise"
 
 
 def test_the_runbook_commands_that_touch_the_cache_all_name_the_graph():
