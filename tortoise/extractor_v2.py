@@ -1715,7 +1715,7 @@ OUTPUT_CONTRACT = """{
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],
-  "relations": [{"src": str, "dst": str, "predicate": str, "semantics": str|null}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states ("the retry storm weakened the deadline rule", "A changed because of B"). src/dst are entity NAMES that must ALSO appear in entities[] above — spell one exactly as emitted (a case/whitespace-only variant resolves to the emitted spelling); an endpoint is never invented here, and one this emission does not produce is DROPPED. predicate must be a declared relation verb (the same vocabulary create_operator accepts); semantics is the optional closed Layer-2 meaning (ONTOLOGY §8). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
+  "relations": [{"src": str, "dst": str, "predicate": str, "semantics": str|null}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states ("the retry storm weakened the deadline rule", "A changed because of B"). src/dst are entity NAMES that must ALSO appear in entities[] above — spell one exactly as emitted (a case/whitespace/Unicode-fold-only variant resolves to the emitted spelling); an endpoint is never invented here, and one this emission does not produce is DROPPED. predicate must be a declared relation verb (the same vocabulary create_operator accepts); semantics is the optional closed Layer-2 meaning (ONTOLOGY §8). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
   "chain_notes": [{"chain": str, "finding": str, "action": "repaired|warned", "note": str}],
   "link_before_create": [{"searched_for": str, "found": bool, "note": str}],
   "retractions": [{"content": str}|"id": str]  # E7: explicit withdrawals — emit when the conversation RETRACTS a previously-stated fact (additive; omit when nothing is withdrawn)
@@ -8662,26 +8662,45 @@ def _declared_relation_predicates() -> frozenset[str] | None:
         return None
 
 
+def _endpoint_fold_keys(name: str) -> tuple[str, ...]:
+    """The TWO folds an endpoint is matched on — both, always.
+
+    ``_norm`` (whitespace-collapsed + lower) is the pipeline's name identity:
+    ``_merge_key`` builds this section's dedupe key with it and
+    ``vet_gate._norm`` matches entity references with it, so two spellings that
+    differ by a whitespace RUN are the same entity to every other stage.
+    ``str.casefold()`` is the wider Unicode fold, and it is what
+    ``vet_gate._referenced_entity_names``' relation arm probes (the 'Straße' /
+    'STRASSE' pair on which ``_norm`` and ``casefold`` DIVERGE).
+
+    Neither fold is a superset of the other — ``casefold`` folds the ß/İ pair
+    that ``lower`` does not, and ``_norm`` collapses the whitespace run that
+    ``casefold`` does not — so resolving on one of them alone silently loses a
+    spelling every other stage accepts.
+    """
+    return (_norm(name), name.casefold())
+
+
 def _resolve_relation_endpoint(name: str, exact: set[str],
                                folded: dict[str, list[str]]) -> str | None:
     """The emitted entity an endpoint names, or ``None`` (never a new one).
 
-    Exact name first; then a UNIQUE match on ``_norm`` — the pipeline's own
-    name identity (whitespace-collapsed + lower), the SAME transform
-    ``_merge_key`` builds this section's dedupe key with and ``vet_gate._norm``
-    matches entity references with. Case-folding alone was narrower than every
-    other stage: an endpoint differing from the emitted name by a whitespace
-    RUN is the same entity to ``_merge_key`` (so the union already treats the
-    two spellings as ONE relation) and was nonetheless dropped here as
-    "does not resolve" — an edge lost to a space.
+    Exact name first; then a UNIQUE match on EITHER fold (see
+    :func:`_endpoint_fold_keys`) — an endpoint differing from the emitted name
+    only by case, a whitespace run or a Unicode fold is the same entity every
+    other stage treats it as, and dropping it was "an edge lost to a space".
 
-    An ambiguous ``_norm`` match (two entities differing only by case or
-    whitespace) resolves to ``None`` — guessing which one the story meant
-    would attribute an edge to the wrong node, which is worse than the missing
-    edge this channel exists to fix. ``folded`` must be keyed by ``_norm``."""
+    An ambiguous match (two entities differing only by one of those) resolves
+    to ``None`` — guessing which one the story meant would attribute an edge to
+    the wrong node, which is worse than the missing edge this channel exists to
+    fix. ``folded`` must be keyed by BOTH ``_endpoint_fold_keys`` of each name."""
     if name in exact:
         return name
-    hits = folded.get(_norm(name)) or []
+    hits: list[str] = []
+    for key in _endpoint_fold_keys(name):
+        for hit in folded.get(key) or []:
+            if hit not in hits:
+                hits.append(hit)
     return hits[0] if len(hits) == 1 else None
 
 
@@ -8715,7 +8734,10 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     exact.discard("")
     folded: dict[str, list[str]] = {}
     for n in exact:
-        folded.setdefault(_norm(n), []).append(n)
+        for key in _endpoint_fold_keys(n):
+            bucket = folded.setdefault(key, [])
+            if n not in bucket:
+                bucket.append(n)
 
     declared = _declared_relation_predicates()
     kept: list[dict] = []
@@ -8735,7 +8757,7 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                 f"({src!r}, {dst!r}, {predicate!r}) — dropped")
             dropped += 1
             continue
-        if _norm(src) == _norm(dst):
+        if _norm(src) == _norm(dst) or src.casefold() == dst.casefold():
             warnings.append(f"relations[{i}] is a self-relation "
                             f"('{_clip(src, 40)}') — dropped")
             dropped += 1
