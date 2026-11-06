@@ -268,8 +268,10 @@ mechanisms:
       (`docs/evidence/9889/e1-gate-drops.json`: 0 drops of 61 Objects, 0 of 13
       bare-definite, positive controls firing) — the residual is the point/event
       rate, which that artifact does not cover (`#10996` V8).
-      The ARBITER half stays OPT-IN (`TORTOISE_VET`, or the seam below), because
-      arming a decision-only model puts a paid network call on the write path
+      The ARBITER half stays OPT-IN. `TORTOISE_VET` runs the pass but supplies
+      NO arbiter, so it adds no spend; the paid network call arrives only with
+      the seam below (or an injected arbiter), which is why arming a
+      decision-only model stays an operator decision and not this default
       (`docs/architecture/S2-DECISION-SEAM.md` §6): the spend decision is not
       this default. `TORTOISE_S2_DECISION_SEAM` (#5087) is a THIRD switch that
       also arms this step, overriding even an explicit `TORTOISE_VET=0`: the

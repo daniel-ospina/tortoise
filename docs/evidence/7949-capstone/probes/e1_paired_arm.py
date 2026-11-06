@@ -87,8 +87,8 @@ from capstone_measure import (  # noqa: E402
 ARM_KEYS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_VALUE_GATE")
 
 #: Switches whose UNSET value is ON. For these, "absent" is not an OFF spelling:
-#: the run must SET the falsy value explicitly, so the record shows the arm was
-#: produced rather than inherited. `TORTOISE_VALUE_GATE` joined the set in
+#: :func:`off_arm_readback` PINS them to a falsy value and READS IT BACK, so the
+#: record shows the arm was produced rather than inherited. `TORTOISE_VALUE_GATE` joined the set in
 #: `#10996` (the `#4899` mechanical predicate defaults ON); the other two still
 #: default OFF. Measured before the fix: with only the four keys cleared,
 #: ``value_gate.value_gate_enabled()`` was True inside an arm this file labelled
@@ -98,7 +98,7 @@ DEFAULT_ON_KEYS = ("TORTOISE_VALUE_GATE",)
 #: A FOURTH switch for the same pass, and the reason it is checked beside the
 #: three: `TORTOISE_S2_DECISION_SEAM` arms S2.2 *through the arbiter*, so
 #: `_vet_enabled` reads True even against an explicit `TORTOISE_VET=0`
-#: (`capstone_measure.ARM_OFF` pins it UNSET for exactly this, and #5087 is the
+#: (`capstone_measure.ARM_OFF` pins it falsy for exactly this, and #5087 is the
 #: flag). Leaving it out would let this driver print `OFF` while the seam ran
 #: the very pass the label denies — the mislabelled arm the refusal above exists
 #: to prevent, arriving through the one key the acceptance list does not name.
@@ -108,10 +108,12 @@ SEAM_KEY = "TORTOISE_S2_DECISION_SEAM"
 def off_arm_readback() -> dict[str, str | None]:
     """The arm actually in force, READ BACK — never a literal this file types.
 
-    Two refusals, because "unset" is not one state (`#10996`): a switch SET to a
-    truthy value, and a switch in :data:`DEFAULT_ON_KEYS` left UNSET — the
-    second reads OFF by the old rule while the resolver reports ON. Both are the
-    same defect (a mislabelled arm), arriving through different spellings.
+    Two arms, because "unset" is not one state (`#10996`): a switch SET to a
+    truthy value is REFUSED (the shell armed something this arm denies), and a
+    switch in :data:`DEFAULT_ON_KEYS` left UNSET is PINNED to ``"0"`` and read
+    back (absence reads OFF by the old rule while the resolver reports ON). Both
+    are the same defect — a mislabelled arm — arriving through different
+    spellings: the first is the operator's to fix, the second is this file's.
     """
     held = {key: os.environ.get(key) for key in (*ARM_KEYS, SEAM_KEY)}
     on = {k: v for k, v in held.items() if v not in (None, "", "0")}

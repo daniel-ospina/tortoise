@@ -94,8 +94,9 @@ from `os.environ`** and printed, never typed as a literal.
 S2.2 mechanical half defaults **ON** (`tortoise/value_gate.py`), so an ABSENT
 value gate is the *treatment* arm; a control produced by unsetting it would be
 the treatment under the control's label. `e1_paired_arm.off_arm_readback()`
-therefore REFUSES an unset value gate (naming the key), and the OFF arm is run
-with `TORTOISE_VALUE_GATE=0`. That reproduces the **intent** of
+therefore PINS the value gate to `0` and reads it back (a switch the shell
+EXPLICITLY armed is still refused), so the OFF arm is run with
+`TORTOISE_VALUE_GATE=0`. That reproduces the **intent** of
 `PRE-REGISTRATION.md`'s CONTROL arm ("the selection flags unset … their default
 is OFF"); the frozen record's *wording* predates the flip and is left unedited —
 amending a pre-registration is its owner's call, not a probe's.
