@@ -2351,7 +2351,8 @@ def test_a_multi_line_comment_between_a_claiming_word_and_its_ref_still_claims(b
     A comment is now blanked character-for-character INCLUDING its newlines, so the claim survives.
     RED against the newline-preserving blanking: `claims()` returns `{}` and there is no finding.
     The closing-word spelling is included because it is the one that never broke (`cmid` is
-    `[\\s:]*`, so it crossed the blanked newline) — the pair keeps the two keyword classes honest.
+    ``\s*:?\s*`` — the separator ITSELF, never a character class (see the `cmid` note above), so it
+    crossed the blanked newline) — the pair keeps the two keyword classes honest.
     """
     claimed = L.claims(body, 1)
     assert claimed["weak"] + claimed["closing"] == [1234], why
@@ -2456,3 +2457,28 @@ def test_a_plural_decline_across_a_wrapped_list_is_a_DECLARED_residual():
     # …and the named spelling of the SAME sentence does decline both, on either layout.
     assert L.claims("Part of #10085,\n#10063 — deliberately not closing #10085 and #10063.\n",
                     1)["declined"] == [10063, 10085]
+
+
+@pytest.mark.parametrize("tail", [",", ";", ".", "*", "_", "`", " ", "!", "?"])
+def test_one_character_after_the_auxiliary_does_not_turn_a_subject_into_a_gloss(tail):
+    """The aux-tail guard tested `[ \\t]*` after the auxiliary, so `is` was refused and `is,`,
+    `*is*`, `` `is` ``, `is;` and `is.` — the same clause subject with ONE character of emphasis or
+    punctuation after it — were admitted, and the reference was CLEANED (measured at `fd5dfe39f`,
+    review P3). One character is not a discriminator; the tail is now the module's own
+    punctuation/emphasis set, which only widens REFUSALS and so cannot cost a claim.
+
+    The honest battery is asserted alongside, so the widening cannot be made green by refusing
+    glosses generally.
+    """
+    body = f"Refs #1234 (the outage is{tail}) — not closed.\n"
+    assert L.claims(body, 1)["declined"] == [], tail
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[1234]], tail
+
+    for honest in (
+        "Refs #100 (a) — not closing it.\n",
+        "Refs #100 (the parent) — deliberately not closing it.\n",
+        "Refs #10892 (blind spot), #10602 (latency) — deliberately not closing them.\n",
+        "Refs #100 (P3) — not closing it.\n",
+        "Refs #100 (2026-11-05) — not closing it.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
