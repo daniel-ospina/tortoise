@@ -669,6 +669,42 @@ def test_value_gate_flag_switches_the_vet_pass_on(
     assert vgm.value_gate_enabled() is True
 
 
+def test_no_gate_docstring_still_cites_the_value_gate_as_a_default_off_precedent() -> None:
+    """The precedent list is shipped prose, and `#10996` removed its third member.
+
+    ``TORTOISE_EMBED_GATE`` and ``TORTOISE_DD_BACKFILL`` both justify their
+    own off-by-default flag by naming ``TORTOISE_VALUE_GATE`` / ``TORTOISE_VET``
+    / ``TORTOISE_CLASSIFY_LATER`` as *"the rate effect is measurable before it is
+    trusted"* precedent. The value gate is no longer that: since `#10996` it is
+    ON when unset, and unset is the state every deploy is in.
+
+    Red-first by construction — both sentences were present when this pin was
+    written — and this is the failure it exists to catch: the rationale is what
+    the NEXT gate author copies, so leaving it makes a superseded rule read as
+    the house pattern. Each file must now say why the third member is missing,
+    which is the difference between a corrected precedent and a quietly short
+    one.
+    """
+    embed = (ROOT / "tortoise" / "embed_gate.py").read_text()
+    backfill = (ROOT / "tortoise" / "definite_description_backfill.py").read_text()
+    for name, text in (("embed_gate.py", embed),
+                       ("definite_description_backfill.py", backfill)):
+        assert "was the third member" in text, (
+            f"{name} no longer records that TORTOISE_VALUE_GATE left the "
+            "off-by-default precedent — a short list reads as if it never had "
+            "three members, and the next reader re-adds it")
+    # The two OLD sentences, verbatim. Restoring either re-falsifies the claim
+    # while every behavioural test above stays green — which is why the pin is
+    # on the prose and not on the flag.
+    assert "matching the `TORTOISE_VALUE_GATE` /" not in embed, (
+        "embed_gate.py still cites TORTOISE_VALUE_GATE as an off-by-default "
+        "precedent; #10996 flipped it ON, so that sentence now argues for a "
+        "default this repo does not use")
+    assert "the ``TORTOISE_VALUE_GATE`` (#4899)," not in backfill, (
+        "definite_description_backfill.py still cites TORTOISE_VALUE_GATE as "
+        "an off-by-default precedent (#10996)")
+
+
 #: Documented **fail-open** misses — recorded here so they are a decision rather
 #: than a silent gap. Each is a real path the predicate keeps:
 #:   * ``a//b.py`` — relaxing the segment class to ``/+`` re-opens the cycle-3 P2
