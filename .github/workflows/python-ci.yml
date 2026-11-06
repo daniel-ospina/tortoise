@@ -745,7 +745,7 @@ jobs:
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
-      # #6744: BOUND THE FAN-OUT. Unset, a matrix enqueues its whole shard set at
+      # #6744: BOUND THE FAN-OUT. Unset, a matrix ADMITS its whole shard set at
       # once — a PR that selects all three lanes requests 17 matrix jobs at the
       # same instant (9 fast + 5 slow + 3 carve-out). The `test-slow` and
       # `test-carve-out` matrices are `if:`-guarded on the diff, but `test` is

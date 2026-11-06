@@ -6395,7 +6395,7 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
     """#6744: each shard matrix declares `max-parallel`, and the three caps
     together keep ONE PR's MATRIX fan-out below the measured runner pool.
 
-    Unbounded, a single PR enqueues its whole shard set (17 jobs) at once. The
+    Unbounded, a single PR admits its whole shard set (17 jobs) at once. The
     measured consequence (9 `python-ci` runs, 2026-10-30T21:48Z..10-31T02:54Z,
     completed jobs only): per-PR peak simultaneous jobs p50 11 / max 18 against
     a 12-runner pool, and a single run held >=50% of all running jobs at 352 of

@@ -541,13 +541,11 @@ resolves — see the measurement below), and `max-parallel` gates which of those
 cells may **start** — so on a capped matrix this interval now counts cap-induced
 queueing **and** runner-availability wait together, and it can attribute neither. A capped PR's
 per-job wait will therefore **rise**, not fall: a leg held for a slot is queued for the whole
-wave ahead of it. (Lazy cell creation is a property of a matrix job that calls a reusable
-workflow via a job-level `uses:` — it changes nothing here, because all three of these jobs
-declare `runs-on` and `steps` and are the DIRECT shape.) The clock for this change is the
-**matrix band** — the first leg's `started_at` to the last leg's `completed_at` within one matrix
-job — compared against the same band on an uncapped run. That is the quantity the simulation's
-`matrix-band end delta` column is expressing (+17.9 m p50 / +23.2 m max at cap 3), and the only
-number a later reading should judge the regression against.
+wave ahead of it. The clock for this change is the **matrix band** — the first leg's `started_at`
+to the last leg's `completed_at` within one matrix job — compared against the same band on an
+uncapped run. That is the quantity the simulation's `matrix-band end delta` column is expressing
+(+17.9 m p50 / +23.2 m max at cap 3), and the only number a later reading should judge the
+regression against.
 
 The read that confirms the shape on this repo's first capped run — one shared `created_at` across
 all 9 fast legs, with `started_at` spread over the waves, is this text; distinct `created_at`
@@ -558,6 +556,12 @@ wrong for this workflow:
 gh api "repos/daniel-ospina/tortoise/actions/runs/<capped_run_id>/jobs?per_page=100&filter=all" \
   --jq '.jobs[] | select(.name|startswith("test ")) | {name, created_at, started_at, completed_at}'
 ```
+
+⛔ **That falsifier is the whole of the claim, and it is read here for ONE shape: a DIRECT matrix**
+(all three of these jobs declare `runs-on` and `steps`). Nothing in this repo measures cell-creation
+timing for any other shape, so none is asserted: a matrix job that calls a reusable workflow through
+a job-level `uses:` would have to be re-read with the command above before this paragraph could be
+applied to it.
 
 **Taken 2026-11-05 on the first capped run** (`pull_request`, head `80d059348f68`, run
 `42034142918`, 29 job records — the 26 accounted for below plus the 3 dependents (`canary-streak`,
