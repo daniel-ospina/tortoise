@@ -661,10 +661,10 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
     half. Asserted against the real `metrics()` dict, key-set form, so the test
     cannot pass vacuously on a substring of some other key.
 
-    ⛔ It also pins the docstring that makes the claim ("under the SAME names
-    ``metrics()`` publishes"), because that surface is unreachable from a literal
-    assertion: a COHERENT rename (block + `metrics()` + the literals here) left the
-    docstring false with every test in the repo green (#9548 review P3). The
+    ⛔ It also pins the docstring that makes the claim, AT the claim: the pair's own
+    bullet (``record_writes_applied`` / ``record_last_write_at`` — the POSITIVE
+    channel) and the "under the SAME names ``metrics()`` publishes" sentence — a
+    bare mention test was measured GREEN with both broken (#9548 review P2). The
     runbook's field row is pinned next, in `tests/test_deploy_workflow.py`, and for
     a stated reason: it runs on a docs-only diff and this file does not.
     """
@@ -674,22 +674,33 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
         "the /health block documents these as `metrics()`'s own names, and "
         f"metrics() publishes {sorted(published)}"
     )
-    # …and the name must appear where the claim is MADE, not only in the code that
-    # makes it true: `_record_health`'s own docstring ("under the SAME names
-    # ``metrics()`` publishes"). Without it, renaming the pair here AND in
-    # `metrics()` left the docstring false with every leg above green — they pin
-    # the literals only (#9548 review P3).
+    # …and the claim must be pinned WHERE IT IS MADE, not merely mentioned: the
+    # docstring says (a) the block publishes these "under the SAME names
+    # ``metrics()`` publishes" and (b) they are the POSITIVE channel. A bare
+    # `name in docstring` was measured GREEN on both halves being broken — a
+    # renamed bullet head (`applied_writes` / `last_write_at`) still mentions the
+    # real names later in the same bullet, and "SAME names" inverted to
+    # "DIFFERENT names" matched nothing. So both sentences are pinned, on a
+    # whitespace-normalised copy so a reflow cannot red them (#9548 review P2).
     # ⛔ The RUNBOOK half of this claim is pinned in `tests/test_deploy_workflow.py::
     # test_the_runbook_field_row_documents_the_positive_pair`, deliberately and not
     # here: a runbook-only diff selects no surface and runs `tier1` only, and this
     # file is on `api`/`core` — so a row pin in THIS file is asleep on the one diff
     # that can re-break it (measured via `tools/ci_selection.py`).
-    contract = hosted_api._record_health.__doc__ or ""
-    for name in ("record_writes_applied", "record_last_write_at"):
-        assert name in contract, (
-            f"`_record_health`'s docstring no longer names {name!r} — the field is "
-            "published but undocumented, which is the paper-only claim inverted"
-        )
+    doc = " ".join((hosted_api._record_health.__doc__ or "").split())
+    assert (
+        "``record_writes_applied`` / ``record_last_write_at`` — the POSITIVE channel"
+        in doc
+    ), (
+        "`_record_health`'s docstring no longer documents the positive pair as the "
+        "pair the payload publishes — the field is published but undocumented, "
+        "which is the paper-only claim inverted"
+    )
+    assert "under the SAME names ``metrics()`` publishes" in doc, (
+        "`_record_health`'s docstring no longer claims the pair is published under "
+        "`metrics()`'s own names — that claim is what ties the /health keys to the "
+        "ones the rest of the process reads, so losing it makes a rename silent"
+    )
 
 
 def test_an_unread_applied_counter_publishes_none_never_a_zero(monkeypatch):
