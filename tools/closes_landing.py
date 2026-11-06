@@ -1341,7 +1341,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     # `"   <div>"` + a column-0 marker line lost the close against both the parent head and
     # `origin/main` (1,440 such bodies). The block is bound to the ITEM it opened in (None at top
     # level, and then it can never be dedented out of one) plus the quote depth it opened at.
-    html_item: "_ListItem | None" = None
+    html_item: _ListItem | None = None
     html_depth = 0
     # Lines the CURRENTLY OPEN block has hidden from the scan. Reset when a block
     # opens or closes, so the value at the end is the unterminated block's tail.

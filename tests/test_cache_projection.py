@@ -685,13 +685,42 @@ def test_relation_props_ride_the_edge_and_the_predicate_is_the_rel_type():
 def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     """The rebuild's field set is EXACTLY the record's — never a superset.
 
-    ⚠️ ONE DECLARED EXCEPTION (#9634): the properties in
-    `cp.FOLD_ON_CREATE_DEFAULTS` are the FOLD's `ON CREATE` constants, applied
-    where the record row is silent, so the view carries them before this test
-    runs. That is why the comparison below cannot see this class — the bound on
-    the exception is
-    `test_the_declared_fold_defaults_are_the_folds_own_constants`, not this
-    assertion. Everything NOT in that table is still pinned exactly here.
+    ⚠️ FOUR CLASSES THIS COMPARISON CANNOT SEE — and every one of them is
+    declared, with a pin of its own. `_view()` builds every fixture row through
+    `cp.node_from_row`, so any property the VIEW adds is on BOTH sides of the
+    assertion below and the assertion is silent about it:
+
+    (1) #9634: `cp.FOLD_ON_CREATE_DEFAULTS` are the FOLD's `ON CREATE` constants,
+    applied where the record row is silent. Bound by
+    `test_the_declared_fold_defaults_are_the_folds_own_constants`.
+    (2) §2.6's DERIVED half, `cp.DERIVED_FROM_RECORD` (#9974): a property the
+    record is FORBIDDEN to store and the cache must COMPUTE from the columns it
+    does carry — `status` from a supersession carrier
+    (`supersededBy`/`supersededAt`), for which `public.object` has NO column at
+    all. Bound by that table's own stated divergences from the record's
+    `*_current_status` views.
+    (3) `cp.EVENT_STREAM_FOLDS` (#10198): the same `status`, derived from the
+    record's EVENT STREAM (`public.journal_event`) rather than from a column,
+    because the lifecycle vocabulary is declared by packs at RUNTIME. Bound by
+    `tortoise.status_folds`, which owns that vocabulary.
+    (4) #10853: `cp._EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_searchText`) is
+    DELIBERATELY not written for an episodic Source. ⛔ A narrowing is a
+    SILENT-LOSS surface, so it is pinned by a leg that MEASURES the drop set:
+    `tests/test_10853_session_source_prose.py::test_the_DROP_SET_itself_is_exactly_the_declared_pair`
+    (and its widening mutation).
+
+    ⛔ AND THE BLINDNESS IS NOT LIMITED TO THOSE FOUR — it is the whole of
+    `node_from_row`, because that is what BUILDS `node.props`: the schema
+    REFUSAL set (a column dropped by name, `if column in refused: continue`) is
+    equally invisible here, and so is any column the projection stops placing.
+    Listing only the four above would close the question too early; they are
+    listed because each has a named pin, not because they are the whole bound.
+
+    What this assertion DOES pin is the STATEMENT layer: `node_statement` must
+    write exactly the props the plan's model carries. A field IT drops or invents
+    reds here (that mutation is why this leg compares statements and not
+    `node.props`). Anything decided upstream, in `node_from_row`, cannot — both
+    sides are built there, so a drop and an identical drop cancel.
 
     This is S3's contract clause at the STATEMENT level: a superset would be the
     cache carrying state the record does not hold, i.e. the cache becoming a

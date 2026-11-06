@@ -318,8 +318,11 @@ GRAPHS (the ON log's own `# graph:` line — its `# head:` is equal either way, 
 the head cannot catch it), when the falsifier's SCORED `with_anchor` block is
 not the run the E2a record was taken on (a graph is `capstone_on_<head>_<stamp>`,
 so a SIBLING run of the same head is a different run, and naming the head is not
-enough), when the TWO before artifacts name the SAME graph (two copies of one
-run are one realization, not two — and `decidable` is the SET of pairings, so
+enough), when the TWO before artifacts carry the SAME `object_names` population
+(two copies of one run are one realization, not two — the identity is the
+population and not the `graph` name, so a fresh graph stamp over one population is
+still one run and re-ordering the list does not make a second — and `decidable` is
+the SET of pairings, so
 two copies of one reading can only ever agree and would report a DECIDED E1 off
 the replication the design requires and never got), when a before artifact
 carries no graph at all (an absent run cannot be told apart from a duplicated
@@ -362,8 +365,10 @@ record cannot show; re-recording the pair at the shipped probe closes it.
 two pairings give different verdicts. At n=1 per arm the verdict would depend on
 which before run is chosen, so the aggregate is `REFUSED` with both pairings
 printed. The next requirement is **n >= 2 per arm** — and the two realizations
-have to BE two runs: the driver refuses a before pair taken on the same graph,
-because two copies of one OFF record pair identically, which makes the row
+have to BE two runs: the driver refuses a before pair carrying the same
+`object_names` population (the `graph` name alone is not the identity — a re-stamped
+copy of one population is still one run), because two copies of one OFF record pair
+identically, which makes the row
 decidable off a single realization — a decided `FAIL` when the duplicated arm is
 the 0.3590 one, and a decided `PASS` when it is the 0.5652 one. The `PASS` is the
 direction that matters: it is the one this guard exists to stop, and the one
