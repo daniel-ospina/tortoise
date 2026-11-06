@@ -27,8 +27,8 @@ command in §5. The two figures that are **quoted from research records rather t
 62.3 % definite-description share and `#4889`'s 13-type hosted census — are cited to their own sources
 and are marked as such in §5.
 
-**Verdict summary: 0 of 3 discharged — and one of the three blockages cleared during the lane without
-moving a single number.**
+**Verdict summary: 0 of 3 discharged — and the one blockage that *looked* cleared during the lane was
+only half cleared, which is the finding worth reading (§2).**
 
 | Child | Assertion | Verdict | Decisive evidence |
 |---|---|---|---|
@@ -179,7 +179,8 @@ deictics, generic heads**. Its scope is explicitly *not* A2's population:
 **What the shipped selection path does, measured — re-run AFTER `#11212` landed.** `probes/e1_e2_probe.py`
 on the committed 25-candidate corpus, on a tree that contains `tortoise/identity_hold.py` (exit 3 =
 `UNPREREGISTERED`, by design — a verdict needs a frozen threshold). **Selected lines** — the §5 command
-prints all twelve arm lines; the ones quoted here are the four that decide the reading:
+prints all twelve arm lines; the six quoted here (plus the `e1 ` summary) are the ones that decide the
+reading:
 
 ```text
 e1 before_share=0.600000 after_share=0.600000 reduction=-0.000000 threshold=n/a observed=NO_REDUCTION verdict=UNPREREGISTERED
@@ -236,8 +237,10 @@ mechanical half now defaults ON — the composition is `extractor_v2.py:11731-11
 default-ON itself lives at `tortoise/value_gate.py:81` (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
 `extractor_v2.py:1154` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
 nothing else. ⚠️ Both cites are line numbers **at `80c912244`**: the forward merge that brought `#11212`
-in inserted ~381 lines above them and moved these from `:11350-11352`/`:1153`, which is the class of
-defect §0 exists to catch — a number true at one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result, not an unarmed one.
+in inserted ~381 lines above them, and the two cites moved by **different** amounts —
+`:11351-11352` → `:11731-11732` (**+380**) and `:1153` → `:1154` (**+1**) — so a bare "re-anchor on merge"
+is not one arithmetic. That is the class of defect §0 exists to catch: a number true at one base and false
+at the base the record claims. Which is why the 0.0 pp above is the **armed** result, not an unarmed one.
 
 **Exact remaining gap for `#10985`:** (a) the attach rate must be a reported census number, per candidate,
 with HOLD as a third bucket; (b) E1/E1b must be scored against the registered arithmetic rather than
@@ -295,7 +298,8 @@ The capstone's **19** is a *different graph* — a fresh, disposable, pre-regist
 not a contradiction. Two explanations are live and this record does **not** choose between them:
 `#10987`'s own **(3)** — *"the surface the owner measured is a different graph/deployment than the one
 production serves"* — and a fourth this record adds, that **the kind→label routing landed between the two
-measurements** (2026-09-29 `#4934` vs the capstone run stamped `9152448d7`, 2026-11-02), which would move
+measurements** (2026-09-26, PR `#5230` — not `#4934`, which is the report — vs the capstone run stamped
+`9152448d7`, 2026-11-02), which would move
 `:Subject` from ~1 to 19 with no change to the corpus. That is a **reading this record offers, not an
 adjudication** — `#10987` owns the adjudication and has not made it; weighing (3) against the routing is
 part of what it owes.
@@ -369,7 +373,8 @@ git grep -n apply_hierarchy_edges                          # 9 in the test file 
 git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
 grep -c -E 'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py   # 0
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
-tools/who-is-on.sh 10984 --repo .                           # exit 2 — holder surface UNQUERIED, NOT "nobody"
+tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer; exit 2 = holder
+                                                          # surface UNQUERIED (never "nobody")
 uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time gate (exit 0 = clear)
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
