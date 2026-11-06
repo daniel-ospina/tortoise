@@ -546,6 +546,23 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
                     f"in this step binds that project and `db push --linked` applies production "
                     f"DDL there while the run reports success (#10896)"
                 )
+            # …and `if:` is the same genus: an always-false condition on ANY step of the applier
+            # job is a skipped step, and in this job a skipped step is never benign. `if: false` was
+            # closed only for MUTATING steps (cycle 10), so the main-only REFUSAL — the step whose
+            # whole job is to stop a non-main dispatch from applying that branch's DDL — could be
+            # disabled with one token while the entire 9-file workflow battery stayed green (565
+            # passed, measured in review cycle 14). A guard protecting a safety check must govern
+            # the safety check itself.
+            condition = str(step.get("if") or "").lower()
+            assert step.get("if") is not False and not _FALSE_CONDITION.fullmatch(
+                condition
+            ) and not _FALSE_OPERAND.search(condition), (
+                f"step {step.get('name')!r} in job {job_name!r} is gated on an always-false "
+                f"condition ({step.get('if')!r}): the step never runs and the job reads GREEN. In "
+                f"the applier job a skipped step is a skipped CHECK — most of all the main-only "
+                f"refusal, which is what stops a non-main dispatch applying that branch's "
+                f"migrations to production (#10896)"
+            )
             # The tree that is CHECKED OUT is what `db push` applies. The workflow refuses a
             # non-main dispatch by reading `github.ref`, but nothing read what checkout actually
             # fetched — `with: {ref: some-other-branch}` measured GREEN (review cycle 13), and that
