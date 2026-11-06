@@ -1,5 +1,14 @@
 """`#11085` — the embedding-exemption register has a production home, and an undeclared writer
-cannot bypass silently.
+cannot bypass silently **within the population the instrument can see**.
+
+⛔ The qualifier is not decoration and `#11086` must not drop it: discovery is
+`tools/dod_5090_probe.py::_EMBED_WRITE`, a source-text regex, so a writer that spells its write as
+a map-merge (`SET n += $p` carrying `{"embedding": …}`), a dict key (`rec["embedding"] = x`), an
+inline property map (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace (`SET n = $map`),
+**or** that reaches the store through a helper the vocabulary does not name (live today:
+`tortoise.sdk::_write_capture_turns`, `tortoise.cache_projection::node_statement`) is ABSENT from
+the census rather than undeclared — and every test below is green. `tortoise/embed_writer_register.py`'s
+module docstring states the same boundary; `#11274` owns widening it.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (6 recognised producers,
 9 legitimately exempt, 0 bypasses) but left that classification in `tools/dod_5090_probe.py`'s
@@ -17,7 +26,7 @@ is the product home; this file is its proof.
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
-| `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer whose vector the gate does not see and the product has no declaration for it — the *silent bypass* this issue exists to prevent |
+| `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer **discovery decides** whose vector the gate does not see and the product has no declaration for it — the population is the syntax the AST/regex pass can decide, and the shapes it cannot are NAMED in `UNDECIDABLE_WRITE_SHAPES` and pinned by `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` |
 | `test_the_live_guard_has_teeth_on_an_INJECTED_writer` | the same guard, driven through **DISCOVERY** (`probe._embedding_writers` on an injected tree) rather than through set arithmetic | the guard goes vacuous when the tree's population is all-declared (the `#10541` guard's own lesson), or the discovery filter regresses and stops seeing a writer — in EITHER the clause shape or the container-key shape (`#11274`) |
 | `test_the_register_names_the_shapes_its_discovery_cannot_see` | `#11274` — the guard is exactly as wide as discovery, so discovery's blind spots are NAMED rather than implied | the instrument stops naming a shape it cannot decide, claims to decide one it cannot (or the reverse), or the register's docstring stops scoping its claim to the mechanism |
 | `test_the_instrument_and_the_product_declare_the_same_writers` | `04-plan.md` §6.2 — *"the instrument and the product cannot disagree about which writer a row is about"* | a class changes in one place, the census keeps an entry the register dropped, or the register invents one the instrument does not find |
@@ -221,13 +230,22 @@ def _writers_outside_the_gate() -> set[str]:
 
 
 def test_every_writer_the_instrument_finds_outside_the_gate_is_declared():
-    """**The silent-bypass guard.** A new writer outside the gate needs a PRODUCT declaration.
+    """**The silent-bypass guard — scoped to what discovery can SEE.**
 
-    This is the `#11085` property in one assertion: the instrument discovers the population by
-    walking the tree, and the product must already name every member of it. A writer added tomorrow
-    without a declaration reds HERE — which is what `#11086` (arming the gate) needs to be able to
-    point at, and what "an undeclared writer cannot bypass silently" means once the census is not
-    the only place the answer lives.
+    A new writer outside the gate needs a PRODUCT declaration, asserted over the population the
+    instrument measures: it discovers that population by walking the tree, and the product must
+    already name every member of it. That is what `#11086` (arming the gate) needs to point at, and
+    what "an undeclared writer cannot bypass silently" means for this population once the census is
+    not the only place the answer lives.
+
+    ⛔ What this does NOT claim: that discovery is exhaustive. A writer whose store the regex cannot
+    spell (`SET n += $p`, `rec["embedding"] =`, an inline property map, `SET n = $map`, a clause
+    held in a module constant) is ABSENT from the census, so it does not red here — the `#10541`
+    guard's own inherited lesson, and the reason an earlier version of this docstring ("a writer
+    added tomorrow reds HERE") overstated the guard. The blind spot is stated in
+    `tortoise/embed_writer_register.py`'s module docstring and PINNED by
+    `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` below, so silence is
+    distinguishable from coverage. **Widening** discovery is `#11274`, which blocks `#11086`.
     """
     outside = _writers_outside_the_gate()
     assert outside, (
@@ -330,7 +348,14 @@ def test_the_instrument_and_the_product_declare_the_same_writers():
         "the census classifies writers the product does not declare: "
         f"{sorted(set(census) - declared)}"
     )
-    stale = declared - set(census) - _writers_outside_the_gate()
+    # ⛔ `declared - _writers_outside_the_gate()`, NOT `declared - set(census) - outside`. Every
+    # `unresolved_write` key IS in the static `WRITER_CENSUS`, so subtracting the census dropped the
+    # keys before staleness was ever tested: a writer repaired so it no longer stores outside the
+    # gate — the case this arm exists for — was masked, and the arm could only ever fire on the one
+    # register key that is not in the census (`tortoise.session_indexer::main`). Measured on the
+    # live sets at the repair: `declared - census - outside == []` AND `declared - outside == []`,
+    # so the narrowing changes no verdict today and restores the direction the message claims.
+    stale = declared - _writers_outside_the_gate()
     assert not stale, (
         "the register declares writers the instrument no longer finds outside the gate "
         f"(a stale declaration survives a rewrite): {sorted(stale)}"
@@ -443,3 +468,67 @@ def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
     with pytest.raises(TypeError):
         EMBED_WRITER_CLASSES["tortoise.z::_w"] = _record()  # type: ignore[index]
     assert len(register._DECLARATIONS) == len(EMBED_WRITER_CLASSES)
+
+
+# ── The discovery blind spot (pinned, not merely documented) ────────────────
+
+#: The shapes `_EMBED_WRITE` cannot spell, one scratch module each. Kept as data so the assertion
+#: below reads as the limitation it is measuring, not as four hand-written cases.
+INVISIBLE_SHAPES = {
+    "map_merge": 'def w(tx, p):\n    tx.query("SET n += $p", {"p": p})\n',
+    "inline_property_map": (
+        'def w(tx, e):\n    tx.query("MERGE (n:Point {id:$id, embedding: $e})")\n'
+    ),
+    "whole_node_replace": 'def w(tx, m):\n    tx.query("SET n = $m", {"m": m})\n',
+    "interpolated_property": (
+        'def w(tx, prop, form):\n    q = "SET n." + prop + " = " + form\n'
+    ),
+}
+
+
+def _scratch_root(tmp_path: Path, name: str, body: str) -> Path:
+    """A `tortoise/`-shaped root the probe can walk — no repo copy, one module file."""
+    root = tmp_path / name
+    (root / "tortoise").mkdir(parents=True)
+    (root / "tortoise" / "m.py").write_text(body, encoding="utf-8")
+    return root
+
+
+def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
+    """`#11274` row 1, in the direction that makes SILENCE distinguishable from coverage.
+
+    The guard above discovers through `probe.embedding_writers()`, whose `_EMBED_WRITE` is a
+    source-text regex. Four Cypher shapes store a vector it cannot spell, so a writer using one is
+    ABSENT from the census — not unclassified, absent — and every other test in this file is green.
+    That limitation is stated in the register's module docstring; this test is what keeps the
+    statement from rotting:
+
+    * in the direction it is written, a reader can check it;
+    * and it reds if discovery's breadth changes in EITHER direction — a widened regex means the
+      caveat and the register's population are now stale, and the newly-visible writer must be
+      declared.
+
+    Measured here (not asserted from the regex's text): the positive control is detected, all four
+    invisible shapes are absent from the map entirely.
+    """
+    controls = {
+        "clause": 'def w(tx, e):\n    tx.query("SET n.embedding = $e")\n',
+        # the CONTAINER-KEY shape `#11274` added; if this stops being decided, the widening
+        # regressed and the register's population shrank silently.
+        "container_key": 'def w(rec, e):\n    rec["embedding"] = e\n',
+    }
+    for name, body in controls.items():
+        detected = probe._embedding_writers(_scratch_root(tmp_path, name, body))
+        assert detected, (
+            f"the detector found nothing in a scratch module using the {name!r} shape — either "
+            "discovery regressed or its root handling changed; repair the detector, do not "
+            "delete this control"
+        )
+    for shape, body in INVISIBLE_SHAPES.items():
+        found = probe._embedding_writers(_scratch_root(tmp_path, shape, body))
+        assert not found, (
+            f"`_EMBED_WRITE` NOW sees the {shape!r} shape ({sorted(found)}) — that is an "
+            "improvement, not a failure, but it is a CLAIM CHANGE: update the module docstring's "
+            "'What the closure claim does NOT cover' block and this test together, and declare "
+            "the writer(s) the widened discovery now finds."
+        )

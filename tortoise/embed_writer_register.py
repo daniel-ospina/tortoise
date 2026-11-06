@@ -59,6 +59,28 @@ module-scope read of the config constants is a **reproduced `ImportError`**
 can never enter that cycle — pinned in a subprocess by
 `test_the_register_imports_without_entering_the_projection_cycle`.
 
+**⚠️ What the closure claim does NOT cover — read this before quoting `#11086`.** "No silent
+bypass" holds for the population **discovery decides**, and that population is bounded by the
+write shapes `tools/dod_5090_probe.py` can *decide*, not by "every writer". `#11274` widened it
+(the CONTAINER-KEY shape `record["embedding"] = …` is now decided on the AST, which is why
+`tortoise.sdk::_write_capture_turns` — invisible when this module was first written — is in the
+census), and it named the shape it deliberately will not decide:
+`UNDECIDABLE_WRITE_SHAPES` (`SET n += $p` — whether the merged map carries a vector is DATA FLOW,
+not syntax). Measured at this head, three further shapes are still ABSENT from the census — not
+unclassified, absent, which is why the guard in `tests/test_embed_writer_register.py` stays green
+for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace
+(`SET n = $map`), and a property name INTERPOLATED into the clause — and that last one is **live**:
+`tortoise.cache_projection::node_statement` (`cache_projection.py:3141`,
+`cypher += f", n.{prop} = {form}"`) stores a vector and has no key in the census. A writer is also
+excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
+*named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module) or when its
+module will not parse.
+⛔ So this register is a **product declaration for a population discovery decides**, and `#11086`
+must not read it as a closure proof. The residual shapes are pinned (not merely described) by
+`test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented`, and widening discovery further is
+`#11274`'s direction — the durable repair belongs to the instrument, because a hand-written table
+can never cover a detector's blind spots.
+
 **No `bypass` class — by construction.** `class` is one of `recognised_producer` / `exempt`. A writer
 that is neither is **unclassified**, and :func:`classify` *raises* rather than answering. A
 declaration that *asks* for `"bypass"` raises too: a bypass is a defect, never a declaration. The
@@ -82,12 +104,22 @@ from types import MappingProxyType
 #: A writer whose vector reaches a **recognised** producer — the canonical clause builder
 #: (`tortoise/vector_write.py::set_embedding_clause`) or the `#5008` session producer
 #: (`compute_session_embedding`, via `SDK._session_embedding`). ⚠️ It does **not** mean
-#: `encode_for_row`: none of these six calls it, which is why `gated` is not the class name.
+#: `encode_for_row`: none of the census's six producers calls it, which is why `gated` is not the
+#: class name. ⛔ And this spelling is NOT the instrument's `kind == "producer"`, which means
+#: "computes a vector another function writes" — the two vocabularies collide on the word and
+#: disagree on the meaning (`tortoise/sdk.py::_session_embedding` is the instrument's `producer`
+#: and is not declared here at all). `tools/dod_5090_probe.py` keeps that wart because `#10541`
+#: named the class; this module carries the warning instead of dropping it.
 RECOGNISED_PRODUCER = "recognised_producer"
 
 #: A function that is not a producer of a STORED vector at all: it renders the clause, forwards one,
 #: journals one, reads one, sets a FLAG or emits a DIAGNOSTIC, or merely MENTIONS one in a
-#: comment/docstring — or it stores one under a **named** owner exemption (`#4094`, `#5008`).
+#: comment/docstring — or it stores one under a **named** owner exemption (`#4094` today; the
+#: `#5008` session writers that DO store are declared `recognised_producer`, not this class).
+#: ⚠️ The class therefore folds two very different dispositions into one value — "no write to gate"
+#: (`tortoise.consistency::_compare_views`) and "a write gated out by a ruling"
+#: (`tortoise.sdk::_update_entity`) — which an enforcement point cannot tell apart; a consumer that
+#: needs the difference must carry it (`#11274`), not re-derive it from this string.
 EXEMPT = "exempt"
 
 #: ⛔ The admissible classes. A `bypass` is a DEFECT, not a class: it is not here, and
@@ -225,8 +257,14 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`set_embedding_clause(\"n\", \"$emb\")`, the canonical clause, from the replayed "
             "journal the `#5008` chain wrote. ⚠️ It also holds two OTHER embedding statements this "
             "class does not rest on — `SET n.embedding = NULL` (a wipe) and a DIRECT "
-            "`n.embedding = $emb` that bypasses the builder. Recorded, not fixed: changing a "
-            "writer's behaviour is out of `#11085`'s scope",
+            "`n.embedding = $emb` on the `embedding_verbatim` branch — and ⛔ that direct write is "
+            "**not** a defect awaiting a fix: it is a RECORDED DECISION (`#5004` / PR #3018's TYPE "
+            "CHANGE GUARD — `tortoise/vector_write.py` records that a caller-owned vector \"must not "
+            "be re-routed\" through `set_embedding_clause`), taken so a CALLER-owned vector keeps "
+            "its raw form instead of being narrowed through `vecf32`. Re-routing it is a REOPEN of "
+            "that decision, never a tidy-up. The class above speaks to the clause statement, not "
+            "to the unit: an enforcement point must not whitelist the raw write under a producer "
+            "class",
             "#11085",
         ),
     ),
@@ -438,9 +476,15 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 )
 
 #: The register, frozen. `module::symbol` → :class:`WriterClass`; the same key the instrument uses.
-#: ⚠️ Its population is *"every writer whose vector the gate does not see"* — the instrument's
-#: ``unresolved_write`` set PLUS its one ``ungated`` write path
+#: ⚠️ Its population is **the population the instrument MEASURES**, not "every writer whose vector
+#: the gate does not see": the ``unresolved_write`` set PLUS the ``ungated`` write path
 #: (`tortoise.session_indexer::main`). A ``gated`` writer needs no declaration: the gate decides it.
+#: ⛔ The difference between those two sentences is load-bearing and is stated in the module
+#: docstring: the census's discovery is a source-text regex, and writers it cannot spell (a
+#: map-merge, a dict-key form, an inline property map, a clause held in a module constant or
+#: an INTERPOLATED property name) are ABSENT from this population rather than declared here — one
+#: is live in `tortoise/` today (`cache_projection::node_statement`), and `#11274` NAMES the shape
+#: discovery will not decide (`UNDECIDABLE_WRITE_SHAPES`) instead of guessing at it.
 #: `tests/test_embed_writer_register.py::test_every_writer_the_instrument_finds_outside_the_gate_is_declared`
 #: holds that population in both directions.
 EMBED_WRITER_CLASSES: Mapping[str, WriterClass] = load(_DECLARATIONS)
@@ -473,5 +517,12 @@ def undeclared(writers: Iterable[str]) -> tuple[str, ...]:
 
     The enumeration the gate (`#11086`) and the falsifiers share, so *"is anything undeclared?"* is
     answered by one function rather than by each caller's own set arithmetic.
+
+    ⛔ Precondition: ``writers`` must ALREADY be restricted to writers outside the gate (this
+    register's population — ``unresolved_write`` ∪ ``ungated``). Handing it the instrument's whole
+    map answers with the ~9 ``gated``/``producer`` writers that legitimately need no declaration,
+    and :func:`classify` then raises for each of them — a false refusal on a correct write. The
+    restriction lives in `tests/test_embed_writer_register.py::NEEDS_A_DECLARATION` because it is
+    the INSTRUMENT's vocabulary; this module deliberately imports nothing, so it cannot own it.
     """
     return tuple(sorted(set(writers) - set(EMBED_WRITER_CLASSES)))
