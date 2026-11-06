@@ -138,11 +138,44 @@ _LOCAL_TARGET = re.compile(r"--local\b|--db-url[= ]+\S*(?:localhost|127\.0\.0\.1
 
 
 def _mutates_hosted(step: dict) -> bool:
-    """True when the step RUNS a hosted-mutating command against a REMOTE target."""
+    """True when the step RUNS a hosted-mutating command against a REMOTE target.
+
+    This is the JOB-SELECTION question ("is this the applier?") and it deliberately requires a
+    remote selector. It is NOT the APPLY-CONTRACT question — see `_mutates_production`.
+    """
     for command in _commands_in(step):
         if not command.startswith(_MUTATING_ROOTS):
             continue
         if _LOCAL_TARGET.search(command) or not _REMOTE_TARGET.search(command):
+            continue
+        return True
+    return False
+
+
+def _mutates_production(step: dict) -> bool:
+    """True when the step RUNS a hosted-mutating command that is NOT explicitly local.
+
+    ⛔ DIFFERENT QUESTION FROM `_mutates_hosted`, AND THE DIFFERENCE IS A FALSE PASS (#11135, fourth
+    review). Job selection must demand a REMOTE selector — a job with no remote-targeted mutation is
+    not "the applier". The APPLY contract must not, because "no target flag" is not "not
+    production":
+
+    * `supabase db push --linked` and `supabase db push` are the same command against the same
+      project on the pinned v2 CLI, which only WARNS that the local default is a FUTURE major;
+    * `supabase functions deploy <name>` targets the linked project with no target flag at all
+      (`--help`: "Deploy a Function to the linked project").
+
+    So `_mutates_hosted` returns **False** for both untargeted forms — measured — and gating the
+    contract on it (or on the containing job's membership, the same predicate one level up) leaves a
+    step that really mutates production free to set `continue-on-error: true` and `exit 0`: MEASURED
+    GREEN. The fail-closed rule this file applies everywhere else decides it — an UNKNOWN target must
+    never read as a safe one — so only an EXPLICIT local target (`--local`, loopback `--db-url`) is
+    exempt.
+    """
+    for command in _commands_in(step):
+        if not command.startswith(_MUTATING_ROOTS):
+            continue
+        if _LOCAL_TARGET.search(command):
             continue
         return True
     return False
@@ -224,6 +257,11 @@ _CONSENT_GATED_ROOTS = (
     "supabase db diff",
     "supabase config pull",
 )
+
+#: What the SWEEP walks: a step that RUNS any consent-gated hosted command, mutating or not. The
+#: job SELECTOR reads `_MUTATING_ROOTS` alone; the APPLY contract is decided per STEP, not per job
+#: (see `_applier_contract`) — three predicates, three questions, no nesting assumption (#11135).
+_SWEPT_ROOTS = _MUTATING_ROOTS + _CONSENT_GATED_ROOTS
 
 #: A shell `run:` body can turn a failing apply into a green one. Enumerating the swallow tokens is
 #: unbounded and was measured defeated by `|| exit 0`, `|| echo …`, `|| { …; exit 0; }`, `| tee p`
@@ -365,26 +403,35 @@ def _mutating_steps_with_job() -> list[tuple[str, dict, dict]]:
     `supabase db pull --linked || true` drift job that pulls nothing reading green). Job SELECTION
     stays narrow: `_applier_jobs()` reads `_MUTATING_ROOTS` alone.
 
-    ⚠️ The widening's OWN residual, stated rather than implied (#11135, third review): a swept step
-    from a NON-applier job runs a consent-gated READ — a mutating root there would make that job an
-    applier and fire the `len(jobs) == 1` assert — so the APPLIER's step contract ("the body IS its
-    invocation", no `continue-on-error`, no `shell:`, no false `if:`, no disabled errexit) must NOT
-    be applied to it. Measured false REDs before the split, all on legitimate read-only shapes: a
-    snapshot job running `supabase db pull --linked --yes` then `git diff --exit-code
-    supabase/migrations`; an informational pull with `continue-on-error: true`; and a `db diff`
-    prepended to this repo's own warn-only drift step (`check-drift`, deliberately `set +e` …
-    `exit 0`). A guard that reds those teaches the cheapest escape — delete the read — which is the
-    blindness the widening ended. `test_the_apply_and_function_steps_pass_yes` therefore gates the
-    apply-specific assertions on `job_name in apply_jobs` and keeps the failure-swallow checks
-    (`_CONTROL_OPERATOR`, `_disables_execution`, `_EXIT_ZERO_TRAP`) on BOTH halves, which is the
-    half where a swallow turns a read that failed into a green job.
+    ⚠️ The widening's OWN residual, stated rather than implied (#11135, third review): a step that
+    only runs a consent-gated READ must NOT have the APPLY contract applied to it ("the body IS its
+    invocation", no `continue-on-error`, no `shell:`, no false `if:`, no disabled errexit). Measured
+    false REDs, all on legitimate read-only shapes: a snapshot job running `supabase db pull --linked
+    --yes` then `git diff --exit-code supabase/migrations`; an informational pull with
+    `continue-on-error: true`; and a `supabase db diff --linked --yes > /tmp/drift.sql` prepended to
+    this repo's own warn-only drift step (`check-drift`, deliberately `set +e` … `exit 0`). A guard
+    that reds those teaches the cheapest escape — delete the read — which is the blindness the
+    widening ended.
+
+    ⛔ BUT THE EXEMPTION IS PER STEP, NOT PER JOB (#11135, fourth review — this lane's own fix). The
+    first attempt keyed it on `job_name in _applier_jobs()`, and that is WRONG in the dangerous
+    direction: `_mutates_hosted` also demands a REMOTE TARGET selector, so a step running
+    `supabase db push --include-all --yes` (no `--linked`) in a second job is SWEPT but its job is
+    NOT an applier — measured `_mutates_hosted(...) is False`, sweep `True` — and the whole apply
+    contract was skipped for a step that really mutates production (`db push` targets the LINKED
+    project by default on the v2 pin; `functions deploy` targets the linked project with no flag at
+    all). Measured at the previous head: `db push --yes` + `exit 0` + `continue-on-error: true` in a
+    second job was RED, and went GREEN once the contract was gated on job membership. The predicate
+    is therefore `_mutates_production(step)` — a mutation whose target is not EXPLICITLY local — so a
+    read is exempt and an untargeted mutation is not. (`_mutates_hosted`, which job selection uses,
+    is the WRONG predicate here: it demands a remote selector, so it is False for exactly the
+    untargeted forms this paragraph is about — measured, not assumed.)
     """
-    swept = _MUTATING_ROOTS + _CONSENT_GATED_ROOTS
     return [
         (name, job, step)
         for name, job in (_workflow_doc().get("jobs") or {}).items()
         for step in (job.get("steps") or [])
-        if any(c.startswith(swept) for c in _commands_in(step))
+        if any(c.startswith(_SWEPT_ROOTS) for c in _commands_in(step))
     ]
 
 
@@ -784,20 +831,28 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
     # an `if:`-wrapped push. The first three are asserted here; assert-don't-swallow is the contract.
     mutating = _mutating_steps_with_job()
     assert mutating, (
-        "the applier job must still RUN a hosted mutation — finding none means the selection broke, "
-        "and every assertion below would pass vacuously (#10896)"
+        "the workflow must still RUN a consent-gated hosted command — finding none means the sweep "
+        "broke, and every assertion below would pass vacuously (#10896)"
     )
     def _applier_contract(job_name: str, job: dict, step: dict) -> None:
-        """The APPLIER's step contract — asserted only for the job(s) that APPLY.
+        """The APPLY contract — asserted for every swept step that MUTATES production.
 
-        ⛔ WHY THIS IS GATED (#11135, third review). `_mutating_steps_with_job()` deliberately sweeps
-        EVERY job, so a consent-gated READ in a second job is guarded; but a step in any OTHER job
-        is a READ — a mutating root there would make that job an applier and fire the
-        `len(jobs) == 1` assert — and every assertion here is about an APPLY: a body that must BE
-        its invocation so a failed apply fails, and an `if:` / `shell:` / `continue-on-error` /
-        disabled-errexit that must not skip or mask one. Applying this contract to a read was
-        MEASURED to red three legitimate shapes, so a guard written that way teaches the cheapest
-        escape — delete the read — which is the blindness the widening ended:
+        ⛔ THE PREDICATE IS THE STEP, NOT THE JOB, AND NOT `_mutates_hosted` (#11135, fourth review).
+        The first version of this gate tested `job_name in _applier_jobs()`, which is wrong in the
+        dangerous direction: `_mutates_hosted` also requires a REMOTE TARGET selector, so
+        `supabase db push --include-all --yes` (no `--linked`) in a second job is SWEPT but its job is
+        not an applier — measured, `_mutates_hosted(...)` is False while the sweep is True — and the
+        contract was skipped for a step that really mutates production (`db push` targets the LINKED
+        project by default on the v2 pin; `functions deploy` targets it with no flag at all), so
+        `continue-on-error: true` + `exit 0` on such a step was GREEN. Swapping in
+        `_mutates_hosted(step)` does NOT close it — that function is False for the same untargeted
+        forms, also measured — so the predicate is `_mutates_production`, whose only exemption is an
+        EXPLICIT local target.
+
+        Every assertion here is about an APPLY: a body that must BE its invocation so a failed apply
+        fails, and an `if:` / `shell:` / `continue-on-error` / disabled-errexit that must not skip or
+        mask one. Applying it to a step that only READS was MEASURED to red three legitimate shapes,
+        and a guard that reds those teaches the cheapest escape — delete the read:
 
         * a snapshot job: `supabase db pull --linked --yes` then `git diff --exit-code
           supabase/migrations` (GitHub's default `bash -e` aborts on a failed pull, so the second
@@ -808,9 +863,11 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
           warn-only `check-drift` step (`set +e` … `exit 0`, documented as "warn-only … not a
           failure").
 
-        The failure-swallow checks are NOT gated this way — they stay on both halves, in the caller.
+        The failure-swallow checks are NOT gated — they stay on both halves, in the caller, and on
+        the read half they scan the INVOCATION rather than the whole shell body (a read step's body
+        is ordinary shell: `if …; then`, `for …; do`, `&&`).
         """
-        if job_name not in {name for name, _ in _applier_jobs()}:
+        if not _mutates_production(step):
             return
         where = f"step {step.get('name')!r} in job {job_name!r}"
         assert not step.get("continue-on-error"), (
@@ -878,11 +935,26 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
 
     for job_name, job, step in mutating:
         where = f"step {step.get('name')!r} in job {job_name!r}"
-        _applier_contract(job_name, job, step)
-        # Comment lines are dropped first, exactly as `_printed_remedies` does: a comment is prose,
-        # so the most natural note on this very step ("# NOTE: v3 consent-gates this; keep --yes")
-        # must not be read as shell and red a correct step (measured, review cycle 9).
-        body = "\n".join(_strip_shell_comment(line) for line in _run_body(step).splitlines())
+        applies = _mutates_production(step)
+        if applies:
+            _applier_contract(job_name, job, step)
+            # Comment lines are dropped first, exactly as `_printed_remedies` does: a comment is
+            # prose, so the most natural note on this very step ("# NOTE: v3 consent-gates this;
+            # keep --yes") must not be read as shell and red a correct step (measured, review
+            # cycle 9).
+            body = "\n".join(_strip_shell_comment(line) for line in _run_body(step).splitlines())
+        else:
+            # ⛔ ON THE READ HALF THE SWALLOW SCAN READS THE INVOCATION, NOT THE SCRIPT AROUND IT
+            # (#11135, fourth review — this lane's own docstring claimed this shape green and was
+            # measured RED). A read step's body is ordinary shell: this repo's own `check-drift`
+            # is `set +e` … `if [ "$rc" -eq 1 ]; then` … `exit 0`, whose `;` is not a control
+            # operator composed with the CLI call. What a swallow would have to touch is the
+            # INVOCATION — `supabase db pull --linked || true` — so that is what is scanned.
+            body = "\n".join(
+                _strip_shell_comment(command)
+                for command in _commands_in(step)
+                if command.startswith(_SWEPT_ROOTS)
+            )
         noexec = _disables_execution(body)
         assert noexec is None, (
             f"{where} puts the body in noexec (`set -n` / `set -o noexec`): bash parses and executes "
@@ -1219,8 +1291,12 @@ def test_read_only_jobs_are_swept_without_the_appliers_step_contract(monkeypatch
     1. a snapshot job: `supabase db pull --linked --yes` then `git diff --exit-code …` (GitHub's
        default `bash -e` aborts on a failed pull, so the second line cannot mask one);
     2. an informational pull with `continue-on-error: true`, in a job with no apply and no flip;
-    3. a `db diff` prepended to a warn-only drift step shaped exactly like this repo's own
-       `check-drift` (`set +e` … `exit 0`, documented there as "warn-only … not a failure").
+    3. a `db diff` prepended to **this repo's own `check-drift` body, verbatim** — `set +e`, `rc=$?`,
+       `if [ "$rc" -eq 1 ]; then` … `exit 0`. ⛔ The first version of this test used a three-line
+       stand-in (`db diff` / `set +e` / `exit 0`) and therefore passed while the REAL body still red,
+       because `if …; then` contains a `;` and the swallow scan ran over the whole shell body
+       (#11135, fourth review). The scan now reads the swept INVOCATION on the read half, so the
+       real shape is what is pinned here.
     """
     doc = copy.deepcopy(_workflow_doc())
     doc["jobs"]["schema-snapshot"] = {
@@ -1246,11 +1322,20 @@ def test_read_only_jobs_are_swept_without_the_appliers_step_contract(monkeypatch
         "runs-on": "ubuntu-latest",
         "steps": [
             {
-                "name": "Report schema drift (warn-only, like check-drift)",
+                "name": "Check migration drift (warn-only, like check-drift)",
+                # ⛔ The REAL `check-drift` body, not a stand-in: its `if [ "$rc" -eq 1 ]; then`
+                # carries a `;`, which a whole-body control-operator scan reads as composition.
                 "run": (
                     "supabase db diff --linked --yes > /tmp/drift.sql\n"
                     "set +e\n"
-                    "exit 0"
+                    "bash .github/scripts/check-migration-drift\n"
+                    "rc=$?\n"
+                    "set -e\n"
+                    "if [ \"$rc\" -eq 1 ]; then\n"
+                    '  echo "::warning::Migrations pending"\n'
+                    "  exit 0\n"
+                    "fi\n"
+                    'exit "$rc"\n'
                 ),
             }
         ],
@@ -1261,6 +1346,45 @@ def test_read_only_jobs_are_swept_without_the_appliers_step_contract(monkeypatch
     # contract plus swallow checks — must pass over a workflow carrying three legitimate reads.
     assert [name for name, _ in _applier_jobs()] == ["deploy"]
     test_the_apply_and_function_steps_pass_yes()
+
+
+def test_an_untargeted_mutating_step_still_owes_the_apply_contract(monkeypatch) -> None:
+    """The predicate is the STEP's mutation, not the JOB's membership — the hole the first fix opened.
+
+    Measured (#11135, fourth review): keying the apply contract on `job_name in _applier_jobs()` let
+    a second job's `supabase db push --include-all --yes` — no `--linked`, so `_mutates_hosted` is
+    False and that job is NOT an applier, while the sweep still reaches the step — carry
+    `continue-on-error: true` and `exit 0` GREEN (it was RED at the parent head). That is a real
+    production mutation, not a read: on the v2 pin `db push` targets the LINKED project by default
+    (the CLI warns that the local default is a future major), and `functions deploy` targets the
+    linked project with no target flag at all.
+
+    Both rows were measured RED before the gate existed and GREEN under the membership predicate;
+    they must stay RED.
+    """
+    for name, command in (
+        ("untargeted-push", "supabase db push --include-all --yes"),
+        ("untargeted-function", "supabase functions deploy tenant-provision --no-verify-jwt --yes"),
+    ):
+        doc = copy.deepcopy(_workflow_doc())
+        doc["jobs"][name] = {
+            "runs-on": "ubuntu-latest",
+            "steps": [
+                {
+                    "name": f"{name} step",
+                    "continue-on-error": True,
+                    "run": f"{command}\nexit 0",
+                }
+            ],
+        }
+        monkeypatch.setattr(sys.modules[__name__], "_workflow_doc", lambda doc=doc: doc)
+        # The three premises that made the membership predicate miss it.
+        assert _mutates_production({"run": command}) is True, "premise: mutates production"
+        assert _mutates_hosted({"run": command}) is False, "premise: no remote target selector"
+        assert [n for n, _ in _applier_jobs()] == ["deploy"], "premise: not the applier job"
+        assert any(n == name for n, _j, _s in _mutating_steps_with_job()), "premise: swept anyway"
+        with pytest.raises(AssertionError, match="continue-on-error"):
+            test_the_apply_and_function_steps_pass_yes()
 
 
 def test_a_read_only_step_must_still_carry_consent(monkeypatch) -> None:
