@@ -343,14 +343,17 @@ def test_a_LIVE_pid_in_ANOTHER_group_is_not_our_rail():
     (`assert rd._in_group(pid, 42) is False`, its own control arm), which the
     forward-merge brought in — so "NOTHING pinned it" is false at this head, and
     the figure is a frozen count of a file the merge has since grown (45
-    `^def test_` at `e49e641f4^`, 46 at `e49e641f4`, 76 here). ⛔ TWO COUNTING
+    `^def test_` at `e49e641f4^`, 46 at `e49e641f4`; ⛔ no live figure is restated
+    here — a population count drifts with every test added, so it belongs keyed
+    to the commit it was measured at or nowhere). ⛔ TWO COUNTING
     DEFINITIONS meet in this paragraph and neither figure is wrong: the `46
     passed` quoted above is pytest's COLLECTED population at `e49e641f4^` (45
     `^def test_` functions, one of them carrying a 2-case `parametrize`, so
     45 + 1 = 46), while the parenthetical counts `^def test_` definitions. Do
     not "correct" one figure to match the other. Reproduce with a plugin that
-    sets `rail_detach._in_group = lambda pid, pgid: True`:
-    `2 failed, 75 passed`.
+    sets `rail_detach._in_group = lambda pid, pgid: True`; measured at
+    `71f6d4acb` that reads `2 failed, 96 passed`, and only the NAMES matter —
+    this test and that control arm red, nothing else.
 
     The gap this test fills survives that correction, and it is narrower than the
     old sentence claimed: every other test reaches `_in_group`'s rejecting
@@ -3560,7 +3563,8 @@ def test_a_record_that_ALREADY_EXITED_is_not_live_whatever_its_pid_answers(
     """`_record_is_live` must honour `EXIT=` before it consults `PID=`/`CHILD_PID=`.
 
     ⛔ Deleting `if _attempt_exits(text): return False` left this whole suite green
-    (measured: arm present → 98 passed, arm DELETED → 98 passed), so the arm had no
+    (measured at `06ba8c8c5`: arm present → 98 passed, arm DELETED → 98 passed), so
+    the arm had no
     regression detector. The consequence is the ordering it exists for: during the
     window where a finished attempt's carrier is still exiting, its pid (possibly
     recycled) still answers alive, so a FINISHED attempt would outrank the

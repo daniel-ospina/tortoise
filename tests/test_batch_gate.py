@@ -793,8 +793,11 @@ def test_an_EMPTY_diff_is_never_a_containment_proof(monkeypatch: pytest.MonkeyPa
     status, would let an empty diff reach the apply with nothing to reverse and be
     read as `CONTAINED-CONTENT` — `closable is True` on no evidence at all, which is
     the one unrecoverable outcome the module docstring names (the PR gets closed).
-    Deleting the arm leaves this file green (measured, 55 passed), so the arm had no
-    regression detector at all.
+    Deleting the arm left this file green when this pin was written, so the arm had
+    no regression detector at all. ⛔ The whole-file count is deliberately NOT
+    restated: it is a property of the FILE, not of the arm, and it drifts with
+    every test added — a stale figure here reads as "the pin is vacuous" when the
+    arm is in fact pinned. Re-derive it by deleting the arm.
     """
     monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
     monkeypatch.setattr(
@@ -817,7 +820,7 @@ def test_an_EMPTY_constituent_set_is_COULD_NOT_MEASURE_not_a_clean_run(
     """A run that measured NOTHING must not exit 0 — 0 means "every one was contained".
 
     `if not constituents:` prints the reason and returns 2. Nothing pinned it, so
-    deleting it left this file green (55 passed) while `main` fell through to the
+    deleting it left this file green while `main` fell through to the
     verdict loop with an EMPTY list, built an empty plan and exited **0** — the code
     its own docstring reserves for "every constituent was contained and (with
     `--apply`) closed". With `--apply` it also issued
