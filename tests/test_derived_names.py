@@ -677,10 +677,10 @@ def _raw_detach_violations(root=None):
         src = f.read_text(encoding="utf-8")
         # Once per file: the handles every `_journal_append(…)` call RECEIVES, as
         # (line, static prefix) — see `_journal_prefixes`.
-        journaled = _journal_prefixes(src)
-        # Nested-scope spans, computed once per file the first time a block's
-        # ownership half is actually examined (`_nested_scope_spans`).
-        nested_spans = None
+        journaled = _journal_sites(src)
+        # Nested-scope boxes, computed once per file the first time a block's
+        # ownership half is actually examined (`_nested_scope_boxes`).
+        scope_boxes = None
         # every raw-client CONSTRUCTION site (from falkordb import /
         # import falkordb / falkordb.FalkorDB( form) whose enclosing block
         # bulk-DETACHes must carry per-test-unique + journal in the SAME block
@@ -716,25 +716,41 @@ def _raw_detach_violations(root=None):
             # review round 8).
             first_line = src.count(chr(10), 0, block_start) + 1
             last_line = src.count(chr(10), 0, max(block_end - 1, block_start)) + 1
-            if nested_spans is None:
-                nested_spans = _nested_scope_spans(src)
-            in_block = [(line, prefix) for line, prefix in journaled
+            if scope_boxes is None:
+                scope_boxes = _nested_scope_boxes(src)
+            block_pos = _pos_of_offset(src, block_start)
+            in_block = [(line, col, prefix) for line, col, prefix in journaled
                         if first_line <= line <= last_line]
-            own = [(line, prefix) for line, prefix in in_block
-                   if not _inside_a_nested_scope(line, first_line, nested_spans)]
+            own = [(line, col, prefix) for line, col, prefix in in_block
+                   if not _inside_a_nested_scope((line, col), block_pos, scope_boxes)]
+            # The two halves are deliberately ASYMMETRIC (#11217 review round 9,
+            # reviewer B P1/P2):
+            #   • PRESENCE (`own`) requires the journal in the block's OWN scope.
+            #     That is what closes C4 — a nested `helper()`'s journal cannot
+            #     stand in for a handle the block never records. It costs one
+            #     documented false BLOCK: a module that builds + journals the
+            #     handle in a nested helper and RETURNS it is rejected, because
+            #     "_journal_append in the same block" is the contract this guard
+            #     states. Cost to the author is a one-line move of the journal;
+            #     accepting a nested journal instead re-opens a false PASS.
+            #   • OWNERSHIP (`in_block`) judges EVERY journal in the block, nested
+            #     or not. Restricting it to `own` was measurably WORSE than the
+            #     defect it fixed: an unowned prefix journaled in a nested helper
+            #     — the leaking site, the whole reason this arm exists — read CLEAN
+            #     as soon as one owned name was journaled in the own scope, i.e.
+            #     RED -> CLEAN on the exact datum this census protects.
+            # No claim is made here about unparseable files: `own` is empty for
+            # one, so its sites are reported — fail CLOSED, matching a helper that
+            # cannot read the journal list at all.
             if "os.urandom" not in block or not _journal_calls(code) or not own:
-                # `not own` covers BOTH "no journal at all" and "the only
-                # journals are nested" — neither is this block journaling the
-                # handle it drops. Note `own` is empty for a file that does not
-                # PARSE, which keeps the documented behaviour (`_journal_prefixes`
-                # returns nothing there) exactly as it was.
                 violations.append(
                     f"{f.name}: raw FalkorDB( client + bulk DETACH at "
                     f"L{lineno} without a "
                     f"per-test-unique handle + _journal_append in the same "
-                    f"block (cycle-6 P1-3 / cycle-8 P2-2)")
+                    f"block (cycle-6 P1-3 / cycle-8 P2-2) — the journal must be "
+                    f"a statement of THIS block, not of a nested def/lambda")
                 continue
-            non_owned = _non_owned_handles([prefix for _line, prefix in own])
+            non_owned = _non_owned_handles([p for _line, _col, p in in_block])
             if non_owned:
                 outside = [p for p in non_owned if p]
                 undecidable = [p for p in non_owned if not p]
@@ -767,13 +783,17 @@ def _raw_detach_violations(root=None):
     return violations
 
 
-def _nested_scope_spans(source: str) -> list[tuple[int, int]]:
-    """The `(first_line, last_line)` span of every NESTED scope in `source`:
-    every `def`/`lambda`/`class`/comprehension, the module itself excluded by
-    the caller's strict comparison on `block_first_line`.
+def _nested_scope_boxes(source: str) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """The `(start, end)` SOURCE POSITIONS of every nested scope in `source` —
+    every `def`/`async def`/`lambda`/`class`/comprehension, the module excluded
+    (it carries no position).
 
-    `_raw_detach_violations` uses this to tell a block's OWN journal from one
-    written inside a nested scope in the same block (#11217 review round 8).
+    POSITIONS, not line spans: a one-line `cb = lambda: None; _journal_append(x)`
+    shares a line with a scope that does NOT contain the call, and a line-range
+    test marked that journal "inside a nested scope" — a false BLOCK on a site
+    whose journal is a direct statement of the block (#11217 review round 9,
+    reviewer B P2). Containment is decided on `(line, col)` bounds, so only a
+    scope that actually ENCLOSES the call counts.
     """
     try:
         with warnings.catch_warnings():
@@ -781,24 +801,48 @@ def _nested_scope_spans(source: str) -> list[tuple[int, int]]:
             tree = ast.parse(source)
     except SyntaxError:
         return []
-    spans: list[tuple[int, int]] = []
+    boxes = []
     for _scopes, node in _nodes_with_scopes(tree, [tree]):
-        first = getattr(node, "lineno", None)
-        if isinstance(node, _NESTED_SCOPES) and first is not None:
-            # `ast.Module` is in `_NESTED_SCOPES` and carries no `lineno`; the
-            # module IS the outermost scope, so it is never a NESTED one.
-            last = getattr(node, "end_lineno", None) or first
-            spans.append((first, last))
-    return spans
+        if not isinstance(node, _NESTED_SCOPES):
+            continue
+        start = getattr(node, "lineno", None)
+        end = getattr(node, "end_lineno", None)
+        if start is None or end is None:
+            continue  # `ast.Module`: the outermost scope, never a NESTED one
+        boxes.append(((start, node.col_offset),
+                      (end, getattr(node, "end_col_offset", 0) or 0)))
+    return boxes
+
+
+def _pos_of_offset(source: str, offset: int) -> tuple[int, int]:
+    """`(line, column)` of the BLOCK START — where its own scope node begins.
+
+    `_enclosing_block_span` returns the match of `^( *)def`, whose offset is the
+    LINE START, while the `FunctionDef` node's `col_offset` is the `def` keyword.
+    Comparing the two directly made every block's OWN `def` look like a nested
+    scope beginning at its own line, so `own` was empty for every site in a class
+    body — measured as three false BLOCKS in `tests/test_search_engine.py`. So
+    when only whitespace precedes the offset, report the column of the first
+    TOKEN, which is exactly where the scope node starts (#11217 review round 9).
+    """
+    line = source.count(chr(10), 0, offset) + 1
+    line_start = source.rfind(chr(10), 0, offset) + 1
+    prefix = source[line_start:offset]
+    if not prefix.strip():
+        rest = source[offset:].split(chr(10), 1)[0]
+        column = len(rest) - len(rest.lstrip())  # the block's first token
+    else:
+        column = offset - line_start
+    return line, column
 
 
 def _inside_a_nested_scope(
-        line: int, block_first_line: int, spans: list[tuple[int, int]]) -> bool:
-    """Is `line` inside a nested scope that BEGINS after the block's own body
-    starts? The block's enclosing `def` starts ON `block_first_line`, so the
-    strict `>` excludes it — everything else spanning `line` is nested INSIDE
-    the block."""
-    return any(block_first_line < first <= line <= last for first, last in spans)
+        pos: tuple[int, int], block_pos: tuple[int, int],
+        boxes: list[tuple[tuple[int, int], tuple[int, int]]]) -> bool:
+    """Is `pos` inside a scope that BEGINS after the block's own start? The
+    block's enclosing `def` starts AT `block_pos`, so the strict `>` excludes it;
+    everything else that ENCLOSES `pos` is nested inside the block."""
+    return any(block_pos < start <= pos <= end for start, end in boxes)
 
 
 def _non_owned_handles(prefixes: list[str]) -> list[str]:
@@ -1355,9 +1399,12 @@ def _nodes_with_scopes(node, scopes: list):
                 stack.append((child, chain))
 
 
-def _journal_prefixes(source: str) -> list[tuple[int, str]]:
-    """`(line, static prefix)` for every handle `_journal_append` is CALLED with
-    in `source`, in source order.
+def _journal_sites(source: str) -> list[tuple[int, int, str]]:
+    """`(line, column, static prefix)` for every handle `_journal_append` is
+    CALLED with in `source`, in source order.
+
+    The COLUMN is what lets `_raw_detach_violations` decide scope containment on
+    `(line, col)` bounds instead of a line range (#11217 review round 9).
 
     A `def _journal_append(…)`, a comment naming the symbol and a bare import are
     excluded by CONSTRUCTION — a `FunctionDef` is not a `Call`, a comment is not
@@ -1387,7 +1434,10 @@ def _journal_prefixes(source: str) -> list[tuple[int, str]]:
       on an OWNED name. Reasoning about what a transform returns is deliberately
       NOT attempted, so the value is not certified (#11217 review round 5, B2);
     * a file that does not PARSE: the census is about live test modules, and an
-      unparseable one cannot run, so pytest reports it and this arm stays silent.
+      unparseable one cannot run, so pytest reports it. THIS HELPER returns
+      nothing for it, which makes every raw-DETACH site in that file fail CLOSED
+      in `_raw_detach_violations` — reported, not exempted (#11217 review round
+      9: this sentence said "stays silent", which the census path contradicted).
     """
     if "_journal_append" not in source:
         # Fast path: any CALL of the symbol (bare, or via an attribute/getattr)
@@ -1404,7 +1454,7 @@ def _journal_prefixes(source: str) -> list[tuple[int, str]]:
             tree = ast.parse(source)
     except SyntaxError:
         return []
-    out: list[tuple[int, str]] = []
+    out: list[tuple[int, int, str]] = []
     for scopes, node in _nodes_with_scopes(tree, [tree]):
         if not isinstance(node, ast.Call):
             continue
@@ -1423,11 +1473,19 @@ def _journal_prefixes(source: str) -> list[tuple[int, str]]:
             # A call this arm cannot even read the ARGUMENT of (`**{"name": …}`)
             # must report, not vanish: `continue` here was the one place the
             # "fails CLOSED" claim was not true by construction (#11217 round 7).
-            out.append((node.lineno, ""))
+            out.append((node.lineno, node.col_offset, ""))
             continue
-        out.append((node.lineno, _prefix_of(argument, scopes, _pos(node))))
+        out.append((node.lineno, node.col_offset,
+                    _prefix_of(argument, scopes, _pos(node))))
     out.sort()  # source order
     return out
+
+
+def _journal_prefixes(source: str) -> list[tuple[int, str]]:
+    """`(line, static prefix)` for every journaled handle in `source` — the
+    `(line, prefix)` spelling of `_journal_sites`, kept for the tests that only
+    care which prefix was resolved."""
+    return [(line, prefix) for line, _col, prefix in _journal_sites(source)]
 
 
 def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
