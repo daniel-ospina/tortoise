@@ -1389,7 +1389,13 @@ _RESIDUAL_WAIVER_WITHHOLD = re.compile(
 #: GREEN while `the ADJACENCY gap is not closed` RED.
 _RESIDUAL_CLOSED_VERDICT = (
     r"\bnever\b[^.;]{0,30}\bclosed\b",
-    r"\b(?:has|have|had|is|are|was|were)\s+yet\s+to\s+be\s+closed\b",
+    # ⛔ `<aux> yet to be closed` AND ITS SYNONYMS (#11258 review round 9 `P2`,
+    # MEASURED): the arm read only `yet`, so `the ADJACENCY half remains to be
+    # closed` and `… is still to be closed` — the natural residual-list phrasing,
+    # asserting the gap is still open — were GREEN. `remains?` is its own form
+    # because it takes no auxiliary.
+    r"\b(?:has|have|had|is|are|was|were)\s+(?:yet|still)\s+to\s+be\s+closed\b",
+    r"\bremains?\s+(?:yet\s+|still\s+)?to\s+be\s+closed\b",
     r"\b(?:far\s+from|anything\s+but)\s+closed\b",
 )
 
@@ -1441,17 +1447,20 @@ _RESIDUAL_OPENNESS = (
     # never was, closed` splits into clauses that each carry only half of it
     # (#11258 review `P2`, measured).
     r"\bnot\b[^.;]{0,30}\bclosed\b",
-    # ⛔ THE CONTRACTION ARM IS THE WHOLE AUXILIARY FAMILY, not `isn't` alone
-    # (#11258 review round 8 `P2`, MEASURED). `isn'?t closed` was added beside
-    # `not closed` for the `is` auxiliary and nothing else, so every OTHER
-    # contracted auxiliary escaped: `wasn't closed`, `hasn't been closed`,
-    # `hadn't been closed`, `weren't closed` all GREEN while their uncontracted
-    # twins RED. That is the same defect the `fuses`→`fused` inflection fix
-    # records one class over — an arm reaching the subject but not the form the
-    # lane writes — and it is NOT one of the disclosed uncatchable shapes: these
-    # are phrased with `closed`, a word this arm exists to read.
-    r"\b(?:is|are|was|were|has|have|had|does|do|did|would|should|could|must|"
-    r"need|ca|wo)n['\u2019]?t\b[^.;]{0,30}\bclosed\b",
+    # ⛔ THE CONTRACTION ARM IS A PATTERN, NOT AN AUXILIARY LIST (#11258 review
+    # rounds 8 and 9, each MEASURED). Round 8 replaced `isn'?t closed` with an
+    # enumeration (`is|are|was|were|has|have|had|does|do|did|would|should|could|
+    # must|need|ca|wo`) and round 9 found three holes in the enumeration itself:
+    # `cannot` has NO word boundary after `can`, and `shan't` was never listed, so
+    # `cannot be closed` / `shan't be closed` stayed GREEN while `can not be
+    # closed` / `can't be closed` RED. An enumeration will keep acquiring holes
+    # because the language has one, so the arm is now the SHAPE: any word whose
+    # contraction ends the negation, plus `cannot`.
+    # ⛔ THE APOSTROPHE IS MANDATORY on the contraction form — `\b\w+n['\u2019]?t\b`
+    # with `?` also matches `point`, `count`, `account`, and `the account is
+    # closed` would then be a false block (measured). `cannot` is the one
+    # contraction written without an apostrophe, so it is named.
+    r"\b(?:\w+n['\u2019]t|cannot)\b[^.;]{0,30}\bclosed\b",
     # ⛔ `never … closed`, `<aux> yet to be closed`, `far from closed` and
     # `anything but closed` assert the gap is open for the same reason `not …
     # closed` does — but they are in the ANCHORED arm and NOT here, because unlike
@@ -2020,6 +2029,21 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half hasn't been closed.",
     "the ADJACENCY half hadn't been closed.",
     "the ADJACENCY half weren't closed.",
+    # ⛔ ROUND 9: the two spellings the AUXILIARY ENUMERATION could not reach, and
+    # the `yet to be closed` synonyms. `cannot` has no word boundary after `can`,
+    # `shan't` was simply never listed, and `remains to be closed` is the natural
+    # residual-list phrasing of the same claim. Each was MEASURED GREEN at the head
+    # that enumerated auxiliaries, which is why the arm is now a shape.
+    "the ADJACENCY half cannot be closed.",
+    "the ADJACENCY half shan't be closed.",
+    "the ADJACENCY half remains to be closed.",
+    "the ADJACENCY half is still to be closed.",
+    # ⛔ THE `no longer …` MOVEMENT (#11258 review round 9 `P1`): with the floor's
+    # old slack this pattern and its six exclusive proofs were deletable in one
+    # edit, and this shape then measured GREEN. It is the one the membership loop
+    # pins that pattern by.
+    "the ADJACENCY half is no longer closed.",
+    "the ADJACENCY half is no longer judged.",
     "the ADJACENCY result is unclosed",
     # the SPELLING clause is honest; a `;`/`, and`-joined second clause is not
     "the SPELLING gap is not closed and `minute` no longer fuses",
@@ -2374,14 +2398,18 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 81, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 94, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
-        "in the docstrings/comments rather than deleting shapes. ⚠️ The floor is "
-        "kept within ONE arm's proof set of the current length on purpose: at a "
-        "#11258 round-6 reviewer-measured 49, twenty-one deletions were permitted "
-        "while `_RESIDUAL_CLOSED_VERDICT` is three patterns (two exclusively covered — "
-        "the same three are duplicated inside `_RESIDUAL_ANCHORED_OPENNESS`), so the arm plus every "
-        "proof of it could be deleted with both tests GREEN.")
+        "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
+        "THE CURRENT LENGTH (94), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "list the slack was SEVEN mutations, which is more than the SIX exclusive "
+        "proofs of the `no longer …` arm — so that pattern and all six of its "
+        "proofs could be deleted with both tests GREEN, and "
+        "`the ADJACENCY half is no longer closed.` then measured GREEN (#11258 "
+        "review round 9 `P1`, measured). Earlier the same slack at 49 permitted "
+        "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
+        "A `>=` at the current length costs nothing on growth and refuses any "
+        "shrinkage; raise it in the same commit that adds proofs.")
     assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 30, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage. ⚠️ Within two of the "
@@ -2408,7 +2436,14 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             "the remaining gap is the SPELLING case for `minute`, which is open by design.",
             # the comma forms: the veto slot cannot cross a comma
             "the ADJACENCY half is CLOSED, not open.",
-            "the ADJACENCY half is judged, not open.",):
+            "the ADJACENCY half is judged, not open.",
+            # ⛔ AND THE OTHER TWO (#11258 review round 9 `P2`, MEASURED): pinning
+            # three of five left the remaining two SUBSTITUTABLE — replacing either
+            # with a duplicate of a pinned one kept uniqueness, length and all three
+            # membership strings, and the proof stayed GREEN. A ledger where a cost
+            # can be swapped out silently is the same defect one entry over.
+            "the ADJACENCY half is closed rather than open.",
+            "the ADJACENCY half is no longer an open question.",):
         assert required in _RESIDUAL_REFUSED_TRUTHFUL, (
             f"the over-block ledger no longer carries {required!r} — that shape's "
             "refusal is the measured price of a specific rule; if it is no longer "
@@ -2437,6 +2472,21 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # GREEN while its uncontracted twin RED. This entry keeps the family
             # shape (not just the `is` member) from being narrowed back.
             "the ADJACENCY half hasn't been closed.",
+            # ⛔ AND THE SHAPE ITSELF (#11258 review round 9 `P1`, MEASURED):
+            # `cannot` and `shan't` were GREEN under the ENUMERATION that replaced
+            # `isn't`, so the arm is a pattern now. These two keep the pattern's
+            # two branches (apostrophe-contraction, `cannot`) from being re-listed.
+            "the ADJACENCY half cannot be closed.",
+            "the ADJACENCY half shan't be closed.",
+            # ⛔ THE `no longer …` ARM (#11258 review round 9 `P1`, MEASURED): this
+            # pattern loses SIX exclusive proofs and the membership loop pinned
+            # none of them, so it could be deleted with its proofs inside the
+            # floor's slack and `the ADJACENCY half is no longer closed.` went
+            # GREEN with both tests GREEN.
+            "the ADJACENCY half is no longer closed.",
+            "the ADJACENCY half is no longer judged.",
+            # ⛔ THE `yet to be closed` SYNONYM ARM (#11258 review round 9 `P2`).
+            "the ADJACENCY half remains to be closed.",
             # ⛔ AND ONE SHAPE PER ARM/PATTERN THAT HAS FEW EXCLUSIVE PROOFS. The
             # round-6 fix covered `_RESIDUAL_CLOSED_VERDICT` and left the rest:
             # `_SPELLING_FLOOR` had NO membership entry and exactly ONE exclusive
