@@ -141,8 +141,10 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``record-restore`` / ``rebuild_from_record`` wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
   legacy copy, and ``#10017`` is the targeted graph-side purge for an operator
-  who does not want the wipe — and it has NO route that RESTORES the value:
-  nothing writes the column any more, so there is nothing to re-derive it from.
+  who does not want the wipe — and it has NO route that RESTORES the value: the
+  record's COPY is intact (the column is PRIMARY there), so what is missing is a
+  PERMITTED WRITE — §9.1/D1 forbids any projection from materialising it in the
+  graph — not a source to re-derive it from.
   ⛔ Not "no in-place repair": ``#10017``'s purge IS in place, and so is a
   targeted clear — what is missing is a route that KEEPS the value. That is WHERE IT
   DIFFERS from the declined pair, which does have one, shipped:
@@ -585,10 +587,11 @@ def reconcile_record_and_cache(
     name becomes comparable and the bucket empties with the value PRESERVED. The
     mint exists only for a STRING the label's status door ACCEPTS, so on a
     ``:Subject`` it is limited to ``SUBJECT_STATUS_VALUES`` and a value outside
-    that set has no USABLE mint (`#11296`); a NON-STRING status has none either
-    — the state-op reader reads ``->> 'status'``, so a mint comes back as the
-    TEXT spelling (``5`` -> ``'5'``): the bucket EMPTIES and the pair reds as a
-    ``field_mismatches`` entry rather than reading clean. A CLEAR is only for an
+    that set has no USABLE mint (`#11296`); a NON-STRING status's mint is a NO-OP
+    — the state-op leg is guarded by ``jsonb_typeof(…) = 'string'`` and the event
+    builder skips a non-string ``restatus``, so the record derives NOTHING, the
+    name STAYS in ``graph_only``, and no ``field_mismatches`` entry appears. A
+    CLEAR is only for an
     untrustworthy value
     and is LABEL-DEPENDENT: ``update_entity(…, status=None)``, ``SET n +=
     {status: null}``, a REMOVAL, on an ``:Object``; on a ``:Subject`` that call
