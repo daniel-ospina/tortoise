@@ -3748,11 +3748,12 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 #: its SECOND line, not its opener (`:1890` there, and the opener is what the pin below requires), and
 #: #6744's +70-line insert in the `test` job's `strategy` block moved the whole block — so
 #: a reader (or a fixer) sent to `:1891` never found the refusal it was sent to read, and NOTHING
-#: read either file, so the drift shipped green. The numbers keep moving, and the anchors are NOT
-#: the same line: at this head the paragraph's OPENER is `:1966` (what the pin below requires), the
-#: prohibition is `:1996`, and `:1891` is now the `test` job's `orphan-bound.sh --count` invocation
-#: (the teardown comment `:1891` used to reach is `:1897-1898`). Which is why the citation is read
-#: from the file, never from a note like this one.
+#: read either file, so the drift shipped green. The numbers keep moving — every insert above the
+#: paragraph, in either direction, moves it, and the anchors are NOT the same line (the opener the
+#: pin below requires is not the `Do NOT change it back` prohibition, and neither is `:1891`). ⛔ No
+#: current number is restated here on purpose: three attempts to keep it live went stale on the
+#: next merge, so the pin reads the citation from the FILE and resolves it against the workflow.
+#: Trust a red, not this note.
 _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml")
 
 #: `docs/ops/ci-wall-clock.md`'s own `python-ci.yml:<n>` citations, each paired with the text its
