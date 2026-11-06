@@ -114,17 +114,19 @@ document and in `01-test-design.md` §10.
 half)"* — the primary artifact a reader of this fix opens. The sites named so far — `tools/ci_selection.py`,
 `docs/infra-runbook.md`, and — **13 occurrences on 11 lines**, the two pin-filename mentions aside — this
 epic's own `08-hosted-prerequisites.md`, including the line the **302** figure in §1 is quoted from — are
-**examples, not a census**: `git grep -l 10620` matches **25 files at this PR's merged head** — **21 at the
+**examples, not a census**: `git grep -l 10620` matches **26 files at this head** — **21 at the
 measurement commit** — the difference being these two documents, which match because they discuss the number,
-and **two files landed after the measurement**: `tests/test_supabase_cli_pin_10593.py` (#11100) and
-`tests/test_9548_record_search_keys_shape.py` (#10726's fold batch) — and the two that matter most were
-**missing from this paragraph's first version**; they are named here now.
+and **three files landed after the measurement**: `tests/test_supabase_cli_pin_10593.py` (#11100),
+`tests/test_9548_record_search_keys_shape.py` (#10726's fold batch) and `tortoise/monitoring.py` (#11054, one
+comment at `:803`). The first two were **missing from this paragraph's first version** and are named here now;
+the third landed later still, which is why 25 — this sentence's earlier figure — no longer reproduces.
 `tortoise/record_projection.py` carries it on
 **23 lines** (`:267` reads *"#10620 — R4's remaining half: `public.point.search_keys` NARROWED to …"*), and
 `tests/test_9078_record_written_by_production_path.py` carries it inside the **assertion message** at `:2367`
 (*"… #10620 closed `search_keys`"*) — the text a future failing pin prints, and the very file this document
-quotes at §7.2. `tortoise/hosted_api.py` (4 lines) and `config/ci-surfaces.yml` (`:622` at this head — `:615` before this PR's own
-comment was added; plus the *"#10620: same dual
+quotes at §7.2. `tortoise/hosted_api.py` (4 lines) and `config/ci-surfaces.yml` (the *"#10620: the record stopped dropping every point that carried
+search keys"* comment — `:625` at this head, `:615` at `origin/main`; the number is the handle that moves,
+which is why the quoted comment is the durable one — plus the *"#10620: same dual
 registration as the guards above"* comment — `:3627` at the measurement commit; the number is a convenience every
 rebase moves, so the quoted comment is the handle) assert it too.
 So **even the sites named here are not the set**, and ⚠️ **none of the sites named here is carried today**:
@@ -263,7 +265,7 @@ acceptance criteria**, with one criterion honestly marked *waived* rather than s
    ↑ NO GATE: DB-free, needs no deploy — start in parallel today. Its only link to #10896 is that the field it
 guards is only *live* once the deploy lands.
 
-#10896  (the deploy — 2 migrations unapplied)              ← the first gate
+#10896  (the deploy — "2 unapplied migrations", its title)   ← the first gate
    │
    ├── #10593  write_failed → 0 in production
    │      └── #9994  positive write counter                  (rows landed, not just "no longer failing")
@@ -319,7 +321,7 @@ has already paid for once, so the decomposition's product is **navigation and or
 
 | # | what | group | state at `3ac6b1636` | action |
 |---|---|---|---|---|
-| 1 | **#10896** deploy: 2 unapplied migrations | G1 | OPEN | **linked + labelled** — the gate |
+| 1 | **#10896** deploy: 2 unapplied migrations *(its title — whether the premise still holds is #11129's, §1)* | G1 | OPEN | **linked + labelled** — the gate |
 | 2 | **#10593** every hosted record write refused | G1 | OPEN | **linked**; the root is recorded in comment `6663361035` — ⚠️ **the body still asks for that investigation**, so the comment, not the body, is the answer |
 | 3 | **#11075** the declared-type guard | G1 | NEW | **filed** |
 | 4 | **#9994** positive write counter | G1 | OPEN | the channel **landed on main** (PR #11109, merged 2026-11-06T01:57Z) **and is now SERVED**: the deployed `/health` publishes `record_writes_applied: 0` / `record_last_write_at: null` — first on `ba87797c` (started 2026-11-06T04:24:26Z, read at 05:26:10Z) and, at the 2026-11-06T06:57Z read, on `443498e66` (started 05:57:25Z). ⚠️ The two earlier reads (`c3af2d018` @ 02:27Z, `e74361912` @ 02:55Z) were **both pre-merge** and served no `record_writes_applied` key — that dated observation stands; the absence claim it supported does not. The issue is still OPEN; closing it is the issue's own decision, not this row's |
