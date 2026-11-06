@@ -9987,16 +9987,16 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     emitted_edges: set[tuple[str, str, str]] = set()
     mitigates_pending: list[dict] = []
     # #10997: the run's OWN operators first, then the edges the drain above
-    # restored — deduplicated on (src, dst, op_type), because run 2 usually
-    # re-emits the operator it held in run 1 and ONE edge must not be emitted
-    # twice for it.
+    # restored — deduplicated on the EDGE's identity (src, dst, op_type, plus a
+    # MITIGATES' target), because run 2 usually re-emits the operator it held in
+    # run 1 and ONE edge must not be emitted twice for it.
     _run_ops = list(embed_list.get("operators", []) or [])
 
-    def _op_identity(o: object) -> tuple[str, str, str]:
-        if not isinstance(o, dict):
-            return ("", "", "")
-        return (_norm(str(o.get("src", ""))), _norm(str(o.get("dst", ""))),
-                str(o.get("op_type", "")).upper())
+    def _op_identity(o: object) -> tuple:
+        # the store's own `operator_identity`: a MITIGATES' TARGET is part of the
+        # edge identity — on (src,dst,op_type) alone two MITIGATES on ONE pair
+        # collapsed and the second edge (plus its target IMPL) was dropped silently.
+        return _identity_hold.operator_identity(o)
 
     # ⛔ And deduplicated AMONG THEMSELVES, not only against the run's own
     # operators (#10997 review round 4, P2). One operator whose `src` AND `dst`

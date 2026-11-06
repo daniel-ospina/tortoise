@@ -4626,6 +4626,15 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # so no drift can explain it. A full `file:line` cite is not a pin:
         # `_BUNDLE_CITE` resolves that the number exists and lands on a code
         # line, never that it is the code the sentence names. Held by content.
+        # ⛔ THE VET PASS'S FAIL-OPEN PAIR (#10997 review round 5, P3): a bare
+        # range inside a paragraph whose LIVE half says "here" — the paragraph is
+        # `_BUNDLE_HISTORICAL`, so the named cite is excluded from the sweep AND
+        # the bare one sat in no row, which is how a `+N` insert left it on a
+        # docstring in an unrelated helper while every neighbour moved.
+        ("README.md", "on its fail-open path", (
+            ("11603", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("11606", '"(fail-open)"], {}'),
+        )),
         ("docs/00_index.md", "refuses a value-free point at", (
             ("5168", "if not _carries_value(content, quote):"),
             ("5169", "return None"),

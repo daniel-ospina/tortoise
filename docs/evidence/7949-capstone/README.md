@@ -226,8 +226,8 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `:11040-11046` here, not in the log. The `8288-8292` cite is
-the `result["vet"]` block, and it is corrected to `:11050-11054` here — **not** to the `:8534-8538`
+the `result["classify_later"]` block at `:12148-12154` here, not in the log. The `8288-8292` cite is
+the `result["vet"]` block, and it is corrected to `:12158-12162` here — **not** to the `:8534-8538`
 this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
 head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
 number. (The SYMBOL is what makes

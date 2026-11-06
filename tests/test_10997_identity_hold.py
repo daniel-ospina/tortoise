@@ -408,6 +408,48 @@ class TestEveryHeldEdgeIsCarried:
         assert second["stats"]["held_drained"] == 2, second["stats"]
 
 
+class TestAMitigatesTargetIsPartOfTheEdge:
+    """⛔ Review round 5, P2: the drain's OWN edge identity omitted the target.
+
+    The store deduped and replayed on `operator_identity` (src, dst, op_type,
+    target), but the drain then re-identified the restored edges on
+    `(src, dst, op_type)` alone — so two MITIGATES naming the SAME pair and
+    attacking DIFFERENT edges collapsed: the second was dropped with no warning,
+    its materialised target IMPL went with it, and the record was confirmed
+    `resolved`. The same duplicate-for-loss trade, one function later.
+    """
+
+    def test_two_mitigates_on_one_ref_with_different_targets_both_drain(
+            self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        points = [{"content": c, "pointKind": "statement"} for c in
+                  ("alpha claim", "beta claim", "gamma claim", "delta claim")]
+        embed = {"entities": [], "events": [], "chain_notes": [],
+                 "link_before_create": [], "points": points, "operators": [
+                     {"src": _REF, "dst": "alpha claim", "op_type": "MITIGATES",
+                      "target": {"src": "alpha claim", "dst": "beta claim",
+                                 "op_type": "IMPL"}},
+                     {"src": _REF, "dst": "alpha claim", "op_type": "MITIGATES",
+                      "target": {"src": "gamma claim", "dst": "delta claim",
+                                 "op_type": "IMPL"}},
+                 ]}
+        first = v2.execute_embed(embed, {}, session_id="s1", hold_store=store)
+        assert first["stats"]["held"] == 1
+        assert len(hold.operators_of(store.pending()[0])) == 2, (
+            "the store must keep BOTH edges for this leg to mean anything")
+
+        second = v2.execute_embed(
+            {"entities": [], "events": [], "chain_notes": [],
+             "link_before_create": [], "points": points, "operators": []},
+            _search(True), session_id="s2", hold_store=store)
+        mitigates = [o for o in second["payload"]["operators"]
+                     if o["op_type"] == "MITIGATES"]
+        assert len(mitigates) == 2, (
+            "two MITIGATES differing only by TARGET collapsed into one — the "
+            f"second edge (and its target IMPL) is lost: {mitigates}")
+        assert store.pending() == []
+
+
 class TestTheAggregateHoldSentenceIsTrue:
     def test_a_store_that_cannot_write_is_not_reported_as_carried(self):
         """⛔ Review round 4 P3: the run-level line keyed on `hold_store is not
