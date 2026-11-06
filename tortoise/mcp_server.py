@@ -3744,6 +3744,19 @@ def _public_filters(filters: Any) -> dict:
     return {k: v for k, v in filters.items() if k not in PRIVATE_FILTER_KEYS}
 
 
+# ⚠️ DOC NOTE (#10063) — the docstring below opens with "structural exact-match
+# retrieval", and since #10063's fix that phrase is very slightly NARROW for
+# exactly two keys: `extractedFrom` / `extractedFromAll` answer through a UNION
+# (property equality OR `(n)-[:extractedFrom]->(:Source {url: $k})`), so a ref
+# carried only by a fold's `:Source` edge matches too. Every match is still an
+# EXACT one (no normalization, no prefix/fuzzy), which is why the served text is
+# left standing rather than reworded: its opening is mirrored as the catalog
+# `description` in `tortoise/tool_registry.py`, as the `job:` row in
+# `config/surface-manifest.yml` and in the rendered `docs/product/mcp-sdk-surface.md`,
+# so a reword is a surface-manifest re-cut — the surface gate's own artifact,
+# which a documentation note must not move. Recorded here, in-tree, instead of
+# only in a PR comment nobody greps (the
+# `tests/test_orient_direct_consolidation.py:186-189` precedent).
 def tortoise_query(kind: str | None = None,
                    filters: Any = None,
                    text: str | None = None,

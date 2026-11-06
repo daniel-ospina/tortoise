@@ -1637,8 +1637,15 @@ class TestWriterContract(unittest.TestCase):
         # The survivor here is RETRACTED on purpose: the props leg (`domain`)
         # is refused for a terminal survivor (#10368), so it keeps
         # `other-domain` while the fold WIRES this source onto it — the wiring
-        # runs BEFORE the props leg (`_fold_source_evidence` at sdk.py:13024 /
-        # 13148-13152, "deliberately left applying"). Both halves are
+        # runs BEFORE the props leg: `create_point` calls
+        # `self._fold_source_evidence(...)`, and only afterwards computes
+        # `_terminal_fold_refused`, whose own comment records `extractedFrom`
+        # as "the #7704 provenance fold, deliberately left applying". Cited by
+        # SYMBOL, not by line: the two `sdk.py` line ranges this comment used
+        # to carry do not resolve at this head — one was right when written and
+        # drifted ~560 lines through the `origin/main` merges, the other was
+        # never right (the #7949 bundle's own convention: the symbol is
+        # authoritative, the line is a convenience). Both halves are
         # documented behaviour (`non_live_hits`, never force-promoted).
         shared = f"sticky cross-source claim {os.urandom(4).hex()}"
         from tortoise.sdk import TortoiseSDK
