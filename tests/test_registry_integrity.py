@@ -247,3 +247,94 @@ def test_the_generated_rename_table_is_not_tracked() -> None:
         ["git", "-C", str(ROOT), "check-ignore", "-q", "--", GENERATED],
     )
     assert ignored.returncode == 0, f"{GENERATED} is untracked but not ignored"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# The other entry point: `ci_selection.py --integrity` must SEE the class
+# ─────────────────────────────────────────────────────────────────────
+# `--integrity` is the check fixers actually run, and the one a PR body cites
+# as proof that the durations map carries no duplicate. It reads the manifest
+# through `yaml.safe_load`, so before this wiring it was structurally blind to
+# a duplicate MAPPING key: #10726 reddened the REQUIRED `manifest-integrity`
+# leg four times (62 durations keys, then 13, then 1, then 2) while
+# `--integrity` printed its green OK line over every one of them.
+
+
+def test_the_integrity_entry_point_names_a_duplicate_durations_key(tmp_path, monkeypatch) -> None:
+    """Wiring: `--integrity`'s composed problems include the registry walk.
+
+    Non-vacuous both ways — `safe_load` (what `load_manifest()` uses) keeps the
+    LAST row and reports nothing, while the same file makes `--integrity` exit 1
+    naming the duplicate. Remove the `duplicate_mapping_key_issues()` term from
+    the composition and the message disappears from the output.
+
+    ⛔ THE PLANTED ROW CARRIES A DIFFERENT VALUE FROM THE REAL ONE, and that is
+    load-bearing (#10648 review P3). Planted with the SAME value the assertion
+    below held under EITHER resolution order, so it pinned only "the key
+    parses" and would have stayed green if the loader flipped to first-wins —
+    the arm that matters, because a `merge=union` duplicate leaves the STALE
+    row in the file and only the resolution order decides whether the shard
+    packer reads the fresh weight or the superseded one. With a different value
+    planted ahead of the real row, `safe_load` returning the real weight IS
+    last-wins and any first-wins loader returns the planted one and reds here.
+
+    The planted value is DERIVED from the real one instead of hard-coded, the
+    shape `tests/test_ci_timing.py` uses for the same property (#10726 review
+    P3). The row this test shadows is an ADOPTED CI reading — its note says
+    "MEASURED by the 2026-10-26 sweep (run 40259128208)" and ends "Was 2.0."
+    — so the next `--refresh-durations` sweep may rewrite its weight, and a
+    hard-coded figure would then red here as a complaint about this FIXTURE
+    rather than about the duplicate the test exists to catch.
+    """
+    from tools import ci_selection
+
+    text = ci_selection.MANIFEST.read_text(encoding="utf-8")
+    key = "test_7818_plan_record_5362.py"
+    anchor = f"  {key}: "
+    real_value = yaml.safe_load(text)["durations"][key]
+    # derive a value that provably DIFFERS from the real one, whatever it is
+    other_value = 0.9 if real_value != 0.9 else 0.8
+    dup = f"  {key}: {other_value}  # duplicate planted by this test\n"
+    at = text.index(anchor)
+    planted = text[:at] + dup + text[at:]
+    victim = tmp_path / "ci-surfaces.yml"
+    victim.write_text(planted, encoding="utf-8")
+
+    # the loader the gate uses cannot see it …
+    assert sum(1 for line in planted.splitlines()
+               if line.startswith(anchor)) == 2
+    assert yaml.safe_load(planted)["durations"][key] == real_value
+    assert real_value != other_value, (
+        "the planted value must differ from the row it shadows, otherwise "
+        "last-wins and first-wins are indistinguishable here and the "
+        "assertion above proves nothing")
+
+    # … but the composed `--integrity` does, by name.
+    assert any(f"duplicate mapping key '{key}'" in problem
+               for problem in ci_selection.duplicate_mapping_key_issues(victim))
+
+    import contextlib
+    import io
+
+    def _run_integrity() -> tuple[int, str]:
+        out, err = io.StringIO(), io.StringIO()
+        monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = ci_selection.main()
+        return rc, out.getvalue() + err.getvalue()
+
+    rc, seen = _run_integrity()          # the REAL manifest is clean …
+    assert rc == 0, seen
+    assert "duplicate mapping key" not in seen
+
+    monkeypatch.setattr(ci_selection, "MANIFEST", victim)
+    rc, seen = _run_integrity()          # … and the planted one is not
+    assert rc == 1, seen
+    assert f"duplicate mapping key '{key}'" in seen
+
+
+def test_the_integrity_entry_point_is_clean_on_the_real_manifests() -> None:
+    """Positive control: the shipped manifest carries no duplicate mapping key."""
+    from tools import ci_selection
+
+    assert ci_selection.duplicate_mapping_key_issues() == []
