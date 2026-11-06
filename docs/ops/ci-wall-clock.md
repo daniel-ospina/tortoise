@@ -181,7 +181,7 @@ stated there once, not restated here, which is how this pair drifted apart in th
 `test-d14-hosted-api` incident (#10182). The 15.9 m above was measured on this job *before* #11063
 stood its save down, on a different runner and day, and shows a 3.6 GB save can cost TWICE that.
 The rows derived from `~9 m` (`test-slow`'s 60 m, the `test-d14-hosted-api` headroom
-statements below, and `test-track-b`'s save arm at `:226` — ⛔ **`test` is NOT one of them at this head:** #11063 has since re-derived
+statements below, and `test-track-b`'s save arm (`python-ci.yml:3222`, `cache: pip`) — ⛔ **`test` is NOT one of them at this head:** #11063 has since re-derived
 its SUM on a MEASURED ~7.3 m startup plus an 8 m cache-write term, and split its payload so
 that job no longer writes the 3.6 GB archive at all — see its row below, which is the
 authority for it. Nor is `test-carve-out`, whose pip step has been
@@ -257,13 +257,13 @@ false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its
 took that save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. `test-slow` sits exactly AT its
 cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all) and
 `test-carve-out` sits at ~31.6 m against 30: 10 m embedder + 19 m shard watchdog + ~1 m, plus the 1 m 38 s
-`~/.cache/huggingface` POST (`python-ci.yml:3539`) — its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
+`~/.cache/huggingface` POST (`python-ci.yml:3539-3541`) — its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision** — ≈ 21 m of IN-STEP caps (10 + 10 + ~1 m), and it installs
 `install-cpu-torch` + `.[test,embeddings]` (`python-ci.yml:2941-2946`). The ~30 m this row used to
-carry also counted a `~/.cache/pip` save #11063 stood down (`python-ci.yml:2934` is
+carry also counted a `~/.cache/pip` save #11063 stood down (`python-ci.yml:2934-2938` is
 `actions/cache/restore@`), and it still pays an unconditional `actions/cache@v4` POST on
-`~/.cache/huggingface` (`python-ci.yml:2977`), so its SUM needs a measurement: `15 → 50` is VOID.
+`~/.cache/huggingface` (`python-ci.yml:2977-2979`), so its SUM needs a measurement: `15 → 50` is VOID.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 
