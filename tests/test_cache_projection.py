@@ -821,10 +821,15 @@ def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     """The rebuild's field set is EXACTLY the record VIEW's — never a superset of it.
 
     ⚠️ "The record VIEW's", not "the record's": the classes named below mint
-    properties the record has NO COLUMN for, so against the record's PRIMARY column
-    set the plan IS a strict superset for an `:Object`/`:Subject` carrying a
-    `status`. The assertion below compares `written` against `set(node.props)` —
-    the view — which is the identity that holds, and §17.2 states the same
+    properties the record has NO COLUMN for (class (2)/(3) mint `status`), so
+    against the record's PRIMARY COLUMN set the plan carries a name that set does
+    not have. ⛔ It is a WIDENING, not a superset, and the difference is not
+    pedantry: `_props_from_row` SKIPS a column whose value is `None`, so a sparse
+    row's plan also lacks most of P — measured on the suite's own sparse fixture,
+    `props - P == {'status', 'objectKind', 'supersededAt', 'supersededBy'}` while
+    `P - props` holds 13 of 16 names, i.e. the plan is neither a superset nor a
+    subset. The assertion below compares `written` against `set(node.props)` —
+    the view — which is the identity that DOES hold, and §17.2 states the same
     distinction by direction.
 
     ⚠️ FIVE CLASSES THIS COMPARISON CANNOT SEE — and every one of them is

@@ -131,19 +131,24 @@ column nor an invented field can hide behind the carve-out. A field the cache
 has and the record does not, and that is **not** in the refused set, is an
 UNEXPLAINED absence and reddens the test.
 
-⛔ THREE sanctioned asymmetries, not one, and ALL are enumerated in
+⛔ FOUR sanctioned asymmetries, not one, and ALL are enumerated in
 :func:`parity_difference` rather than absorbed by a tolerant comparison: the
 SCHEMA's refusal set (the EP carve-out above), a fold ``ON CREATE`` default
-(``FOLD_ON_CREATE_DEFAULTS``, #9634), and, since #10853, the
+(``FOLD_ON_CREATE_DEFAULTS``, #9634), since #10853 the
 PROJECTION's own §9.1/D1 decline of an episodic Source's turn prose
-(``cache_projection.episodic_source_declined_properties``). The last one
-exists because this module's parity rule is one of the THREE record↔cache
+(``cache_projection.episodic_source_declined_properties``), and since #10394 the
+NOT-PROJECTABLE column class (``cache_projection.CACHE_FORBIDDEN_COLUMNS`` —
+§9.1/D1's narrative, authority the record KEEPS and the cache must never
+materialise). The decline exists because this module's parity rule is one of the
+THREE record↔cache
 field-comparison instruments in the tree — ``record_reconcile``, this function,
 and ``tools/turn_parity_census.py``, which compares turn rows rather than
 Source nodes; teaching only `record_reconcile` about the
 decline (#10867 review ISSUE 1) left this one reporting a legacy session node's
 own prose as a projection gap, i.e. a declared asymmetry reddening the same as a
-real defect.
+real defect. The not-projectable class exists for the MIRROR reason: it is
+explained in BOTH directions, because a record row rightly holding the column is
+the state the deny exists to create (#10394).
 
 ⚠️ ``content_hash`` is in the refused set and is still recomputable (a pure
 function of ``content``, #2795 D2) — a caller that wants it re-derives it with
