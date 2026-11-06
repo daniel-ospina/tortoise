@@ -4415,6 +4415,23 @@ app.add_middleware(McpPathCanonicalizerMiddleware)
 #     credit a DISCARDED response to the org's egress.
 _WAIT_BOUND_REFUSED_STATE = "_wait_bound_refused"
 
+#: #10602 (exactly-once COUNT): a SEPARATE bit on the same shared
+#: ``scope["state"]`` dict, kept off ``_WAIT_BOUND_REFUSED_STATE`` on purpose.
+#: That flag is ONE-DIRECTIONAL — it lets ``mcp_server``'s dispatch seam suppress
+#: ITSELF when this middleware already refused, and says nothing about the
+#: reverse order. On a transport that does not start its response before
+#: dispatching (fastmcp's ``json_response`` mode — the case ``mcp_server``
+#: documents at its ``transport_refused`` read), the seam can see an unarisen
+#: deadline, count, and refuse FIRST; this middleware's own bound then expires
+#: later in the same request and counts a SECOND time for one refusal, because
+#: nothing above suppresses it. The count drives a capacity decision, so it must
+#: not depend on a transport option being set the helpful way.
+#:
+#: Whichever detector fires first WINS: it claims the bit, and the other's count
+#: becomes a no-op. Same literal as ``mcp_server._WAIT_BOUND_COUNTED_KEY`` — one
+#: string, two modules, kept in step by name (as the refused key is).
+_WAIT_BOUND_COUNTED_STATE = "_wait_bound_counted"
+
 #: Mount prefixes the app serves through a ``Mount`` — CODE LITERALS, so a
 #: request under one is admitted on the ROUTE axis (see ``monitoring``'s
 #: two-axis note) rather than the request-derived one. That matters because a
@@ -4932,7 +4949,8 @@ _TRANSPORT_WAIT_BOUND_EXEMPT = frozenset({("POST", "/v1/context")})
 #:
 #: WHO publishes the replacement patience, by class — the two differ, and the
 #: record must not flatter the weaker one:
-#:   * CRON callers, in `registry-cron.sh`: sweep `-m 600`, purge `-m 300`,
+#:   * CRON callers, in `registry-cron.sh`: sweep `-m $SWEEP_TIMEOUT_S` (default
+#:     1500 s, bounded 60-1800 s by #10234), purge `-m 300`,
 #:     reconcile `-m 120`, drill `-m 900`, drill-scheduled `-m 1200`.
 #:   * OPERATOR-run curls, in `docs/ops/registry-backup-dr.md` and
 #:     `docs/ops/669-post-flip-verification.md`: these carried NO `--max-time`
@@ -5331,6 +5349,57 @@ class WaitBoundMiddleware:
         # be forged. The helper lives in ``mcp_auth`` (#3834 F-3) so the MCP
         # arm shares it without importing this module.
         safe_route_path = _mcp_auth._sanitize_for_log(route_path)
+        # #10602: count the breach HERE, synchronously and before the emit is
+        # scheduled. The emit is best-effort (telemetry pool, bounded backlog,
+        # `logger.debug` on failure); a counter that rode inside it would go
+        # silent under exactly the overload that causes breaches.
+        #
+        # ⛔ Classified by SURFACE, not by arm. THIS middleware also owns the
+        # `/mcp` refusal for a request that stalls BEFORE its SSE response
+        # begins (see the class docstring), and that refusal is served with the
+        # JSON-RPC `-32009` body — the exact shape #10602 recorded. Labelling it
+        # "rest" would report the P0's own refusal class under the surface an
+        # operator is told is NOT the read path, sending them to the REST routes
+        # while MCP tool calls are the ones being refused. `_is_jsonrpc_surface`
+        # is the same predicate `_send_wait_bound_refusal` uses three lines below
+        # to CHOOSE that body, so the label and the body cannot disagree.
+        #
+        # ⛔ WRAPPED, for the rule every other monitoring write on a request
+        # path in this module already carries (`record_egress`/`record_compute`
+        # below): measurement must never be a NEW failure mode for the request
+        # it measures. That rule is load-bearing HERE rather than merely
+        # tidy — this call sits AFTER `refused = True` and BEFORE the send, so
+        # an exception escaping it would skip `_track_wait_bound_request` and
+        # `_send_wait_bound_refusal` and hand the client an opaque 500 with no
+        # `Retry-After` and no `-32009` body: the illegible refusal #3834/#10602
+        # exist to remove, produced by the observation meant to expose it.
+        # ⛔ AT MOST ONCE PER REQUEST, whichever detector fired first. The
+        # dispatch seam (`mcp_server`) reaches the same refusal and counts on
+        # ITS thread; ``_WAIT_BOUND_REFUSED_STATE`` only suppresses the seam
+        # when THIS middleware went first, so without this bit the reverse order
+        # counts twice (see `_WAIT_BOUND_COUNTED_STATE`). Claim-and-check is
+        # one operation on the single-threaded loop, so two meters cannot both
+        # win; a request with no shared state dict (off-HTTP) counts, as before.
+        counted_now = True
+        if isinstance(state, dict):
+            counted_now = not state.get(_WAIT_BOUND_COUNTED_STATE)
+            state[_WAIT_BOUND_COUNTED_STATE] = True
+        if counted_now:
+            try:
+                _monitoring.record_wait_bound_breach(
+                    _monitoring.WAIT_BOUND_SURFACE_MCP
+                    if _is_jsonrpc_surface(route_path)
+                    else _monitoring.WAIT_BOUND_SURFACE_REST)
+            except Exception:
+                _logger.debug("wait-bound count failed", exc_info=True)
+        # ⛔ THE COUNT IS EXACTLY-ONCE; THIS EMIT IS NOT, IN THE REVERSE ORDER.
+        # When the seam refused FIRST it already scheduled its own event on the
+        # telemetry pool, and `_emit_wait_bound_breach` has no dedupe — so this
+        # emit can be the second analytics row for one request while the
+        # counter reports one. Stated rather than "fixed": gating the emit on
+        # `counted_now` would keep the SEAM's event and drop THIS one, inverting
+        # the #3834 F-2 rule that the detector which ANSWERED the caller owns the
+        # truthful event. Tracked on #10602.
         _emit_wait_bound_breach(org_id or "", safe_route_path,
                                 scope.get("method", ""),
                                 int((time.monotonic() - t0) * 1000))
@@ -6299,7 +6368,7 @@ def _record_health() -> dict:
         serves exactly ONE record tenant (#9192). Multi-tenant (``False``) is
         the fail-closed default the hosted app MUST stay on; it is what makes
         the process-global org/graph env pair be refused instead of misused.
-      * the three record counters, under the SAME names ``metrics()`` publishes
+      * the record counters, under the SAME names ``metrics()`` publishes
         (#9188/#9231/#9307) — the hosted app has no ``/metrics`` route, so
         without them indicator (b) of #9548 (``record_write_failures`` = 0) has
         no reader at all on the deployment it is claimed about. Each is
@@ -6307,11 +6376,31 @@ def _record_health() -> dict:
         a zero are different facts, and the obvious consumer
         (``counts.get("write_failed", 0)``) would read the second from the first
         (#9548 review P2).
-        ⚠️ All three are FAILURE/decline channels — there is no positive
-        ``record_writes`` counter anywhere in ``monitoring.py``, so a zero here
-        does NOT evidence that a row was written. An armed-and-writing
-        deployment and one that has never written both read ``{}``; indicator
-        (b) needs the runbook's SQL row count beside it.
+        ⚠️ All three are FAILURE/decline channels, so a zero here does NOT by
+        itself evidence that a row was written: an armed-and-writing deployment
+        and one that has never written both read ``{}``. That is why the
+        POSITIVE pair below rides beside them — and why the runbook's SQL row
+        count names a second, independent witness.
+      * ``record_writes_applied`` / ``record_last_write_at`` — the POSITIVE
+        channel (#9548). The count of live writes THIS PROCESS committed since
+        it started, and the instant of the last one (ISO-8601 UTC, or ``None``).
+        ⚠️ The two ``None`` values MEAN DIFFERENT THINGS and ``counters_error`` is
+        what separates them: for ``record_writes_applied``, ``None`` = the
+        counter could not be READ (never ``0`` — ``0`` is precisely the value a
+        never-writing deployment reports, so an unread counter published as
+        ``0`` would manufacture the finding this field exists to make), while
+        for ``record_last_write_at``, ``None`` = this process has not committed
+        a write since it started, AND it is also ``None`` on an unread snapshot.
+        Its absence is the defect it fixes — every other
+        record counter is a failure/decline channel, so ``record_write_failures:
+        {}`` was offered as evidence for indicator (b) of #9548 while indicator
+        (a) (a captured session writes ``journal_event`` + ``point`` rows) had no
+        reader on the deployment at all, and this P0 was closed on an empty
+        object and reopened. It remains an in-process counter: it resets on
+        restart (``record_last_write_at`` is how an operator dates it), and a
+        NON-ZERO value is the claim "a transaction committed here", not a row
+        count — the runbook's SQL read is still the witness for how many rows
+        landed.
       * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.
@@ -6366,9 +6455,11 @@ def _record_health() -> dict:
     try:
         from tortoise import record_writer
         from tortoise.monitoring import (
+            record_last_write_at,
             record_non_journal_skip_counts,
             record_position_unproven_count,
             record_refusing,
+            record_write_applied_count,
             record_write_failure_counts,
         )
     except Exception as exc:  # liveness must answer, always
@@ -6382,6 +6473,9 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                # The POSITIVE pair is present-and-null here for the same reason:
+                # a consumer must not read a missing key as "no writes" (#9548).
+                "record_writes_applied": None, "record_last_write_at": None,
                 "degraded": None, "degraded_reasons": None,
                 # No ``refusing``: nothing was evaluated, so the key is ABSENT
                 # rather than ``None`` (#10648 review P3).
@@ -6401,6 +6495,12 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
+        # The POSITIVE pair (#9548): committed writes, and when. Seeded ``None``
+        # for the same reason as the three above — an unread counter is not a
+        # zero, and a ``0`` here is exactly what a never-writing deployment
+        # reports, so inventing one would fabricate the finding.
+        "record_writes_applied": None,
+        "record_last_write_at": None,
         # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
         # is "not evaluated" (the counter snapshot could not be read); ``False``
         # is "no armed write was refused inside the window"; ``True`` is "rows
@@ -6439,16 +6539,31 @@ def _record_health() -> dict:
         "fetched_at": datetime.now(UTC).isoformat(),
     }
     try:
-        block["record_write_failures"] = record_write_failure_counts()
+        # Read EVERY counter into a local FIRST, then publish the whole set at
+        # once: a snapshot that fails half-way must not leave the earlier keys
+        # holding values while the later ones read ``None`` — a consumer that
+        # treats a partially-read block as a complete one reads a stale number
+        # as a current fact (#9548 review cycles 3-4). The published shape is
+        # therefore all-read or all-``None``, and ``counters_error`` names which.
+        failures = record_write_failure_counts()
         # The sibling keys, not folded into the counter above: a
         # `no_durable_journal` decline is the HEALTHY M2 lane and a
         # `position_unproven` append is healed by a replay, so neither may
         # move the zero that means "no record row was lost" (#9231/#9307).
-        block["record_non_journal_skips"] = record_non_journal_skip_counts()
-        block["record_position_unproven"] = record_position_unproven_count()
+        skips = record_non_journal_skip_counts()
+        unproven = record_position_unproven_count()
+        # The POSITIVE pair (#9548) rides the SAME snapshot for the same reason.
+        applied = record_write_applied_count()
+        last_write_at = record_last_write_at()
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
+    else:
+        block["record_write_failures"] = failures
+        block["record_non_journal_skips"] = skips
+        block["record_position_unproven"] = unproven
+        block["record_writes_applied"] = applied
+        block["record_last_write_at"] = last_write_at
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
     # this counter carries — SIX values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
@@ -6626,7 +6741,7 @@ async def health():
     place the acknowledgement can be made.
 
     Record check (#9548): ``record`` reports whether the Postgres record is
-    ARMED on this deployment, plus the three record counters — the same class as
+    ARMED on this deployment, plus the record counters — the same class as
     ``change_feed`` (state that lives inside the process, or in an env var only
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
@@ -6673,6 +6788,16 @@ async def health():
             else "degraded",
             "db": db, "probe": probe_meta, "loop_stale_ms": loop_age_ms,
             "backup_watcher": watcher, "change_feed": _change_feed_health(),
+            # #10602: the transport wait bound's own breach count. This is the
+            # surface an operator curls FIRST, and on 2026-11-02T15:44Z it read
+            # `status: "ok"` while 6/6 searches were refused with `-32009`.
+            # Same rule as `change_feed` / `build` above: it is REPORTED, never
+            # folded into `status`. A cumulative counter must never pin the
+            # deployment degraded for the life of the process; `status` stays
+            # tied to a failure that is observable NOW — which on THIS body
+            # means `db.ok`, `backup_watcher.ok` and `record.ok` (the three
+            # terms in the `status` expression above), not the counter.
+            "wait_bound_breaches": _monitoring.wait_bound_breach_counts(),
             "record": record, "build": _build_identity()}
 
 
@@ -8793,23 +8918,41 @@ def _gate_sdk_for(org: dict, resource: str):
 
     This mirrors the opener's TWO call forms rather than re-deriving one:
     a graph-bound key gets `graph_name=_data_graph_name(org)` (the value
-    `_data_sdk` passes verbatim), and an org-wide key gets exactly what
-    `_org_sdk_for_credential` builds — which is the SAME decision the #10180
-    promotion work put on this path, reused rather than restated: a moved
-    default opens `graph_name=<promoted namespace>`, and every other org opens
-    the historical `namespace=org_id`. Those two axes are ORTHOGONAL and both
-    were real — #10180 made an org-wide count follow a PROMOTION, #4051 makes a
-    graph-BOUND count follow the BINDING, and before the merge of the two each
-    fix left the other's lane vacuous.
+    `_data_sdk` passes verbatim), and an org-wide key gets
+    `_org_sdk_for_credential(org)` — byte-for-byte the SDK `_data_sdk`'s
+    org-wide branch builds. Mirroring the FORMS matters as much as the graph:
+    `_make_sdk` keys its embedded keepalive anchor on `graph_name if
+    graph_name is not None else namespace` (`_FALLBACK_KEEPALIVE`), and that dict
+    never evicts a HEALTHY anchor — it is only replaced when `_anchor_usable`
+    fails (#1502) and never to bound its size. Mirroring also preserves the
+    "identical connection" property `mcp_server._enforce_quota` states as the
+    rule.
 
-    Mirroring the FORMS matters as much as the graph: `_make_sdk` keys its
-    embedded keepalive anchor on `graph_name if graph_name is not None else
-    namespace` (`_FALLBACK_KEEPALIVE`), and that dict never evicts a HEALTHY
-    anchor — it is only replaced when `_anchor_usable` fails (#1502) and never to
-    bound its size — so `graph_name="org_team-001"` for an org-wide key would
-    park a SECOND anchor (`org_team-001` beside the write's `team-001`) for every
-    org in the process. Mirroring also preserves the "identical connection"
-    property `mcp_server._enforce_quota` states as the rule.
+    ⛔ THE ORG-WIDE ARM IS DELEGATED, NOT RE-DERIVED — #10180 (merge of that
+    branch with #4051). Writing `namespace=org["org_id"]` here was correct only
+    while nothing could MOVE an org's default; promotion
+    (`POST /v1/graphs/{id}/promote`) leaves the default living in the promoted
+    graph's namespace, and `_data_sdk`'s org-wide branch has opened it BY NAME
+    since #10180 (`_default_graph_name`). A literal `namespace=org_id` here would
+    therefore count the graph a promotion DEMOTED — a stale-low count admits an
+    org past its real cap (the money gate failing OPEN) and a stale-high one
+    402s writes the org is under. Delegating to `_org_sdk_for_credential` is
+    also byte-identical for every org that has NOT promoted anything (it answers
+    `_make_sdk(namespace=org_id)` there, because `_default_graph_name` is None),
+    so the non-promoted lane keeps the exact `namespace=` form and its anchor.
+    For a PROMOTED org the anchor key is `graph_name=<moved>`, which is the same
+    anchor the write's own SDK parks — one anchor, not a second.
+
+    ⚠️ The two arms answer DIFFERENT questions and must not be folded: THIS
+    function asks "which graph does this request OPEN" (so a graph-bound key
+    counts its bound graph — #4051), while `_org_sdk_for_credential` asks
+    "which graph is this org's DEFAULT" — the resolver it calls,
+    `_default_graph_name`, answers None for a graph-bound binding (that function
+    is the one that answers None there, NOT `_org_sdk_for_credential`, which
+    always builds an SDK), leaving the historical `namespace=org_id` fallback
+    this gate must NOT take for such a key (#10180). Delegating the org-wide arm
+    to it is safe precisely because a graph-bound credential never reaches it:
+    the `graph_id` arm above returns first.
 
     Two deliberate non-uses:
     - registry-scoped resources get `None`: their count is a control-plane read
@@ -8839,8 +8982,12 @@ def _gate_sdk_for(org: dict, resource: str):
         if graph is None:
             return None
         return _make_sdk(graph_name=graph)
-    if not org.get("org_id"):
+    org_id = org.get("org_id")
+    if not org_id:
         return None
+    # #10180: the org's DEFAULT graph, by name when a promotion moved it, else
+    # the historical `namespace=org_id` open. ONE owner for that decision —
+    # re-deriving it here is how the gate counted the demoted graph.
     return _org_sdk_for_credential(org)
 
 

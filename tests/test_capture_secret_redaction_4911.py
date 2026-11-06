@@ -820,8 +820,12 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     secret's ABSENCE. Absence alone is satisfied VACUOUSLY by any arrangement in
     which the turn never reaches the summary, and it therefore did not bind the
     control: neutralising ``redact_secrets`` left this test GREEN. The non-str
-    turn is placed FIRST and kept short enough to be the first substantive
-    utterance, so it IS the summary — which makes the marker check load-bearing.
+    turn is placed FIRST, so its marked credential is what the Source's derived
+    vocabulary carries — which makes the marker check load-bearing. (Since
+    #10000 the derivation is a CAPPED TOPIC lexicon, so the marker's words are
+    only a *candidate* for the six that survive; the marker is therefore read on
+    the scrubber's own output below, which is the property, and the coerced
+    turn's presence on the node is pinned separately.)
     """
     _keyless(monkeypatch)
     # #4897 round 6: capture every string the scrubber is handed on the Source
@@ -835,11 +839,16 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     from tortoise.sdk import _CAPTURE_TURN_CAP
 
     scanned: list[int] = []
+    scanned_text: list[str] = []
     _real_redact = sdk_mod.redact_secrets
 
     def _spy(text: str):
         scanned.append(len(text))
-        return _real_redact(text)
+        marked = _real_redact(text)
+        # `redact_secrets` returns ``(text, counts)``; the text is what the
+        # capture path goes on to derive the Source from.
+        scanned_text.append(marked[0] if isinstance(marked, tuple) else marked)
+        return marked
 
     monkeypatch.setattr(sdk_mod, "redact_secrets", _spy)
     secret = "sk_live_" + _fill(24)
@@ -863,9 +872,22 @@ def test_the_source_sink_scans_a_bounded_window(sdk, monkeypatch):
     # (a) the non-str turn's credential was COERCED, SCANNED and MARKED. This is
     #     the assertion that binds: with the scrubber neutralised the raw value
     #     is here instead of the marker and this reds.
-    assert "[REDACTED:stripe_secret_key]" in blob, (
-        "a credential was dropped rather than marked — or the non-str turn was "
-        f"never scanned: {blob!r}")
+    #
+    #     ⛔ THE MARKER IS ASSERTED ON THE SCRUBBER'S OWN OUTPUT, not on the
+    #     node's 6-word lexicon. Since #10000 the Source carries a CAPPED topic
+    #     lexicon whose ties are broken alphabetically (#10852 P1: the old
+    #     first-encountered tie-break made the lexicon a re-wording of the
+    #     utterance in transcript order), so which six words survive is a
+    #     function of the fixture's unrelated vocabulary — reading the marker
+    #     there pins the SORT ORDER, not the redaction. The scrub's output is
+    #     the property, and it is the one the neutralised-scrubber mutation
+    #     reds.
+    assert any("[REDACTED:stripe_secret_key]" in t for t in scanned_text), (
+        "the credential was dropped rather than MARKED by the scrubber — "
+        f"scanned windows carried no marker: {scanned_text!r}")
+    assert "note" in blob, (
+        "the non-str turn never reached the Source's derivation — its coerced "
+        f"text is the only source of this word: {blob!r}")
     assert secret not in blob, (
         "a credential reached the session :Source — check the coercion path "
         "and the per-turn ordering")
@@ -1565,8 +1587,28 @@ def test_every_rule_scans_linearly_on_adversarial_input():
     Scaling, not just a wall-clock threshold: a generous absolute bound alone
     cannot certify linearity (and did not — the reverted `jwt` rule passed the
     shipped 5.0 s bound). 2x input may not cost more than 3x time.
+
+    CPU TIME, not wall, is the asserted quantity (#9474's own recommendation —
+    "measure CPU time / call count instead of wall clock"). A shared runner
+    inflates WALL without touching the scan, and this leg was measured red on
+    exactly that: on a saturated arm64 CI leg it reported ``0.508s for 200 units
+    → 1.538s for 2x input`` — **3.03x against the 3.0x bound**, i.e. a 1%
+    overrun decided by one preemption inside one sample, which is a load
+    measurement and not a superlinear rule (#9431's class). CPU time is what a
+    re-scanning rule actually spends (4x input cost 70x time in the measurements
+    recorded above), and it does not move when the box is busy. WALL is still
+    measured and REPORTED in the failure message — never asserted — so a slow
+    host stays visible instead of silent.
+
+    A single pair of samples still decides nothing: if the first pair trips the
+    bound, the pair is measured AGAIN and the leg fails only when the second pair
+    agrees. A real re-scanning rule is 4x-70x here, so it trips both pairs; a
+    contention event does not survive a second measurement.
     """
     import time
+
+    #: 2x input may not cost more than this multiple of the CPU time.
+    _SCALING_BOUND = 3.0
 
     #: ``(name, build, units, spared)`` — per-family unit count, because the
     #: families differ by up to ~700x in characters per unit (see the docstring).
@@ -1602,11 +1644,13 @@ def test_every_rule_scans_linearly_on_adversarial_input():
          lambda n: (" apikey_" + "a" * 24 + "_" + "b" * 4 + " " * 2048) * n, 200, False),
     )
 
-    def scan(name: str, build, n: int, spared: bool) -> float:
+    def scan(name: str, build, n: int, spared: bool) -> tuple[float, float]:
+        """One scan of the family at ``n`` units -> ``(cpu_s, wall_s)``."""
         text = build(n)
-        started = time.perf_counter()
+        started_wall, started_cpu = time.perf_counter(), time.process_time()
         redacted, counts = redact_secrets(text)
-        elapsed = time.perf_counter() - started
+        wall = time.perf_counter() - started_wall
+        cpu = time.process_time() - started_cpu
         if spared:
             assert counts == {}, f"{name}: redacted a non-credential"
             assert redacted == text, f"{name}: text was modified"
@@ -1618,15 +1662,29 @@ def test_every_rule_scans_linearly_on_adversarial_input():
             # could be "not spared" while redacting something else entirely.
             assert redacted.count("[REDACTED:typesafe_api_key]_bbbb") == n, (
                 f"{name}: the under-floor tail was not left intact")
-        return elapsed
+        return cpu, wall
+
+    def within_bound(one: float, two: float) -> bool:
+        return two < max(one * _SCALING_BOUND, 1.0)
 
     for name, build, units, spared in families:
-        one = scan(name, build, units, spared)
-        two = scan(name, build, units * 2, spared)
-        assert two < max(one * 3.0, 1.0), (
-            f"{name}: scan does not scale linearly — {one:.3f}s for {units} units "
-            f"→ {two:.3f}s for 2x input (a rule is re-scanning the tail from "
-            "every candidate start)")
+        one_cpu, one_wall = scan(name, build, units, spared)
+        two_cpu, two_wall = scan(name, build, units * 2, spared)
+        if not within_bound(one_cpu, two_cpu):
+            # Confirm before failing (see the docstring): one pair of samples is
+            # not evidence on a shared runner, two agreeing pairs are.
+            retry_one_cpu, retry_one_wall = scan(name, build, units, spared)
+            retry_two_cpu, retry_two_wall = scan(name, build, units * 2, spared)
+            if within_bound(retry_one_cpu, retry_two_cpu):
+                one_cpu, two_cpu = retry_one_cpu, retry_two_cpu
+                one_wall, two_wall = retry_one_wall, retry_two_wall
+        assert within_bound(one_cpu, two_cpu), (
+            f"{name}: scan does not scale linearly — CPU {one_cpu:.3f}s for "
+            f"{units} units → {two_cpu:.3f}s for 2x input "
+            f"({two_cpu / max(one_cpu, 1e-9):.2f}x, twice in a row; wall "
+            f"{one_wall:.3f}s → {two_wall:.3f}s is REPORTED, never asserted — "
+            "on a loaded host wall is contention, not scan cost). A rule is "
+            "re-scanning the tail from every candidate start")
 
     # And the recall half of the same trade: bounding per-candidate work must
     # NOT be bought by narrowing a lookbehind past a real body character. A JWT

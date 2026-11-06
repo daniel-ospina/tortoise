@@ -324,6 +324,31 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         r"from_uri\(_probe_uri\)",
         r"from_uri\(\s*uri\s*\)",
     ],
+    # #8447 C3: the ingest door's live arms. EVERY `from_uri(uri)` site is the
+    # file's OWN handle on a per-test graph — either a "did the door write it?"
+    # read-back (`_resolution_points` in the resolution-Point control, and the
+    # sweep teardown in `TestTheSweepReportsOutstandingWork`) or the SEED an arm
+    # needs before the door can be asked anything
+    # (`test_an_already_extracted_document_answers_the_named_skip`, which creates
+    # the already-extracted `:Source` the `--upgrade` arm expects to skip). The
+    # seed is the opposite of a read-back, so the gloss names both shapes rather
+    # than calling every site a read-back. ⛔ SYMBOLS, not line numbers: the
+    # coordinates this comment carried drifted twice (round 12 measured them all
+    # +21), and nothing re-measures a comment in a different file.
+    #
+    # Every `uri` those sites receive comes from `_fresh_graph(...)`, which swaps
+    # the env URI's graph path for a per-run `test_8447_<stem>_<hex>`
+    # (`_graph_uri`, the same shape as `test_ingest.py::_live_uri`). SAFETY IS NOT
+    # "the handle is declared": `--upgrade-all` reads EVERY pending Source in the
+    # graph, and the sweep arm ends with `MATCH (s:Source {url: $id}) DETACH DELETE
+    # s` where `$id` is a SOURCE BASENAME, so on the shared `tortoise_test_matrix`
+    # path that delete could reach a peer file's `Source {url: "note.md"}`. The
+    # per-run graph is what makes both the sweep's verdict and the delete local to
+    # this test. The regex is deliberately narrow to the one shape that exists
+    # today so a second one reds instead — which is why round 8's seeding handle
+    # (the already-extracted arm) names its variable `uri` rather than widening
+    # this pattern.
+    "test_8447_c3_ingest_door.py": [r"from_uri\(\s*uri\s*\)"],
     # #10135 review (post-rebase): `test_5140_d10_relabel_migration.py` is
     # deliberately ABSENT here. Main's #10164 gave both of that file's
     # `from_uri(` sites an explicit `graph_name=` (`:50` the module probe,
@@ -583,6 +608,10 @@ _ENV_URI_PIN_FILES = (
     # main's #10164 gave its `from_uri(` sites an explicit `graph_name=`, so
     # the loose-net hazard this tuple guards (a declared, un-named site) no
     # longer exists in that file.
+    # #8447 C3: declares the same `from_uri(uri)` shape — every `uri` there is
+    # `_fresh_graph()` -> a per-test `test_8447_*` graph, so the invariant below
+    # (no raw-env `uri =` assignment) is what keeps that true.
+    "test_8447_c3_ingest_door.py",
 )
 
 

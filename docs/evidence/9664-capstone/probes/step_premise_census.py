@@ -73,7 +73,7 @@ def _hosted_startup_guard_cleared():
     _CHECKPOINT_STEPS` raised there, the `onboarding` section was UNMEASURED
     (rows 1 and 5a-5e never printed) and this probe exited 3. The documented
     recipe (README.md → "Re-running the measurable half") therefore could not
-    reproduce `25 premises, 0 unmeasured sections` on any box that exports the key
+    reproduce `26 premises, 0 unmeasured sections` on any box that exports the key
     without a pepper; the pins in `tests/test_9664_premise_census.py` were green
     over it only because `tests/conftest.py:18` supplies a pepper the recipe does
     not.
@@ -120,6 +120,11 @@ def census_tools() -> None:
     for step, tool in (
         ("6", "tortoise_load_skill"),
         ("6", "tortoise_health"),
+        # #4282: the advertised orientation tool is the container; `tortoise_overview`
+        # retired INTO it, so both names are still measured — the advertised one as
+        # PRESENT, the retired one as ABSENT-with-replacement (a bare absence reads as
+        # "the product is broken").
+        ("6", "tortoise_graph_overview"),
         ("6", "tortoise_overview"),
         ("6", "tortoise_onboarding_state"),
         ("7", "tortoise_list_graphs"),
@@ -415,7 +420,7 @@ def census_packs() -> None:
     # that was NOT read and says nothing about one that WAS — so a reader that
     # consults the data leg on this arm would still print "data leg: not
     # consulted — the arm returns early" with every expectation satisfied
-    # (measured: all rows CONFIRMED, `25 premises, 0 unmeasured sections`,
+    # (measured: all rows CONFIRMED, `26 premises, 0 unmeasured sections`,
     # exit 0, the whole test file green).
     # Deriving the WORD instead (`'consulted' if 'kind_scan' in union.served`)
     # would stop it lying and stay green over a changed contract, which is the

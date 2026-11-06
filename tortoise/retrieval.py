@@ -1172,6 +1172,18 @@ def _validity_marker(h: dict) -> str:
       - live hit with ``valid_from`` → ``[valid since <from>]``
       - superseded hit → ``[valid <from> → <to>]``; with ``expired_at`` →
         ``[valid <from> → <to>; expired <tx-date>]``
+      - an END-ONLY window — an end and NO start, which is exactly what
+        ``invalidate_point`` writes on a claim created without a window — →
+        ``[valid → <to>]``; with ``expired_at`` →
+        ``[valid → <to>; expired <tx-date>]`` (#8067). This is NOT new
+        vocabulary: it is the window a PRESENT-but-unorderable start already
+        renders (``[valid → 2026-06-12]``, #9730), because an ABSENT start and
+        an unnameable one are the same reader-facing fact — no start to state.
+        Nothing is fabricated: no start clause, and in particular no ``since``,
+        is asserted. Before #8067 the whole window block was gated on a STORED
+        start, so this shape rendered the supersession marker and NO window at
+        all — the reader was told the claim was superseded but not WHEN it
+        stopped being true, though the graph records the instant.
       - an ENDED-but-un-datable window (``end_state == 'unknown'``) →
         ``[valid since <from>; end unknown]`` (with ``expired_at`` →
         ``…; expired <tx-date>; end unknown``). #2350: the marker is
@@ -1370,14 +1382,39 @@ def _validity_marker(h: dict) -> str:
     # expiry half has to be read from the bound itself.
     end_unreadable = (_bound_present(raw_vt) and not vt) or (
         not vt and _bound_present(raw_ex) and not ex)
-    # #9741 review P2: the arm is gated on whether a start was STORED, not on
-    # whether it produced display text. Gating on the display string made an
-    # unreadable start indistinguishable from an absent one, so it discarded a
-    # READABLE end beside it (``{valid_from: nan, valid_to: "2025-01-01"}``
-    # rendered NOTHING while ``valid_from: "TBD"`` on the same hit rendered
-    # ``[valid → 2025-01-01]``). Both name no instant, so both render the
-    # no-start forms below — one stored fact, one answer.
-    if _bound_present(raw_vf):
+    # #8067: the gate opens on a STORED START **or an end the reader is owed an
+    # answer for**. Gating on the start alone was the defect: ``invalidate_point``
+    # stamps ONLY the end (``validTo`` + ``expiredAt``, and deliberately no
+    # ``validFrom`` — the invalidated claim's start is its create-time fact, so a
+    # ``now`` start would be a fabricated instant), which is precisely the shape
+    # a start-only gate drops. The single most common terminal transition
+    # therefore rendered the supersession marker and no window, while the graph
+    # held the instant it ended.
+    #
+    # An end is OWED when the marker can state one (``vt``), when a stored end is
+    # UNREADABLE and so owes the ``end unknown`` reading rather than silence, or
+    # when the validity layer already resolved the end as un-datable
+    # (``END_UNKNOWN`` — the #9202 vocabulary, which a start-less
+    # ``valid_to_precision='unknown'`` close takes; without it that close would
+    # stay silent while a dated one speaks, an asymmetry with no reader meaning).
+    # ⚠️ Deliberately NOT widened to the #9741 residual: a READABLE
+    # ``expired_at`` arriving with no statable ``valid_to`` stays out, and the
+    # pin in ``tests/test_2350_validity_precision.py`` keeps it out — the gate
+    # widens to what the reader is owed an answer for, never to every end column.
+    #
+    # #9741 review P2: the START half of the gate is ``_bound_present`` (was a
+    # start STORED?), not the display string (did it produce text?). Gating on
+    # the display string made an unreadable start indistinguishable from an
+    # absent one, so it discarded a READABLE end beside it
+    # (``{valid_from: nan, valid_to: "2025-01-01"}`` rendered NOTHING while
+    # ``valid_from: "TBD"`` on the same hit rendered ``[valid → 2025-01-01]``).
+    # Both name no instant, so both take the no-start forms below — one stored
+    # fact, one answer. #8067 inherits exactly that reading and adds the third
+    # spelling of the same fact (no start at all), so all three now state one
+    # window instead of two of them stating nothing.
+    end_state_unknown = _end_state_is_unknown(h)
+    if (_bound_present(raw_vf) or vt or end_unreadable
+            or end_state_unknown):
         # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
         # #9730: a START that names no instant renders NO start clause. The
         # gate is the read gate's OWN predicate (``_bounds_an_instant`` ⇒
@@ -1400,7 +1437,7 @@ def _validity_marker(h: dict) -> str:
         # paragraph and the note below it (#9741 review P3).
         vfd = vf if _bounds_an_instant(raw_vf) else ""
         since = f" since {vfd}" if vfd else ""
-        if _end_state_is_unknown(h) or end_unreadable:
+        if end_state_unknown or end_unreadable:
             # #2350/#9202/#9741: ENDED but un-datable. Both spellings of that
             # one state land here — the declared marker AND a stored end that
             # names no instant — so the stored text is never interpolated as a

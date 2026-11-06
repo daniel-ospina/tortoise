@@ -54,10 +54,15 @@ class _FakeGraph:
         self,
         nodes: int = 10,
         *,
+        name: str | None = "g",
         delete_removes: int | None = None,
         peer_takes: int = 0,
     ) -> None:
         self.nodes = nodes
+        #: The graph this handle says it is. `evict`'s gate 5 refuses a handle that
+        #: cannot name its graph, or names one other than the census's — so the fake
+        #: must be able to say both. `name="g"` matches `_state()`'s default.
+        self.name = name
         self.delete_removes = delete_removes   # None = remove everything offered
         #: Rows a PEER evicted inside the probe->delete window. They are gone from the
         #: graph but are NOT this pass's deletions — the case `survivors` cannot
@@ -616,3 +621,249 @@ def test_a_failed_post_delete_byte_read_is_none_not_the_pre_delete_value():
     )
     assert m["bytes_reclaimed"] is None
     assert m["byte_ceiling_still_exceeded"] is None
+
+
+# --------------------------------------------------------------------------------------
+# GATE 5 — the graph. The licence is scoped to the graph the CENSUS measured.
+# --------------------------------------------------------------------------------------
+def test_a_plan_for_one_graph_never_deletes_from_another():
+    """#10976 review P1: `Assessment.state.graph_name` was never read by the executor.
+
+    The census makes the graph binding REQUIRED (`load_parity_report(graph_name=…)`,
+    #11097) precisely because "a CLEAN census of graph A licensed evicting graph B".
+    The executor is the half that DELETES, so it must re-check the binding at the last
+    hop — otherwise a licence measured on one graph is applied to whatever handle the
+    caller passed.
+    """
+    graph = _FakeGraph(nodes=10, name="graph_b")
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False, policy=EvictionPolicy(max_nodes=2),
+    )
+    assert report.verdict == "REFUSED"
+    assert "graph_b" in report.reason and "'g'" in report.reason
+    assert graph.deletes == [], "swept a graph the census never measured"
+    assert graph.mutating == []
+
+
+def test_a_handle_that_cannot_name_its_graph_is_refused():
+    """A duck-typed stub is exactly the handle most likely to point at the wrong graph.
+
+    "I cannot tell which graph this is" is not "it matches" — the same doctrine
+    `_read_statement` applies to a handle with no read-only verb.
+    """
+    graph = _FakeGraph(nodes=10, name=None)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False, policy=EvictionPolicy(max_nodes=2),
+    )
+    assert report.verdict == "REFUSED"
+    assert "does not name its graph" in report.reason
+    assert graph.deletes == []
+
+
+def test_an_assessment_with_no_graph_binding_is_refused():
+    """`CacheState.graph_name` is a required field, but an empty one binds nothing."""
+    def _unbound():
+        a = _assessment()
+        a.state = _state(graph_name="")
+        return a
+
+    graph = _FakeGraph(nodes=10)
+    report = evict(
+        _unbound(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: _candidates(10)[:limit],
+        record_probe=_record, dry_run=False, policy=EvictionPolicy(max_nodes=2),
+    )
+    assert report.verdict == "REFUSED"
+    assert "did not bind a graph name" in report.reason
+    assert graph.deletes == []
+
+
+# --------------------------------------------------------------------------------------
+# the bound cannot be smuggled past `EvictionPolicy.__post_init__`
+# --------------------------------------------------------------------------------------
+def test_a_foreign_policy_object_cannot_lower_the_bound_to_zero():
+    """`policy or EvictionPolicy.resolve()` accepted ANY object (review P2).
+
+    `EvictionPolicy.__post_init__` floors `max_nodes` at 1 *because* a bound of zero
+    empties the cache one batch at a time. An object that merely LOOKS like a policy
+    skips that validation entirely, so the only defence is an `isinstance` check.
+    """
+    from types import SimpleNamespace
+
+    graph = _FakeGraph(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False,
+        policy=SimpleNamespace(max_nodes=0, batch_size=100, max_passes=10),
+    )
+    assert report.verdict == "REFUSED", "a bound of zero was honoured"
+    assert "EvictionPolicy" in report.reason
+    assert graph.deletes == [], "a fabricated bound emptied the graph"
+
+
+# --------------------------------------------------------------------------------------
+# a duplicated licence entry TIGHTENS
+# --------------------------------------------------------------------------------------
+def test_a_duplicated_licence_entry_takes_the_smaller_proven_count():
+    """Last-wins let a second entry WIDEN a licence the first had already bounded."""
+    graph = _FakeGraph(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(evictable=[
+            {"population": POPULATION, "nodes": 2},
+            {"population": POPULATION, "nodes": 10},
+        ]),
+        _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=1, batch_size=100, max_passes=5),
+    )
+    assert len(report.deleted) == 2, (
+        f"evicted {len(report.deleted)} on a licence whose smaller proof was 2"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# a FAILED delete statement still returns the record of what may have gone
+# --------------------------------------------------------------------------------------
+def test_a_delete_statement_that_fails_still_returns_a_report():
+    """The statement can execute server-side and then fail in transport.
+
+    An exception escaping `evict` there loses the ONLY record of what left the cache —
+    on the one destructive path in the module. It must become a REFUSED report that
+    says the deletion is unverified, exactly like a failed re-measure.
+    """
+    class _FailsOnDelete(_FakeGraph):
+        def query(self, statement, params=None):
+            if "DETACH DELETE" in statement:
+                self.statements.append(statement)
+                # The nodes ARE gone server-side; the client never hears the count.
+                self.nodes = max(0, self.nodes - len((params or {}).get("rows") or []))
+                raise RuntimeError("transport dropped mid-statement")
+            return super().query(statement, params=params)
+
+    graph = _FailsOnDelete(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=6, batch_size=4, max_passes=1),
+    )
+    assert report.verdict == "REFUSED"
+    assert "UNVERIFIED" in report.reason
+    assert report.delete_unverified is True
+    # Nothing is claimed as removed: the count is unknowable.
+    assert report.deleted == ()
+    assert report.metric()["nodes_evicted"] == 0
+
+
+# --------------------------------------------------------------------------------------
+# an EXECUTED pass says what it planned
+# --------------------------------------------------------------------------------------
+def test_an_executed_pass_reports_what_it_planned():
+    """`planned` was populated on the dry-run arm only, so an EVICTED report carried
+    `nodes_planned: 0` beside `nodes_evicted: N` — a state a pass cannot be in, on the
+    metric a monitor reads."""
+    graph = _FakeGraph(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=6, batch_size=4, max_passes=1),
+    )
+    assert report.verdict == "EVICTED"
+    m = report.metric()
+    assert m["nodes_planned"] == len(report.deleted) == 4
+    assert m["nodes_planned"] > 0, "an executed pass planned nothing and deleted four"
+
+
+# --------------------------------------------------------------------------------------
+# a batch held entirely by LEASES is not a population shortfall
+# --------------------------------------------------------------------------------------
+def test_an_all_leased_batch_names_the_lease_not_the_population():
+    """Telling the reader "the population did not hold enough evictable nodes" sends it
+    after a wider proven population when the answer is "a reader is holding these"."""
+    from tortoise.cache_evictor import ReadLeases
+
+    leases = ReadLeases()
+    for node_id in range(10):
+        leases.acquire(node_id)
+    graph = _FakeGraph(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, leases=leases, dry_run=False,
+        # 5 passes so the window WIDENS to the whole graph and the pass converges on
+        # "every node is leased" rather than stopping on the pass budget first.
+        policy=EvictionPolicy(max_nodes=6, batch_size=4, max_passes=5),
+    )
+    assert report.verdict == "PARTIAL"
+    assert len(report.skipped_leased) == 10
+    assert "read lease" in report.reason, report.reason
+    assert "did not hold enough evictable nodes" not in report.reason
+    assert graph.deletes == []
+
+
+def test_a_leased_node_is_excluded_from_a_DRY_RUN_plan():
+    """The plan-time lease check is a separate guarantee from the pre-delete re-check,
+    and `dry_run` is the DEFAULT mode — where only the plan-time check can speak."""
+    from tortoise.cache_evictor import ReadLeases
+
+    leases = ReadLeases()
+    leases.acquire(0)
+    graph = _FakeGraph(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_record, leases=leases, dry_run=True,
+        policy=EvictionPolicy(max_nodes=6, batch_size=100, max_passes=1),
+    )
+    assert report.verdict == "DRY_RUN"
+    planned_ids = {c.node_id for c in report.planned}
+    assert 0 not in planned_ids, "a leased node was planned for eviction"
+    assert [c.node_id for c in report.skipped_leased] == [0]
+    assert graph.mutating == []
+
+
+def test_a_lease_taken_during_the_probe_stops_the_pass_as_leased():
+    """The SECOND place a lease can stop a pass, and the only one that needs the re-check.
+
+    A batch that plans fine and is then held ENTIRELY by a lease acquired between the plan
+    and the statement hits `if not final` — a different arm from the plan-time exclusion,
+    which is what a dry run exercises. Asking the probe to take the lease is the hermetic
+    way to reproduce that window: every candidate is servable when asked, and held by the
+    time the statement is built.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    leases = ReadLeases()
+
+    def _probe_that_takes_the_lease(candidate: Candidate) -> bool:
+        leases.acquire(candidate.node_id)
+        return True
+
+    graph = _FakeGraph(nodes=10)
+    offered = _candidates(10)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: offered[:limit],
+        record_probe=_probe_that_takes_the_lease, leases=leases, dry_run=False,
+        policy=EvictionPolicy(max_nodes=6, batch_size=4, max_passes=1),
+    )
+    assert report.verdict == "PARTIAL"
+    assert graph.deletes == [], "deleted a batch a live read was holding"
+    assert len(report.skipped_leased) == 4
+    assert "read lease" in report.reason, report.reason
+    assert "did not hold enough evictable nodes" not in report.reason

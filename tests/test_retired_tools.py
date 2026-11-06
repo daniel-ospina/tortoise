@@ -125,7 +125,10 @@ class TestWarning:
         assert out.content[-1].text == ms._retired_warning(spec)["message"]
         assert out.content[0].text == base.content[0].text
         assert "tortoise_list_tags" in out.content[-1].text
-        assert "tortoise_overview" in out.content[-1].text
+        # The replacement this pointer names is the CONTAINER, not the retired name it used
+        # to name: `tortoise_overview` retired into `tortoise_graph_overview` in the same
+        # #4282 batch, and a warning that pointed at a retired name would dead-end.
+        assert "tortoise_graph_overview" in out.content[-1].text
         assert out.meta["tortoise"]["retired"]["use_instead"] == spec.retired_use_instead
         assert out.structured_content == {"ok": True}
 

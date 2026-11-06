@@ -21,14 +21,20 @@ is ONE Redis key**. Measured on the lane container (`fdb-lane-9361951d11`,
     evicted_keys: 2
     KEYS: ['pressure0']              # the graph key is GONE from the keyspace
     MATCH (n) RETURN count(n) -> 0   # 20,000 -> 0, silently, no error raised
-    GRAPH.LIST -> ['evict_probe']    # STILL NAMES THE GRAPH
+    GRAPH.LIST -> ['evict_probe']    # on THAT build, STILL NAMED THE GRAPH
 
-So the eviction unit is the whole graph, and the loss is silent twice over: no
-exception, and `GRAPH.LIST` still reports the graph as present while it holds zero
-nodes. Redis-level TTL is the same unit — the only key an operator could expire is
-the graph itself (`ttl=-1` on every key measured, including the per-graph
-`telemetry{}` stream) — and FalkorDB's own Enterprise offload confirms the
-granularity: *"serialize a graph to disk and evict it from memory, leaving a
+So the eviction unit is the whole graph, and the loss is silent: no exception, and no
+count that survives it. ⚠️ ``GRAPH.LIST`` is NOT a reliable detector of it — the last
+line above is what that build reported, while an independent re-measurement on
+``falkordb-server:v4.20.6`` after the same class of eviction saw ``GRAPH.LIST -> []``.
+Which of the two you get is a version detail, so nothing here may key a verdict on it
+(the census does not: ``tools/cache_eviction_census.py`` lists first only to keep a
+typo'd graph name from being CREATED, and an evicted-but-listed graph is still refused
+by the read itself — ``GRAPH.RO_QUERY`` answers ``Invalid graph operation on empty
+key``, which is a :class:`CacheReadError`). Redis-level TTL is the same unit — the only
+key an operator could expire is the graph itself (`ttl=-1` on every key measured,
+including the per-graph `telemetry{}` stream) — and FalkorDB's own Enterprise offload
+confirms the granularity: *"serialize a graph to disk and evict it from memory, leaving a
 lightweight stub"*, where *"removing a stub in any way — `DEL`, `UNLINK`, TTL
 expiration, or `FLUSHALL` — deletes the matching dump file"*
 (`docs.falkordb.com/enterprise/operations/graph-offloading`). Node-granular
@@ -61,8 +67,10 @@ invents a verdict for a class no instrument covers. A class with no instrument i
 `cannot-answer`, which is a refusal — never a silent skip and never an assumed pass.
 
 READ-ONLY, AND STRUCTURALLY SO. Nothing here writes, deletes or drops anything: the
-only statements it issues are counts and `INFO`/`CONFIG GET`/`TTL` reads, and every
-one of them goes through the graph's **read-only verb** — `ro_query`, i.e.
+only statements it issues are counts, and the only other commands are `INFO memory`,
+`EXISTS`/`TTL` on the graph's own key, and `GRAPH.MEMORY USAGE` reads (no `KEYS`, no
+`CONFIG GET`, no `CONFIG SET`) — and every count goes through the graph's
+**read-only verb** — `ro_query`, i.e.
 `GRAPH.RO_QUERY` — never `graph.query`. The `DELETE`-bearing arm does not exist to
 be called by mistake, and the tests assert that no refused assessment emitted a
 mutating statement.
@@ -96,12 +104,17 @@ __all__ = [
     "PARITY_INSTRUMENTS",
     "TRUTH_LABELS",
     "Assessment",
+    "CacheReadError",
     "CacheState",
     "ClassReading",
     "ParityReport",
     "assess",
+    "classify",
     "config_labels",
+    "load_parity_report",
+    "measure_state",
     "node_total",
+    "resident_counts",
 ]
 
 #: Where a declared ceiling is read from. ⛔ ABSENT means "no ceiling declared", and
@@ -187,17 +200,21 @@ class ParityReport:
     ``instrument`` is the tool's path; ``verdict`` is that tool's own word, kept
     verbatim so this module never has to agree with a paraphrase of it. The population
     pair is read from the instrument's REAL report shape (see
-    :func:`load_parity_report`), and ``graph_name`` is the graph the operator asserts
-    it was run against.
+    :func:`load_parity_report`), and ``graph_name`` is the graph the report says it
+    measured.
 
-    ⚠️ ``graph_name`` is an OPERATOR ASSERTION, not a proof: `turn_parity_census.py`
-    does not emit a graph identity, so nothing here can verify it. It is required
-    anyway, because the alternative — no binding at all — lets a CLEAN census of
-    graph A license evicting graph B, and a named assertion is at least reviewable.
-    Enforced in two places so neither surface can produce one: `load_parity_report`
-    takes ``graph_name`` as a REQUIRED argument, and :func:`assess` demotes an unbound
-    report exactly like a mismatched one. Making the instrument emit the identity is
-    the follow-up that would make it a proof; this module never claims more than it has.
+    ``graph_name`` is CHECKED, not asserted: the report must carry its own ``graph``
+    (``tools/turn_parity_census.py::census`` emits it), :func:`load_parity_report`
+    refuses a report that carries none, and a name that disagrees with the graph being
+    measured is refused too. ⚠️ What that buys is a real comparison, not a proof: the
+    reader still trusts the instrument to name the graph it actually opened, the reader
+    cannot correlate a name with an INSTANCE (two hosts can both call a graph
+    ``tortoise``), and a census of the SAME graph measured EARLIER passes this check
+    untouched — time is not part of the identity (the only staleness guard downstream
+    is :func:`assess`'s over-count check). Stated here rather than overclaimed: an
+    earlier version of this docstring called the field "an OPERATOR ASSERTION" and the
+    loader filled in a missing name with the caller's own — which made the check unable
+    to fail at all (review P1 on #11004).
     """
 
     instrument: str
@@ -667,10 +684,22 @@ def assess(
     instrument that did not run, was not CLEAN, or covered part of the population
     leaves the class ``cannot-answer``.
 
-    The verdict is computed from the WRONG direction on purpose: **one unproven
-    class refuses the whole sweep.** A partial sweep would be a pass that answered
-    the question for some nodes and swept the rest on the strength of it, which is
-    exactly what #10976 forbids.
+    The verdict is computed from the WRONG direction on purpose: **an unproven class
+    is never evicted.** ``PLAN`` licenses ONLY the populations named in
+    ``plan["evictable"]`` — each one proved by its own instrument's report. Every other
+    class is listed in ``problems`` and ``plan["not_evictable"]`` and may not be
+    touched, so a partial plan is safe **by construction**: evicting exactly the
+    proven populations still satisfies #10976's "0 evictions of a node the record
+    cannot serve".
+
+    ⛔ DO NOT READ ``PLAN`` AS "EVERYTHING WAS PROVEN". It is not a statement about the
+    classes it omits — it is a licence scoped to the list it prints. An earlier
+    revision of this docstring said "one unproven class refuses the whole sweep",
+    which described a rule the function does not implement: a caller who believed it
+    would write ``if census.verdict == "PLAN": sweep_every_label()`` and delete every
+    ``:Point``, ``Source`` and ``GraphEvent`` in the graph — the data loss #10976
+    exists to prevent, reached by trusting prose over the artefact. The artefact is
+    ``plan["evictable"]``, and it is the only thing a licence covers.
     """
     state = measure_state(client, graph_name, ceiling_bytes=ceiling_bytes)
     counts = resident_counts(graph)
@@ -839,9 +868,10 @@ def assess(
             ),
             "server_side_policy": (
                 "REFUSED, measured: a FalkorDB graph is ONE Redis key, so an eviction "
-                "policy takes the WHOLE graph (20,000 nodes -> 0, silently, with "
-                "GRAPH.LIST still naming it). `tools/test_lane.py` pins `noeviction` "
-                "for exactly that reason."
+                "policy takes the WHOLE graph (20,000 nodes -> 0, silently; on the "
+                "measured build `GRAPH.LIST` still named it, on v4.20.6 it did not — "
+                "either way the count is what refuses). `tools/test_lane.py` pins "
+                "`noeviction` for exactly that reason."
             ),
         }
 
@@ -856,6 +886,7 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     report `turn_parity_census.py` emits (`census()`'s return dict) carries:
 
         instrument                        "tools/turn_parity_census.py" — REQUIRED
+        graph                             the graph the census MEASURED — REQUIRED
         population.episodic_graph_nodes   the DELETE SET — every node the read returned
         dry_run.would_delete_turn_nodes   the nodes it proved AND proposed to purge
         dry_run.held_back_turn_nodes      the turn nodes it could NOT prove
@@ -871,12 +902,12 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     the reason string, that the report was unreadable, so a real integration defect
     never reads as "the record cannot serve".
 
-    *graph_name* is the graph this census is measuring, and it is **required**: a
-    report carrying its own ``graph`` field must agree with it, and a report carrying
-    none is attributed to the graph the CALLER asked to measure (the instrument emits
-    no graph identity of its own). Neither is a proof — the binding is an operator
-    ASSERTION — but an UNBOUND report is no assertion at all, so it is refused here and
-    demoted by :func:`assess` rather than being eligible for any graph.
+    *graph_name* is the graph this census is measuring, and it is **required**. The
+    report's OWN ``graph`` field (``tools/turn_parity_census.py::census`` emits it) must
+    agree with it, and a report carrying **no** graph identity is REFUSED — not stamped
+    with the caller's name, which is what made this check unable to fail (review P1 on
+    #11004). An UNBOUND :class:`ParityReport` is still refused here and demoted by
+    :func:`assess`, so a library caller cannot mint one either way.
     """
     import json
 
@@ -939,8 +970,34 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     measured = dry_run.get("would_delete_turn_nodes")
     total = population.get("episodic_graph_nodes")
 
-    reported_graph = payload.get("graph") or payload.get("graph_name")
-    if graph_name is not None and reported_graph is not None and reported_graph != graph_name:
+    # ⛔ THE FIELD IS `graph` AND ONLY `graph`. There is no `graph_name` fallback: the
+    # alias was a pre-fix shim nothing emits (`tools/turn_parity_census.py::census`
+    # emits `graph`), and keeping it re-opened the exact hole this check closes —
+    # `{"graph": null, "graph_name": "tortoise"}` was resolved to `"tortoise"` by the
+    # `or` before the refusal below could ever see it, so an artifact with NO identity
+    # was accepted on an operator-controlled field (review P2 on #11097).
+    reported_graph = payload.get("graph")
+    # ⛔ A REPORT THAT NAMES NO GRAPH IS REFUSED, not attributed to the caller's own.
+    # Filling the field in with ``graph_name`` made the binding VACUOUS: the loader
+    # authored the assertion it was supposed to check, so `mismatched` could never fire
+    # and `unbound` could never be reached from this door — the only path that produces
+    # a real report. A CLEAN census taken on another instance then loaded as a licence
+    # to sweep THIS graph, with the operator's typed `--graph` and the repeated
+    # `--parity-graph` as the whole of the evidence (review P1 on #11004).
+    # `tools/turn_parity_census.py::census` emits the identity, so the honest path is
+    # open; a report without one is an artifact that cannot say what it measured.
+    # ⚠️ Neither this check nor any other on this path closes STALENESS: a census of
+    # the SAME graph measured earlier carries the same name and passes. The only
+    # downstream guard is `assess()`'s over-count check (a report claiming MORE nodes
+    # than the graph holds is refused); a report claiming fewer is accepted.
+    if reported_graph is None or not str(reported_graph).strip():
+        raise CacheReadError(
+            f"parity report {path} names no graph — the field is REQUIRED "
+            f"(`graph`, emitted by `tools/turn_parity_census.py::census`): an "
+            f"unattributed report cannot be told apart from a CLEAN census of "
+            f"another graph, so it licenses nothing"
+        )
+    if reported_graph != graph_name:
         raise CacheReadError(
             f"parity report {path} measured graph {reported_graph!r}, but this census "
             f"is measuring {graph_name!r} — a CLEAN census of one graph does not "
@@ -952,5 +1009,5 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
         verdict=str(payload.get("verdict") or ""),
         measured_nodes=_int_or_none(measured),
         total_nodes=_int_or_none(total),
-        graph_name=str(reported_graph) if reported_graph is not None else graph_name,
+        graph_name=str(reported_graph),
     )

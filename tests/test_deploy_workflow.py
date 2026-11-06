@@ -2340,6 +2340,17 @@ _RECORD_ARMING_HEADING = "### Arming the Postgres record"
 _NUMERALS = {"TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6}
 
 
+def _record_keys_missing_a_row(heads: list[str], names: set[str]) -> set[str]:
+    """The `names` that NO row's HEAD CELL in the arming table documents.
+
+    Split out of the pin so its non-vacuity can be MEASURED against the real head
+    cells instead of asserted: the same predicate applied to a coherently renamed
+    payload must report every renamed key missing, which is the state the pin
+    exists to catch (#9548 review P3).
+    """
+    return {name for name in names if not any(f"`{name}`" in head for head in heads)}
+
+
 def _record_arming_section() -> str:
     """The runbook's `Arming the Postgres record` section, verbatim.
 
@@ -2452,20 +2463,25 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the bar states no presence requirement — name the reading that must "
         "EXIST after a capture before the reason breakdown means anything"
     )
-    # The presence LIST must be the five qualifying readings, in one clause — not
+    # The presence LIST must be the six qualifying readings, in one clause — not
     # merely a lead-in that some other, always-true reading could be appended to.
+    # (`record_writes_applied` is the POSITIVE witness added by #9548: without it
+    # required here, deleting that clause from the runbook left this pin green —
+    # the one reading the bar exists to add would have been the one reading the
+    # pin did not demand.)
     # ⛔ Read the FLAT copy, like its siblings above: this pin used to read `section`,
     # and its pattern spells the sentence out with literal single spaces, so a
     # wording-identical refill at widths 76/78/82 broke that clause across a line
     # boundary and reded it — measured here after the F3 fix, i.e. the file still
     # reds a reflow F3 exists to make harmless (#10083 review P2). Normalizing is
-    # NOT a relaxation: the five readings are still required verbatim below.
+    # NOT a relaxation: the six readings are still required verbatim below.
     presence = re.search(
         r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:(.*?)\.\s",
         flat,
     )
     assert presence, "the presence requirement does not enumerate its readings"
-    for reading in ("record_write_failures", "record_non_journal_skips",
+    for reading in ("record_writes_applied", "record_write_failures",
+                    "record_non_journal_skips",
                     "record_position_unproven", "journal_event", "point"):
         assert reading in presence.group(1), (
             f"the presence list omits {reading!r} — an armed deployment whose only "
@@ -2490,10 +2506,35 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "never reaches Postgres"
     )
     # The BEFORE-and-after baseline: "growth" has no referent without it.
-    assert re.search(r"read both counters BEFORE the\s+capture and again after", flat), (
+    # ⛔ The noun is pinned as *every record counter*, not "both counters": the
+    # presence list below requires FOUR counters (plus two row reads), so a
+    # "both" baseline told the operator to take two of them — and the positive
+    # witness this bar exists to add (#9548's `record_writes_applied`) was one it
+    # omitted, leaving the delta it demands uncomputable from the reading it
+    # prescribed (#9548 review P2).
+    # ⛔ The clause is pinned from its lead-in through the RULE it states — `… the
+    # \*difference\* between the two reads, never an absolute count` — and that end
+    # point is deliberate: a pattern stopping at "between the two reads" was
+    # measured GREEN on the runbook dropping the very rule this assertion's message
+    # defends ("an absolute count left from earlier in the process's life then reads
+    # as this capture's growth"). Two earlier forms also failed, both measured: a
+    # bare fragment matched inside a sentence that FORBADE the baseline ("So ⛔ Do
+    # not **read every record counter …**" stayed green), and a negation-vocabulary
+    # guard bolted onto the fragment false-blocked accurate wording ("So never skip
+    # the baseline: **read every…**" red). Pinning the clause needs no vocabulary:
+    # any negation inserted before the imperative breaks the match, and a rewording
+    # reds — the trade the sibling clauses in this test make too. `flat` still
+    # tolerates a reflow.
+    assert re.search(
+        r"So \*\*read every record counter BEFORE\s+the capture and again after\*\*:"
+        r"\s+presence and growth are the \*difference\* between the two reads,"
+        r" never an absolute count",
+        flat,
+    ), (
         "the bar says 'growth' but never tells the operator to take a reading "
         "BEFORE the capture — an absolute count left from earlier in the "
-        "process's life then reads as this capture's growth"
+        "process's life then reads as this capture's growth — or it names a "
+        "subset of the counters the presence list then requires"
     )
     assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", flat), (
         "the bar has no arm for an empty reading — an operator landing there is "
@@ -4679,3 +4720,99 @@ def test_the_health_gate_header_states_the_budgets_its_knobs_derive() -> None:
             "the gate's BEHAVIOUR header still says 3 min for a phase whose "
             "derived window is not 180 s"
         )
+
+
+def test_the_runbook_field_row_documents_the_positive_pair():
+    """#9548: the operator's FIELD ROWS must name the fields `metrics()` publishes.
+
+    ⛔ Registered on `tier1` — that is the whole point. `docs/infra-runbook.md` is under
+    `docs/`, which is in `NON_PYTHON_PREFIXES` and matches no `SOURCE_PATTERNS` entry, so
+    a runbook-only diff selects NO surface and runs `tier1` only (#4309). The assertion
+    that first tried to guard this was a whole-file `name in runbook` membership test in
+    `tests/test_9548_record_arming_health.py` — and it failed on BOTH counts, each measured:
+    that suite is not selected on a docs-only diff, and the membership form stays green
+    under the rename anyway (the row's own explanation still names both fields further
+    along it). So this pin names the row's HEAD CELL, in the suite the diff actually runs.
+
+    Scoped to the section's TABLE ROWS — and to each row's **HEAD CELL**, not its prose — so it
+    pins the operator's row without pinning its punctuation: a head cell that annotates the types
+    (`record_writes_applied` (int) / …) or a pair split across two rows is a better doc and still
+    passes, while a rename (or a deletion) reds. ⚠️ Head-cell scope is not fussiness: a same-row
+    substring test was measured GREEN on a rename of the pair in the head cell, because the row's
+    own explanation still names both fields further along it.
+
+    ⛔ **The set of names this pin DEMANDS is DERIVED FROM `metrics()`** — never a duplicate of it.
+    That is the finding this pin was rewritten for (#9548 review P3): the earlier form iterated two
+    LITERALS, so a *coherent* rename — payload keys, docstring, `test_9548`'s literals and this
+    file's literals all renamed together — left `docs/infra-runbook.md` documenting a field the
+    payload no longer published with **every test green**, while this docstring claimed it pinned
+    "the two fields the payload publishes". Reading the demanded set from `metrics()` is what reds
+    the runbook-stale half, and it is also the reason this pin is in `tier1` rather than beside the
+    docstring pin.
+
+    ⚠️ **What is still spelled out by hand, and why that is not a contradiction** (#11128 review P3):
+    the positive pair is hand-spelled at **four sites below, in three roles** —
+    (1) the `<= record_keys` **precondition**; (2) the non-vacuity **mutation**, both its `.replace(...)`
+    SEARCH strings and the `== {…}` EXPECTATION naming what the mutation must leave reported missing;
+    and (3) the **survivor** assertion that the unmutated cells satisfy the pair. Role (1) is the only
+    duplicate-in-the-harmful-sense, and it is deliberate: naming `record_writes_applied` /
+    `record_last_write_at` IS the #9548 claim (this pair exists, is published, and must be documented),
+    so the pin has to fail if either disappears rather than quietly demanding one fewer name.
+    Roles (2) and (3) are not second sources of truth: (2)'s search strings say which cells to mutate
+    and its expectation says which names must then be missing (they have to be the payload's names —
+    that is what makes the mutation mean "the runbook kept the OLD row"), and (3) asserts those same
+    names are satisfied before the mutation. So a coherent rename does require editing these
+    spellings too — and the pin still reds when the runbook keeps the old row; what it never does is
+    reduce the set it demands on its own.
+    """
+    from tortoise import monitoring  # local: this file keeps heavy imports inside tests
+
+    section = _record_arming_section()
+    rows = [line for line in section.splitlines() if line.lstrip().startswith("|")]
+    assert rows, "the arming section has no table rows at all — the field docs vanished"
+    heads = [row.split("|")[1] for row in rows if len(row.split("|")) > 1]
+    published = monitoring.metrics()
+    record_keys = {name for name in published if name.startswith("record_")}
+    assert {"record_writes_applied", "record_last_write_at"} <= record_keys, (
+        "`metrics()` no longer publishes the positive pair #9548 exists to add, so "
+        f"an empty failure object cannot be read as a write — record keys: {sorted(record_keys)}"
+    )
+    missing = _record_keys_missing_a_row(heads, record_keys)
+    assert not missing, (
+        f"the arming section's field table documents no row for {sorted(missing)} — "
+        "the operator has no reading to take for a counter the payload publishes, "
+        "however correct the `/health` payload is; a renamed key leaves this row "
+        "naming a field that no longer exists"
+    )
+    # Non-vacuity MEASURED, and it must be a measurement that can FAIL (#11128 review
+    # P3): the earlier form asserted `_record_keys_missing_a_row(heads, {f"{n}_renamed"})
+    # == {f"{n}_renamed"}` — which holds for ANY `heads` that mention no `*_renamed` cell,
+    # including `heads=[]`, so it could not red on the mutation its message described.
+    # This mutates the REAL head cells instead: rename the pair where the section
+    # documents it, and require the predicate to report exactly those two names
+    # missing and to stop reporting them once the mutation is reverted. Vacuous
+    # passes are impossible by construction — the mutation is asserted to have
+    # changed a cell, and the survivor check proves the cells are LIVE input, not an
+    # empty list the predicate would agree with.
+    mutated = [
+        head.replace("`record_writes_applied`", "`record_applied_writes`").replace(
+            "`record_last_write_at`", "`record_last_write_instant`"
+        )
+        for head in heads
+    ]
+    assert mutated != heads, (
+        "the rename mutation changed no head cell — the arming section no longer "
+        "documents either name in a head cell, so this measurement has no subject"
+    )
+    assert _record_keys_missing_a_row(mutated, record_keys) == {
+        "record_writes_applied",
+        "record_last_write_at",
+    }, (
+        "this pin would stay GREEN on a coherent rename of `metrics()`'s record "
+        "keys — the runbook would keep documenting the retired names while the "
+        "suite passed, the paper-only claim #9548 exists to end"
+    )
+    # …and the predicate reads the cells given to it (so it is not a constant):
+    # with the REAL head cells, neither name is missing.
+    assert not _record_keys_missing_a_row(heads, {"record_writes_applied",
+                                                "record_last_write_at"})

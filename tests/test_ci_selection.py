@@ -229,9 +229,26 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured: 131 files for the STORAGE diff (`onboarding`), 60 for the
-    EXTRACTOR diff (empty surfaces, the early return); the gate is in the
-    selected set in both, and dropping the `tier1` row removes it from both.
+    Measured at this head: 150 files for the STORAGE diff, 73 for the EXTRACTOR
+    diff (empty surfaces, the early return); the gate is in the selected set in
+    both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
+    measurements, not constants, and they move for DIFFERENT reasons:
+
+    * the **150** is `onboarding` ∪ `tier1` **minus 14** — the union is 164 at
+      this head (97 + 73 − 6 shared) and `select()` drops 3 `carve_out` and 11
+      `uri_requiring` files, so it is the union minus those, never the union;
+    * the **73** is `tier1`'s own size — the entire set an empty-surface diff
+      selects. It is NOT "the whole `full`-less fast pool", which is 1097 at
+      this head (1094 on `main` before this fold's three new test files), and it
+      moves for a third reason again — `len(fast_pool(manifest))`, re-derive it.
+      The `60` this sentence carried was that same `tier1` set **13 rows ago**
+      (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
+      and 73 here), i.e. the very "a past state quoted as a current one"
+      defect the line below warns about.
+
+    Re-derive both (`ci_selection.py` reports `len(test_files)`) rather than
+    trusting either — the assertions below are the pin, this
+    sentence is a note.
     """
     storage = _sel(["docs/architecture/STORAGE-ARCHITECTURE.md"])
     assert storage["surfaces"] == ["onboarding"], storage["surfaces"]
@@ -241,6 +258,51 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
     assert extractor["surfaces"] == [], extractor["surfaces"]
     assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+    # #10980 review (P2): the §9.4/§12.1b source-vector pin lives in the
+    # narrative-home module, and it guards the SAME document — so a STORAGE-only
+    # diff must reach it. Before that row it reached the module in NO arm
+    # (`core`/`api` both need a Python path; this diff matches `onboarding`),
+    # i.e. the pin would have been green on every real question asked of it.
+    # Asserted here rather than trusted to the row's comment: a row that is
+    # present but no longer SELECTS is the failure #9778 measured.
+    assert "test_9555_narrative_carrier.py" in storage["test_files"], (
+        "a `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff no longer "
+        "selects `test_9555_narrative_carrier.py` — the §9.4/§12.1b "
+        "source-vector pin (and the §9.1 narrative-home pins beside it) would "
+        "be asleep on the only diff class that can re-scatter the claim "
+        "(#10980 review P2, the #4309 silent-drop class)"
+    )
+
+    # PR #11023 review (P1, MEASURED FALSE — pinned here so it is not
+    # re-derived): the claim was that the CHANGELOG half of the pin "cannot run
+    # on the only change class that breaks it", because the module is allegedly
+    # not in `tier1`. It IS — `tier1` membership is asserted below, and the
+    # reviewer read the range `config/ci-surfaces.yml:6387-:6717`, which is
+    # inside `surfaces:`, where no `tier1` key exists at all. (⚠️ A line number
+    # for the `tier1:` key was quoted here and went stale within two heads; it is
+    # a MEMBERSHIP assert now, not a locator — review at `10fc020353`, P3.)
+    # Selected now: `surfaces=[]` (the docs-only early return) with the module
+    # in `test_files`. The coverage is ALSO already pinned transitively: the
+    # STORAGE assertion directly above passes only through the SAME `tier1`
+    # row, since `onboarding` does not carry the module and `api`/`core` need a
+    # Python path — so removing that row reds this test rather than silently
+    # un-covering the CHANGELOG. Asserted explicitly below so the second file
+    # is a measurement of its own, not an inference from the first.
+    assert "test_9555_narrative_carrier.py" in _tier1(), (
+        "`test_9555_narrative_carrier.py` is no longer in `tier1` — the CHANGELOG "
+        "leg of the §9.4 pin would then be asleep on the only diff class that "
+        "can re-introduce the retracted sentence it pins. ⚠️ Without this row the "
+        "module is reached by NO arm for a docs-only diff at all")
+    changelog = _sel(["docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md"])
+    assert changelog["surfaces"] == [], changelog["surfaces"]
+    assert changelog["full"] is False
+    assert "test_9555_narrative_carrier.py" in changelog["test_files"], (
+        "a `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`-only diff no "
+        "longer selects `test_9555_narrative_carrier.py` — then the "
+        "`#10852`-landed CHANGELOG leg is asleep on exactly the diff class "
+        "that can re-introduce the retracted sentence it pins (#11023 review)"
+    )
 
 
 def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
@@ -430,6 +492,32 @@ def test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff():
     assert "test_fly_secret_drift.py" in r["test_files"], (
         "the #8614 runbook owner must stay in tier1 — #9548 adds a second "
         "runbook reader, it does not replace the first"
+    )
+
+
+def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():
+    """#11104 review (P1): the applier's own guard must run on the applier's docs.
+
+    `tests/test_supabase_deploy_applier_config.py` pins the operator remedy the
+    README prints (`supabase/README.md` — the manual-fallback `db push` /
+    `functions deploy` block) BECAUSE that text is copied by an operator during a
+    failed co-move. `supabase/README.md` matches no SOURCE_PATTERNS entry, so a
+    README-only diff filters to `changed == []` and takes the docs-only early
+    return — tier1 ONLY. Registered in `core` but not in `tier1`, the guard is
+    asleep on the one diff that can re-break it: dropping `--yes` from that block
+    (the exact pre-#10896 shape, which a v3 CLI refuses unattended, applying
+    nothing) would merge green and only red `main` post-merge (#4309 silent-drop
+    class; the #8614 / #9548 shape one document over). Dropping the tier1 entry
+    re-opens that hole.
+    """
+    r = _sel(["supabase/README.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_supabase_deploy_applier_config.py" in r["test_files"], (
+        "a supabase/README.md-only diff must select the guard that pins its "
+        "printed remedies (`test_supabase_deploy_applier_config.py`) — "
+        "otherwise a README edit dropping `--yes` merges green (#11104 review, "
+        "#4309 class)"
     )
 
 
@@ -2902,6 +2990,120 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_ci_cancel_guard_tool_change_selects_core_not_tier1():
+    """A change to the cancel guard must run the rules it pins (#10936 round-3 review).
+
+    `tests/test_ci_cancel_guard.py` is registered on the `core` surface and owns the
+    guard's fail-closed guarantees — a CURRENT-HEAD cancel is refused, a started job
+    blocks the act, an unreadable or ambiguous surface cancels nothing. That
+    registration is INERT for a tool-only diff: `tools/` is a flat
+    NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/ci_cancel_guard.py`, so `select()` returns NO surface, takes the docs-only
+    early return and falls back to the tier-1 smoke set, which does not contain the
+    file. The diff that DELETES the CURRENT-HEAD arm would then be the one diff that
+    never ran the case refusing it.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`).
+    """
+    r = _sel(["tools/ci_cancel_guard.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_ci_cancel_guard.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_gh_write_preflight_tool_change_selects_core_not_tier1():
+    """A change to the credential write preflight must run the cases pinning it (#11026).
+
+    `tests/test_gh_write_preflight.py` is registered on `core` and owns the write-proof's
+    guarantees: a read-only credential is REFUSED, the probe ref is created and confirmed and
+    deleted, cleanup is verified on the PUSH target, and no credential reaches argv or output. That
+    registration is INERT for a tool-only diff — `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    no SOURCE_PATTERNS row matches `tools/gh_write_preflight.py`, so `select()` returns NO surface,
+    takes the docs-only early return and falls back to the tier-1 smoke set, which does not contain
+    the file. The PR that weakens the proof would then be the one that never ran the cases pinning
+    it — the same silent-drop class as #10220's report, and worse here, because this tool exists
+    precisely to stop a silent pass (a 17-lane wave delivered nothing while every lane reported
+    "built, parked").
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`); the docs-only early return then yields `full: False` with no pin,
+    so the later asserts pass unexercised.
+
+    ⛔ This case does NOT pin the entry's SHAPE: it exercises the exact path, which matches a prefix
+    and an exact entry alike, so it stays green if the prefix is narrowed back to
+    `"tools/gh_write_preflight.py"`. That half is owned by the NEXT case
+    (`tests/test_ci_selection.py::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped`), which is the
+    falsifier for it — one case per property, because a single case reported as pinning both is how
+    the second property went unpinned in the first place.
+    """
+    r = _sel(["tools/gh_write_preflight.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_gh_write_preflight.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped():
+    """The carve-out entry must be a PREFIX, not the exact path (#11027).
+
+    `_selection_relevant` claims a changed path with `path.startswith(CORE_ALSO)` — this entry's
+    tuple, NOT `TOOL_CARVEOUTS` — and `CORE_ALSO` membership is what forces `core` into the
+    selection: the `matched.add("core")` in `select()`'s `CORE_ALSO` branch. Cited by symbol, not
+    by line number, because on this entry the line number has already drifted twice.
+
+    Which tuple holds a `tools/` path is what decides its fate, and the two carve-out tuples do
+    different jobs:
+
+      * `CORE_ALSO` KEEPS the path (`_selection_relevant`) **and CLAIMS it** — `core` is forced in,
+        so this tool yields `core` only, `full=False`.
+      * `TOOL_CARVEOUTS` only KEEPS the path (`_keep_changed`) and claims no surface, so a kept
+        path that no `SOURCE_PATTERNS` row matches stays unknown and fails closed to the FULL
+        matrix — `tools/work_claim.py` -> all eight surfaces, `full=True`.
+      * a KEPT path's surface is `SOURCE_PATTERNS`' job (`tools/longmem_eval/x.py` -> `eval`,
+        `full=False`).
+      * in NEITHER tuple is the path kept at all -> `surfaces=[]`, `full=False`, the tier-1
+        smoke set, which does not carry this suite.
+
+    Both of the first two are measured against paths that NO `SOURCE_PATTERNS` row matches, so the
+    tuple alone is what differs between them. Do not restate this as "the row decides" — that is
+    the mirror-image error and it sends a maintainer to the wrong lever.
+
+    Because the matcher is `startswith`, an entry naming `tools/gh_write_preflight.py` EXACTLY
+    claims only that spelling. One ordinary refactor then re-opens the silent drop the entry exists
+    to close — which, before this case existed, no test noticed:
+
+      * a split-out sibling (`tools/gh_write_preflight_urls.py`) — nothing claims it, so a diff to
+        the gate runs none of the gate's own arms. This is the realistic shape, because the tool's
+        URL parsing is already the most defect-dense part, and it is what this entry now covers.
+
+    ⛔ A rename (`tools/write_preflight.py`) is NOT covered, by the prefix or by the exact path:
+    neither claims a path that no longer carries the stem. It is named here only so the boundary is
+    explicit — this change buys the sibling shape, not rename survival, and a reader who assumes
+    both would be relying on a pin that does not exist. A rename-detection pin belongs with the
+    rename (in the diff that performs it), not here.
+
+    The test immediately above cannot catch this: it exercises the exact path, which matches a
+    prefix AND an exact entry, so it stays green under the regression. **This** case is the
+    falsifier that distinguishes them — reverting the entry to `"tools/gh_write_preflight.py"`
+    fails its FIRST assert and leaves that test green, which is the whole reason both exist.
+
+    Over-matching is the accepted cost, bounded here: `git ls-files 'tools/gh_write_preflight*'`
+    is one path today, so the prefix claims nothing that is not the tool.
+    """
+    for sibling in (
+        "tools/gh_write_preflight_urls.py",
+        "tools/gh_write_preflight_probe.py",
+    ):
+        r = _sel([sibling])
+        assert "core" in r["surfaces"], (sibling, r)
+        assert "test_gh_write_preflight.py" in r["test_files"], (sibling, r)
+
+    # The prefix is not a blanket: an unrelated tool under `tools/` stays unclaimed, so the
+    # entry's cost is bounded to the `gh_write_preflight*` family rather than all of `tools/`.
+    unrelated = _sel(["tools/other_tool.py"])
+    assert "test_gh_write_preflight.py" not in (unrelated["test_files"] or []), unrelated
+
+
 def test_worktree_report_tool_change_selects_core_not_tier1():
     """A change to the lane report must run the rules it pins (#10220).
 
@@ -2923,6 +3125,36 @@ def test_worktree_report_tool_change_selects_core_not_tier1():
     r = _sel(["tools/worktree_report.py"])
     assert "core" in r["surfaces"], r
     assert "test_worktree_report.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_gh_read_cache_tool_change_selects_core_not_tier1():
+    """A change to the read cache must run the invariants it pins (#11052 review P0).
+
+    `tests/test_gh_read_cache.py` is registered on the `core` surface and owns the tool's
+    whole load-bearing property — a declared-invariant read is served stale only when the
+    freshness is PROVEN, the mutable denylist refuses every call-spending route, the
+    identity covers host + account + argv, and a refresh failure fails closed. That
+    registration is INERT for a tool-only diff: `tools/` is a flat NON_PYTHON_PREFIXES
+    entry and no SOURCE_PATTERNS row matches `tools/gh_read_cache.py`, so `select()`
+    returns NO surface, takes the docs-only early return and falls back to the tier-1
+    smoke set, which does not contain the file. Weakening the refusal denylist (or
+    dropping the `--jq` projection, or dropping an identity field) would then be the one
+    PR that never ran the cases pinning it — and this tool is what every lane's declared
+    reads route through, so a wrong fresh answer is served fleet-wide.
+
+    Mutation check: removing the CORE_ALSO entry fails the first TWO asserts
+    (`"core" in r["surfaces"]` and `"test_gh_read_cache.py" in r["test_files"]`);
+    only the third (`r["full"] is False`) survives, unexercised. MEASURED both ways:
+    with the entry `surfaces=['core']`, `full=False`, file present; without it
+    `surfaces=[]`, `full=False`, 73 tier-1 files and the pin ABSENT. Stated as two
+    because the tier-1 fallback genuinely does not carry this file — the very premise
+    three lines above — so an earlier cut of this docstring that claimed only the
+    FIRST assert fails understated the pin and mis-described its own failure mode.
+    """
+    r = _sel(["tools/gh_read_cache.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_gh_read_cache.py" in r["test_files"], r
     assert r["full"] is False, r
 
 
@@ -4987,6 +5219,53 @@ def test_attest_census_tool_change_fails_closed_to_full():
         assert "core" in r["surfaces"], (sibling, r)
 
 
+# ⛔ REMOVED HERE: `test_gh_write_preflight_tool_change_fails_closed_to_full` (#10930/#10947).
+# #11026 landed `tools/gh_write_preflight.py` on `main` with a DIFFERENT implementation (a throwaway
+# ref push on the real remote, not a three-surface API probe), and registered the tool in
+# `CORE_ALSO` rather than `TOOL_CARVEOUTS`. The removed pin asserted `full is True` / `test_files ==
+# "ALL"`; the landed registration makes a tool-only diff select `core` with `full is False`, which
+# is exactly what `test_gh_write_preflight_tool_change_selects_core_not_tier1` above pins. The two
+# are mutually exclusive, so keeping both leaves one of them permanently red. Superseded, not lost:
+# `git show 15c6d179e4f2:tests/test_ci_selection.py` has the removed case. (Same supersession applies
+# to the `TOOL_CARVEOUTS` entry in `tools/ci_selection.py` and the duplicate `ci-surfaces.yml` row.)
+
+
+def test_ready_for_owner_tool_change_fails_closed_to_full():
+    # #10962/#10968: tools/ready_for_owner.py owns tests/test_ready_for_owner.py — the arms that pin
+    # the owner-facing merge-readiness verdict. This is the same silent-drop class as
+    # attest_census/ci_check_repair/gh_write_preflight above, but in the FAIL-OPEN direction on the
+    # one tool whose whole job is to tell the owner a PR is safe to merge from the UI.
+    #
+    # Measured on the fold at #10975 (pre-fix; 72 was `tier1`'s size THEN — 73 since #10980,
+    # so re-derive it rather than reading this as a current count):
+    #     echo tools/ready_for_owner.py | ci_selection.py --changed-files -
+    #       -> surfaces: []  full: False  tier-1 `test_files`,
+    #          with `test_ready_for_owner.py` ABSENT
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this tool, so
+    # the path was filtered out BEFORE the `if not matched: matched.add("core")` fallback and
+    # select() took the docs-only early return. A PR improving the merge gate would therefore have
+    # got a GREEN run in which essentially none of the gate's own tests ran. (Deliberately no
+    # count: it is the size of `test_ready_for_owner.py` and drifts with every test added.)
+    #
+    # It propagates into the tool as well: `ready_for_owner.py::_read_coverage` counts this shape as
+    # `core-smoke-only` and therefore COVERED, so the gate would certify its own untested edit as
+    # covered by CI. That is why this is a fail-closed entry and not merely a missing registration —
+    # registering `test_ready_for_owner.py` under `core` in ci-surfaces.yml covers edits of the TEST
+    # file, NOT of the tool.
+    #
+    # Mutation check: removing the TOOL_CARVEOUTS entry re-opens the docs-only early return, so the
+    # path is filtered out, `full` is False and `test_files` is the tier-1 list — every assert below
+    # fails.
+    r = _sel(["tools/ready_for_owner.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
+    # NOT asserted here: that a renamed/split sibling (tools/ready_for_owner_extra.py) is also
+    # carved out — a `.py` TOOL_CARVEOUTS entry is a STRING prefix and does not cover a sibling (see
+    # the same note on the gh_write_preflight pin above; `tools/ci_check_repair_extra.py` measures
+    # `full=False`). Asserting it here would assert an accident, not a property.
+
+
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
     # #3554: the declared :Session writer inventory SPANS surfaces —
     # tools/longmem_eval/ingest.py and ingest_v2.py select `eval`,
@@ -7037,6 +7316,207 @@ def test_duration_coverage_guard_boundary_and_realistic():
     assert duration_coverage_issues(load_manifest()) == []
 
 
+# #2148 (the batch fold's PR #10726) review P3: the map's own ENTRY RULE is that a
+# fast file added by a PR must carry a `durations:` row at all — "a default is not a
+# reading" — and the coverage FLOOR cannot police it, because the floor is a RATIO
+# (`duration_coverage_issues()` against 0.90, ~70 files of headroom here). Nothing reds
+# on a missing row today, which is exactly why it needs a pin: the rule was enforced by
+# hand once (`test_substrate_map.py`) and silently missed twice.
+#
+# ⛔ WHAT THIS SET ACTUALLY IS — stated because an earlier revision of this comment
+# called all nine files "files that fold ADDED", and only ONE is (measured against the
+# fold's base `60b0e07a0`):
+#   * ADDED by this delta, so it cannot have a row from anywhere else —
+#     `test_9548_record_search_keys_shape.py` (`git diff --diff-filter=A` finds no
+#     other file in this set);
+#   * ROWLESS on the base and repaired by this fold's manifest — the review's actual
+#     finding, `test_attest_census.py` and `test_rail_detach.py`;
+#   * already carrying a row on the base — the other six. They are kept in the set
+#     rather than trimmed, so the guard covers the whole row-set this fold owns and a
+#     later edge cannot drop one silently.
+#
+# The list is EXPLICIT rather than derived from git: `ROWED_BY_THIS_FOLD` is a fact
+# about one PR's diff, and a test that shelled out to `git diff <base>...HEAD` would
+# change meaning with the base it happened to run against (and would go silently empty
+# on a shallow CI checkout, which is the #10356 shallow-channel trap this same file
+# already carries a control for).
+ROWED_BY_THIS_FOLD = (
+    "test_10084_graph_argument_omit_first.py",
+    "test_10084_graph_disclosure.py",
+    "test_4051_gate_graph.py",
+    "test_9548_record_search_keys_shape.py",
+    "test_attest_census.py",
+    "test_cli_config_show.py",
+    "test_closes_landing.py",
+    "test_metering_capture_usage_reader.py",
+    "test_rail_detach.py",
+)
+
+
+def test_every_fast_file_this_fold_rows_carries_a_durations_row():
+    """#2148 P3: the ENTRY RULE, pinned — an added fast file has a row of its own."""
+    from tools.ci_selection import load_manifest
+    durations = load_manifest()["durations"]
+    missing = [f for f in ROWED_BY_THIS_FOLD if f not in durations]
+    assert missing == [], (
+        "a test file this PR ADDS is registered in a fast surface but carries no "
+        f"`durations:` row, so it packs at the flat default: {missing}. The map's "
+        "ENTRY RULE requires the row to EXIST (#3400/#4348) — add it with the "
+        "`new in …` note; `tools/ci_timing.py --refresh-durations` fills the value "
+        "from a push-to-main junit sweep later.")
+
+
+def test_the_added_file_row_guard_bites_at_the_pre_fix_head():
+    """Non-vacuity: on the PRE-FIX map the guard must name exactly the two rowless files.
+
+    The pre-fix state is reconstructed from the live map by dropping the two rows this
+    fix adds — not by an invented fixture — so the assertion is about the map this PR
+    shipped, and a future reader can re-derive it the same way.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    # the guard's own predicate, applied to a map that lacks the two rows this fix adds
+    pre_fix = {k: v for k, v in real.items()
+               if k not in {"test_attest_census.py", "test_rail_detach.py"}}
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in pre_fix] == [
+        "test_attest_census.py", "test_rail_detach.py"], (
+        "the pre-fix reconstruction must find exactly the two files the review "
+        "reported rowless — otherwise this pin is not testing that defect")
+    # and dropping any ONE row is still named, so the guard is not keyed to those two
+    dropped = next(f for f in ROWED_BY_THIS_FOLD if f in real)
+    holed = {k: v for k, v in real.items() if k != dropped}
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [dropped]
+
+
+def _added_files_off_the_flat_default(durations: dict, tails: dict):
+    """Files in this fold's row set whose row is neither the flat default nor a CI reading.
+
+    The ENTRY RULE's SECOND half, which the existence pin above cannot see: the
+    VALUE of a PR-added row must be `DEFAULT_FAST_WEIGHT`, because no push-to-main
+    junit sweep can have collected the file yet — a hand-picked number is this
+    host's wall clock, and `fast_pool()` feeds the shard balancer (#2818/#3419/#4348,
+    the rule stated verbatim above the `durations:` block). The one legitimate
+    exception is a row whose tail carries a CI basis: that is the refresher having
+    ADOPTED a junit reading, which IS the number the balancer should take.
+    """
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT
+    off = []
+    for f in ROWED_BY_THIS_FOLD:
+        if f not in durations:
+            continue
+        value = durations[f]
+        if abs(value - DEFAULT_FAST_WEIGHT) < 1e-9:
+            continue
+        if _MEASURED_BASIS_RE.search(tails.get(f, "")):
+            continue
+        off.append((f, value))
+    return off
+
+
+def test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading():
+    """#10726 review P1: `test_9548_record_search_keys_shape.py` shipped `4.0`.
+
+    That 4.0 was this host's local clock — the row's note at the time quoted "11 passed,
+    1 skipped in 3.45s", a count a later commit removed because a hand-written figure
+    re-stales — while the other eight files in `ROWED_BY_THIS_FOLD` all took 2.0.
+    (Only ONE of the nine is a file this fold ADDED — the `ROWED_BY_THIS_FOLD` block
+    above is the authority on what the set actually is, #2148 review P3 — but the whole
+    set is the row-set this pin guards.)
+
+    The existence pin above stayed green through it, because a local reading is a
+    row like any other; the coverage floor could not see it either (it is a RATIO
+    with ~70 files of headroom). Nothing reds on a hand-picked shard weight, which
+    is precisely why it needs its own pin — `test_state_value_verbatim_10360.py` is
+    the settled shape: state the local reading as a sanity bound and keep the flat
+    default as the weight.
+    """
+    from tools.ci_selection import load_manifest
+    durations = load_manifest()["durations"]
+    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    off = _added_files_off_the_flat_default(durations, tails)
+    assert off == [], (
+        "a test file this PR ADDS carries a weight that is neither the flat "
+        f"`DEFAULT_FAST_WEIGHT` nor a CI reading: {off}. A local wall clock is not "
+        "a shard-layout input (#2818/#3419) — keep the flat default and state the "
+        "local number as a sanity bound, or wait for the junit sweep to adopt one.")
+
+
+def test_the_flat_default_value_pin_bites_on_the_pre_fix_row_and_spares_a_ci_reading():
+    """Non-vacuity for the pin above, in both directions.
+
+    The pre-fix state is reconstructed from the LIVE row (the local-reading `4.0`
+    this review corrected) rather than an invented fixture, so a future reader can
+    re-derive what was wrong; and a `2.0 -> 3.1` ADOPTED CI reading — the
+    `test_oauth_consent_page_step4.py` shape — must stay silent, or the pin would
+    forbid the refresher from doing its job.
+
+    ⛔ BOTH halves are reconstructed, and the TAIL half is not optional: the
+    exemption `_added_files_off_the_flat_default` applies is keyed on the row's
+    tail (a CI basis), never on its value. Reusing the LIVE tail exempts the
+    reconstructed pre-fix value the moment `--refresh-durations` adopts this row
+    onto its row line — which the row's own note promises it will — and this pin
+    then reds about its own fixture. `""` is the FAITHFUL pre-fix tail: the `4.0`
+    row carried nothing after it on its row line, its measurement note in the
+    continuation block below (#10726 review round 4, P2).
+
+    The pre-fix state is dated by its own commits, not by memory: `33b312feb`
+    (`fix(10692)`) INTRODUCED the row as `…search_keys_shape.py: 4.0` with an empty
+    row-line tail, and `36b028494` (`fix(10726)`) is the commit that REPLACED it
+    with `2.0` (`git show 36b028494^:config/ci-surfaces.yml` still carries `4.0`;
+    `git show 36b028494:config/ci-surfaces.yml` carries `2.0`). So the fixing commit
+    is `36b028494` and the carrier of the defect is its parent.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    victim = "test_9548_record_search_keys_shape.py"
+    pre_fix = dict(real, **{victim: 4.0})
+    pre_fix_tails = dict(tails, **{victim: ""})
+    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)], (
+        "the reconstruction must find exactly the row this review corrected — "
+        "otherwise the pin is not testing that defect")
+    adopted = dict(real, **{victim: 3.1})
+    adopted_tails = dict(tails, **{
+        victim: "  # new in #1 — ci-timing junit-census+top-15 2026-11-02"
+                " (run 41375596528); was 2.0"})
+    assert _added_files_off_the_flat_default(adopted, adopted_tails) == [], (
+        "a row the refresher ADOPTED from a junit sweep must not be reported — "
+        "that value is the CI reading the balancer should take")
+
+
+def test_the_pre_fix_reconstruction_clears_the_tail_a_sweep_would_adopt():
+    """Regression pin for the half-reconstruction defect (review round 4, P2).
+
+    Simulates the state the FIRST post-landing `--refresh-durations` sweep produces
+    for this row — an adopted junit basis written ONTO the row line — without waiting
+    for that sweep, so the hazard is falsifiable in the repo rather than a year from
+    now in a red shard.
+
+    Both directions matter: the control asserts the exemption really IS tail-keyed
+    (a valid adopted row stays silent, so the fix cannot be "make the helper ignore
+    tails"), and the second arm asserts the reconstruction still finds the pre-fix
+    row once its tail is cleared — which is exactly what reusing the live tail
+    (the pre-fix test body) stops doing.
+    """
+    from tools.ci_selection import load_manifest
+    real = load_manifest()["durations"]
+    victim = "test_9548_record_search_keys_shape.py"
+    swept_tails = {f: _durations_row_tail(f) for f in ROWED_BY_THIS_FOLD}
+    swept_tails[victim] = (
+        "  # ci-timing junit-census+top-15 2026-11-09 (run 99999999999); was 2.0")
+    adopted = dict(real, **{victim: 3.1})
+    assert _added_files_off_the_flat_default(adopted, swept_tails) == [], (
+        "control: an ADOPTED row must be exempt on its tail — this is why the tail "
+        "cannot be reused when reconstructing the PRE-fix row")
+    pre_fix = dict(real, **{victim: 4.0})
+    assert _added_files_off_the_flat_default(pre_fix, swept_tails) == [], (
+        "control: reusing a swept tail exempts the pre-fix value, i.e. the pin "
+        "would report nothing and the reconstruction assertion above would red — "
+        "the exact defect this pin exists for")
+    pre_fix_tails = dict(swept_tails, **{victim: ""})
+    assert _added_files_off_the_flat_default(pre_fix, pre_fix_tails) == [(victim, 4.0)]
+
+
 # The refresher (`tools/ci_timing.py::render_refreshed_manifest`) rewrites a row's
 # VALUE and preserves its trailing comment verbatim, so a note that states WHERE
 # the number came from can outlive the basis it states — the file ships a rule about
@@ -7267,9 +7747,9 @@ def _durations_row_comments(text: str):
     row does this block document" — §3.2.3.3 of the YAML spec says comments are "a
     presentation detail … not associated with a particular node" — and this map's
     dominant convention is the OPPOSITE of "the block continues the row above": the
-    block PRECEDES the row it documents (almost every such block opens a new note —
-    re-derive the ratio at the head you are reading; it moves with the map). Joining
-    anyway attributes a neighbour's prose to the wrong key,
+    block PRECEDES the row it documents (77 of the 78 such blocks at this head open
+    a new note — re-derived at `e49e641f4` with `ci_timing._starts_a_new_note`, and
+    a SNAPSHOT of a moving denominator: main keeps adding rows). Joining anyway attributes a neighbour's prose to the wrong key,
     which matters because these guards read CLAIMS off the joined text — a stale
     case count or a `WATCHDOG_FLOOR_MIN` claim from the block below then lands on a
     row whose value it does not describe. The writer bounds its span identically
@@ -7463,6 +7943,501 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         "surfaces: []\n")
     assert _durations_rows_with_a_stale_case_count(gone, tmp_path) == [
         ("test_gone.py", 4, None)]
+
+
+def test_a_detached_note_is_a_claim_no_guard_can_read(tmp_path):
+    """#10726 review P2: a note the reader DETACHES is a claim no guard can read.
+
+    The `durations` row for the test file this PR ADDS once stated "12 cases" while
+    the file had 13, and NOTHING red — not because the stale-count guard above is
+    broken, but because the block below the row OPENED a note of its own
+    (`# THIS file: 12 cases …` matches `tools.ci_timing._starts_a_new_note`), so
+    `_row_continuation_lines` returned `[]` and `_durations_row_comments` never
+    joined it. A citation nobody reads is how a stale count survives many rounds.
+
+    ⛔ PROVENANCE, CORRECTED — the citation was NOT "wrong on arrival" (an earlier
+    revision of this docstring said so). `36b028494` wrote it when the file's
+    `grep -c '^def test_'` really was 12; `c660ffcee`, 2 h 15 m later, added the
+    13th case and touched no note. It went stale by ORDINARY DRIFT, and the
+    guard's blindness is what let it stay.
+
+    ⛔ NO committed-map `_row_continuation_lines(...)` NON-EMPTY ASSERTION. The
+    writer FLATTENS a wrapped note on a CUT or a wholesale replacement
+    (`tools.ci_timing.render_refreshed_manifest`), so a HEALTHY map reaches zero
+    wraps on the first adopting sweep while every claim is still read off the row
+    line. Measured at `237ce923a` with this module: committed span = 25 lines and a
+    42-char row tail; after one `render_refreshed_manifest(...)` the span is 0 and
+    the joined note is 1,471 chars on the row line, still carrying the claims. The
+    sibling `tests/test_ci_timing.py::_assert_preamble_shape` dropped its own
+    `wrapped >= 1` clause for exactly this reason (#10575 review, P2).
+
+    So the property worth pinning is the MECHANISM, synthetically, in BOTH
+    directions: a note that CONTINUES the row's sentence has its claim read by the
+    guard, and a note that OPENS one does not.
+    """
+    from tools.ci_timing import _row_continuation_lines
+
+    (tmp_path / "test_two.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
+
+    # Same claim, same (wrong) count — the ONLY difference is how the block opens.
+    attached = (
+        "durations:\n"
+        "  test_two.py: 2.0  # #5086: the weight.\n"
+        "  # it continues this row's sentence: 3 cases (`grep -c '^def test_'` -> 3).\n"
+        "surfaces: []\n")
+    detached = (
+        "durations:\n"
+        "  test_two.py: 2.0  # #5086: the weight.\n"
+        "  # THIS file: 3 cases (`grep -c '^def test_'` -> 3).\n"
+        "surfaces: []\n")
+
+    def _row(text: str) -> tuple[list[str], int]:
+        lines = text.splitlines()
+        start = lines.index("durations:")
+        return lines, next(i for i, ln in enumerate(lines)
+                           if i > start and ln.startswith("  test_two.py:"))
+
+    lines, row = _row(attached)
+    assert _row_continuation_lines(lines, row), (
+        "an attached note is part of the row's continuation span")
+    assert _durations_rows_with_a_stale_case_count(attached, tmp_path) == [
+        ("test_two.py", 3, 2)], (
+        "the attached note's claim must be READ by the guard, so a stale count bites")
+
+    lines, row = _row(detached)
+    assert _row_continuation_lines(lines, row) == [], (
+        "a block whose first line OPENS a note is not a continuation of the row above")
+    assert _durations_rows_with_a_stale_case_count(detached, tmp_path) == [], (
+        "the detached note's claim is INVISIBLE to the guard — that blind spot is "
+        "what this test documents, and why the map's note is attached to its row")
+
+
+def test_the_9548_rows_note_is_readable_by_the_guard_whatever_its_shape():
+    """#10726 review P2: the MECHANISM is pinned above; this pins the COMMITTED map.
+
+    A synthetic pin proves the reader and the writer agree. It does not notice that
+    the REAL map's note has DETACHED, and that is not hypothetical for this row: its
+    attachment is carried ENTIRELY by the `⛔` that opens the block, because
+    `tools.ci_timing._NOTE_OPENER_RE` (`^(?:#?\\d{3,5}…|[A-Z])`) reads the block's
+    semantic first word — "The CASE COUNT …" — as a NEW note. Drop the emoji in a
+    routine cleanup and the whole note silently stops being read: measured at this
+    head, read-only, that edit takes the joined note from 2,870 chars to **0**.
+
+    ⛔ NOT `_row_continuation_lines(...) >= 1`, AND NOT `assert block` either. The
+    writer FLATTENS a wrapped note on a CUT or a wholesale replacement —
+    `tools.ci_timing.render_refreshed_manifest`'s CUT branch, the
+    `lines[index] = f"{rendered_row}{tail}"` beside its `drop.update(continuation)`
+    (`tools/ci_timing.py:3038-3039`) — so a HEALTHY map can have ZERO continuation
+    lines with the whole note read off the row line. The blank-line rule that makes
+    the span what it is lives in `_row_continuation_lines`'s own docstring
+    (`tools/ci_timing.py:2237`: a blank line does not end a note, any other
+    non-comment line does). The sibling `tests/test_ci_timing.py::
+    _assert_preamble_shape` refused the same clause for that reason (#10575
+    review, P2). Measured at this head, read-only, with the guards' own readers:
+
+        committed                                     span = 42, reader joins 2,870
+        CUT arm, `_joined_note_tail` -> `{rendered_row}{tail}`
+                                                      span =  0, reader joins 2,831
+        `⛔` dropped so the block opens a note         span =  0, reader joins      0
+
+    ⛔ THE CUT ARM CAN ONLY SHRINK (#10726 review P2). Flattening re-emits the SAME
+    note on the row line, so it drops each continuation's `#`/leading space and the
+    wrap separators and adds nothing — a CUT-arm figure ABOVE the committed one is
+    therefore a measurement bug, not a rendering. The `2,918` this line carried was
+    exactly that: it had been read off `_joined_note_tail(<the ROW line>, …)`, which
+    duplicates the row into the note's own text. Measured faithfully (the fragment is
+    the FIRST CONTINUATION line, not the row) the arm joins 2,831 < 2,870.
+
+    So the shapes are told apart by READABILITY alone, and the pin below is the one
+    property every healthy shape satisfies and a detached block does not: whatever
+    the row carries must be REACHABLE in the text `_durations_row_comments` joins.
+    The expected text is derived from the map ITSELF (never a phrase baked in here),
+    so a legitimate rewrite of the note stays green.
+
+    ⛔ THE SPAN IS THE GUARDS' OWN (`tools.ci_timing._row_continuation_lines`), never
+    a span hand-rolled in this test. That predicate refuses a block whose first line
+    OPENS a note — this map's dominant convention is a block that documents the row
+    BELOW — so a private collector that accepts one applies this row's assertion to a
+    NEIGHBOUR's prose and reds a map the reader and the writer both accept.
+    """
+    from tools.ci_timing import _row_continuation_lines
+
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    key = "test_9548_record_search_keys_shape.py"
+    block_start = lines.index("durations:")
+    row = next(i for i, ln in enumerate(lines)
+               if i > block_start and ln.startswith(f"  {key}:"))
+
+    # Raw extent of the block below the row, with the reader's blank-line rule
+    # (`tools/ci_timing.py:2237`: a blank line does NOT end a note; any other
+    # non-comment line does). Used only to pick the DIAGNOSIS when the span is empty.
+    raw_block: list[str] = []
+    for ln in lines[row + 1:]:
+        if not ln.strip():
+            continue
+        if not (ln[:1] in (" ", "\t") and ln.strip().startswith("#")):
+            break
+        raw_block.append(ln)
+
+    joined = dict(_durations_row_comments(text))[key]
+    span = _row_continuation_lines(lines, row)
+    if span:
+        last_claim = lines[span[-1]].strip().lstrip("#").strip()
+        assert last_claim, "the note's last line is an empty comment marker"
+        assert last_claim in joined, (
+            "the note below this row is DETACHED from it: no duration guard reads "
+            "what it claims. Make the block CONTINUE the row's sentence rather "
+            f"than open a new one. (joined: {len(joined)} chars)")
+    elif raw_block:
+        # A block sits below the row but is NOT this row's note — either the row was
+        # flattened and the block documents the NEXT row (healthy), or the block was
+        # detached from this row (the defect). The row's own tail tells them apart.
+        assert joined.strip(), (
+            "the note below this row is DETACHED: its first line OPENS a note of its "
+            "own (`tools.ci_timing._starts_a_new_note`), so `_durations_row_comments` "
+            "never joins it and no duration guard reads what it claims. Start the "
+            "block with a line that CONTINUES the row's sentence.")
+    else:
+        # FLATTENED with nothing below: the writer moved the whole note onto the row
+        # line, so the only way this shape loses the guard is by carrying no note.
+        assert joined.strip(), (
+            "this row carries NO note in either shape: no continuation block below "
+            "it and no tail on its row line, so no duration guard reads what it "
+            "claims. The note is the row's rationale — restore it.")
+
+
+# ── a row may not state ZERO cases for a file that defines tests ──────────────
+# The instruments disagree on a CLASS-BASED file: `grep -c '^def test_'` reads **0**
+# for every test that lives as a method of a `Test*` class, while the session that
+# ran it reports the real count. So a row that re-derived its count with that
+# instrument and wrote the result into a note that QUOTES a passing run produces a
+# sentence that contradicts itself in one line — "pytest session total, 0 tests,
+# '16 passed in 138.63s'" (measured on the #10726 fold at `65b3d332b`: two such
+# rows). Zero is never a legitimate case count here — every key in this map is a
+# file that contributes tests — so it is judged WITHOUT needing the citation form
+# the pins above require. `0 tests skipped` is a different claim and is not judged.
+_ZERO_CASE_COUNT_RE = re.compile(r"(?<![\w.])0 tests\b(?!\s+skipped)")
+
+
+def _durations_rows_claiming_zero_cases(text: str, tests_dir: Path):
+    """`(key, indented-definition-count)` for rows asserting ZERO cases for a real file.
+
+    The second element proves the claim false: the number of `def test_` at ANY
+    indent (methods of a `Test*` class included), which no collection can undercut.
+    """
+    out = []
+    for key, note in _durations_row_comments(text):
+        if _ZERO_CASE_COUNT_RE.search(note) is None:
+            continue
+        path = tests_dir / key
+        defined = (len(re.findall(r"^\s*def test_", path.read_text(encoding="utf-8"),
+                                  re.M)) if path.is_file() else 0)
+        if defined:
+            out.append((key, defined))
+    return out
+
+
+def test_no_durations_row_states_zero_cases_for_a_file_that_defines_tests():
+    """A row that quotes a passing run cannot also claim the file has 0 cases."""
+    offenders = _durations_rows_claiming_zero_cases(
+        cs.MANIFEST.read_text(encoding="utf-8"), cs.TESTS_DIR)
+    assert offenders == [], (
+        "a durations row states its file has 0 cases while the file defines tests "
+        "— `grep -c '^def test_'` reads 0 for a class-based file, so a count "
+        "re-derived with it is a FLOOR of zero, not a measurement. Restore the "
+        "measured count (or re-derive with `tools/ci_timing.declared_test_counts`, "
+        f"which reads the AST): (key, defined): {offenders}")
+
+
+def test_the_zero_case_count_guard_is_not_vacuous(tmp_path):
+    """Bites on a zero claim, stays quiet on `0 tests skipped` and on a real file."""
+    (tmp_path / "test_cls.py").write_text(
+        "class TestThing:\n    def test_a(self):\n        pass\n", encoding="utf-8")
+    zeroed = (
+        "durations:\n"
+        "  test_cls.py: 2.0  # #5509: pytest session total, 0 tests, \"16 passed in "
+        "138.63s\".\n"
+        "surfaces: []\n")
+    skipped = (
+        "durations:\n"
+        "  test_cls.py: 2.0  # #5509: 16 tests, and 0 tests skipped on this lane.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_zero_cases(zeroed, tmp_path) == [("test_cls.py", 1)]
+    assert _durations_rows_claiming_zero_cases(skipped, tmp_path) == []
+
+
+#: A row's own STALENESS CHAIN — "This count has gone stale THIRTEEN times
+#: (17 -> 19 -> … -> 38)". The chain is the row's history of control-adding cycles,
+#: and its own ⛔ ENTRY RULE fixes what the LAST element means: "every entry in that
+#: chain is the count AFTER that cycle's controls, never before". So the chain's
+#: terminus and the `grep -c` count the SAME row cites are two statements about ONE
+#: number, and they can drift apart while the citation alone stays true.
+_STALENESS_CHAIN_RE = re.compile(
+    r"\bstale\b[^()]{0,120}\((?P<chain>\d+(?:\s*(?:->|\u2192)\s*\d+)+)\)",
+    re.IGNORECASE)
+_CHAIN_TERMINUS_RE = re.compile(r"\d+")
+
+
+def _durations_rows_whose_chain_disagrees_with_its_citation(text: str):
+    """`(key, cited, chain_terminus)` rows whose own history ends at another count.
+
+    Only rows that do BOTH are judged: cite the instrument AND carry a chain. A row
+    may legitimately cite a count with no chain (its first cycle) and carry history
+    of a WEIGHT with no citation, and neither is a contradiction.
+    """
+    out = []
+    for key, note in _durations_row_comments(text):
+        cited = _CASE_COUNT_CLAIM_RE.search(note)
+        chain = _STALENESS_CHAIN_RE.search(note)
+        if cited is None or chain is None:
+            continue
+        terminus = int(_CHAIN_TERMINUS_RE.findall(chain.group("chain"))[-1])
+        if terminus != int(cited.group("n")):
+            out.append((key, int(cited.group("n")), terminus))
+    return out
+
+
+# ── a row may not state ZERO cases beside a passing reading (#10726 ISSUE 1) ──
+# `02133e21b` (the fold's auto-merge) re-derived 41 `durations:` counts with
+# `grep -c '^def test_'` — a FLOOR, and `0` for every class-based file — and
+# wrote those floors into notes that quote a DIFFERENT, really-measured number.
+# The result was a row that contradicts itself in one sentence:
+#
+#   test_5509…: … pytest session total, **0 tests**, "16 passed in 138.63s"
+#   test_8864…: … (embedded carve-out lane, **0 tests**): "8 passed in 5.82s"
+#
+# `ac129dec7` repaired both by restoring the count each note's OWN reading
+# quotes — `16 tests` and `8 tests` at this head — so the MAP IS CLEAN HERE and
+# this pin is a REGRESSION GUARD, not the report of a live defect: the map arm
+# below asserts the offender list is EMPTY, which is the state a future fold has
+# to keep true, and `test_the_zero_case_guard_is_not_vacuous` supplies the
+# discrimination the clean map cannot.
+#
+# One guard already covers PART of this, and saying otherwise invites its deletion:
+# `test_no_durations_row_states_zero_cases_for_a_file_that_defines_tests` (`:7843`,
+# added by `ac129dec7`) flags ANY row whose note claims `0 tests` for a key that
+# resolves to a file defining `def test_` at any indent — on `02133e21b` it flags
+# all FOUR offenders, including both quoted above, so this class was never
+# unguarded. What it does not reach, and this pin adds: the `0 cases` spelling
+# (`_ZERO_CASE_COUNT_RE` matches only `0 tests`), a key that resolves to no
+# readable file under `TESTS_DIR` (that guard short-circuits on `defined == 0`),
+# and a zero claim ANYWHERE in a sentence that also quotes a passing reading.
+# ⛔ The vocabulary is still exactly two nouns (`0 tests` / `0 cases`, see
+# `_ZERO_CASE_CLAIM_RE` below) — it is NOT any `0 <noun>`; a `0 points` beside a
+# passing reading is invisible to this pin too (#10726 review round 3, P3). This
+# pin is therefore NARROWER (one sentence, so the map's legitimate history —
+# `"33 passed" … (31 tests / 2.77 s BEFORE this review)`, and `at 35 tests on an
+# [earlier] idle host` — is not judged) and WIDER in spelling. Keep both: neither
+# subsumes the other. A same-sentence `0 … N>0` needs no history exemption: no
+# correct note can say it.
+_ZERO_CASE_CLAIM_RE = re.compile(r"\b0\s+(?:tests|cases)\b")
+_PASSED_READING_RE = re.compile(r'"(\d+)\s+passed')
+# ⛔ `:` is deliberately NOT a boundary (#10726 review round 2, P2).
+# `(embedded carve-out lane, **0 tests**): "8 passed in 5.82s"` splits AFTER the
+# zero claim, so with `:` in the class the two halves of one self-contradiction
+# land in different "sentences" and the row is silently skipped — the shape the
+# comment above quotes as an offender was the one shape the guard could not see.
+# Measured: at `02133e21b` this finds `test_5509` only; without `:`, both it and
+# `test_8864` are found, and the head map is still `[]`.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+")
+
+
+def _durations_rows_stating_zero_cases_beside_a_passing_reading(text: str):
+    """`(key, passed, sentence)` for rows that contradict themselves in one sentence."""
+    out = []
+    for key, note in _durations_row_comments(text):
+        for sentence in _SENTENCE_SPLIT_RE.split(note):
+            if not _ZERO_CASE_CLAIM_RE.search(sentence):
+                continue
+            passed = _PASSED_READING_RE.search(sentence)
+            if passed is not None and int(passed.group(1)) > 0:
+                out.append((key, int(passed.group(1)), sentence.strip()[:120]))
+    return out
+
+
+def test_no_durations_row_states_zero_cases_beside_a_passing_reading():
+    """#10726 review ISSUE 1: a count of 0 is the FLOOR instrument, never a reading.
+
+    Green on this head by construction — `ac129dec7` restored the two counts —
+    which is the point: this is the guard that keeps the next fold from
+    re-deriving a cited READING with a current instrument.
+    """
+    offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(
+        cs.MANIFEST.read_text(encoding="utf-8"))
+    assert offenders == [], (
+        "a durations row states its file collected 0 cases in the same sentence "
+        "that quotes a passing count — `grep -c '^def test_'` reads 0 for every "
+        "class-based file, so 0 is the instrument's floor, never a measurement of "
+        f"a file that passed tests — (key, passed, sentence): {offenders}. "
+        "Restore the count this note's own measurement quotes; do not re-derive a "
+        "cited READING with a current instrument.")
+
+
+def test_the_zero_case_guard_is_not_vacuous():
+    """Bites on the self-contradiction, stays quiet on history and on real zeros."""
+    text = (
+        "durations:\n"
+        "  test_contradiction.py: 1.0  # measured: pytest session total, 0 tests, "
+        "\"16 passed in 138.63s\".\n"
+        "  test_history.py: 2.0  # measured: \"33 passed in 3.14s\" (31 tests / "
+        "2.77 s before this review added the two arms).\n"
+        "  test_no_reading.py: 3.0  # What the weight covers: 0 cases — none of the "
+        "arms reads a graph.\n"
+        "surfaces: []\n")
+    offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(text)
+    assert [k for k, _, _ in offenders] == ["test_contradiction.py"], offenders
+
+
+def test_the_zero_case_guard_sees_the_paren_then_colon_shape():
+    """The shape that got away with a `:` sentence boundary (#10726 review round 2).
+
+    Replayed against the revision its own comment names: at `02133e21b` the
+    offenders were `test_5509` (`0 tests, "16 passed…"`) and `test_8864`
+    (`(embedded carve-out lane, 0 tests): "8 passed in 5.82s"`). With `:` in
+    `_SENTENCE_SPLIT_RE` the second splits at the `):` and is skipped, so the
+    guard caught ONE of the two historical offenders. This arm fails if that
+    class comes back.
+    """
+    text = (
+        "durations:\n"
+        "  test_paren_colon.py: 1.0  # measured: Local reading on this host "
+        "(embedded carve-out lane, 0 tests): \"8 passed in 5.82s\" — the session "
+        "total.\n"
+        "surfaces: []\n")
+    offenders = _durations_rows_stating_zero_cases_beside_a_passing_reading(text)
+    assert [k for k, _, _ in offenders] == ["test_paren_colon.py"], offenders
+
+
+def test_no_durations_row_staleness_chain_ends_on_a_count_it_denies():
+    """#10726 review ISSUE 1: the chain must terminate on the count the row cites.
+
+    The ENTRY RULE makes the chain's last entry the count *after* the last cycle's
+    controls, i.e. the file's CURRENT count — which is what the row also cites when
+    it holds the instrument. The fold merged `config/ci-surfaces.yml` row-by-row as
+    a union, and a row is ONE key, so a branch based before a landed control (here
+    `#10452`, whose `test_a_same_thread_read_outside_the_index_is_still_drift` came
+    through) can re-take an OLDER copy of the note: at head
+    `test_substrate_map.py` cited `39` in the same sentence whose chain terminated
+    on `38` — the row contradicting itself, and the paragraph that documents the
+    landed control silently dropped. Nothing gating caught it (the CITATION matched,
+    so the guard above stayed green); this is the second half of that claim.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_whose_chain_disagrees_with_its_citation(text)
+    assert offenders == [], (
+        "a durations row's staleness chain terminates on a count it denies in the "
+        "same note — the ENTRY RULE says the last entry IS the current count, so "
+        "either the chain must be extended through the cycle that moved the count "
+        f"or the citation is wrong: (key, cited, chain_terminus): {offenders}"
+    )
+
+
+def test_the_staleness_chain_terminus_guard_is_not_vacuous():
+    """The guard above must bite on the shipped shape and stay quiet on its siblings.
+
+    `shipped` is the pre-fix `test_substrate_map.py` row, quoted from the head this
+    review found it at: `39` cited, `THIRTEEN … -> 38` chained. Measured pre-fix the
+    guard reports `('test_substrate_map.py', 39, 38)`; post-fix it reports nothing.
+    """
+    shipped = (
+        "durations:\n"
+        "  test_substrate_map.py: 0.9  # #5086: 39 cases (`grep -c '^def test_'` -> 39;"
+        " pytest collects 39). ⛔ This count has gone stale THIRTEEN times (17 -> 19 ->"
+        " 37 -> 38) — and the chain above terminates on that asserted 38.\n"
+        "surfaces: []\n")
+    assert _durations_rows_whose_chain_disagrees_with_its_citation(shipped) == [
+        ("test_substrate_map.py", 39, 38)]
+    repaired = shipped.replace("37 -> 38", "37 -> 38 -> 39").replace(
+        "asserted 38", "asserted 39")
+    assert _durations_rows_whose_chain_disagrees_with_its_citation(repaired) == []
+    legitimate = (
+        "durations:\n"
+        # a citation with NO chain is a row's first cycle, not a contradiction
+        "  test_a.py: 1.0  # 3 cases (`grep -c '^def test_'` -> 3).\n"
+        # a chain about a WEIGHT, with no instrument cited, is provenance
+        "  test_b.py: 2.0  # this weight has gone stale 3 times (1.0 -> 1.4 -> 2.0).\n"
+        "surfaces: []\n")
+    assert _durations_rows_whose_chain_disagrees_with_its_citation(legitimate) == []
+
+
+#: A row asserting that its OWN committed weight is "deliberately unchanged" —
+#: "The 3.7 weight sits inside that range and is deliberately unchanged". The number
+#: is a claim about the row it sits in, so it can be falsified by that row's value.
+#: A note that quotes a PREVIOUS weight ("was 3.7", the sweep's provenance) must not
+#: be read as a claim — the sweep suffix never puts `deliberately unchanged` after
+#: the number, which is what this anchors on.
+_WEIGHT_UNCHANGED_CLAIM_RE = re.compile(
+    r"\bthe\s+(?P<w>\d+(?:\.\d+)?)\s*weight\b[^.;]{0,160}?\bdeliberately\s+unchanged",
+    re.IGNORECASE)
+
+
+def _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(text: str):
+    """`(key, claimed, value)` rows whose note calls a weight unchanged at another number."""
+    out = []
+    for key, note in _durations_row_comments(text):
+        claim = _WEIGHT_UNCHANGED_CLAIM_RE.search(note)
+        if claim is None:
+            continue
+        row = next((ln for ln in text.splitlines()
+                    if (m := _DURATIONS_ROW_RE.match(ln)) and m.group("key") == key),
+                   None)
+        if row is None:  # pragma: no cover — every judged note came from a row
+            continue
+        value = float(_DURATIONS_ROW_RE.match(row).group("value"))
+        if abs(float(claim.group("w")) - value) > 1e-9:
+            out.append((key, float(claim.group("w")), value))
+    return out
+
+
+def test_no_durations_row_calls_an_unchanged_weight_one_it_does_not_hold():
+    """#10726 review ISSUE 1: a note may not deny the weight its own row declares.
+
+    The union merge took an older copy of the `test_substrate_map.py` note AND the
+    sweep then re-based that row's weight from `3.7` to `0.9`. Both halves are
+    individually defensible; together the row read `0.9` and then said "The 3.7
+    weight sits inside that range and is deliberately unchanged" — which is how a
+    reader concludes the committed weight is 3.7. The sweep cannot attribute a
+    mid-note claim to the value it rewrote, so this pin is what stops the next one
+    from shipping quietly.
+    """
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(text)
+    assert offenders == [], (
+        "a durations row's note calls a weight 'deliberately unchanged' at a number "
+        "the row does not hold — the note is a stale copy of the row it sits in: "
+        f"(key, claimed, row's value): {offenders}"
+    )
+
+
+def test_the_unchanged_weight_claim_check_is_not_vacuous():
+    """The guard above must bite on the shipped shape and stay quiet on its siblings.
+
+    `shipped` is the pre-fix `test_substrate_map.py` row: value `0.9`, note "The 3.7
+    weight sits inside that range and is deliberately unchanged". Measured pre-fix
+    the guard reports `('test_substrate_map.py', 3.7, 0.9)`; post-fix, nothing.
+    """
+    shipped = (
+        "durations:\n"
+        "  test_substrate_map.py: 0.9  # the range stays the file's own spread. The 3.7"
+        " weight sits inside that range and is deliberately unchanged;"
+        " `tools/ci_timing.py --refresh-durations` replaces it from junit.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(shipped) == [
+        ("test_substrate_map.py", 3.7, 0.9)]
+    legitimate = (
+        "durations:\n"
+        # a claim that AGREES with its row is the honest form
+        "  test_a.py: 3.7  # 3.7 is the reading; the 3.7 weight is deliberately"
+        " unchanged by this sweep.\n"
+        # the sweep's own provenance quotes a PREVIOUS weight — not a claim
+        "  test_b.py: 0.9  # ci-timing junit-census+top-15 2026-11-02 (run 1); was 3.7\n"
+        # "deliberately unchanged" about the FILE, with no weight claim at all
+        "  test_c.py: 2.0  # the file's cost is deliberately unchanged.\n"
+        "surfaces: []\n")
+    assert _durations_rows_claiming_an_unchanged_weight_they_do_not_hold(
+        legitimate) == []
 
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
@@ -7770,6 +8745,194 @@ def _load_python_ci() -> dict:
     import yaml
     wf_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "python-ci.yml"
     return yaml.safe_load(wf_path.read_text())
+
+
+# The `test` job's dependency-caches block: the section header that opens it and the
+# step the `⛔ OVERRIDES:` marker is attached to. Both are unique lines in
+# `python-ci.yml`, which is what makes them usable anchors (#11065 round 5, ISSUE 1).
+_TEST_JOB_CACHE_SECTION_HDR = "Dependency caches: read the big half, bound the write"
+_TEST_JOB_CACHE_RESTORE_STEP = "Restore pip dependency cache (#7612, read-only — #11063)"
+
+
+def _test_job_cache_overrides_block(wf_lines: list[str], prune_name: str) -> str:
+    """Return the `⛔ OVERRIDES:` block that GOVERNS the `test` job's uv cache write.
+
+    ⛔ ANCHORED TO THE STEP IT DOCUMENTS, not to a marker's absolute position in the
+    file (#11065 round 5, ISSUE 1 — measured). This locator used to be
+    `next(ln for ln in <whole 4,900-line file> if "⛔ OVERRIDES:")`, i.e. the FIRST such
+    marker anywhere, so the two arms built on it judged whichever block happened to
+    come first. Measured at `60981107a8`, on the merge tree, nothing else altered:
+
+      * a degraded copy of the REAL block read **GREEN** once an unrelated
+        `⛔ OVERRIDES:` block was inserted above it in `changes` — a fail-open; and
+      * that unrelated block reddened a **correct** real block whose own text was
+        untouched — a false block.
+
+    Neither is hypothetical: `AGENTS.md` requires an `OVERRIDES:` line for every
+    departure from the common default, so this workflow keeps growing them (three
+    today, one already ⛔-prefixed at `:954`), and "first marker in the file" is a
+    locator that decays the moment one is added above this job.
+
+    The anchor is therefore the PARSE-VISIBLE step the comment block documents: the
+    marker must live in the contiguous comment run attached to that step, at or after
+    the dependency-caches section header and above the prune step. A marker that is
+    not attached to this block raises instead of being silently judged — the guard
+    fails closed on its own drift.
+
+    (Comment-aware YAML is the theory answer — `ruamel.yaml` round-trip can attach a
+    comment to a node (`yaml_add_eol_comment`) where PyYAML discards comments
+    entirely. It is not taken here: one new import and a second YAML parser for one
+    pin is machinery this blocker PR should not grow. Adjacency to the documented
+    step gets the same guarantee from text the pin already reads.)
+    """
+    sections = [i for i, ln in enumerate(wf_lines) if _TEST_JOB_CACHE_SECTION_HDR in ln]
+    anchors = [i for i, ln in enumerate(wf_lines)
+               if ln.strip() == f"- name: {_TEST_JOB_CACHE_RESTORE_STEP}"]
+    prunes = [i for i, ln in enumerate(wf_lines) if ln.strip() == f"- name: {prune_name}"]
+    assert len(sections) == 1, (
+        f"expected exactly one dependency-caches section header "
+        f"({_TEST_JOB_CACHE_SECTION_HDR!r}) in python-ci.yml, found {len(sections)} — "
+        "the `OVERRIDES:` arm anchors on it and cannot locate the block without it")
+    assert len(anchors) == 1, (
+        f"expected exactly one `- name: {_TEST_JOB_CACHE_RESTORE_STEP}` step in "
+        f"python-ci.yml, found {len(anchors)} — the `OVERRIDES:` marker must stay "
+        "attached to the step block that carries the cache write, so a rename or a "
+        "duplicate has to be re-anchored here rather than judged as another block")
+    assert len(prunes) == 1, (
+        f"expected exactly one `- name: {prune_name}` prune step in python-ci.yml, "
+        f"found {len(prunes)} — the marker's lower bound is the step it governs")
+    section_hdr, anchor, prune_line = sections[0], anchors[0], prunes[0]
+
+    markers = [i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln and i < anchor]
+    assert markers, (
+        "no `⛔ OVERRIDES:` marker at or above the `test` job's dependency-caches "
+        "step — the departure from the vendor's `uv cache prune --ci` recommendation "
+        "is unrecorded, which is what the marker exists to prevent")
+    start = markers[-1]
+
+    # ⛔ ADJACENCY (the actual anchor): every line between the marker and the step it
+    # documents must be blank or a comment. This is what makes the locator immune to a
+    # marker added anywhere else in the workflow — including one in another job.
+    stray = [i + 1 for i in range(start, anchor)
+             if wf_lines[i].strip() and not wf_lines[i].lstrip().startswith("#")]
+    assert not stray, (
+        f"the nearest `⛔ OVERRIDES:` at or above the dependency-caches step is at "
+        f"python-ci.yml:{start + 1}, but non-comment lines {stray} sit between it and "
+        f"the step it is supposed to document (line {anchor + 1}). That marker belongs "
+        "to a different block — a departure statement must stay attached to the "
+        "step it governs, not float above unrelated steps")
+    assert section_hdr < start < prune_line, (
+        f"the `⛔ OVERRIDES:` marker resolved to python-ci.yml:{start + 1}, which is "
+        f"outside the dependency-caches section (header {section_hdr + 1}, prune step "
+        f"{prune_line + 1}) — the arm would judge a block that does not govern this "
+        "cache write")
+
+    # ⛔ ONE MARKER PER CACHE WRITE, asserted (#11065 round 5). Two markers inside this
+    # section would leave "which block is the attributed one" to the locator's tie-break —
+    # the same class of ambiguity the absolute-position anchor had — so a second departure
+    # statement here has to be folded into the one marker that governs this write.
+    in_section = [m for m in markers if m > section_hdr]
+    assert len(in_section) == 1, (
+        f"the dependency-caches section of python-ci.yml (line {section_hdr + 1}) carries "
+        f"{len(in_section)} `⛔ OVERRIDES:` markers "
+        f"({', '.join(str(m + 1) for m in in_section)}); this write has exactly one "
+        "departure to record, and with two markers the arm would judge whichever it "
+        "picked — fold the additional departure into the marker that governs this cache "
+        "write, or move it to the block it belongs to")
+
+    block = []
+    for ln in wf_lines[start:]:
+        if re.match(r"\s*#\s*ARM \d", ln):
+            break
+        block.append(ln)
+    return "\n".join(block)
+
+
+def _overrides_payload_misattribution(overrides: str) -> str | None:
+    """Return the sentence that misattributes `#7612`'s payload, or None when clean.
+
+    The claim, not the phrase (#11065 cycle 3): a bare substring ban reddened a
+    CORRECT edit that named `~/.cache/pip` for the 3.2 GB torch wheel set. What is
+    forbidden is an assertion that the payload SITS in `~/.cache/uv`.
+    """
+    prose = " ".join(re.sub(r"^\s*#\s?", "", ln) for ln in overrides.splitlines())
+    for sentence in re.split(r"(?<=[.;])\s+", prose):
+        if "#7612" not in sentence or "~/.cache/uv" not in sentence:
+            continue
+        if "~/.cache/pip" in sentence:
+            continue
+        return sentence.strip()
+    return None
+
+
+def _cache_refs_of(step: dict) -> str:
+    """EVERY cache key a step names: its primary `key:` AND its `restore-keys:`.
+
+    `actions/cache` reads both fields. On a primary-key miss it walks
+    `restore-keys` in order as PREFIX matches and restores the newest entry that
+    matches, reporting `cache-hit == 'false'` (a partial hit) and the matched
+    key (`docs.github.com` -> "Dependency caching reference"; `actions/cache`
+    README). So a guard that reads `with.key` alone cannot see a step that reads
+    a retired or cross-family archive through `restore-keys:`, and reports the
+    pin green while the step restores the payload the pin exists to keep out —
+    the read-side twin of the #11063 split (#11065 cycle 8, P2).
+
+    `key:` ALONE remains the right field to read for a WRITER (a save writes
+    under its primary key; `restore-keys` on a save step is inert), which is what
+    the writer-identity arms do.
+    """
+    with_ = step.get("with") or {}
+    return "\n".join(str(with_.get(field) or "")
+                     for field in ("key", "restore-keys"))
+
+
+def _cache_roots_of(step: dict) -> dict:
+    """The key ROOT each cache field declares, per line: `{field: [root, ...]}`.
+
+    A root is the literal prefix before the first `${{ … }}` interpolation — the
+    only part `actions/cache` can match on: the primary `key:` exactly, each
+    `restore-keys:` entry as a prefix. Comparing ROOTS (never whole keys) is what
+    lets an arm state "this step reads inside its own family and nowhere else"
+    without restating a formula that a legitimate `uv.lock` or OS edit moves.
+    """
+    with_ = step.get("with") or {}
+    return {field: [ln.split("${{")[0].strip()
+                    for ln in str(with_.get(field) or "").splitlines() if ln.strip()]
+            for field in ("key", "restore-keys")}
+
+
+def _cross_family_restore_keys(step: dict) -> list:
+    """The `restore-keys:` roots in `step` that leave its own `key:` family.
+
+    `restore-keys` entries are prefix matches, so one is only safe while it stays
+    inside the family its primary key names: an entry that is EQUAL to the key
+    root, or NARROWER (`pip-Linux-` inside `pip-`), can only ever reach that
+    family's entries. A BROADER root (`uv-` against `uv-cache-`) or a foreign one
+    (`uv-pip-` against `uv-cache-`, `pip-` against `uv-cache-`) reaches an archive
+    written by another cache — the payload mixing #11063 split and this pin
+    exists to prevent, from the read side.
+    """
+    roots = _cache_roots_of(step)
+    own = [r for r in roots["key"] if r]
+    if not own:
+        return []
+    own_root = own[0]
+    return [rk for rk in roots["restore-keys"]
+            if rk and not (rk == own_root or rk.startswith(own_root))]
+
+
+def _steps_naming_key(jobs: dict, needle: str) -> list:
+    """`[(job id, step name)]` for every step whose cache FIELDS name `needle`.
+
+    Fields, plural: `key:` and `restore-keys:` both (`_cache_refs_of`). Takes the
+    JOBS mapping, not the workflow, so the same call serves the whole-workflow
+    scan — where "no reader, no writer" is a claim about every job, and a reader
+    left behind in a sibling job restores the same archive — and a synthetic
+    single-job fixture in `test_the_cache_key_scan_reads_restore_keys_and_not_key_alone`.
+    """
+    return [(jid, s.get("name")) for jid, jd in jobs.items()
+            for s in (jd.get("steps") or [])
+            if needle in _cache_refs_of(s)]
 
 
 def _effective_step_env(wf: dict, job_id: str, step: dict) -> dict:
@@ -9565,6 +10728,1238 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
         "cache-SERVICE error (transport/503) must never red the leg; a miss is "
         "the fail-open case and install-cpu-torch downloads the pinned CPU "
         "wheel either way")
+
+
+def test_the_test_job_carries_no_unbounded_cache_post_step():
+    """#11063: the `test` job must carry NO unbounded cache post step, and each
+    dependency-cache writer must be bounded twice — in SIZE and in TIME.
+
+    MEASURED (run 42000057137, job `test (d)` 127165076497, runner
+    `pi-runner-vm-6`, 90 m cap): the uv+pip restore MISSED
+    (`Cache not found for input keys: uv-pip-Linux-8755d72f…, uv-pip-Linux-`)
+    where the other EIGHT shards HIT it in 5.7-32.7 s, and the `actions/cache`
+    POST step then tarred 4 m 07 s and uploaded a 3,882,423,064 B payload —
+    `Sent 3019898880 of 3882423064 (77.8%), 0.9 MBs/sec` at 11:51:52, i.e.
+    3,019,898,880 B in 3,412 s — still 22% short when the cap fired. Every WORK
+    step was green (suite 10:28:58 -> 10:45:07, orphan gate 10:45:54) and the job
+    ended `cancelled`, which `python-ci-gate` reads as RED by design (#5219), so a
+    REQUIRED check was WITHHELD by a cache upload on a passing shard.
+
+    The payload is TWO payloads and that is what the shape rests on
+    (`actions/caches`, same key, different refs): `pip-Linux-8755d72f…` is
+    3,616,385,308 B in a PR scope and 397,897,273 B in `refs/heads/main`, while
+    `uv-pip-Linux-8755d72f…` is 662,393,744 B in `refs/heads/main` — so pip (the
+    torch wheel set, #7612's own payload, installed by `install-cpu-torch` with
+    `pip`) is 93% of the uploaded payload on its own, and FOUR other jobs write
+    `pip-<os>-<hash uv.lock>`, so this job reads it and writes nothing. The uv
+    half has no other writer (`refs/heads/main` puts it at 252 MiB, an order of
+    magnitude rather than a bound — scope variance is large), so this job keeps
+    one writer, and the save archives `~/.cache/uv` ALONE.
+
+    The HF restore in the same job is the SAME degradation without being a miss:
+    `Cache hit for: hf-embedding-cache-v2-Linux` 10:25:10.498, then
+    `Received 8388608 of 78130875 (10.7%), 0.1 MBs/sec` and
+    `##[warning]Failed to restore: The operation cannot be completed in timeout`
+    at 10:26:59.872 — a transport timeout on an entry that existed, which is why
+    the remedy there is restore-only rather than a smaller write.
+
+    Bounded twice, because a time bound alone on an unbounded payload is the
+    shape #11065 cycle 2 already rejected:
+      * SIZE — `uv cache prune` runs before the save, removing entries no current
+        environment reaches (`uv` docs). That bounds the ACCUMULATION case (this
+        box's `~/.cache/uv` is 7.2 GB, 6.6 GB of it `archive-v0` from environments
+        that no longer exist), not a single-environment cache, and it is not
+        claimed as a size bound: the fail-open time bound is what bounds the write.
+      * TIME — 1 m for the prune and 7 m for the save, both `continue-on-error`,
+        the save additionally gated on `cache-hit != 'true'` (the output is
+        `'true'` only on an exact primary-key match; `'false'` on a
+        `restore-keys` match, unset on a full miss). An aborted save is a MISS:
+        it can never red the leg and can never withhold a required check.
+
+    Non-vacuous in both directions: the pre-fix bare `actions/cache@v4` step reds
+    the implicit-post-save assertion, a writerless uv key reds the one-writer arm
+    (that shape is a reopen of #7612 — the cache then survives only until expiry
+    or the first `uv.lock` bump), a save that archives `~/.cache/pip` too reds the
+    payload-split arm, and a save without a bound reds the boundedness arm.
+    """
+    wf = _load_python_ci()
+    job = wf["jobs"]["test"]
+    steps = job.get("steps", [])
+    order = {id(s): i for i, s in enumerate(steps)}
+
+    def _path_of(step: dict) -> str:
+        return str((step.get("with") or {}).get("path") or "")
+
+    # ⛔ `key:` ONLY — correct for a WRITER's identity (a save writes under its
+    # primary key), and WRONG for a READER's reach, which is why every read-side
+    # arm below goes through the module-level `_cache_refs_of` /
+    # `_cross_family_restore_keys` instead (#11065 cycle 8, P2).
+    def _key_of(step: dict) -> str:
+        return str((step.get("with") or {}).get("key") or "")
+
+    # …and the READ side has ONE implementation, at module scope
+    # (`_cache_refs_of`): the pin, `_legacy_uv_pip_refs` and
+    # `test_the_cache_key_scan_reads_restore_keys_and_not_key_alone` all read it,
+    # and a second copy inline here is how the two drift apart (#11065 cycle 8).
+
+    def _uses_of(step: dict) -> str:
+        return str(step.get("uses") or "")
+
+    def _is_writer(step: dict) -> bool:
+        """Does this step WRITE its cache key?
+
+        `actions/cache@` writes implicitly (its post step); `actions/cache/save@`
+        writes explicitly; `actions/cache/restore@` only READS. The earlier
+        revision of this pin tested `uses.startswith("actions/cache@")` — the
+        implicit spelling only — which had the polarity backwards in BOTH
+        directions: converting a sibling to the restore+save spelling this very
+        PR prescribes made `hf_writers` report "no other job writes the HF key"
+        and red, while a future restore-ONLY consumer of a key counted as its
+        writer and red the sibling arm at a job that writes nothing. Both arms
+        fail safe (red), but they red at the remedy this PR lands (#11065
+        cycle 2, finding 6).
+        """
+        return _uses_of(step).split("@")[0].strip().lower() in {"actions/cache",
+                                                               "actions/cache/save"}
+
+    # ── No implicit save may come back: that is the defect itself ──────────────
+    # Enumerated by MECHANISM, never by one spelling (#11065 cycle 3, review finding).
+    # `actions/cache@` is only the FIRST way to acquire an unbounded post-step save:
+    #   (a) a `cache:`-family input on a `setup-*` action installs that action's own
+    #       post step — `actions/setup-python@v5` + `cache: 'pip'` saves `~/.cache/pip`,
+    #       the 3.6 GB half, in a post step with no timeout. It is used one job away
+    #       (`python-ci.yml:3125-3128`, `test-track-b` — the ONLY `cache:`-family input in
+    #       this workflow), so this is a live shape, not a hypothetical;
+    #   (b) a LOCAL composite action is a second `uses:` indirection whose body can
+    #       call `actions/cache`, arm a `cache:` input, or use a cache-capable setup
+    #       action — expanded TWO levels below, and parsed (not grepped) so all three
+    #       mechanisms are seen.
+    # A `uses:`-prefix scan alone reads GREEN over both.
+    #
+    # `cache` ALONE is the arming input for the two OPT-IN actions: `cache-dependency-path`
+    # is read only inside the `if (cache)` branch (`setup-python` `src/setup-python.ts:26`,
+    # read inside `cacheDependencies`), so on its own it installs NO post step — counting
+    # it reddened a no-op edit (cycle 8 review round 2, P2).
+    #
+    # ⛔ SCOPE OF THIS PREDICATE, stated honestly (#11065 review, 2026-11-06): it keys on a
+    # KNOWN ACTION-ID TABLE, not on "any cache mechanism in the universe". The table is
+    # small on purpose — a generic `with:` scan cannot know the polarity — but it is
+    # complete for this workflow's vocabulary, and it is EXACTLY the set of ids that
+    # actually appear here plus their two neighbours, so an unrecognised cache-writing
+    # action is still a gap. The gap is named in the message rather than implied away.
+    # OPT-IN, value-gated: the value names a package manager, and an action input is a
+    # STRING, so the only values that INSTALL a save are the SUPPORTED ones —
+    # `getCacheDistributor` is `default: throw`, and `setup-python`'s
+    # `post-if: success()` (action.yml:43) means a throwing main step installs NO post
+    # save. So `cache: false`, `cache: "false"` and any other unsupported value are all
+    # NOT armed — they fail the step, they do not upload (measured: all GREEN).
+    _SUPPORTED_CACHE_VALUES = {
+        "actions/setup-python": frozenset({"pip", "pipenv", "poetry"}),
+        "actions/setup-node": frozenset({"npm", "yarn", "pnpm"}),
+    }
+    # DEFAULT-ON, boolean-gated: `actions/setup-go@v5`'s `cache:` is **`default: true`**
+    # (action.yml:15-17), so a BARE step — no `with:` at all — installs an unbounded
+    # post-step save. That is a stronger fail-open than the one this arm was written to
+    # close, and it measured GREEN without this set (#11065 review, P2).
+    _DEFAULT_ON_CACHE_ACTIONS = frozenset({"actions/setup-go"})
+    # Actions that ARE a cache write, with no input to read: an allow-list by ID, because
+    # there is nothing in the step's own `with:` to detect (`Swatinem/rust-cache`).
+    # ⛔ KEYS MUST BE LOWER-CASE: `_action` is lower-cased before lookup, so a mixed-case
+    # member can never match and the arm silently stops firing. That exact defect was
+    # introduced and caught in review — `{"Swatinem/rust-cache"}` made the whole arm inert
+    # (#11065 review round 3, NEW-1) — and a pin now asserts every member is lower-case.
+    _CACHE_WRITING_ACTIONS = frozenset({"swatinem/rust-cache"})
+    # Inputs that write a foreign cache directly (`docker/build-push-action`'s GHA cache
+    # backend). Any non-empty value is a write.
+    _GENERIC_CACHE_WRITE_INPUTS = frozenset({"cache-to"})
+    # ⛔ THE TABLES MUST BE KEYED IN LOWER-CASE, and this asserts it (#11065 round 3,
+    # NEW-1). Every lookup is `_uses_of(step).split("@")[0].strip().lower()`, so a
+    # mixed-case member is UNREACHABLE: `{"Swatinem/rust-cache"}` made the whole
+    # `_CACHE_WRITING_ACTIONS` arm inert — the arm never fired, no test noticed, and the
+    # pin certified a workflow it could no longer inspect. That is an INERT ENFORCER, the
+    # same class this file exists to catch, so the guard-about-the-guard is not decoration:
+    # normalising the LOOKUP without normalising the DATA is exactly how such a table rots.
+    for _table_name, _table in (
+            ("_SUPPORTED_CACHE_VALUES", _SUPPORTED_CACHE_VALUES),
+            ("_DEFAULT_ON_CACHE_ACTIONS", _DEFAULT_ON_CACHE_ACTIONS),
+            ("_CACHE_WRITING_ACTIONS", _CACHE_WRITING_ACTIONS),
+            ("_GENERIC_CACHE_WRITE_INPUTS", _GENERIC_CACHE_WRITE_INPUTS)):
+        # ⛔ VALUES AS WELL AS KEYS (#11065 round 4, NEW-2). `_SUPPORTED_CACHE_VALUES` is a
+        # dict of id -> frozenset of package managers, and the MANAGER is compared against a
+        # lower-cased `cache:` value (`_val in _SUPPORTED_CACHE_VALUES[_action]`). So a
+        # mixed-case manager such as `"Pipenv"` is exactly as unreachable as a mixed-case
+        # key: `cache: pipenv` then reads GREEN while setup-python arms its unbounded
+        # post-step save. Keys-only was a measured false negative.
+        _members = list(_table)
+        _members += [v for _vals in getattr(_table, "values", lambda: ())() for v in _vals]
+        _bad = sorted(m for m in _members if m != m.lower())
+        assert not _bad, (
+            f"{_table_name} has mixed-case member(s) {_bad}. Every lookup lower-cases BOTH "
+            "the action id AND the `cache:` manager value before matching, so a member that "
+            "is not already lower-case can NEVER match — the arm is silently inert and this "
+            "pin certifies a workflow it cannot see. Lower-case the member "
+            "(#11065 review round 3 NEW-1, round 4 NEW-2).")
+    # ⛔ `astral-sh/setup-uv` is a THIRD mechanism, and it is the opposite polarity: there is
+    # no `actions/setup-uv` (a nonexistent id keys a set on nothing), and the real action's
+    # cache is ON BY DEFAULT — `enable-cache: auto`, `save-cache: true` (v7 action.yml:32-52)
+    # — and FOUR other workflows in this repo use it (`ci.yml:1286`, `deploy-hosted.yml:476`,
+    # `deploy-pages.yml:962`, `skills-parity.yml:59`) with a `with:` block that never sets
+    # `enable-cache`. A copied line in the `test` job installs that action's own unbounded
+    # post-step save of `~/.cache/uv` — the payload this PR bounds — so PRESENCE is the
+    # arming unless the step states an explicit off (#11065 cycle 8 review, P2).
+    # ⚠️ `auto` resolves to OFF when `RUNNER_ENVIRONMENT !== "github-hosted"`
+    # (`src/utils/inputs.ts:61-66`, at the **v7** ref this repo actually uses), and
+    # `python-ci.yml:790-795` records that
+    # `scripts/ci_runner_gate.sh` attaches `ubuntu-latest` to the SELF-HOSTED pool — which is
+    # the runner class the measured incident ran on. So on this repo's own pool the bare
+    # form is inert, and this arm is CONSERVATIVE there rather than derived; it is derived
+    # for the `github-hosted` class. Recorded so the justification is not falsifiable by
+    # one vendor source read (#11065 review, P3).
+    _UV_SETUP = "astral-sh/setup-uv"
+
+    def _arming_of(step: dict) -> list:
+        """The cache-arming inputs THIS step carries, by mechanism (empty = none).
+
+        One implementation, used for the `test` job's own steps AND for the body of a
+        local composite action it delegates to: a second copy of this predicate is how
+        the two drift apart, and the composite arm below would then certify only the
+        `actions/cache` spelling (measured GREEN over a composite arming
+        `setup-python`+`cache: pip` — cycle 8 review round 2).
+        """
+        # ⛔ INPUT NAMES ARE CASE-INSENSITIVE AT RUNTIME (#11065 round 4, NEW-4). The toolkit
+        # reads `INPUT_<NAME.toUpperCase()>`, so `Cache: pip` and `Cache-To: type=gha` are the
+        # SAME inputs as `cache:` / `cache-to:` — and reading the raw dict made them read
+        # GREEN. That is a fail-open on the exact #11063 mechanism, so normalise the map ONCE
+        # here and read every input name from it.
+        _with = {str(_k).strip().lower(): _v for _k, _v in (step.get("with") or {}).items()}
+        # ⛔ ACTION IDS RESOLVE CASE-INSENSITIVELY (#11065 delta review, P3-1).
+        # `Actions/Setup-Python@v5` + `cache: pip` measured GREEN against a
+        # case-sensitive table — a fail-open spelled with a capital letter. Every table
+        # below is lower-case, so lower-case the extracted id.
+        _action = _uses_of(step).split("@")[0].strip().lower()
+        if _action in _CACHE_WRITING_ACTIONS:
+            return ["the action IS a cache write"]
+        _generic = [k for k in sorted(_with)
+                    if k in _GENERIC_CACHE_WRITE_INPUTS and str(_with.get(k) or "").strip()]
+        if _generic:
+            return _generic
+        if _action == _UV_SETUP:
+            _off = any(str(_with.get(k, "")).strip().lower() == "false"
+                       for k in ("enable-cache", "save-cache"))
+            return [] if _off else ["enable-cache (default `auto`)"]
+        if _action in _SUPPORTED_CACHE_VALUES:
+            # ARMED ONLY BY A VALUE THE ACTION ACTUALLY CACHES FOR. `cache:`/`cache-dependency-path`
+            # are read only inside `if (cache)`, and an unsupported manager THROWS in
+            # `getCacheDistributor` — with `post-if: success()` (setup-python action.yml:43)
+            # no post step is installed, so it does not upload. Presence alone reddened a
+            # genuine no-op; a VALUE test reddened `cache: "false"` for a save that is
+            # never created. Both were false blocks (#11065 cycle 8 round 3, and review
+            # 2026-11-06 finding 5).
+            _val = str(_with.get("cache") or "").strip().lower()
+            # ⛔ AN UNRESOLVED `${{ … }}` EXPRESSION CANNOT BE CERTIFIED (#11065 delta
+            # review, P2-1). `with:` values are resolved by the RUNNER at execution time,
+            # so `cache: ${{ vars.python_cache_manager }}` can resolve to `pip` and install
+            # setup-python's own unbounded post-step save of `~/.cache/pip` — the 3.6 GB
+            # half, i.e. #11063 exactly — while a literal-value test reads GREEN. Treat any
+            # expression as ARMED: the pin cannot see what it will become.
+            if "${{" in _val:
+                return [f"cache ({_val}) — unresolved expression"]
+            return ["cache"] if _val in _SUPPORTED_CACHE_VALUES[_action] else []
+        if _action in _DEFAULT_ON_CACHE_ACTIONS:
+            # The off is an EXPLICIT `cache: false`; absence is ON. An EMPTY value is also
+            # off, so redding it was a false block (#11065 round 2, C5) — but the MECHANISM
+            # is NOT setup-python's. This branch is `actions/setup-go`, which reads
+            # `core.getBooleanInput('cache')` (`src/main.ts:20`): `getBooleanInput('')`
+            # THROWS, main fails, and `post-if: success()` skips the save. Same polarity,
+            # different reason — stated accurately because the next editor edits against
+            # this comment (#11065 round 3, NEW-6).
+            _val = str(_with.get("cache", True)).strip().lower()
+            return [] if _val in {"false", ""} else ["cache (default `true`)"]
+        return []
+
+    implicit = [(s.get("name"), s.get("uses")) for s in steps
+                if _uses_of(s).split("@")[0].strip().lower() == "actions/cache"]
+    for s in steps:
+        armed = _arming_of(s)
+        assert not armed, (
+            f"the `test` job's step {s.get('name')!r} arms a cache save through "
+            f"{s.get('uses')!r} ({armed}). A `cache:`-family input — or, for "
+            "`astral-sh/setup-uv`, the action's own default-on cache — installs that "
+            "action's OWN UNBOUNDED post-step save, charged against the job's "
+            "`timeout-minutes` exactly as #11063's was, so it is the defect one "
+            "spelling over. For `actions/setup-python`/`actions/setup-node` the off is "
+            "ABSENCE — delete the `cache:` input; for `astral-sh/setup-uv` write "
+            "`enable-cache: false`. Otherwise keep the cache an explicit, BOUNDED "
+            "`actions/cache/save@` for a key this job owns.")
+        uses = _uses_of(s)
+        if uses.startswith("./"):
+            _root = Path(__file__).resolve().parents[1]
+            # ⛔ TWO levels, not one: a composite that delegates to another local composite
+            # still reaches this job's post-step budget, and a one-level scan read GREEN
+            # over the nested case (#11065 review, P3).
+            _frontier = [(uses, 0)]
+            _seen = set()
+            while _frontier:
+                _ref, _depth = _frontier.pop()
+                if _ref in _seen or _depth > 2:
+                    continue
+                _seen.add(_ref)
+                _manifest = next((mp for _e in ("action.yml", "action.yaml")
+                                  if (mp := _root / _ref / _e).exists()), None)
+                # ⛔ A `./`-prefixed `uses:` that does not resolve is a BROKEN WORKFLOW, not
+                # an absent cache — the previous `continue` left no assertion at all and
+                # read GREEN (#11065 review, P3). Fail closed and say which path.
+                assert _manifest is not None, (
+                    f"the `test` job's step {s.get('name')!r} delegates to {_ref!r}, "
+                    "which has no `action.yml`/`action.yaml` under the repo root — a "
+                    "`./` reference that does not resolve cannot be certified to "
+                    "carry no cache write (#11063)")
+                _body = yaml.safe_load(_manifest.read_text(encoding="utf-8")) or {}
+                _body_steps = (_body.get("runs") or {}).get("steps") or []
+                # PARSED, not grepped: a composite body can reach a cache write through any
+                # of the mechanisms `_arming_of`/`_is_writer` model, and a substring scan
+                # for one spelling certified the others (measured GREEN — cycle 8 round 2).
+                # ⛔ A COMPOSITE-STEP `timeout-minutes` IS AN INERT KEY (#11065 delta review,
+                # P2-2). The runner's composite schema does not list it (`actions/runner`
+                # `action_yaml.json` composite-step ∈ run-step|uses-step; neither admits it) and
+                # `actions/runner#1979` "Support timeout-minutes in composite-actions" is OPEN,
+                # its body recording that a stuck cache action then runs for the DEFAULT
+                # timeout. So an inner `timeout-minutes` certifies nothing: the bound that
+                # actually bounds the whole composite is on the CALLING step (`s`). Reading the
+                # inner key made the pin certify the #11063 shape as bounded — an inert
+                # enforcer, which is worse than no arm. `continue-on-error` is required too,
+                # for the same reason the top-level `~/.cache` loop requires it.
+                _caller_bound = s.get("timeout-minutes")
+                _caller_bounds = isinstance(_caller_bound, int) and _caller_bound > 0
+                _offenders = [(b.get("name"), _uses_of(b)) for b in _body_steps
+                              if _arming_of(b)
+                              or (_is_writer(b)
+                                  and not (_caller_bounds
+                                           and b.get("continue-on-error") is True))]
+                # A body that is not a composite (no `runs.steps`) is not resolvable here;
+                # the grep fallback keeps the arm honest rather than silently green.
+                if not _body_steps:
+                    _raw = _manifest.read_text(encoding="utf-8")
+                    assert ("actions/cache@" not in _raw
+                            and "actions/cache/save@" not in _raw), (
+                        f"the `test` job's step {s.get('name')!r} delegates to the "
+                        f"composite action {_ref!r}, whose body carries a cache write "
+                        "— an implicit, UNBOUNDED post step one indirection away "
+                        "from this scan (#11063)")
+                # ⛔ The message must describe what was FOUND (#11065 review, finding 3).
+                # `_is_writer` alone red an explicit, BOUNDED `actions/cache/save@` with
+                # `timeout-minutes` — the very remedy the sibling message prescribes —
+                # while accusing it of being "implicit, UNBOUNDED". Only an ARMING input,
+                # or a writer with no positive bound, is an offender now.
+                assert not _offenders, (
+                    f"the `test` job's step {s.get('name')!r} delegates to the "
+                    f"composite action {_ref!r}, whose body carries an UNBOUNDED cache "
+                    f"write {_offenders}. A cache-arming `setup-*`/`setup-uv` input, or a "
+                    "cache write with no bound, is charged against the JOB cap and "
+                    "withholds a REQUIRED check on a green shard (#11063). ⛔ A "
+                    "`timeout-minutes:` INSIDE a composite step is an INERT KEY — the "
+                    "runner does not support it (`actions/runner#1979` is open) — so the "
+                    "bound must go on the `uses: ./…` step in THIS job, together with "
+                    "`continue-on-error: true` on the inner write.")
+                _frontier.extend((_uses_of(b), _depth + 1) for b in _body_steps
+                                 if _uses_of(b).startswith("./"))
+    assert not implicit, (
+        f"the `test` job still carries implicit post-step cache SAVE(s) {implicit}. "
+        "That post step is UNBOUNDED and is charged against the job's "
+        "`timeout-minutes` (#10182), so the cap cannot amortize it: measured "
+        "57 m 02 s into the post step against a 3.88 GB archive, ending "
+        "`cancelled` and withholding a REQUIRED check on a green shard (#11063). "
+        "Use `actions/cache/restore@` plus an explicit, BOUNDED "
+        "`actions/cache/save@` — for a NEW key. The two keys this job already "
+        "carries are pinned separately and a save is REJECTED for both: `pip-` "
+        "because four other jobs write it, and `uv-cache-` because it must keep "
+        "exactly one bounded writer (the next two arms).")
+
+    # ── The pip half: READ ONLY, because FOUR other jobs write it ──────────────
+    pip_steps = [s for s in steps if "~/.cache/pip" in _path_of(s)]
+    assert pip_steps, (
+        "the `test` job no longer touches ~/.cache/pip at all — the torch wheel "
+        "set is #7612's payload (140 wheels, ~3.2 GB, 93-219 s per job cold) and "
+        "`install-cpu-torch` installs it with `pip`, so every shard would then "
+        "re-download it, which is what #7612 removed")
+    pip_restores = [s for s in pip_steps if _uses_of(s).split("@")[0].strip().lower() == "actions/cache/restore"]
+    assert len(pip_restores) == 1, (
+        "the `test` job's pip cache reader must be exactly one "
+        f"`actions/cache/restore@v4` (found {len(pip_restores)} of {len(pip_steps)})")
+    pip_restore = pip_restores[0]
+    # ⛔ PATH IDENTITY, the other half of the same contract (#11065 cycle 5,
+    # finding 2). `path` is part of the cache's VERSION, so a restore pointed one
+    # directory off can never match the entry the writers produced — a permanent
+    # MISS with the step green. Applying this to `~/.cache/uv` only left the two
+    # BIGGEST payloads (3,616,385,308 B of torch wheels, and the 78 MB embedder
+    # whose transfer died in the filed incident) guarded by a substring.
+    assert _path_of(pip_restore).strip() == "~/.cache/pip", (
+        f"the pip restore reads {_path_of(pip_restore).strip()!r}, not "
+        "`~/.cache/pip`. `path` is part of the cache's VERSION, so the entry the "
+        "four writer jobs produce can never match it — a permanent MISS with the "
+        "step green, which is a cold 3.6 GB torch download on every shard "
+        "(#7612 reverted, #11063 cycle 5 finding 2).")
+    assert pip_restore.get("continue-on-error") is True, (
+        "the pip restore must be `continue-on-error: true` — a cache-SERVICE error "
+        "(transport/503) must never red the leg; a miss is the fail-open case and "
+        "install-cpu-torch downloads the pinned CPU wheel either way")
+    pip_key = _key_of(pip_restore)
+    pip_key_root = pip_key.split("${{")[0]
+    assert pip_key_root == "pip-", (
+        f"the pip cache key is {pip_key!r}; the SHARED key other jobs write is "
+        "`pip-<os>-<hash uv.lock>` — any other spelling silently unships it from "
+        "the four writers that populate it")
+    pip_writers_here = [s.get("name") for s in steps
+                        if _is_writer(s) and pip_key_root in _key_of(s)]
+    assert not pip_writers_here, (
+        f"the `test` job WRITES the shared pip cache again {pip_writers_here}. "
+        "That archive measured 3,616,385,308 B in a PR scope — restoring it and "
+        "re-saving it is what put a 3.88 GB upload inside a 90 m cap (#11063), "
+        "and it buys nothing: FOUR other jobs already write the key (#10327's "
+        "argument, applied to the bigger half).")
+    pip_writer_rows = [(jid, s.get("name"), _key_of(s))
+                       for jid, jd in wf["jobs"].items() if jid != "test"
+                       for s in (jd.get("steps") or [])
+                       if pip_key_root in _key_of(s) and _is_writer(s)]
+    pip_writers_elsewhere = [row[0] for row in pip_writer_rows]
+    assert pip_writers_elsewhere, (
+        "NO other job writes the shared pip key any more, so this job's "
+        "restore-only shape now empties the key it depends on and every shard "
+        "pays the cold torch download #7612 removed. Re-derive the remedy (#10327 "
+        "vs a bounded writer here) rather than leaving this pin asserting a stale "
+        "premise.")
+    # ── KEY IDENTITY, not a root prefix ────────────────────────────────────
+    # The root test above is a PREFIX test: `pip-${{ github.sha }}` satisfies it,
+    # and `pip_writer_rows`' membership test (`pip_key_root in _key_of(s)`) is a
+    # SUBSTRING test, so a one-sided key-formula change reads GREEN while nothing
+    # writes the key this job reads — every shard then pays the ~3.2 GB cold torch
+    # download and #7612 is reverted with a green pin (#11065 review, reproduced by
+    # mutation). The expected spelling is therefore taken from a SIBLING WRITER,
+    # never restated here, so renaming the shared key in one place reds.
+    pip_sibling_keys = sorted({row[2] for row in pip_writer_rows})
+    assert pip_key in pip_sibling_keys, (
+        f"the `test` job restores {pip_key!r}, which is not the key ANY other job "
+        f"writes ({pip_sibling_keys}). A change on this side only leaves the job "
+        "reading a key nothing populates — the #7612 regression with a green pin. "
+        "Use the shared spelling, or change BOTH sides in one commit.")
+    # A writer that runs LESS OFTEN than this job empties the key this job reads.
+    # `test` runs on `python == 'true'`; a writer whose job carries that same
+    # expression runs whenever this job runs, and one gated only on `always()` is
+    # strictly broader. `test-slow` (`slow_run`) is the DIFF-GATED pip writer and is
+    # the one that can vanish on a run which still reaches this job — so a COUNT of
+    # writers names the wrong population: it cannot tell the unconditional writers
+    # from the diff-gated one, and its message named `test-carve-out` twice while
+    # omitting `test-d14-hosted-api` and `test-record-postgres` (#11065 cycle 4).
+    # (`test-carve-out` is not in the population at all: its pip step is
+    # restore-only by `test_the_carve_out_job_restores_the_pip_cache_without_saving_it`.)
+    test_gate = str(job.get("if") or "").strip()
+
+    def _gate_of(job_id: str) -> str:
+        return str((wf["jobs"].get(job_id) or {}).get("if") or "").strip()
+
+    # ⛔ EXACT gate strings, never a prefix. `always() && needs.changes.result ==
+    # 'success' && needs.changes.outputs.carve_out_run == 'true'` STARTS WITH
+    # `always()` and is diff-gated, so a `startswith("always()")` test accepts the
+    # very shape this arm exists to reject (#11065 review, reproduced by mutation:
+    # with every writer diff-gated, the prefix form read GREEN).
+    # Bare `always()` IS in the set and is the exception the exactness must NOT swallow:
+    # it is the widest possible gate, so a writer carrying it is strictly MORE load-bearing
+    # than this job, never diff-gated away — omitting it reddened a CORRECT change with a
+    # message asserting the opposite (#11065 cycle 8 review, P3, reproduced).
+    broader = {test_gate, "always()", "always() && needs.changes.result == 'success'"}
+    load_bearing = [jid for jid in pip_writers_elsewhere if _gate_of(jid) in broader]
+    assert load_bearing, (
+        f"every job writing the shared pip key is diff-gated away from this job's "
+        f"own run: {[(jid, _gate_of(jid)) for jid in pip_writers_elsewhere]} vs "
+        f"this job's `{test_gate}`. A writer that needs `slow_run`/`carve_out_run` "
+        "to be true does not populate the key on a run that still executes `test`, "
+        "so this job reads an entry nothing wrote. The unconditional writers are "
+        "`test-d14-hosted-api` and `test-record-postgres` (`always() && "
+        "needs.changes.result == 'success'`), and `test-concurrency-falkor` shares "
+        "this job's own gate; `test-slow` (`slow_run`) is the only diff-gated pip "
+        "writer, and `test-carve-out` is NOT a writer — its pip step is "
+        "restore-only by its own pin.")
+
+
+    # ── The uv half: ONE reader, ONE writer, bounded in size AND time ─────────
+    uv_steps = [s for s in steps if "~/.cache/uv" in _path_of(s)]
+    assert uv_steps, (
+        "the `test` job no longer touches ~/.cache/uv at all — every shard would "
+        "then resolve and download its deps cold, which is what #7612 removed")
+    uv_restores = [s for s in uv_steps if _uses_of(s).split("@")[0].strip().lower() == "actions/cache/restore"]
+    assert len(uv_restores) == 1, (
+        "the `test` job's uv cache reader must be exactly one "
+        f"`actions/cache/restore@v4` (found {len(uv_restores)} of {len(uv_steps)})")
+    uv_restore = uv_restores[0]
+    assert uv_restore.get("continue-on-error") is True, (
+        "the uv restore must be `continue-on-error: true` — a cache-SERVICE error "
+        "(transport/503) must never red the leg; a miss is the fail-open case and "
+        "install-cpu-torch downloads the pinned CPU wheel either way")
+    uv_key = _key_of(uv_restore)
+    uv_key_root = uv_key.split("${{")[0]
+    assert uv_key_root.startswith("uv-cache-"), (
+        f"the uv cache key is {uv_key!r}; it must be a uv-ONLY key, not the legacy "
+        "shared `uv-pip-` one, which archived `~/.cache/pip` under the same entry "
+        "— pairing 3.6 GB of shared pip wheels with this job's ~253 MB uv delta is "
+        "what turned a save into a 3.88 GB upload (#11063)")
+
+    assert _path_of(uv_restore).strip() == "~/.cache/uv", (
+        f"the uv restore reads {_path_of(uv_restore).strip()!r}, not `~/.cache/uv`. "
+        "`path` is part of the cache's VERSION, so a restore pointed at any other "
+        "directory can never match the entry this job's save writes — a permanent "
+        "MISS with the cache step present and green (#11065 cycle 4, finding 1).")
+
+    uv_writers = [s for s in steps if _is_writer(s) and uv_key_root in _key_of(s)]
+    assert len(uv_writers) == 1, (
+        "the `test` job must keep exactly ONE writer of "
+        f"{uv_key_root}<os>-<hash uv.lock> (found {len(uv_writers)}: "
+        f"{[s.get('name') for s in uv_writers]}). ZERO writers means the key is "
+        "never populated, so #7612's cache survives only until the stored entry "
+        "expires (7 days without a hit) or the first `uv.lock` bump mints a key "
+        "nothing has written — that is a reopen of #7612, not a local fix. TWO is "
+        "the unbounded duplicate this pin exists to stop.")
+    uv_save = uv_writers[0]
+    assert _key_of(uv_save) == uv_key, (
+        f"the uv WRITER saves under {_key_of(uv_save)!r} while the reader restores "
+        f"{uv_key!r}. Both roots are `uv-cache-`, so the one-writer arm above is "
+        "satisfied and this reads GREEN — but a writer on a DIFFERENT formula "
+        "populates a key this job never reads, so the exact-hit path dies and "
+        "every run pays a full bounded write. Same string, or the pin certifies "
+        "nothing about the hit path it exists to protect.")
+    assert _uses_of(uv_save).split("@")[0].strip().lower() == "actions/cache/save", (
+        f"the uv writer must be the EXPLICIT `actions/cache/save@v4` step, not "
+        f"{_uses_of(uv_save)!r} — an implicit `actions/cache@` save runs as a POST "
+        "step that can be neither bounded nor ordered (#10182/#11063)")
+    assert uv_save.get("continue-on-error") is True, (
+        "the uv save must be `continue-on-error: true`: a save aborted at its "
+        "bound is a MISS, and a missing cache must never red a shard whose suite "
+        "passed (#5219)")
+    save_bound = uv_save.get("timeout-minutes")
+    assert isinstance(save_bound, int) and 0 < save_bound <= 8, (
+        f"the uv save's `timeout-minutes` is {save_bound!r}; it must be a positive "
+        "integer <= 8. Arm 2 of `docs/ops/ci-wall-clock.md` §2 caps the `test` "
+        "job's SUM at 60 m (x1.5 <= the 90 m cap) and the measured SUM without a "
+        "cache-write term is 49.6 m, so the prune + save terms have <= 10.4 m between "
+        "them; a larger bound does not make the payload smaller, it only spends "
+        "the margin a real regression needs.")
+    save_paths = [ln.strip() for ln in _path_of(uv_save).splitlines() if ln.strip()]
+    assert save_paths == ["~/.cache/uv"], (
+        f"the uv save archives {save_paths}; it must archive `~/.cache/uv` ALONE. "
+        "Adding `~/.cache/pip` re-creates the 3.88 GB payload (#11063) — that half "
+        "measured 3,616,385,308 B and is written by FOUR other jobs.")
+    gate = str(uv_save.get("if") or "").strip()
+    # ⛔ DERIVE the `install-extras` id, never restate it (#11065 cycle 6,
+    # finding 3). The literal let a rename or a deletion read GREEN — and a
+    # missing id makes `steps.install-extras.outcome` null, so the save's `if:` is
+    # permanently false and the uv key is NEVER written again: exactly the "ZERO
+    # writers … a reopen of #7612" outcome the neighbouring arm exists to catch.
+    # (actionlint does catch the null, which is why this was P3 — but the pin's own
+    # claim was unbacked.)
+    install_steps = [s for s in steps
+                     if str(s.get("name") or "").startswith(
+                         "Install package + test extras")]
+    assert len(install_steps) == 1, (
+        f"expected one `Install package + test extras` step in the `test` job, "
+        f"found {len(install_steps)} — the uv save's `if:` is built from its id")
+    install_id = str(install_steps[0].get("id") or "").strip()
+    assert install_id, (
+        "the `Install package + test extras` step declares no `id:`, so the uv "
+        "save's `if:` cannot reference its outcome — a leg that died inside "
+        "`uv sync` would then write a partial archive into an immutable key")
+    expected_gate = (
+        f"always() && steps.{uv_restore.get('id')}.outputs.cache-hit != 'true'"
+        f" && steps.{install_id}.outcome == 'success'")
+    assert gate == expected_gate, (
+        f"the uv save's `if:` is {gate!r}; it must be exactly {expected_gate!r}. "
+        "`cache-hit` is `'true'` ONLY on an exact primary-key match (`'false'` on a "
+        "`restore-keys` match, unset on a full miss), so any other spelling either "
+        "re-saves on every hit or never saves on a miss — a substring match is not "
+        "enough (`… || true` and a wrong step id both passed the earlier arm). The "
+        "`install-extras` term is what stops a leg that died inside `uv sync` from "
+        "writing a partial archive into a key that can never be overwritten.")
+
+    # ⛔ ONLY CODE LINES COUNT (#11065 cycle 6, finding 1). A plain `in run`
+    # substring match also fires on a `#`-commented command, so commenting the
+    # prune out read GREEN while every other arm — the `--ci` absence, the bound,
+    # the lock wait, the order — still held. The step that bounds the uploaded
+    # payload would then stop executing while the pin certified it, and the save
+    # would upload the runner's accumulated `~/.cache/uv` (the 7.2 GB class this
+    # workflow's own comment cites) into a 7 m bound: aborted, permanent MISS,
+    # nothing red.
+    def _code_lines(step: dict) -> list:
+        return [ln for ln in str(step.get("run") or "").splitlines()
+                if not ln.strip().startswith("#")]
+
+    pruners = [s for s in steps
+               if any("uv cache prune" in ln for ln in _code_lines(s))]
+    assert len(pruners) == 1, (
+        "the `test` job must run `uv cache prune` exactly once before its save "
+        f"(found {len(pruners)}). Without it the save archives the runner's whole "
+        "accumulated uv history — the persistent-runner case, not a "
+        "single-environment one (#11063). NOTE: plain `uv cache prune`, NOT the "
+        "vendor's `--ci` variant, which deletes the pre-built registry wheels "
+        "`uv sync --frozen` re-resolves cold on every shard — #7612's 3.2 GB "
+        "torch set is `pip`'s cache, which this job only READS. Only EXECUTING "
+        "lines are searched, so a commented-out prune does not satisfy this arm.")
+    prune = pruners[0]
+    prune_code = "\n".join(_code_lines(prune))
+    # ⛔ `always()`, and asserted — the SAVE runs unconditionally, so a prune left
+    # on GitHub's default `success()` gate is SKIPPED on any earlier failure while
+    # the save still writes: a red-suite run would then archive the UNPRUNED
+    # accumulation into an immutable key, which is the case #11063 exists to bound
+    # (#11065 cycle 6, finding 2).
+    assert str(prune.get("if") or "").strip() == "always()", (
+        f"the uv prune's `if:` is {str(prune.get('if') or '').strip()!r}; it must be "
+        "`always()`, the same status function the uv save carries. On the default "
+        "`success()` gate a run whose suite FAILED still saves (the save is "
+        "`always() && …`) but skips the prune, so an unpruned archive lands in a "
+        "key that can never be overwritten.")
+    # ⛔ The `OVERRIDES:` departure is PLAIN `prune`, and an unguarded substring
+    # let the vendor's `--ci` variant read green (#11065 cycle 5, finding 4) —
+    # which deletes the pre-built registry wheels `uv sync --frozen` re-resolves
+    # cold on every shard, i.e. the exact tidy-up the marker exists to prevent.
+    assert "--ci" not in prune_code, (
+        "the uv prune was switched to `uv cache prune --ci`, which `uv`'s own "
+        "docs say \"removes all pre-built wheels and unzipped source "
+        "distributions\" — the dev-group registry wheels that `uv sync --frozen` "
+        "re-resolves cold on every shard are what this cache exists to keep (NOT "
+        "the torch set: that is `pip`'s cache, which this job restores read-only). "
+        "The `OVERRIDES:` line at .github/workflows/python-ci.yml:954-962 records "
+        "why this job departs from the vendor's CI recommendation; use plain "
+        "`uv cache prune`.")
+
+    # ⛔ THE `OVERRIDES:` REASON MUST NAME THE PAYLOAD `--ci` WOULD ACTUALLY DROP
+    # (#11065 cycle 7, P3 claim-mismatch). The marker's first version attributed
+    # the 3.2 GB torch wheel set to `~/.cache/uv`; it is in `~/.cache/pip`
+    # (`install-cpu-torch` installs torch with `pip`), and `~/.cache/uv` is
+    # populated by one command, `uv sync --frozen`, which installs the dev group
+    # — no torch. The marker is the artifact an adopter meets BEFORE re-deriving
+    # the decision, so a false attribution there is carried into the next lane
+    # (that is the RESEARCH FIRST failure this pin exists to stop) and reddens a
+    # payload-SHRINKING change with a fact that cannot be true.
+    wf_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "python-ci.yml"
+    wf_lines = wf_path.read_text().splitlines()
+    # ⛔ `_test_job_cache_overrides_block` anchors the marker to the block it documents
+    # and asserts that anchoring; it must NOT be swapped for "the first marker in the
+    # file", which judges an unrelated departure the moment one is added above this
+    # job (#11065 round 5, ISSUE 1).
+    overrides = _test_job_cache_overrides_block(wf_lines, str(prune.get("name") or ""))
+    assert "~/.cache/uv" in overrides and "uv sync --frozen" in overrides, (
+        "the `OVERRIDES:` block does not name the cache directory it governs "
+        "(`~/.cache/uv`) or its only writer (`uv sync --frozen`), so its reason "
+        "is unattributable — restate it against the uv-side payload.")
+    # Test the ATTRIBUTION, not the phrase (#11065 cycle 3, review finding). A bare
+    # substring ban reddened a CORRECT edit — a sentence saying the 3.2 GB torch wheels
+    # are #7612's payload and live in `~/.cache/pip` — because it matched the words rather
+    # than the claim. What is forbidden is an assertion that the payload SITS in
+    # `~/.cache/uv`.
+    #
+    # ⛔ SENTENCE-SCOPED, not line-scoped (#11065 review, finding 2). The block is hard-wrapped
+    # at ~76 columns, so a line loop is blind to the same false claim once it wraps — and it
+    # reds the natural way to state the CORRECT answer ("lives in `~/.cache/pip`, never in
+    # `~/.cache/uv`"), which names the wrong path in order to negate it. Unwrap the comment
+    # block, strip the leading `#`, split on sentence terminators, and judge the CLAIM: a
+    # sentence that attributes #7612's torch payload must not place it in `~/.cache/uv`
+    # without also naming `~/.cache/pip`.
+    # ⛔ No `:` in the split (#11065 delta review, P3-2ii): a hard-wrapped claim written
+    # `#7612's torch payload: in \`~/.cache/uv\`` split at the colon and both halves read
+    # GREEN. And no `torch` conjunct (P3-2i): the exact banned sentence without that word —
+    # `#7612's payload is in \`~/.cache/uv\`` — also read GREEN. The conjunct that matters is
+    # the ISSUE NUMBER, because that is what the attribution claim is about. The judge
+    # itself lives at module scope (`_overrides_payload_misattribution`) so the
+    # mutation test below can drive it over a MUTATED copy of this block (#11065 round 5).
+    #
+    # ⛔ THE NEGATION ESCAPE IS WITHDRAWN (#11065 round 4, NEW-1 — measured). Round 3
+    # reddened a PURE NEGATION — `#7612's payload … is NOT in `~/.cache/uv`` is true, so
+    # that was a false block — and the fix skipped any sentence carrying a negator. That
+    # escape is SENTENCE-WIDE, so it also excused three FALSE claims, each measured GREEN:
+    # `… is in `~/.cache/uv`, not `~/.cache/pip``, `… is in `~/.cache/uv` (this placement
+    # is not negotiable)`, `… is not pip's; it is in `~/.cache/uv``. A fail-open outranks a
+    # false block, so the escape goes and the false block is accepted: fail-closed plus a
+    # message naming the remedy beats a prose parser this blocker PR should not grow.
+    #
+    # THREE DISCLOSED RESIDUALS, stated rather than half-solved:
+    #  (i)   a pure negation reds — say where the payload IS (`~/.cache/pip`) and it
+    #        passes, which is what the message already prescribes.
+    #  (ii)  `… is in `~/.cache/uv`, not `~/.cache/pip`` reads GREEN, because the assertion
+    #        below is a PRESENCE test on `~/.cache/pip`, not a claim about which path the
+    #        payload is attributed to. This is a residual of the sentence-scoped form, and
+    #        it is GREEN with the escape and without it — verified both ways.
+    #  (iii) a false claim that never names `#7612` is out of contract: this arm pins that
+    #        ISSUE's attribution, not torch prose in general.
+    # None is reachable in the shipped text — the block contains no `#7612's payload`
+    # today (`grep -c` -> 0) — so this arm guards a future edit, and every shape it does
+    # decide, it fails CLOSED on.
+    _offending = _overrides_payload_misattribution(overrides)
+    assert _offending is None, (
+        "the `OVERRIDES:` block attributes #7612's payload (the 3.2 GB torch wheel "
+        "set) to `~/.cache/uv`. It is not there: `install-cpu-torch` installs torch "
+        "with `pip`, so it lives in `~/.cache/pip`, which this job only restores. "
+        "`--ci` would drop the DEV-GROUP registry wheels `uv sync --frozen` "
+        f"re-resolves — say that instead (#11065 cycle 7). Offending sentence: "
+        f"{_offending!r}")
+    assert prune.get("continue-on-error") is True, (
+        "the uv prune must be `continue-on-error: true` — a prune that cannot run "
+        "only leaves a bigger archive for a save that is bounded on its own")
+    prune_bound = prune.get("timeout-minutes")
+    assert isinstance(prune_bound, int) and 0 < prune_bound <= 4, (
+        f"the uv prune's `timeout-minutes` is {prune_bound!r}; it must be a "
+        "positive integer <= 4 — an unbounded prune is the same defect class as "
+        "the unbounded save (#11063/#10182)")
+
+    # ⛔ A STEP BOUND ABOVE THE STEP'S OWN BLOCKING WAIT IS AN INERT ENFORCER
+    # (#11065 cycle 5, finding 5). `uv` waits `UV_LOCK_TIMEOUT` (default 300 s)
+    # for the cache lock another uv process may hold, and on a shared pool host
+    # several shards of the same run install concurrently — so a 1 m step bound
+    # with the 5 m default kills the prune having pruned NOTHING, every time,
+    # and the save then uploads the accumulation the prune exists to drop. The
+    # step must bound the LOCK WAIT below its own `timeout-minutes`; it does so
+    # inline (`UV_LOCK_TIMEOUT=10 uv cache prune`) to keep the workflow's line
+    # count — and therefore every `python-ci.yml:NNNN` citation this PR re-anchors
+    # — byte-for-byte unchanged.
+    lock = re.search(r"UV_LOCK_TIMEOUT=(\d+)", prune_code)
+    assert lock, (
+        "the prune step does not bound `UV_LOCK_TIMEOUT`. `uv`'s default cache-lock "
+        "wait is 300 s — longer than this step's 1 m bound — so on any host where "
+        "another uv process holds the cache (the normal case on a shared pool) "
+        "the step is killed mid-wait, pruning nothing while the bound reads as if "
+        "it held. Set it inline, below the step bound.")
+    assert int(lock.group(1)) < prune_bound * 60, (
+        f"the prune step's `UV_LOCK_TIMEOUT` is {lock.group(1)}s against a "
+        f"`timeout-minutes: {prune_bound}` ({prune_bound * 60}s) — the wait must be "
+        "decided INSIDE the step bound, or the bound cannot fire before the "
+        "wait does.")
+    assert order[id(prune)] < order[id(uv_save)], (
+        "`uv cache prune` must run BEFORE the save, or it bounds nothing")
+
+    # The legacy shared key must be fully retired: no reader, no writer, on
+    # EITHER key axis — `key` and `restore-keys` both point a step at a cache
+    # entry, and reading `key` alone left the second axis unexamined (measured:
+    # a workflow carrying `restore-keys: uv-pip-` passed this arm before it read
+    # the refs primitive).
+    #
+    # What that costs depends on `path`, and the two shapes are NOT equivalent:
+    # `@actions/toolkit` derives ONE cache `version` from the resolved `path`
+    # list and applies it to the primary key and every `restore-key` alike
+    # (`getCacheEntry(keys, paths)` → `version = getCacheVersion(paths)`), which
+    # is the same reason this function's PATH-IDENTITY arm above can state that
+    # "a restore pointed one directory off can never match". So:
+    #   · a step that KEEPS the combined `path:` list (both trees) behind a
+    #     migrated `key:` still reaches the retired combined entry — the damaging
+    #     shape, and the one this arm exists for;
+    #   · a step narrowed to `path: ~/.cache/uv` misses the combined entry anyway
+    #     — safe by accident, not by anything this arm guarantees.
+    # The arm therefore enforces the rule ("nothing references a retired key"),
+    # which is the property that stays true regardless of which `path` a later
+    # edit happens to carry.
+    def _legacy_uv_pip_refs(workflow: dict) -> list:
+        """Every step in the workflow that still points at the retired key.
+
+        Takes the WHOLE workflow, not a jobs dict, so the population is inside
+        the pinned unit: a scan that walks only `jobs["test"]` is a real
+        regression (the `pip-` writers live in sibling jobs) and the probes
+        below fail for exactly that. A thin specialization of the module-level
+        `_steps_naming_key` (one implementation), extracted from the assertion
+        below for the same reason the call site is pinned at all: a probe that
+        only exercises the accessor directly stays green if THIS scan is later
+        narrowed back to `_key_of` — measured on the revision before the pin,
+        where the reverted scan passed on BOTH the clean and the mutated
+        workflow, which is the silent regression the probe exists for.
+        """
+        return _steps_naming_key(workflow.get("jobs") or {}, "uv-pip-")
+
+    # ⛔ PIN THE CALL SITE — all three halves of it, one assertion each. Each of
+    # these fails for exactly ONE plausible regression of this arm, and each
+    # mutation was measured on a copy of this file:
+    #   · the scan reads `key:` alone instead of both fields -> the
+    #     `restore-keys` probes stop seeing the marker;
+    #   · the refs primitive is narrowed to `restore-keys` alone -> the `key`
+    #     probe stops seeing it;
+    #   · the scan walks only `jobs["test"]`             -> the sibling-job
+    #     probe stops seeing it.
+    _combined_path_step = {
+        "name": "Restore uv dependency cache",
+        "with": {"path": "~/.cache/uv\n~/.cache/pip",
+                 "key": "uv-cache-Linux-abc",
+                 "restore-keys": "uv-pip-Linux-"}}
+    _narrowed_path_step = {
+        "name": "Restore uv dependency cache",
+        "with": {"path": "~/.cache/uv",
+                 "key": "uv-cache-Linux-abc",
+                 "restore-keys": "uv-pip-Linux-"}}
+    _key_axis_step = {
+        "name": "Restore uv dependency cache",
+        "with": {"path": "~/.cache/uv\n~/.cache/pip",
+                 "key": "uv-pip-Linux-abc",
+                 "restore-keys": "uv-cache-Linux-"}}
+    _clean_step = {
+        "name": "Restore uv dependency cache",
+        "with": {"path": "~/.cache/uv",
+                 "key": "uv-cache-Linux-abc",
+                 "restore-keys": "uv-cache-Linux-"}}
+
+    # Both `path:` shapes are probed and both must be flagged, because the rule
+    # this arm enforces is path-INDEPENDENT — but keep the fixtures' markers on
+    # `restore-keys` ALONE, or the probe stops demonstrating the axis it adds.
+    for _probe in (_combined_path_step, _narrowed_path_step):
+        assert "uv-pip-" not in _key_of(_probe), (
+            "this probe must be invisible on the `key` axis, or it does not "
+            "demonstrate the axis the refs primitive adds")
+        assert _legacy_uv_pip_refs({"jobs": {"test": {"steps": [_probe]}}}), (
+            "the retirement scan cannot see a `restore-keys` reference "
+            f"({_probe['with']['path']!r}): `restore-keys` is a key axis like "
+            "`key`, and the rule is that NOTHING references a retired key, "
+            "whichever `path` a later edit carries (#11063)")
+
+    # …and the OTHER axis, which the probes above cannot cover: with every
+    # marker on `restore-keys`, narrowing the refs primitive to `restore-keys`
+    # alone would leave all of them green while a `key: uv-pip-` step kept
+    # restoring the retired combined archive.
+    assert "uv-pip-" not in str(_key_axis_step["with"]["restore-keys"]), (
+        "this probe must carry its marker on the `key` axis alone, or it does "
+        "not demonstrate that the refs primitive reads `key` too")
+    assert _legacy_uv_pip_refs({"jobs": {"test": {"steps": [_key_axis_step]}}}), (
+        "the retirement scan cannot see a `key: uv-pip-` reference — the refs "
+        "primitive must read BOTH axes, and narrowing it to `restore-keys` "
+        "alone leaves the retired key usable and this pin green (#11063)")
+
+    # …and the POPULATION: the scan has to walk every job, not just `test`. The
+    # live workflow's retired-key writers sit in sibling jobs, and a check that
+    # only reads `test` would call that clean.
+    _sibling_legacy = {
+        "jobs": {"test": {"steps": [_clean_step]},
+                 "test-slow": {"steps": [_key_axis_step]}}}
+    assert _legacy_uv_pip_refs(_sibling_legacy), (
+        "the retirement scan does not walk every job — a legacy reference in a "
+        "sibling job would read green (#11063)")
+
+    assert not _legacy_uv_pip_refs({"jobs": {"test": {"steps": [_clean_step]}}}), (
+        "the retirement scan flags a step that references nothing retired — a "
+        "false red here would push the next editor to drop the axis again")
+
+    legacy = _legacy_uv_pip_refs(wf)
+    assert not legacy, (
+        f"`uv-pip-` is still referenced {legacy} (on `key` or `restore-keys`). "
+        "The key is retired: pip is read "
+        "from the shared `pip-` key and uv is written under `uv-cache-`. Anything "
+        "left on the combined key restores both trees into one step again, which "
+        "is the 3.88 GB archive (#11063).")
+
+    # Any DEPENDENCY-cache write kept in this job must be explicit AND bounded: an
+    # unbounded save is the defect (#11063) — it killed a green shard at the cap.
+    #
+    # ⛔ The one writer OUTSIDE `~/.cache` is admitted BY NAME, never by omission
+    # (#11065 cycle 3, review finding). The previous scope was a `~/.cache` substring
+    # test, so a NEW unbounded save on any other path — `~/.cargo`, `node_modules`, a
+    # repo-relative tree — read GREEN: the exact #11063 shape, one path over. Naming
+    # the admitted exception makes the NEXT writer red instead of invisible.
+    _ADMITTED_OUTSIDE_CACHE = "Save pytest last-failed state (#6142)"
+    _outside = {s.get("name") for s in steps
+                if _is_writer(s) and "~/.cache" not in _path_of(s)}
+    # ⛔ `map(str, …)` because unnamed steps are NORMAL in this job: the mixed set raised
+    # `TypeError: '<' not supported between 'str' and 'NoneType'` and the whole diagnostic —
+    # the admitted exception AND the remedy — was lost behind a crash (#11065 review, P3).
+    assert _outside <= {_ADMITTED_OUTSIDE_CACHE}, (
+        "the `test` job carries cache write(s) on a path outside `~/.cache` that "
+        f"this pin does not admit: {sorted(map(str, _outside - {_ADMITTED_OUTSIDE_CACHE}))}. "
+        f"The only admitted one is {_ADMITTED_OUTSIDE_CACHE!r} (`.pytest_cache`, "
+        "payload measured at 23 s, `continue-on-error`, independent owner in "
+        "tests/test_ci_last_failed.py). Any OTHER write on a non-`~/.cache` path is the "
+        "#11063 defect — it is charged against the job cap and withholds a REQUIRED check "
+        "on a green shard. EXACTLY TWO THINGS CLEAR THIS ARM: move the path under "
+        "`~/.cache` (which hands the step to the boundedness loop below, where a positive "
+        "`timeout-minutes` and `continue-on-error` are what it checks), or add the step's "
+        "name to `_ADMITTED_OUTSIDE_CACHE` above — a `timeout-minutes` ALONE does NOT "
+        "clear it (#11065 review, finding 7: an earlier version of this message said it "
+        "did, and a bounded save on `~/.cargo` reds).")
+    for s in (st for st in steps if _is_writer(st)
+              and "~/.cache" in _path_of(st)):
+        bound = s.get("timeout-minutes")
+        assert isinstance(bound, int) and bound > 0, (
+            f"the `test` job's cache write {s.get('name')!r} carries no positive "
+            f"integer `timeout-minutes` (got {bound!r}) — that is the UNBOUNDED "
+            "post-step shape that reds a required check (#11063/#10182)")
+        assert s.get("continue-on-error") is True, (
+            f"the cache write {s.get('name')!r} must be `continue-on-error: true`: "
+            "a save aborted at its bound is a MISS, and a missing cache must never "
+            "red a shard whose suite passed (#5219)")
+
+    # The HF key takes the READ-ONLY remedy: three sibling jobs write it.
+    hf_here = [s for s in steps if "~/.cache/huggingface" in _path_of(s)]
+    assert hf_here, (
+        "the `test` job no longer restores the HF embedding cache — the dense "
+        "leg would download from huggingface.co on every run")
+    hf_saves = [_uses_of(s) for s in hf_here if _is_writer(s)]
+    assert not hf_saves, (
+        f"the HF cache is now SAVED by the `test` job again {hf_saves}. Its post "
+        "step measured 8 m 57 s for a 78,130,925 B archive on run 42000057137 "
+        "— 5.5x what the carve-out job measured for the same cache — and three "
+        "sibling jobs carry `hf-embedding-cache-v2-<os>`'s writer, one of them on "
+        "this job's own `python == 'true'` gate, so this job's save buys nothing "
+        "(#11063/#10327)")
+    hf_restores = [s for s in hf_here if _uses_of(s).split("@")[0].strip().lower() == "actions/cache/restore"]
+    assert len(hf_restores) == 1 and hf_restores[0].get("continue-on-error") is True, (
+        "the HF restore must be exactly one `actions/cache/restore@v4` with "
+        "`continue-on-error: true`")
+    assert _path_of(hf_restores[0]).strip() == "~/.cache/huggingface", (
+        f"the HF restore reads {_path_of(hf_restores[0]).strip()!r}, not "
+        "`~/.cache/huggingface`. `path` is part of the cache's VERSION, so this "
+        "is a permanent MISS on an entry three sibling jobs keep warm — the "
+        "dense leg then re-downloads the embedder from huggingface.co on every "
+        "run, which is the transfer that died in the filed incident "
+        "(#11063 cycle 5 finding 2).")
+    hf_key = _key_of(hf_restores[0])
+    hf_writers = [jid for jid, jd in wf["jobs"].items() if jid != "test"
+                  for s in (jd.get("steps") or [])
+                  if hf_key.split("${{")[0] in _key_of(s) and _is_writer(s)]
+    assert hf_writers, (
+        "no other job writes the HF key any more — restore-only here would then "
+        "empty it and re-download the embedder from huggingface.co every run. "
+        "Re-derive this remedy rather than leaving a stale premise.")
+
+    # ⛔ THE SAME LOAD-BEARING ARM THE PIP HALF CARRIES, applied to HF (review finding,
+    # 2026-11-06). A writer that runs LESS OFTEN than this job empties the key this job reads,
+    # and a COUNT of writers cannot tell that apart: `test-slow` (`slow_run`) and
+    # `test-carve-out` (`carve_out_run`) are both diff-gated, so `hf_writers` can be non-empty
+    # while every writer that fires on a run reaching this job has been gated away. Measured by
+    # the reviewer on this head: converting `test-concurrency-falkor`'s HF step — the one writer
+    # that shares this job's `python == 'true'` gate — to the same restore-only shape this PR
+    # prescribes left the pin GREEN (`1 passed`), i.e. it certified the remedy after its premise
+    # was gone. EXACT gate strings, never a prefix (the pip arm's own lesson: a `startswith("always()")`
+    # test accepts the diff-gated `always() && … carve_out_run == 'true'`).
+    hf_broader = {test_gate, "always()", "always() && needs.changes.result == 'success'"}
+    hf_load_bearing = [jid for jid in hf_writers if _gate_of(jid) in hf_broader]
+    assert hf_load_bearing, (
+        f"every job writing the shared HF key is diff-gated away from this job's own run: "
+        f"{[(jid, _gate_of(jid)) for jid in hf_writers]} vs this job's `{test_gate}`. A writer "
+        "that needs `slow_run`/`carve_out_run` does not populate the key on a run that still "
+        "executes `test`, so this job becomes a permanent restore-only reader and every shard "
+        "re-downloads the embedder from huggingface.co (#4387, #2573). `test-concurrency-falkor` "
+        "is the writer that shares this job's gate.")
+
+    # ⛔ THE READ SIDE OF THE SAME SPLIT (#11065 cycle 8, P2). `restore-keys`
+    # entries are PREFIX matches, so a restore whose `key:` was migrated to
+    # `uv-cache-…` but whose `restore-keys:` still reads `uv-pip-…` restores the
+    # combined 3.88 GB archive into `~/.cache/uv` — the prune does not know to
+    # drop the `pip/` tree it extracts, and the next bounded save re-uploads it
+    # under `uv-cache-…`. That is #11063 re-landed with this pin green, which is
+    # why each of this job's three readers is checked on its whole `with:` block
+    # and not on `key:` alone.
+    for label, reader in (("pip", pip_restore), ("uv-cache", uv_restore),
+                          ("hf", hf_restores[0])):
+        stray = _cross_family_restore_keys(reader)
+        assert not stray, (
+            f"the `{label}` restore's `restore-keys:` leave its own key family: "
+            f"{stray} against key root {_cache_roots_of(reader)['key']}. "
+            "`restore-keys` are PREFIX matches, so a foreign root restores "
+            "another cache's archive into this root while `key:` still reads "
+            "correct — the #11063 payload mixing, from the read side.")
+
+    # Arm 2 of `docs/ops/ci-wall-clock.md` §2: the cap must clear SUM x 1.5.
+    # Terms the FILE can state are PARSED out of it; the rest are MEASUREMENTS from
+    # the run that filed #11063, named, dated and sized as such — not dressed as
+    # file facts. The earlier revision claimed "every term is read from the file
+    # (or parsed from it)" over two restated literals, and the one that mattered
+    # (`setup = 3`, which was `Set up job` ALONE) was the term that decided
+    # #11065 cycle 2's finding 1.
+    from tools.ci_selection import fast_matrix_include, push_legs
+    fast = fast_matrix_include(push_legs(load_manifest())["shards"])["include"]
+    worst_watchdog = max(int(e["watchdog_minutes"]) for e in fast)
+    pre_phase = _test_job_pre_phase_watchdog_minutes(steps)
+    embedders = [s for s in steps
+                 if str(s.get("name") or "").startswith("Embedding model REQUIRED")]
+    assert len(embedders) == 1, (
+        f"expected one embedder-provision step in the `test` job, found "
+        f"{len(embedders)} — the SUM below would then be wrong")
+    embedder = embedders[0].get("timeout-minutes")
+    assert isinstance(embedder, int) and embedder > 0, (
+        "the embedder-provision step must keep its own `timeout-minutes` — it is "
+        "a term in the job's SUM")
+    # MEASURED on run 42000057137 / job `test (d)` (`actions/jobs/127165076497`,
+    # step timestamps). These are the terms the workflow cannot state as a file
+    # fact, so they are stated HERE as the measurements they are:
+    #   `Set up job`                    10:21:30 -> 10:24:32          182 s = 3.03 m
+    #   other UNCAPPED pre-suite steps  10:24:32 -> 10:28:58          266 s = 4.43 m
+    #     that window MINUS the embedder's own measured 12 s (10:26:59 -> 10:27:11;
+    #     its 6 m cap is a term above, so counting its elapsed time here too would
+    #     double-count it) = 254 s = 4.23 m. The steps in it are: resolve-artifact-
+    #     paths 1 s, checkout 14 s, setup-python 1 s, setup-node 1 s, uv restore
+    #     4 s, install-cpu-torch 5 s, `pip install -e` 9 s, reap 0 s, HF restore
+    #     112 s, FalkorDB provision 45 s, compute-uri 0 s, coverage manifest 61 s,
+    #     lastfailed restore 1 s.
+    #     An earlier revision derived 3.60 m here by subtracting 50 s for the
+    #     embedder — a figure this job's own record contradicts (12 s), which
+    #     understated the term by 0.63 m. Counting it at zero is what let a 12 m
+    #     save bound look like it cleared the cap: worst-case pre-suite is 12.65 m,
+    #     not 3 m.
+    setup = 3.03               # measured 182 s, above
+    uncapped_pre_suite = 4.23  # measured 254 s, above
+    lastfailed = 0.38          # measured 23 s (10:45:07 -> 10:45:30), same run
+    # The cache-write term IS a file fact now: the two bounds this job declares.
+    cache_write = prune_bound + save_bound
+    total = (pre_phase + worst_watchdog + embedder + setup + uncapped_pre_suite
+             + lastfailed + cache_write)
+    cap = job["timeout-minutes"]
+    assert total * 3 / 2 <= cap, (
+        f"the `test` job's SUM ({pre_phase}m pre-phase + {worst_watchdog}m worst "
+        f"shard watchdog + {embedder}m embedder + {setup}m `Set up job` + "
+        f"{uncapped_pre_suite}m uncapped pre-suite + {lastfailed}m last-failed "
+        f"save + {cache_write:g}m prune+uv-cache-save = {total:g}m) x 1.5 = "
+        f"{(total * 3 / 2):g}m no longer clears its {cap}m cap. Arm 2 "
+        "(docs/ops/ci-wall-clock.md §2) requires the x1.5 margin on the SUM, not "
+        "the median, and a save killed at the cap reds a REQUIRED check (#5219). "
+        "The pre-suite terms are the ones to shrink: raising the cap instead "
+        "re-opens #3239's stale-head exposure.")
+
+    # The §2 row's OWN watchdog figure must be the one the tool emits. `df8adb90a`
+    # restated 27 m while `--emit-push-matrix` emitted 26 m, so the doc and the pin
+    # disagreed by a minute on the same SUM and neither was checkable at a glance
+    # (#11065 cycle 2, finding 3). Parsed from the doc, compared to the emission:
+    # prose restating a computed constant is exactly how a constant goes stale.
+    wall = (Path(__file__).resolve().parents[1]
+            / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    stated = re.search(r"the emitted \*\*(\d+) m\*\* per-shard|the emitted (\d+) m per-shard",
+                       wall)
+    assert stated, (
+        "docs/ops/ci-wall-clock.md §2 no longer states the emitted per-shard "
+        "watchdog in a form this pin can read (`the emitted <N> m per-shard`), so "
+        "the doc and the emission cannot be compared — restore the phrase or "
+        "update this arm with it")
+    stated_n = int(stated.group(1) or stated.group(2))
+    assert stated_n == worst_watchdog, (
+        f"docs/ops/ci-wall-clock.md §2 states the emitted per-shard watchdog as "
+        f"{stated_n} m, but `--emit-push-matrix` emits {worst_watchdog} m. The "
+        "row's SUM, and the headroom the workflow comment quotes from it, are "
+        "computed from this term: a doc that restates it wrongly makes the "
+        "arithmetic unfalsifiable (#11065 cycle 2, finding 3).")
+
+    # An `id:` on a cache step is a CONTRACT (`steps.<id>.outputs.cache-hit`,
+    # `steps.<id>.outcome`) — `actions/cache` exposes nothing else through it. An id
+    # nothing reads is either a leftover or a consumer somebody meant to write, and
+    # in both cases it reads as a gate that is not there (#11065 cycle 2, finding 7:
+    # `id: uvpip-cache` / `id: hf-cache` were declared here and referenced nowhere,
+    # `grep -n 'cache-hit'` = 0).
+    wf_text = (Path(__file__).resolve().parents[1]
+               / ".github" / "workflows" / "python-ci.yml").read_text()
+    for s in (st for st in steps
+              if _uses_of(st).startswith("actions/cache") and st.get("id")):
+        assert f"steps.{s['id']}." in wf_text, (
+            f"the cache step {s.get('name')!r} declares `id: {s['id']}` but no "
+            f"`steps.{s['id']}.…` reference exists anywhere in the workflow, so the "
+            "id is inert. Either add the consumer (`cache-hit` / `outcome`) or drop "
+            "the `id:` — an unused id reads as a gate that is not there.")
+
+
+def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
+    """#11065 round 5 (ISSUE 1): the anchor must be the block, not "first in the file".
+
+    The arm that judges the `test` job's `⛔ OVERRIDES:` block located its subject with
+    `next(ln for ln in <whole workflow> if "⛔ OVERRIDES:")`, so it judged whichever
+    departure marker came FIRST in `python-ci.yml` — measured at `60981107a8` as a
+    fail-open (a degraded real block read GREEN once an unrelated marker was inserted
+    above it) AND a false block (that unrelated marker reddened a correct real block).
+
+    Both directions are replayed here on a MUTATED copy of the real workflow text, so
+    the proof is non-vacuous without editing the shipped file: the pre-fix locator is
+    re-implemented inline (`first marker in the file`) and must MISS in each direction
+    while `_test_job_cache_overrides_block` must SEE. Nothing else about the block is
+    altered — the decoy is comments only, and the banned sentence is the exact one the
+    arm exists to catch.
+    """
+    wf_lines = (Path(__file__).resolve().parents[1]
+                / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
+    prune_name = str(next(s for s in _load_python_ci()["jobs"]["test"]["steps"]
+                          if "uv cache prune" in str(s.get("run") or "")).get("name") or "")
+    real = _test_job_cache_overrides_block(wf_lines, prune_name)
+    # The shipped text is clean: the arm's subject is the uv block, nothing is misattributed.
+    assert _overrides_payload_misattribution(real) is None
+    assert "~/.cache/uv" in real and "uv sync --frozen" in real
+
+    def _pre_fix_locator(lines: list[str]) -> str:
+        """The locator this test replaces: the FIRST `⛔ OVERRIDES:` in the file."""
+        start = next(i for i, ln in enumerate(lines) if "⛔ OVERRIDES:" in ln)
+        block: list[str] = []
+        for ln in lines[start:]:
+            if re.match(r"\s*#\s*ARM \d", ln):
+                break
+            block.append(ln)
+        return "\n".join(block)
+
+    decoy = [
+        "      # ⛔ OVERRIDES: an unrelated departure declared by a job ABOVE this one —",
+        "      # the shape `AGENTS.md` guarantees will keep appearing in this workflow.",
+        "      # ARM 9",
+        "      #",
+    ]
+    hdr = next(i for i, ln in enumerate(wf_lines) if _TEST_JOB_CACHE_SECTION_HDR in ln)
+    decoyed = wf_lines[:hdr] + decoy + wf_lines[hdr:]
+
+    # ── A1′ — a decoy above, real block untouched and CORRECT ──────────────────────
+    # Pre-fix: judges the decoy, which names neither `~/.cache/uv` nor `uv sync --frozen`
+    # -> false block on a correct block. Now: still the real block -> clean.
+    assert "~/.cache/uv" not in _pre_fix_locator(decoyed), (
+        "the pre-fix locator no longer misses the real block — this mutation no longer "
+        "demonstrates the false-block direction, so the proof is stale")
+    anchored = _test_job_cache_overrides_block(decoyed, prune_name)
+    assert anchored == real, (
+        "an unrelated `⛔ OVERRIDES:` block inserted above this job's dependency-caches "
+        "section re-routed the arm away from the block it governs — the locator is "
+        "anchored by position again instead of by the step the block documents")
+    assert _overrides_payload_misattribution(anchored) is None
+
+    # ── A1 — the same decoy above, and a FALSE attribution inside the REAL block ───
+    banned = "      # #7612's payload is in `~/.cache/uv`."
+    arm_at = next(i for i, ln in enumerate(decoyed) if re.match(r"\s*#\s*ARM 2", ln))
+    degraded = decoyed[:arm_at] + [banned] + decoyed[arm_at:]
+    # Pre-fix: reads the decoy, sees no claim -> GREEN while the real block asserts the
+    # exact falsehood that reddens a payload-SHRINKING change. That is the fail-open.
+    assert _overrides_payload_misattribution(_pre_fix_locator(degraded)) is None, (
+        "the pre-fix locator caught the false attribution — this mutation no longer "
+        "demonstrates the fail-open the anchoring fix closes")
+    # Now: the real block, so the claim is judged and the arm reds.
+    seen = _test_job_cache_overrides_block(degraded, prune_name)
+    assert _overrides_payload_misattribution(seen) is not None, (
+        "a false `#7612` attribution inside the governed `OVERRIDES:` block read GREEN "
+        "once an unrelated marker existed above it — the arm is judging the wrong block")
+    assert "~/.cache/uv" in seen and "uv sync --frozen" in seen, (
+        "the arm must still judge the real block when a decoy sits above it")
+
+    # ── a marker that is NOT attached to this block fails closed ────────────────────
+    # The anchor is lost (the real marker is gone) and the only one left is in `changes`,
+    # a job above, separated from this block by CODE lines. The locator must RAISE rather
+    # than quietly judge the wrong departure — that is the whole difference between a pin
+    # on "this block" and a pin on "whatever marker came first".
+    real_marker = next(i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln)
+    jobs_at = next(i for i, ln in enumerate(wf_lines) if ln.rstrip() == "jobs:")
+    dropped = (wf_lines[:real_marker]
+               + [wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)")]
+               + wf_lines[real_marker + 1:])
+    detached = dropped[:jobs_at] + decoy + dropped[jobs_at:]
+    with pytest.raises(AssertionError, match="different block"):
+        _test_job_cache_overrides_block(detached, prune_name)
+
+    # ── a SECOND marker inside the section is refused, not tie-broken ────────────────
+    inside = wf_lines[:hdr + 1] + decoy + wf_lines[hdr + 1:]
+    with pytest.raises(AssertionError, match="carries 2"):
+        _test_job_cache_overrides_block(inside, prune_name)
+
+
+def test_the_cache_key_scan_reads_restore_keys_and_not_key_alone():
+    """#11065 cycle 8 (P2): a cache guard is only as wide as the fields it reads.
+
+    The retirement scan and the reader arms above claim "no reader, no writer" of
+    the retired `uv-pip-` key. Read through `with.key` alone, that claim is false
+    for exactly the shape that matters: `actions/cache` walks `restore-keys` as
+    PREFIX matches on a primary miss (`docs.github.com` -> "Dependency caching
+    reference"; `actions/cache` README — a prefix match restores the newest entry
+    that starts with it and reports `cache-hit == 'false'`). A step can therefore
+    keep a neutral `uv-cache-…` primary key, carry `restore-keys: uv-pip-…`, pass
+    the old key-only scan, and still restore the combined 3.88 GB archive that
+    #11063 split.
+
+    Non-vacuous in both directions, on synthetic steps so the assertion is the
+    predicate itself and not the live file: the neutral-key/legacy-restore-key
+    step IS reported (the pre-fix scan, `"uv-pip-" in _key_of(s)`, reports
+    nothing here), a fully migrated step is NOT reported (the scan cannot pass by
+    reporting everything), and a `restore-keys` root that stays in its own family
+    — equal or narrower — is accepted by the crossing predicate.
+    """
+    # 1. `_cache_refs_of` reads BOTH fields — the primitive the rest rests on.
+    both = {"with": {"key": "uv-cache-${{ runner.os }}-",
+                      "restore-keys": "uv-pip-${{ runner.os }}-\n"}}
+    assert "uv-cache-" in _cache_refs_of(both)
+    assert "uv-pip-" in _cache_refs_of(both), (
+        "`_cache_refs_of` does not read `restore-keys:` — a reader with a neutral "
+        "primary key and the retired key as a restore key then reads as retired")
+    assert _cache_refs_of({"with": {"key": "uv-cache-"}}).strip() == "uv-cache-"
+
+    # 2. The gap itself: a neutral `key:` plus a legacy `restore-keys:` is a
+    #    READER of `uv-pip-`, and the whole-workflow scan must say so.
+    smuggled = {"test": {"steps": [
+        {"name": "Restore uv dependency cache",
+         "uses": "actions/cache/restore@v4",
+         "with": {"path": "~/.cache/uv",
+                  "key": "uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}",
+                  "restore-keys": "uv-pip-${{ runner.os }}-\n"}},
+    ]}}
+    assert _steps_naming_key(smuggled, "uv-pip-") == [
+        ("test", "Restore uv dependency cache")], (
+        "the retirement scan missed a step that REACHES the retired `uv-pip-` key "
+        "through `restore-keys:` — a prefix match restores a cache written under "
+        "that key, which is the 3.88 GB combined pip+uv archive (#11063)")
+
+    # 3. …and it cannot pass by reporting everything: the migrated shape is clean.
+    migrated = {"test": {"steps": [
+        {"name": "Restore uv dependency cache",
+         "uses": "actions/cache/restore@v4",
+         "with": {"path": "~/.cache/uv",
+                  "key": "uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}",
+                  "restore-keys": "uv-cache-${{ runner.os }}-\n"}},
+    ]}}
+    assert _steps_naming_key(migrated, "uv-pip-") == []
+
+    # 4. The read-side crossing predicate: a foreign (or broader) restore-key
+    #    root is reported, an equal-or-narrower one is not.
+    assert _cross_family_restore_keys(smuggled["test"]["steps"][0]) == [
+        "uv-pip-"], (
+        "a `restore-keys` root outside the primary key's family was accepted — a "
+        "prefix match then restores another cache's archive into this root while "
+        "`key:` still reads correct")
+    assert _cross_family_restore_keys(migrated["test"]["steps"][0]) == []
+    narrower = {"with": {"key": "pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}",
+                         "restore-keys": "pip-Linux-\n"}}
+    assert _cross_family_restore_keys(narrower) == [], (
+        "a NARROWER restore-key root is legitimate (it can only reach this "
+        "family's entries) and must not red — a false block here would push the "
+        "next lane to delete the prefix recovery path")
+    broader = {"with": {"key": "uv-cache-${{ runner.os }}-",
+                        "restore-keys": "uv-\n"}}
+    assert _cross_family_restore_keys(broader) == ["uv-"], (
+        "a BROADER restore-key root (`uv-`) matches `uv-pip-…` too, so it must be "
+        "rejected like a foreign one")
+
+    # 5. And the live file: every cache step's `restore-keys:` stay in its own
+    #    key family, so the arm above is asserting something true of the tree it
+    #    guards and not only of the fixtures (#11065 cycle 8's own check: all
+    #    twelve live `restore-keys:` fields are `pip-`, `uv-cache-`, `hf-` or
+    #    `pytest-lastfailed-`, none crossing).
+    wf = _load_python_ci()
+    crossing = [(jid, s.get("name"), _cross_family_restore_keys(s))
+                for jid, jd in wf["jobs"].items()
+                for s in (jd.get("steps") or [])
+                if (s.get("with") or {}).get("restore-keys")
+                and _cross_family_restore_keys(s)]
+    assert not crossing, (
+        f"cache step(s) restore through `restore-keys:` roots outside their own "
+        f"key family: {crossing}. A prefix match on a foreign root restores "
+        "another cache's archive into this step's path — the payload mixing "
+        "#11063 split, from the read side (#11065 cycle 8, P2)")
+
+
+def _test_job_pre_phase_watchdog_minutes(steps: list) -> int:
+    """The last-failed pre-phase's OWN watchdog, parsed from the run step.
+
+    It is a `timeout -s INT -k 10 <N>m` inside the pytest step (#6142). Parsed
+    rather than hardcoded: if it moves, the arm-2 SUM in the pin above must move
+    with it, and a restated literal is how a constant goes stale.
+    """
+    pattern = re.compile(r"timeout -s INT -k 10 (\d+)m ")
+    found = sorted({int(m) for s in steps
+                    for m in pattern.findall(str(s.get("run") or ""))})
+    assert len(found) >= 1, (
+        "could not parse any `timeout -s INT -k 10 <N>m` watchdog from the "
+        "`test` job's run steps — the pre-phase term of the arm-2 SUM is "
+        "unreadable, so this pin cannot bound anything")
+    # ⛔ EXACTLY ONE (#11065 cycle 4, finding 5). Taking `found[0]` of a sorted set
+    # silently returns the SMALLEST, so a second, larger pre-phase watchdog would
+    # leave this SUM term at the old value and WEAKEN the cap arm instead of
+    # reddening it — the inverse of "parse it, don't restate it".
+    assert len(found) == 1, (
+        f"the `test` job now carries {len(found)} distinct `timeout -s INT -k 10 "
+        f"<N>m` watchdogs {found}m, so the pre-phase term of the arm-2 SUM is "
+        "ambiguous. Sum them here deliberately, or keep one — do not let the "
+        "smallest stand in for the job's pre-phase budget.")
+    return found[0]
 
 
 def _carve_matrix() -> dict:
@@ -14306,6 +16701,59 @@ def test_seal_session_events_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def _pin_reference_scan(lines: list[str], root: Path) -> tuple[int, list[str]]:
+    r"""Resolve every `Pinned by tests/….py::name` citation in `lines`.
+
+    Returns `(refs_seen, violations)` — the count is what the caller's non-vacuity
+    floor reads, and each violation is a citation that names nothing.
+
+    #11004 review P2: a citation is written in THREE shapes in `tools/ci_selection.py`,
+    # and the first version of this scan checked only the first two. The third is the
+    # shape where the citation line ENDS at `::` and the whole name sits on the next
+    # comment line — 31 of the file's 104 citations at the #11004 head, so a fabricated
+    # name written that way read as verification while verifying NOTHING and the pin
+    # stayed green. The `(\w*)` group (not `(\w+)`) is what makes that shape reachable:
+    # with `(\w+)` the regex demanded a name character after `::` and matched nothing.
+
+      1. on one line — `…::test_x`
+      2. wrapped MID-name — `…::test_x_` / `# the_rest.`
+      3. `::` ends the line — `…::` / `# TestName`   <- the shape this closes
+
+    For 2 and 3 both the bare name and `name + <first word of the next comment line>`
+    are candidates; the citation resolves if EITHER names a real `def`/`class`, so a
+    wrap is not mistaken for a dangling reference (and vice versa). The next-line word
+    keeps its leading case because shape 3 also cites `class` names. A citation with
+    NO resolvable name at all (a bare `file::`) is a violation, never a skip.
+    """
+    refs: list[tuple[str, list[str]]] = []
+    for i, line in enumerate(lines):
+        for m in re.finditer(r"(tests/[\w./-]+\.py)::(\w*)", line):
+            relpath, name = m.group(1), m.group(2)
+            candidates = [name] if name else []
+            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if not line[m.end():].strip() and nxt.startswith("#"):
+                words = nxt.lstrip("#").strip().split()
+                first = words[0].rstrip(".,;:`)") if words else ""
+                if re.fullmatch(r"[A-Za-z_]\w*", first):
+                    candidates.append(name + first)
+            refs.append((relpath, candidates))
+
+    violations = []
+    for relpath, candidates in refs:
+        label = " | ".join(candidates) if candidates else "<no name after ::>"
+        path = root / relpath
+        if not path.exists():
+            violations.append(f"{relpath}::{label} (no such file)")
+            continue
+        body = path.read_text(encoding="utf-8")
+        if not candidates or not any(
+            re.search(rf"^(?:def|class)\s+{re.escape(name)}\b", body, re.M)
+            for name in candidates
+        ):
+            violations.append(f"{relpath}::{label}")
+    return len(refs), violations
+
+
 def test_every_pin_reference_in_ci_selection_names_a_test_that_exists():
     # #10976 / #11004 review P2: every `Pinned by tests/….py::name` citation is what
     # makes "Pinned by" CHECKABLE — a reader greps the name and confirms the guard.
@@ -14316,36 +16764,103 @@ def test_every_pin_reference_in_ci_selection_names_a_test_that_exists():
     # `test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it` (above).
     root = Path(__file__).resolve().parents[1]
     lines = (root / "tools/ci_selection.py").read_text(encoding="utf-8").splitlines()
-
-    # A citation may be WRAPPED across comment lines (`…::test_x_` / `# the_rest.`),
-    # so a name that ends its line inside a comment also offers `name + <next word>`
-    # as a candidate. Both are tried; the citation resolves if EITHER names a real
-    # definition, so a wrap is not mistaken for a dangling reference (and vice versa).
-    refs: list[tuple[str, list[str]]] = []
-    for i, line in enumerate(lines):
-        for m in re.finditer(r"(tests/[\w./-]+\.py)::(\w+)", line):
-            relpath, name = m.group(1), m.group(2)
-            candidates = [name]
-            nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
-            if not line[m.end():].strip() and nxt.startswith("#"):
-                words = nxt.lstrip("#").strip().split()
-                first = words[0].rstrip(".,;:`") if words else ""
-                if re.fullmatch(r"[a-z_]\w*", first):
-                    candidates.append(name + first)
-            refs.append((relpath, candidates))
+    refs_seen, violations = _pin_reference_scan(lines, root)
 
     # Non-vacuity: the file really does cite its pins (a regex that matched nothing
-    # would pass this guard while checking nothing).
-    assert len(refs) > 50, len(refs)
+    # would pass this guard while checking nothing). Measured at the #11004 head:
+    # 104 citations in total — 73 named on the line, 31 named on the next comment
+    # line — so the floor sits well under the true count and cannot be satisfied by
+    # one shape alone. `test_pin_reference_scan_sees_the_colon_then_newline_
+    # citation_shape` is what pins the 31.
+    assert refs_seen > 50, refs_seen
+    assert not violations, f"pin reference(s) that name nothing: {violations}"
 
-    missing = []
-    for relpath, candidates in refs:
-        path = root / relpath
-        if not path.exists():
-            missing.append(f"{relpath}::{candidates[0]} (no such file)")
-            continue
-        body = path.read_text(encoding="utf-8")
-        if not any(re.search(rf"^(?:def|class)\s+{re.escape(name)}\b", body, re.M)
-                   for name in candidates):
-            missing.append(f"{relpath}::" + " | ".join(candidates))
-    assert not missing, f"pin reference(s) that name nothing: {missing}"
+
+def test_pin_reference_scan_sees_the_colon_then_newline_citation_shape():
+    # #11004 review P2, RED-FIRST: the guard above passed on the pre-fix matcher
+    # (`(\w+)`) while skipping 31 of 104 citations, because the citation line ended
+    # at `::` and the name sat wholly on the next comment line. Each case below is
+    # asserted against the real tree, so only the NAME is fabricated.
+    root = Path(__file__).resolve().parents[1]
+
+    # 1. The hole: a name that does not exist, in the `::`-then-newline form, is
+    #    REPORTED. Before the fix this scan matched nothing here and stayed silent —
+    #    which is exactly how a fabricated pin reads as verification.
+    refs_bad, violations_bad = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# test_no_such_pin_exists_xyzzy.",
+        ],
+        root,
+    )
+    assert refs_bad == 1, refs_bad
+    assert violations_bad, "the `::`-then-newline citation shape is not checked"
+    assert "test_no_such_pin_exists_xyzzy" in violations_bad[0], violations_bad
+
+    # 2. The resolving control — so case 1 cannot pass by refusing every line.
+    refs_ok, violations_ok = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# test_every_pin_reference_in_ci_selection_names_a_test_that_exists.",
+        ],
+        root,
+    )
+    assert refs_ok == 1, refs_ok
+    assert not violations_ok, violations_ok
+
+    # 3. A `class` name on the next line is the same shape (the file cites
+    #    `tests/test_website_static.py::` / `# TestMonospaceStackRendersAsAMonoFace`),
+    #    so the next-line word must keep its leading capital.
+    refs_cls, violations_cls = _pin_reference_scan(
+        [
+            "# Pinned by tests/test_ci_selection.py::",
+            "# NoSuchTestCaseClass.",
+        ],
+        root,
+    )
+    assert refs_cls == 1 and violations_cls, (refs_cls, violations_cls)
+
+    # 4. A bare `file::` with nothing resolvable after it names nothing at all —
+    #    that is a defect to report, not a citation to skip.
+    refs_bare, violations_bare = _pin_reference_scan(
+        ["# see tests/test_ci_selection.py::"], root
+    )
+    assert refs_bare == 1, refs_bare
+    assert violations_bare, "a bare `file::` citation is silently skipped"
+
+
+def test_gh_read_cache_guard_runs_on_a_tools_only_change():
+    # #11047: `tests/test_gh_read_cache.py` (registered `core`) pins
+    # `tools/gh_read_cache.py`'s FAIL-CLOSED contract — scope in the filename AND
+    # the envelope, `0 <= age < ttl` as ONE comparison, the projection in the
+    # cache identity, `decode_pages`, and a failed cache WRITE never failing a
+    # successful read. `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # `tools/gh_read_cache.py` matches no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entry a tool-only diff was filtered out BEFORE the
+    # "not matched -> core" fallback: a maintenance edit to a `_project_*`
+    # helper (which the module's own `-v2` id-bump rule says must be paired with
+    # a bump) would have run `python-ci-gate` GREEN with none of the fail-closed
+    # pins executing (the #1349/#3332/#3616 silent-drop class, the same shape as
+    # the `rail_detach.py` arm above). Mutation check: removing the CORE_ALSO
+    # entry fails the arms below (surfaces == [] and the guard absent).
+    r = _sel(["tools/gh_read_cache.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_gh_read_cache.py" in r["test_files"], r
+
+
+def test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it():
+    # #11047: the surface row is what `--integrity` reads. Without it the file was
+    # in NO surface, so the REQUIRED `manifest-integrity` leg redded on every run
+    # (measured at 695c2277f: `manifest drift: ['test_gh_read_cache.py']`) AND no
+    # leg selected the suite — the two harms have one root and one fix.
+    m = load_manifest()
+    assert "test_gh_read_cache.py" in m["surfaces"]["core"], (
+        "the file must be a `core` member or `--integrity` reds the required gate"
+    )
+    assert integrity(m) == [], integrity(m)
+    # A PR-added fast-pool file needs a `durations` row at all (the #3400/#4348
+    # trap); the VALUE is the flat default only until junit measures it.
+    assert "test_gh_read_cache.py" in m.get("durations", {}), (
+        "an absent row packs the file at the flat default AND trips the coverage floor"
+    )

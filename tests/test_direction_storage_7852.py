@@ -329,3 +329,146 @@ def test_find_operator_distinguishes_opposite_one_way_directions(sdk):
     a, b = _point(sdk, "a"), _point(sdk, "b")
     sdk.create_operator("IMPL", a["id"], [b["id"]], direction="->")
     assert sdk._find_operator("IMPL", [a["id"], b["id"]], direction="<-") is None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #10520 — a RAW-WRITTEN non-scalar direction is ABSENT, never a crash
+# ══════════════════════════════════════════════════════════════════════
+
+def test_a_raw_written_non_scalar_direction_reads_as_ABSENT_not_a_TypeError(sdk):
+    """#10520 — the ONE read-side normalizer must read junk as ABSENT.
+
+    `canonical_direction` tests membership in a frozenset and then does a dict
+    lookup on the STORED value. A raw-written non-scalar (list/map — reachable by
+    hand edit, a foreign/legacy writer, or a bulk import) is UNHASHABLE, so both
+    of those raise `TypeError: unhashable type: 'list'` instead of reading the
+    junk as absent. `None` already means "absent" to every consumer
+    (`direction_flows(None) == (True, True)` — the runtime's historical mutual
+    default), which is the same reading `claim_class.normalize` gives a junk
+    token: junk is ABSENT, never a third state and never a crash.
+
+    The EP LOAD path is the damage this pins: one junk property aborted a belief
+    run it is not about (`TortoiseEP._affected_factors` -> `factor_direction`
+    -> `direction_flows`).
+    """
+    for junk in (["sideways"], {"sideways": True}):
+        assert canonical_direction(junk) is None, (
+            f"a non-scalar {junk!r} must read as ABSENT (None), not be tested "
+            "for membership in the four-value frozenset")
+        assert direction_flows(junk) == (True, True), (
+            "an absent/unknown direction flows BOTH ways — the runtime's "
+            "historical mutual default")
+
+    # The stored-value route, on a real node: the EP load path raises on it.
+    a, b = _point(sdk, "raw junk direction source"), _point(sdk, "raw junk direction target")
+    op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+    sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) SET o.direction = ['sideways']",
+        params={"id": op["id"]},
+    )
+    proj = sdk._get_proj()
+    factors = TortoiseEP(proj)._affected_factors({a["id"]})  # must not raise
+    assert isinstance(factors, list)
+
+
+def test_a_raw_written_non_scalar_EDGE_direction_reads_as_ABSENT(sdk):
+    """#10520 — the same junk, read back as a stored EDGE value.
+
+    What this pins is the ONE read-side normalizer over a value that lives on an
+    edge: junk ⇒ ``None`` ⇒ ``direction_flows == (True, True)``. ⛔ It does NOT
+    pin a write door: ``create_direct_edge`` reads the CALLER's ``direction`` and
+    never a stored one, ``invalidate_point`` reads none of any kind (it has no
+    ``direction`` parameter and transfers no edges), and ``_connections_conflict``
+    compares two BUNDLE dicts (``_find_operator``'s exactly-once dedup is the one
+    path that does compare a stored token, but inside a Cypher predicate, so no
+    Python reader touches it) — so the crash this docstring used to attribute to
+    them cannot happen there (#11050, measured surface by surface; a docstring is
+    the only place a reader learns what a pin covers, so a wrong one sends the
+    next lane to "fix" a door that has no defect).
+    """
+    a, b = _point(sdk, "raw junk edge source"), _point(sdk, "raw junk edge target")
+    sdk.create_direct_edge("IMPL", a["id"], b["id"])
+    sdk._get_proj().g.query(
+        "MATCH (:Point {id:$a})-[r:IMPL]->(:Point {id:$b}) "
+        "SET r.direction = ['sideways']",
+        params={"a": a["id"], "b": b["id"]},
+    )
+    assert canonical_direction(_edge_stored(sdk, a["id"], b["id"])) is None
+    assert direction_flows(_edge_stored(sdk, a["id"], b["id"])) == (True, True)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# #10520 A3 — the same non-scalar, arriving through INGEST
+# ══════════════════════════════════════════════════════════════════════
+
+def test_ingest_reports_a_non_scalar_direction_as_a_SHAPE_violation(sdk):
+    """#10520 (A3) — a non-scalar ``direction`` reaches the contract as a REPORT.
+
+    ``_check_connection`` used to screen the caller's ``direction`` with
+    ``direction not in _INGEST_DIRECTION_VALUES`` — a raw frozenset membership
+    test — so a non-scalar (``["->"]``, reachable from a JS/Python caller or a
+    bulk import) raised ``TypeError: unhashable type: 'list'`` and aborted the
+    WHOLE validator with a traceback instead of returning the violation it
+    exists to return. The sibling ``to`` arm several checks above already guards
+    the identical hazard (``isinstance(t, str)`` ⇒ a SHAPE violation), so the
+    contract disagreed with itself about the same value class.
+
+    ⛔ ``TypeError`` is not a ``ValueError``, so ``pytest.raises(ValueError)``
+    below is what makes this red on the pre-fix contract: the phase-2 raise the
+    contract promises never happens, and the caller gets a traceback.
+
+    Scope note (measured): the INGEST branch this issue originally named — the
+    partial-absorb guard — reads the bundle's CALLER-SUPPLIED ``direction``
+    (``sdk.py``: ``self._canonical_direction(op_type, direction)``), never a
+    stored graph value, and ``_find_operator`` compares the stored token in a
+    CYPHER predicate; so a raw-written junk ``direction`` cannot be read there
+    at all (#11050). This arm is the one ingest surface that can hold a
+    non-scalar, so it is the one that can be pinned.
+    """
+    bundle = {
+        "points": [
+            {"ref": "ja", "kind": "statement", "content": "junk direction a"},
+            {"ref": "jb", "kind": "statement", "content": "junk direction b"},
+        ],
+        "connections": [
+            {"from": "ja", "to": "jb", "operator": "IMPL",
+             "direction": ["sideways"]},
+        ],
+    }
+    viols = sdk._validate_bundle(bundle, promotion_policy="gated")
+    assert viols, "a non-scalar `direction` is a SHAPE violation, not a clean bundle"
+    _dir_viols = [v for v in viols
+                  if v.get("section") == "connections" and "direction" in v["message"]]
+    assert _dir_viols, viols
+    # The WORDING is pinned once, here, in the commit that introduces it: the
+    # violation names the type it actually got (the sibling ``to`` shape arm's
+    # idiom) instead of the vocabulary it was tested against.
+    assert "got list" in _dir_viols[0]["message"], _dir_viols
+
+    with pytest.raises(ValueError) as exc:  # TypeError is NOT a ValueError
+        sdk.ingest(bundle, promotion_policy="gated")
+    assert "direction" in str(exc.value), str(exc.value)
+
+    # …and other non-scalar shapes, so the fix is not keyed on one shell: a
+    # mapping is unhashable too, and ``7``/``True`` are hashable-but-not-tokens.
+    for junk in ({"sideways": True}, 7, True):
+        _b = {
+            "points": [
+                {"ref": "ja", "kind": "statement", "content": "junk direction a"},
+                {"ref": "jb", "kind": "statement", "content": "junk direction b"},
+            ],
+            "connections": [
+                {"from": "ja", "to": "jb", "operator": "IMPL",
+                 "direction": junk},
+            ],
+        }
+        _viols = sdk._validate_bundle(_b, promotion_policy="gated")
+        # ⛔ The SHAPE wording, not merely the word "direction": the pre-fix
+        # vocabulary refusal ("must be one of …, got 7") also says "direction",
+        # so a bare substring test is satisfied by the behaviour this pin
+        # exists to replace, and the hashable arms would silently stop
+        # discriminating if the screen were narrowed back to unhashables.
+        _shape = [v for v in _viols if "must be a string token" in v["message"]]
+        assert _shape, (_b, _viols)
+        assert any(f"got {type(junk).__name__}" in v["message"]
+                   for v in _shape), (_b, _viols)

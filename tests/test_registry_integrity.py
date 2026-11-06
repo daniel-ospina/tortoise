@@ -102,6 +102,58 @@ def test_duplicate_sequence_entry_is_refused(tmp_path: Path) -> None:
     assert len(problems) == 1 and "duplicate entry 'test_a.py'" in problems[0]
 
 
+def test_a_duplicate_key_inside_a_nested_mapping_is_refused(tmp_path: Path) -> None:
+    """Depth is the point: `_walk` must RECURSE into `.durations` (#10894).
+
+    WHICH mutant this pins, measured rather than assumed. Every other arm in this file
+    duplicates the ROOT mapping or a `surfaces:` SEQUENCE, and all eleven of them pass
+    on a `_walk` whose mapping branch stops descending into a nested mapping **whose
+    values are all scalars** — the plausible "a dict of scalars is a leaf" shortcut
+    (measured on that mutant: `1 failed, 11 passed`, the failure being this arm). A
+    cruder mutant that never descends a mapping value at all also reds
+    `test_duplicate_sequence_entry_is_refused` (`2 failed, 10 passed`), so this arm's
+    distinct contribution is the scalar-leaf depth, not "nested-ish" in general.
+    `config/ci-surfaces.yml` carries `merge=union`, and
+    `.gitattributes` applies it to the whole FILE — so a retimed block appended on
+    both sides of a base move lands as two `durations:` rows with the SAME key, at
+    exactly the depth this suite did not reach.
+
+    Reproduced from this repo's own history rather than quoted:
+    `git merge-tree --write-tree --merge-base=76f422bd3 d99c25912 641e5f1b3` yields
+    tree `a0d401c30`, and `check_registry()` on that tree's
+    `config/ci-surfaces.yml` returns **12** duplicate keys, all at `.durations`
+    (1,254 rows over 1,242 distinct by `yaml.compose`). The head of that same merge
+    returns **0**. The required `manifest-integrity` job
+    (`.github/workflows/python-ci.yml:590`) runs this validator at every depth, so
+    it was RED for it — but nothing in THIS suite named the class, so a reviewer
+    reading only the tests saw a green tree.
+
+    A duplicated WEIGHT is the silent half: the file still parses, `safe_load`
+    keeps the LAST value, and the shard packer then uses it. This test is
+    non-vacuous in both directions — it rejects a real `.durations` duplicate and
+    passes on a clean document.
+    """
+    victim = tmp_path / "ci-surfaces.yml"
+    victim.write_text(
+        "version: 1\n"
+        "durations:\n"
+        "  test_same.py: 2.0\n"
+        "  test_other.py: 1.0\n"
+        "  test_same.py: 9.0\n",
+        encoding="utf-8",
+    )
+    problems = check_registry(victim)
+    assert len(problems) == 1, problems
+    assert "duplicate mapping key 'test_same.py' at .durations" in problems[0], problems
+
+    clean = tmp_path / "clean.yml"
+    clean.write_text(
+        "version: 1\ndurations:\n  test_same.py: 2.0\n  test_other.py: 1.0\n",
+        encoding="utf-8",
+    )
+    assert check_registry(clean) == [], "a clean nested mapping must NOT be refused"
+
+
 def test_duplicate_name_in_the_frozen_baseline_is_refused(tmp_path: Path) -> None:
     """A name-keyed comparison drops all but the last row — unverified content."""
     victim = tmp_path / "surface-manifest.yml"
@@ -195,3 +247,94 @@ def test_the_generated_rename_table_is_not_tracked() -> None:
         ["git", "-C", str(ROOT), "check-ignore", "-q", "--", GENERATED],
     )
     assert ignored.returncode == 0, f"{GENERATED} is untracked but not ignored"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# The other entry point: `ci_selection.py --integrity` must SEE the class
+# ─────────────────────────────────────────────────────────────────────
+# `--integrity` is the check fixers actually run, and the one a PR body cites
+# as proof that the durations map carries no duplicate. It reads the manifest
+# through `yaml.safe_load`, so before this wiring it was structurally blind to
+# a duplicate MAPPING key: #10726 reddened the REQUIRED `manifest-integrity`
+# leg four times (62 durations keys, then 13, then 1, then 2) while
+# `--integrity` printed its green OK line over every one of them.
+
+
+def test_the_integrity_entry_point_names_a_duplicate_durations_key(tmp_path, monkeypatch) -> None:
+    """Wiring: `--integrity`'s composed problems include the registry walk.
+
+    Non-vacuous both ways — `safe_load` (what `load_manifest()` uses) keeps the
+    LAST row and reports nothing, while the same file makes `--integrity` exit 1
+    naming the duplicate. Remove the `duplicate_mapping_key_issues()` term from
+    the composition and the message disappears from the output.
+
+    ⛔ THE PLANTED ROW CARRIES A DIFFERENT VALUE FROM THE REAL ONE, and that is
+    load-bearing (#10648 review P3). Planted with the SAME value the assertion
+    below held under EITHER resolution order, so it pinned only "the key
+    parses" and would have stayed green if the loader flipped to first-wins —
+    the arm that matters, because a `merge=union` duplicate leaves the STALE
+    row in the file and only the resolution order decides whether the shard
+    packer reads the fresh weight or the superseded one. With a different value
+    planted ahead of the real row, `safe_load` returning the real weight IS
+    last-wins and any first-wins loader returns the planted one and reds here.
+
+    The planted value is DERIVED from the real one instead of hard-coded, the
+    shape `tests/test_ci_timing.py` uses for the same property (#10726 review
+    P3). The row this test shadows is an ADOPTED CI reading — its note says
+    "MEASURED by the 2026-10-26 sweep (run 40259128208)" and ends "Was 2.0."
+    — so the next `--refresh-durations` sweep may rewrite its weight, and a
+    hard-coded figure would then red here as a complaint about this FIXTURE
+    rather than about the duplicate the test exists to catch.
+    """
+    from tools import ci_selection
+
+    text = ci_selection.MANIFEST.read_text(encoding="utf-8")
+    key = "test_7818_plan_record_5362.py"
+    anchor = f"  {key}: "
+    real_value = yaml.safe_load(text)["durations"][key]
+    # derive a value that provably DIFFERS from the real one, whatever it is
+    other_value = 0.9 if real_value != 0.9 else 0.8
+    dup = f"  {key}: {other_value}  # duplicate planted by this test\n"
+    at = text.index(anchor)
+    planted = text[:at] + dup + text[at:]
+    victim = tmp_path / "ci-surfaces.yml"
+    victim.write_text(planted, encoding="utf-8")
+
+    # the loader the gate uses cannot see it …
+    assert sum(1 for line in planted.splitlines()
+               if line.startswith(anchor)) == 2
+    assert yaml.safe_load(planted)["durations"][key] == real_value
+    assert real_value != other_value, (
+        "the planted value must differ from the row it shadows, otherwise "
+        "last-wins and first-wins are indistinguishable here and the "
+        "assertion above proves nothing")
+
+    # … but the composed `--integrity` does, by name.
+    assert any(f"duplicate mapping key '{key}'" in problem
+               for problem in ci_selection.duplicate_mapping_key_issues(victim))
+
+    import contextlib
+    import io
+
+    def _run_integrity() -> tuple[int, str]:
+        out, err = io.StringIO(), io.StringIO()
+        monkeypatch.setattr(sys, "argv", ["ci_selection.py", "--integrity"])
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = ci_selection.main()
+        return rc, out.getvalue() + err.getvalue()
+
+    rc, seen = _run_integrity()          # the REAL manifest is clean …
+    assert rc == 0, seen
+    assert "duplicate mapping key" not in seen
+
+    monkeypatch.setattr(ci_selection, "MANIFEST", victim)
+    rc, seen = _run_integrity()          # … and the planted one is not
+    assert rc == 1, seen
+    assert f"duplicate mapping key '{key}'" in seen
+
+
+def test_the_integrity_entry_point_is_clean_on_the_real_manifests() -> None:
+    """Positive control: the shipped manifest carries no duplicate mapping key."""
+    from tools import ci_selection
+
+    assert ci_selection.duplicate_mapping_key_issues() == []

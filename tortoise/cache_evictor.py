@@ -26,9 +26,16 @@ only when a parity instrument both RAN and was CLEAN over the ENTIRE population
 (``ParityReport.proves()``). Both record gates — #10593 and #7879 — are open as of
 this writing, so every production assessment is ``REFUSED`` and this module issues no
 mutating statement at all. The day the record can serve, the census flips to ``PLAN``
-by itself and this executor becomes reachable without a second decision.
+by itself and this executor becomes PERMITTED without a second decision.
 
-⛔ FOUR INDEPENDENT GATES, and each one alone refuses
+⚠️ PERMITTED IS NOT REACHABLE, and the difference is deliberate rather than an
+omission: this module ships **no operator entry point** — no CLI, no ``--execute``, no
+scheduler, and no production caller (the only importers are its own two suites). A
+`PLAN` verdict opens the delete path; something still has to ASK. Wiring a call site
+is the follow-up, and it needs the `record_probe` and the coldness selector that
+#10976 leaves unsettled (read ledger #8877) — neither of which this module invents.
+
+⛔ FIVE INDEPENDENT GATES, and each one alone refuses
 ----------------------------------------------------
 1. **The census** — the verdict must be **exactly** ``PLAN``. ⛔ Not "not refused":
    ``refused`` is True only for ``REFUSED``/``UNBOUNDED``, so a deny-list would arm the
@@ -51,6 +58,14 @@ by itself and this executor becomes reachable without a second decision.
    keyed on the id alone would take a node created inside the probe→delete window
    that no probe ever saw. ``key_prop`` names the property the key lives in, and a
    candidate with no key cannot be deleted at all.
+5. **The graph** — the handle being deleted from must NAME the graph the census
+   measured (``Assessment.state.graph_name``). Without this the licence was a
+   statement about one graph applied to whatever handle the caller happened to pass:
+   a `PLAN` census of graph A licensed sweeping graph B, which is precisely the
+   binding the census itself makes required (`load_parity_report(graph_name=…)`,
+   #11097) one hop upstream. A handle that cannot say which graph it is, or says a
+   different one, is a REFUSAL — the same doctrine ``_read_statement`` applies to a
+   handle with no read-only verb.
 
 DRY RUN IS THE DEFAULT. ``dry_run=True`` returns the plan — which nodes, in which
 order, and which were held back and why — and emits **no** mutating statement. It
@@ -526,7 +541,15 @@ def evict(
             count = int(entry.get("nodes") or 0)
         except (TypeError, ValueError):
             count = 0
-        licensed[name] = max(0, count)
+        # ⛔ MIN, NOT LAST-WINS. A plan carrying two entries for the same population
+        # (a hand-built plan, or two censuses folded together) must TIGHTEN to the
+        # smaller proven count. Overwriting would let the second entry widen a licence
+        # the first had already bounded — a fail-open aggregate in the one field that
+        # IS the licence.
+        proven = max(0, count)
+        licensed[name] = (
+            proven if name not in licensed else min(licensed[name], proven)
+        )
     ceiling = assessment.state.bound_bytes
 
     def _refuse(
@@ -570,11 +593,52 @@ def evict(
             f"not be swept"
         )
 
+    # ⛔ GATE 5 — THE GRAPH. The licence is scoped to a graph, so the handle this pass
+    # will delete from must be THAT graph. Checked before anything is measured, because
+    # every reading below (the node total, the resident bytes) and the licence itself
+    # are assertions about the graph the census saw.
+    #
+    # ⚠️ A handle with no readable `name` is REFUSED, not trusted. A duck-typed stub is
+    # exactly the handle most likely to be pointed at the wrong graph, and "I cannot
+    # tell" is not "it matches" — the same reason `_read_statement` refuses a handle
+    # without `ro_query` instead of falling back to the creating verb.
+    measured_graph = assessment.state.graph_name
+    actual_graph = getattr(graph, "name", None)
+    if not isinstance(measured_graph, str) or not measured_graph:
+        return _refuse(
+            "the census did not bind a graph name, so this pass cannot prove its "
+            "licence applies to any graph — a cache node may only be evicted from the "
+            "graph the instrument measured"
+        )
+    if not isinstance(actual_graph, str) or not actual_graph:
+        return _refuse(
+            f"the graph handle does not name its graph (got {actual_graph!r}), so it "
+            f"cannot be proven to be the graph the census measured "
+            f"({measured_graph!r}) — a delete needs a proven target, not an assumed one"
+        )
+    if actual_graph != measured_graph:
+        return _refuse(
+            f"this assessment is a licence for graph {measured_graph!r} but the handle "
+            f"is graph {actual_graph!r} — a census of one graph may not evict another "
+            f"(#10976: the record proof is earned per graph, not globally)"
+        )
+
     before_nodes = node_total(graph)
     before_bytes = _resident_bytes(client)
 
     try:
-        resolved = policy or EvictionPolicy.resolve()
+        resolved = policy if policy is not None else EvictionPolicy.resolve()
+        # ⛔ isinstance, not duck-typing. `__post_init__`'s floors are what stop a bound
+        # of zero from emptying the cache one batch at a time, and an object that merely
+        # LOOKS like a policy (`SimpleNamespace(max_nodes=0, …)`) skips them entirely.
+        # Inside a try so the object/type mismatch is this module's REFUSAL, not a
+        # TypeError escaping the sweep.
+        if not isinstance(resolved, EvictionPolicy):
+            raise EvictionConfigError(
+                f"policy must be an EvictionPolicy, got {type(resolved).__name__} — an "
+                f"object that only resembles one skips the bound validation the bounds"
+                f" depend on"
+            )
         quote = _key_property(key_prop)
     except EvictionConfigError as exc:
         return _refuse(
@@ -621,7 +685,8 @@ def evict(
     after_bytes = before_bytes
     delete_unverified = False
     abort_reason: str | None = None
-    #: WHY the loop stopped — "satisfied" | "population" | "licence" | "pass_budget".
+    #: WHY the loop stopped —
+    #: "satisfied" | "population" | "licence" | "leased" | "pass_budget".
     #: ⛔ Reported, not inferred: "ran out of passes" and "the population had nothing
     #: left" need different responses, and a reason derived from `passes == max_passes`
     #: alone claims the first when the last allowed pass had already proven the second.
@@ -730,7 +795,13 @@ def evict(
             # "did not hold enough evictable nodes" — which is false.
             held_grew = (len(held_record_ids), len(held_leased_ids)) != held_before
             if window >= after_nodes or not held_grew:
-                stop_reason = "population"
+                # ⛔ WHICH kind of hold stopped the pass is the whole answer. Growth made
+                # ENTIRELY of leases means a reader is holding these nodes, not that the
+                # population is short — and the two need opposite responses (wait for the
+                # readers vs. widen the proven population).
+                leases_grew = len(held_leased_ids) > held_before[1]
+                record_grew = len(held_record_ids) > held_before[0]
+                stop_reason = "leased" if leases_grew and not record_grew else "population"
                 break
             # The window grew but this pass found nothing new to take: keep widening.
             continue
@@ -755,9 +826,37 @@ def evict(
             final.append(candidate)
 
         if not final:
-            stop_reason = "population"
+            # ⛔ A DISTINCT reason. Every planned node was held by a live lease — telling
+            # the reader "the population did not hold enough evictable nodes" sends it
+            # after a wider proven population when the actual answer is "a reader is
+            # holding these".
+            stop_reason = "leased"
             break
-        removed, survivors = _delete_nodes(graph, final, key_prop)
+        planned.extend(final)
+        # ⛔ THE DELETE IS GUARDED, for the same reason the re-measure below is (and it
+        # is the more important of the two): the statement can EXECUTE server-side and
+        # then fail in transport, so an escaping exception loses the only record of
+        # what left the cache — on the one destructive path in this module. The nodes it
+        # may have removed stay charged to the licence, because refunding a deletion
+        # that might have happened is the fail-open direction.
+        try:
+            removed, survivors = _delete_nodes(graph, final, key_prop)
+        except Exception as exc:
+            delete_unverified = True
+            # ⛔ The after-state is UNMEASURED, not the pre-delete reading. This is the
+            # same invariant every neighbouring unmeasured path keeps (`after_measured`
+            # is what nulls `nodes_after`/`bytes_after`); leaving it True here would hand
+            # a monitor `nodes_after=10` for a graph that may now hold 6, beside
+            # `bytes_reclaimed: 0` — the fabricated-metric class the abort path exists to
+            # prevent, reached on its own arm.
+            after_measured = False
+            abort_reason = (
+                f"the delete statement failed after this pass planned "
+                f"{len(final)} node(s) ({type(exc).__name__}: {exc}) — the deletion is "
+                f"UNVERIFIED: it may have executed server-side, and this pass cannot "
+                f"prove which nodes left"
+            )
+            break
         if removed != len(final):
             delete_unverified = True
         # ⛔ Count from the STATEMENT's own number. `survivors` is the complement of a
@@ -865,6 +964,12 @@ def evict(
                 f"the selector had no more record-servable nodes to offer "
                 f"({len(held_record)} held back because the record cannot serve them)"
             )
+        elif stop_reason == "leased":
+            cause = (
+                f"every node this pass could plan is held by a live read lease "
+                f"({len(held_leased)} skipped_leased) — the plan cannot grow until "
+                f"those readers release them"
+            )
         else:
             cause = "this pass budget could plan no more"
         reason += f"; TRUNCATED — {short} more node(s) over the budget: {cause}"
@@ -894,6 +999,12 @@ def evict(
                 f"; still {over_after} node(s) over the budget — the census proved "
                 f"only {licensed[population]} node(s) for this population, so widen "
                 f"the proven population to go further"
+            )
+        elif stop_reason == "leased":
+            reason += (
+                f"; still {over_after} node(s) over the budget — every planned node is "
+                f"held by a live read lease ({len(held_leased)} skipped_leased), so no "
+                f"more can go until those readers release them"
             )
         else:
             reason += (

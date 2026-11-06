@@ -26,7 +26,11 @@ the old payload fails here rather than in production:
         indicator (b) of the issue (`record_write_failures` = 0) has a reader on
         the deployment it is claimed about;
   * (f) `TORTOISE_RECORD_SINGLE_TENANT` — which the issue requires stay UNSET —
-        is reported, so "left unset" is checkable rather than assumed.
+        is reported, so "left unset" is checkable rather than assumed;
+  * (i) the POSITIVE channel — `record_writes_applied` / `record_last_write_at`,
+        counted after the COMMIT, `None` (never `0`) when unread, and pinned
+        against `metrics()`'s own key names so a rename cannot silently make this
+        block's claim false.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ import hashlib
 import json
 import os
 import socket
+import sys
 
 import pytest
 
@@ -543,3 +548,272 @@ def test_a_failing_counter_snapshot_does_not_fail_open(monkeypatch):
     assert record["armed"] is True, (
         "the arming fact was correct and must survive a counter failure"
     )
+
+
+# ── (i) the POSITIVE channel: did the record ever actually WRITE? ────────────
+#
+# Indicator (a) of #9548 is "a captured session writes `journal_event` + `point`
+# rows", and indicator (b) is "`record_write_failures` stays at 0". Every
+# record counter on the deployment was a FAILURE channel, so `{}` was equally
+# consistent with "writes are landing" and with "the write path has never been
+# reached" — the ambiguity that let this P0 be closed and reopened. These pin
+# the two fields that make the POSITIVE claim checkable from one curl:
+# `record_writes_applied` (a monotone count) and `record_last_write_at` (the
+# instant, which a counter cannot express), and the writer-side increments that
+# feed them.
+
+class _CommittedConnection:
+    """The minimum a live write touches: commit, then close."""
+
+    def __init__(self) -> None:
+        self.commits = 0
+        self.closed = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def _applied(connection, *, first_seq: int = 1) -> record_writer.RecordWrite:
+    return record_writer.RecordWrite(
+        outcome=record_writer.RecordWriteOutcome.APPLIED,
+        events=1, statements=4,
+        first_seq=first_seq, last_seq=first_seq,
+        connection=connection,
+    )
+
+
+def test_a_committed_live_write_increments_the_applied_counter(monkeypatch):
+    """The positive signal is produced by the REAL seam, not by a test stub.
+
+    A counter nothing increments is the "signal with no channel" class this
+    whole file exists to end (#3677/#3995): the payload would carry
+    `record_writes_applied: 0` forever and read as "the record never works".
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
+    conn = _CommittedConnection()
+    monkeypatch.setattr(record_writer, "write_records",
+                        lambda records, **kw: _applied(conn, first_seq=kw.get("first_seq", 1)))
+
+    before = monitoring.record_write_applied_count()
+    with record_writer.use_record_tenant("org-9548", "graph-9548"):
+        result = record_writer.write_live_record({"type": "Point", "id": "p1"},
+                                                 durable=True, seq=7)
+
+    assert result is not None and result.applied is True, result
+    assert conn.commits == 1, "the fixture must have committed — that is the claim"
+    assert monitoring.record_write_applied_count() == before + 1, (
+        "an APPLIED, COMMITTED write produced no positive signal — the deployment "
+        "still cannot distinguish 'writing' from 'never reached'"
+    )
+    stamp = monitoring.record_last_write_at()
+    assert stamp is not None, "the instant of the last write was never recorded"
+    import datetime as _dt
+    parsed = _dt.datetime.fromisoformat(stamp)
+    assert parsed.tzinfo is not None, "the stamp must be timezone-aware (UTC)"
+
+
+def test_an_uncommitted_or_refused_write_does_not_increment_the_counter(monkeypatch):
+    """Only a COMMIT counts. `APPLIED` names "statements ran", not "it persisted"."""
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
+
+    def _explode(records, **kw):
+        raise record_writer.RecordConnectError("the record is unreachable")
+
+    monkeypatch.setattr(record_writer, "write_records", _explode)
+
+    before = monitoring.record_write_applied_count()
+    with record_writer.use_record_tenant("org-9548", "graph-9548"):
+        result = record_writer.write_live_record({"type": "Point", "id": "p2"},
+                                                 durable=True, seq=8)
+
+    assert result is not None and result.applied is False, result
+    assert monitoring.record_write_applied_count() == before, (
+        "a FAILED write was counted as an applied one — the positive channel "
+        "would then read 'the record works' from a record that never answered"
+    )
+
+
+def test_an_armed_deployment_reports_the_writes_it_applied(monkeypatch):
+    """The block carries the positive channel, under `metrics()`'s own names."""
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
+    monkeypatch.setattr(monitoring, "record_write_applied_count", lambda: 7)
+    monkeypatch.setattr(monitoring, "record_last_write_at",
+                        lambda: "2026-11-05T21:07:11+00:00")
+
+    record = _health(monkeypatch)["record"]
+
+    assert record["record_writes_applied"] == 7
+    assert record["record_last_write_at"] == "2026-11-05T21:07:11+00:00"
+    assert record["ok"] is True
+
+
+def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
+    """The block's claim is *"under the SAME names metrics() publishes"* — pin it.
+
+    Without this, renaming the two `metrics()` keys leaves every leg above green
+    (they pin the /health literals only) while the docstring and the runbook both
+    become false — the paper-only claim this codebase treats as a defect. The
+    sibling counter has exactly this pin in
+    `tests/test_9078_record_written_by_production_path.py`; this is its other
+    half. Asserted against the real `metrics()` dict, key-set form, so the test
+    cannot pass vacuously on a substring of some other key.
+
+    ⛔ It also pins the docstring that makes the claim, AT the claim: the pair's own
+    bullet (``record_writes_applied`` / ``record_last_write_at`` — the POSITIVE
+    channel) and the "under the SAME names ``metrics()`` publishes" sentence — a
+    bare mention test was measured GREEN with both broken (#9548 review P2). The
+    runbook's field row is pinned next, in `tests/test_deploy_workflow.py`, and for
+    a stated reason: it runs on a docs-only diff and this file does not.
+    """
+    published = monitoring.metrics()
+
+    assert {"record_writes_applied", "record_last_write_at"} <= set(published), (
+        "the /health block documents these as `metrics()`'s own names, and "
+        f"metrics() publishes {sorted(published)}"
+    )
+    # …and the claim must be pinned WHERE IT IS MADE, not merely mentioned: the
+    # docstring says the record counters are published "under the SAME names
+    # ``metrics()`` publishes". A bare `name in docstring` was measured GREEN on
+    # both halves being broken — a renamed bullet head (`applied_writes` /
+    # `last_write_at`) still mentions the real names later in the same bullet, and
+    # "SAME names" inverted to "DIFFERENT names" matched nothing. So the pair's
+    # bullet and the SAME-names sentence are both pinned, on a whitespace-normalised
+    # copy so a reflow cannot red them (#9548 review P2).
+    # ⚠️ The SAME-names pin runs to the END of its sentence — the full stop after
+    # `is claimed about.` — and each earlier stop point was MEASURED open, not
+    # assumed: stopping at `publishes` stayed green on a narrowing appended there,
+    # and stopping at `(#9188/#9231/#9307)` stayed green on one appended after the
+    # citation. So a narrowing placed anywhere INSIDE this sentence reds the pin.
+    # ⛔ What it does NOT bind, stated so no reader over-trusts it: both halves below
+    # are substring memberships, so a narrowing introduced as a SEPARATE NEW SENTENCE
+    # after `is claimed about.` (e.g. "Separately, the positive pair is documented
+    # elsewhere") still passes. Closing that needs sentence-level parsing of the
+    # docstring — deliberately out of scope for a prose pin; treat this as
+    # "the claim's own sentence is intact", never as "the whole docstring agrees with
+    # it" (#11128 review P3 at 786baf3e7).
+    # ⛔ The RUNBOOK half of this claim is pinned in `tests/test_deploy_workflow.py::
+    # test_the_runbook_field_row_documents_the_positive_pair`, deliberately and not
+    # here: a runbook-only diff selects no surface and runs `tier1` only, and this
+    # file is on `api`/`core` — so a row pin in THIS file is asleep on the one diff
+    # that can re-break it (measured via `tools/ci_selection.py`).
+    doc = " ".join((hosted_api._record_health.__doc__ or "").split())
+    assert (
+        "``record_writes_applied`` / ``record_last_write_at`` — the POSITIVE channel"
+        in doc
+    ), (
+        "`_record_health`'s docstring no longer documents the positive pair as the "
+        "pair the payload publishes — the field is published but undocumented, "
+        "which is the paper-only claim inverted"
+    )
+    assert (
+        "the record counters, under the SAME names ``metrics()`` publishes "
+        "(#9188/#9231/#9307) — the hosted app has no ``/metrics`` route, so without "
+        "them indicator (b) of #9548 (``record_write_failures`` = 0) has no reader at "
+        "all on the deployment it is claimed about." in doc
+    ), (
+        "`_record_health`'s docstring no longer claims (INSIDE that sentence) that the "
+        "record counters are published under `metrics()`'s own names, or has narrowed "
+        "the claim there so it excludes the positive pair — that claim is what ties the "
+        "/health keys to the ones the rest of the process reads, so losing it makes a "
+        "rename silent. ⚠️ Scope: this is a substring pin on the sentence itself, so a "
+        "narrowing added as a separate later sentence is outside it by construction."
+    )
+
+
+def test_an_unread_applied_counter_publishes_none_never_a_zero(monkeypatch):
+    """The #9548 review P2 rule, one field over: an unread counter is not a zero.
+
+    A `0` here is the WORST value to invent on this field: it is exactly what a
+    never-writing deployment reports, so a broken counter read would look like
+    the finding the field exists to make.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
+
+    def _explode():
+        raise RuntimeError("applied counter unreadable")
+
+    monkeypatch.setattr(monitoring, "record_write_applied_count", _explode)
+
+    body = _health(monkeypatch)
+    record = body["record"]
+
+    assert record["ok"] is False, "a broken counter read reported healthy"
+    assert record["record_writes_applied"] is None, (
+        "an unread counter was published as 0 — indistinguishable from a "
+        "deployment that has never written"
+    )
+    assert "applied counter unreadable" in record["counters_error"]
+    # ALL-OR-NOTHING (#9548 review cycle 3): the three failure counters are read
+    # BEFORE the pair, so a half-published block would hand a consumer a stale
+    # `record_write_failures` beside `counters_error` and no way to tell it was
+    # not a complete snapshot. Every counter key must be `None` together.
+    for key in (
+        "record_write_failures",
+        "record_non_journal_skips",
+        "record_position_unproven",
+        "record_last_write_at",
+    ):
+        assert record[key] is None, (
+            f"`{key}` published a value from a snapshot that FAILED half-way — "
+            "a consumer reads a partial block as a complete one"
+        )
+
+
+def test_a_commit_that_RAISES_does_not_count_as_applied(monkeypatch):
+    """The ordering claim, pinned: counted AFTER the commit, not at APPLIED.
+
+    `RecordWriteOutcome.APPLIED` means "the plan materialized and every statement
+    ran on the caller's connection" — the seam has NOT committed at that point.
+    Counting there would report a write the rollback then discards, so a
+    `commit()` that raises must leave the counter untouched. Without this test
+    the placement is an unpinned claim: moving `_count_write_applied()` one line
+    up leaves every other test in this file green.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
+
+    class _CommitFails(_CommittedConnection):
+        def commit(self) -> None:
+            raise RuntimeError("the commit was rejected by the server")
+
+    conn = _CommitFails()
+    monkeypatch.setattr(record_writer, "write_records",
+                        lambda records, **kw: _applied(conn, first_seq=kw.get("first_seq", 1)))
+
+    before = monitoring.record_write_applied_count()
+    with record_writer.use_record_tenant("org-9548", "graph-9548"):
+        result = record_writer.write_live_record({"type": "Point", "id": "p3"},
+                                                 durable=True, seq=9)
+
+    assert result is not None and result.applied is False, result
+    assert result.refusal == "write_failed", (
+        "a failed commit must be reported as a failure, not silently applied"
+    )
+    assert monitoring.record_write_applied_count() == before, (
+        "a write whose COMMIT raised was counted as applied — the positive "
+        "channel would report rows a rollback discarded"
+    )
+
+
+def test_the_unimportable_seam_shape_still_carries_the_positive_pair(monkeypatch):
+    """The block's OTHER shape: the seam itself could not be imported.
+
+    `_record_health` has two surfaces — the early return (nothing could be
+    evaluated) and the normal block — and a key present in one but not the other
+    is read as "no writes" by a `.get(...)`. The early return is only reachable
+    when the import fails, which no other test exercises; a later edit could drop
+    the pair (or seed `0`) and stay green.
+    """
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, RECORD_DSN)
+    # `from tortoise.monitoring import …` raises when the module is None in
+    # sys.modules, which is the arm whose early return this pins.
+    monkeypatch.setitem(sys.modules, "tortoise.monitoring", None)
+
+    record = hosted_api._record_health()
+
+    assert record["ok"] is False, "an unimportable seam reported healthy"
+    for key in ("record_writes_applied", "record_last_write_at"):
+        assert key in record, f"`{key}` is ABSENT — a .get() reads it as 'no writes'"
+        assert record[key] is None, f"`{key}` published a value for an unread snapshot"

@@ -40,14 +40,39 @@
 #   A `(no FAILED/ERROR nodeids)` prose line prints bytes in the log and
 #   contributes nothing (that is the ids=0 above); only the annotation is read.
 #
+# WHY THE MARKER ALONE IS NOT ENOUGH — a killed leg that DID fail (#10914)
+#   The annotation names the LEG, never the TESTS, and the #9984 introduced-failure
+#   predicate reads a per-job capture in which no step head survives (it strips the
+#   transport stamps and will not synthesize one), so `guard-step::` attribution is
+#   not reachable there. What the predicate can still read is a pytest-style
+#   `FAILED <nodeid>` record — and a leg killed at its watchdog printed none:
+#   `-r fEs` renders the short summary only at session end.
+#
+#   Measured on THIS PR, run 42050189058, job `test (f)`: 907 passed, **1 failed**,
+#   killed at its 26m budget. `ci_exemption.py ids` read ZERO ids from its log, so
+#   the predicate fell back to `job-unreadable::test-f` and BLOCKED the merge — even
+#   though the leg's own `--junitxml` had the failing testcase, its nodeid AND its
+#   exception type on disk. The only identity that leg had was in an artifact nobody
+#   read.
+#
+#   So the leg now states its own failing testcases from that artifact, in the exact
+#   shape pytest itself writes in `-r fEs` (`FAILED <nodeid> - <ExceptionType>: <msg>`)
+#   — a RECORD read out of the run's own junitxml, never a guess, and never emitted
+#   for a leg that has a verdict of its own (its summary is already the record).
+#
 # WHAT IT DOES NOT DO
 #   It reports; it never decides. The step's status stays pytest's own rc (the
 #   workflow's `exit $rc`), so this cannot turn a red leg green or a green leg
-#   red — an `::error::` annotation is a check-run annotation, and annotations
-#   do not fail a step.
+#   red — an `::error::` annotation is a check-run annotation, and annotations do
+#   not fail a step. A missing/unreadable junitxml prints a NAMED unknown and
+#   emits no `FAILED` line at all: UNKNOWN is never 'the failure set is empty'.
 #
 # USAGE
 #   pytest-attribution.sh --log <path-to-pytest.log> [--rc <pytest-exit-code>]
+#                          [--junit <path-to-junit.xml>]
+#     --junit     the leg's own `--junitxml` file. OPTIONAL: without it the leg
+#                 reports no test-level identity and says so. Pass it wherever the
+#                 pytest command writes one (`$PYTEST_JUNIT` in python-ci.yml).
 #   Exit 0: reported (a session summary was found, or INCOMPLETE was named).
 #   Exit 2: bad invocation.
 # ============================================================================
@@ -55,6 +80,7 @@ set -uo pipefail
 
 LOG=""
 RC=""
+JUNIT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -66,6 +92,14 @@ while [ $# -gt 0 ]; do
     --rc)
       RC="${2:-}"
       [ -n "$RC" ] || { echo "::error::pytest-attribution: --rc requires a value"; exit 2; }
+      shift 2
+      ;;
+    --junit)
+      # Count the remaining argv, not the value: `--junit ""` is a leg that wrote no
+      # junitxml and must still reach the named-unknown arm rather than spin on a
+      # failed `shift 2` (the `--elapsed` shape pinned by pytest-kill-attribution.sh).
+      [ $# -ge 2 ] || { echo "::error::pytest-attribution: --junit requires a value"; exit 2; }
+      JUNIT="${2:-}"
       shift 2
       ;;
     *)
@@ -479,6 +513,145 @@ SUPPRESS_MARKER=0
 if [ "$HAVE_SUMMARY" = "1" ] && [ "$COLLECTION_VERDICT" = "1" ] && [ "$OBSERVABLE" = "1" ] && [ "$KILLED" = "0" ]; then
   SUPPRESS_MARKER=1
 fi
+
+# THE LEG'S OWN JUNITXML IS THE ONLY PLACE A KILLED LEG RECORDED ITS FAILURES (#10914).
+#
+# A leg that dies at its watchdog never reaches `-r fEs`, so its log holds no
+# `FAILED <nodeid>` record at all — and the #9984 predicate reads nothing else from a
+# per-job capture. On run 42050189058 job `test (f)` that produced `ids=0` and the
+# blocked `job-unreadable::test-f` fallback, while the failing testcase sat in the
+# junitxml with its nodeid and exception type. So the report is EMITTED HERE, from the
+# run's own artifact, in pytest's own `-r fEs` shape (`FAILED <nodeid> - <type>: <msg>`)
+# — the rail's `_SUMMARY_RE` accepts that shape and derives the SAME signature the
+# failure block would (`<type>: <E-line>`), which is what makes the row comparable
+# against main instead of merely named.
+#
+# Fails CLOSED on every unreadable path: an absent/unparseable junitxml prints a NAMED
+# unknown and emits no `FAILED` line, so a missing artifact can never read as an empty
+# failure set. Called ONLY from the no-verdict branch below — a leg that owns a summary
+# already published its own records, and re-emitting them would be a second source for
+# one failure.
+emit_junit_failures() {
+  if [ -z "$JUNIT" ]; then
+    echo "(no test-level identity for this leg: no --junit was passed, so the only record of"
+    echo " its failures is the log above — UNKNOWN, never 'no test failed')"
+    return 0
+  fi
+  if [ ! -f "$JUNIT" ]; then
+    echo "(no test-level identity for this leg: the junitxml ${JUNIT} does not exist —"
+    echo " UNKNOWN, never 'no test failed'. A leg killed before its session could be"
+    echo " unwound writes none.)"
+    return 0
+  fi
+  if ! command -v python3 > /dev/null 2>&1; then
+    echo "(no test-level identity for this leg: python3 is not on PATH, so ${JUNIT} cannot"
+    echo " be read — UNKNOWN, never 'no test failed')"
+    return 0
+  fi
+  echo "==================== failing testcase(s) from the leg's own junitxml ===================="
+  python3 - "$JUNIT" <<'PYATTRIB' || echo "(the junitxml could not be parsed — UNKNOWN, never 'no test failed')"
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+_TRAILER = re.compile(
+    r"^(?P<path>[^\s:][^\s]*\.py):(?P<line>\d+):\s*(?P<exc>[A-Za-z_][\w.]*)\s*$")
+
+
+def _exception_type(text: str) -> str:
+    """pytest's own trailer — `path.py:LINE: ExceptionType` — the last one wins."""
+    for line in reversed(text.splitlines()):
+        m = _TRAILER.match(line.strip())
+        if m:
+            return m.group("exc")
+    return ""
+
+
+def _class_segments(path: str, classname: str):
+    """The CLASS components of `classname` for a nodeid rooted at `path` (or None).
+
+    `testcase/@name` is the LEAF ONLY — pytest puts the rest of the nodeid in
+    `@classname` (`_pytest/junitxml.py`: `names = nodeid.split("::")`,
+    `classname = ".".join(names[:-1])`, `name = names[-1]`). For
+    `tests/test_foo.py::TestBar::test_baz` the artifact is therefore
+    `file="tests/test_foo.py" classname="tests.test_foo.TestBar" name="test_baz"`,
+    and `f"{path}::{name}"` drops `TestBar` — an id that matches NO test, so the
+    rail cannot compare it against main's failure set and two same-named leaves in
+    different classes of one file collapse onto a single id.
+
+    A class is capitalised (`record-postgres-leg-gate.py::_leg_module` encodes the
+    same rule), so the trailing capitalised components are the class chain and what
+    is left is the module. `None` means the two attributes DISAGREE about the module
+    — then the class chain cannot be attributed to this file, and the honest answer
+    is the caller's "not attributable" arm rather than a shortened id.
+    """
+    parts = [p for p in classname.split(".") if p]
+    classes = []
+    while parts and parts[-1][:1].isupper():
+        classes.insert(0, parts.pop())
+    if not classes:
+        return []
+    module = ".".join(parts)
+    expected = path.replace("\\", "/")
+    if expected.endswith(".py"):
+        expected = expected[:-3]
+    expected = expected.replace("/", ".")
+    if expected.endswith(".__init__"):
+        expected = expected[: -len(".__init__")]
+    if module and module != expected and not module.endswith("." + expected):
+        return None
+    return classes
+
+
+try:
+    root = ET.parse(sys.argv[1]).getroot()
+except Exception as exc:  # noqa: BLE001 — any parse failure is the same UNKNOWN
+    print(f"(the junitxml could not be parsed ({exc.__class__.__name__}) — UNKNOWN, "
+          "never 'no test failed')")
+    raise SystemExit(0)
+
+emitted = 0
+for case in root.iter("testcase"):
+    outcome = None
+    for tag in ("failure", "error"):
+        el = case.find(tag)
+        if el is not None:
+            outcome = (tag, el)
+            break
+    if outcome is None:
+        continue
+    tag, el = outcome
+    path = (case.get("file") or "").strip()
+    name = (case.get("name") or "").strip()
+    classname = (case.get("classname") or "").strip()
+    if not path or not name:
+        # No reconstructable nodeid: say so rather than invent a plausible one.
+        print(f"({tag} in the junitxml with no file/name attributes — not attributable)")
+        continue
+    classes = _class_segments(path, classname)
+    if classes is None:
+        # `classname` names a different module than `file`, so its class chain
+        # belongs to some other nodeid: abbreviating to `file::name` would name a
+        # test that does not exist.
+        print(f"({tag} in the junitxml whose classname {classname!r} does not match "
+              f"{path!r} — not attributable)")
+        continue
+    nodeid = "::".join([path, *classes, name])
+    kind = _exception_type(el.text or "")
+    message = " ".join((el.get("message") or "").split())
+    if kind and message and not message.startswith(kind):
+        detail = f"{kind}: {message}"
+    else:
+        detail = message or kind
+    keyword = "ERROR" if tag == "error" else "FAILED"
+    print(f"{keyword} {nodeid}" + (f" - {detail}" if detail else ""))
+    emitted += 1
+
+if emitted == 0:
+    print("(the junitxml holds no failing testcase — every test it recorded passed, which"
+          " says NOTHING about the tests the kill prevented from running)")
+PYATTRIB
+}
 if { [ "$HAVE_SUMMARY" = "0" ] || [ "$KILLED" = "1" ]; } && [ "$SUPPRESS_MARKER" = "0" ]; then
   # Either the interpreter never reached pytest's final report (a SIGKILL, a crash,
   # an aborted interpreter), or it did reach it only because the watchdog's SIGINT
@@ -496,6 +669,7 @@ if { [ "$HAVE_SUMMARY" = "0" ] || [ "$KILLED" = "1" ]; } && [ "$SUPPRESS_MARKER"
     echo " belongs to an earlier/nested session; pytest rc=${RC:-unknown})"
   fi
   echo "(do NOT read the absence of FAILED lines from this leg as a pass — the failure set is unobservable)"
+  emit_junit_failures
 fi
 
 # Only a leg with NO verdict of its own can have been killed mid-test: with an owned

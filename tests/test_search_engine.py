@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 from tests import _live_utils
+from tests._index_settle import index_kind_absent, index_rows_after_settle
 from tortoise.bm25 import DEFAULT_LEXICAL_WEIGHT
 from tortoise.search_engine import (
     classify_query, rrf_fusion, SearchResult, SearchScores,
@@ -197,7 +198,12 @@ def _embedder_or_skip():
     unavailable (R3 tests run where CI guarantees .[test,embeddings] + the
     HF model cache; skip-if-no-embedder keeps this module green anywhere)."""
     from tortoise.embeddings import EmbeddingModel
-    m = EmbeddingModel.get(load_timeout=120)
+    # No `load_timeout=` override: `tests/conftest.py` pins
+    # `EmbeddingModel._LOAD_TIMEOUT_S = 270.0` for the test lane, and an explicit
+    # per-call argument OVERRIDES it — a 120 s bound returned `None` ~7 s before
+    # a cold load finished, turning this probe into a skip that
+    # `tools/skip-guard.py` refuses (#2573).
+    m = EmbeddingModel.get()
     if m is None:
         pytest.skip("sentence-transformers / all-MiniLM-L6-v2 cache "
                     "not available — dense-leg assertion skipped")
@@ -707,6 +713,19 @@ class TestR2OrUnionAndSearchKeys:
             # which is the only way the Event legacy branch is ever reached
             # again on a graph that already carries the two-field index.
             proj.g.query("CALL db.idx.fulltext.drop('Object')")
+            # ⛔ THE DROP IS AWAITED, NOT ASSUMED (#10807). FalkorDB retires a
+            # dropped field ASYNCHRONOUSLY: until the label's one index finishes
+            # rebuilding, `CALL db.indexes()` still reports the FULLTEXT kind, so
+            # `_schema_is_current()` correctly answers True about a graph whose
+            # drift has not been APPLIED yet — and the assertion below fails on a
+            # LANDED drop (measured: `test (b)`, run 41868531069, on a loaded
+            # runner; 3 ms to converge idle). The wait is bounded and returns the
+            # last read, so a drop that genuinely cannot happen still reds here
+            # rather than waiting forever.
+            index_rows_after_settle(
+                proj,
+                until=lambda rows: index_kind_absent(
+                    rows, "Object", "name", "FULLTEXT"))
             assert proj._schema_is_current() is False
 
             statements: list[str] = []
@@ -775,6 +794,20 @@ class TestR2OrUnionAndSearchKeys:
         patched unit test pins the exact index_missing promotion; this live
         variant pins the never-silent contract on the real backend."""
         proj.g.query("CALL db.idx.fulltext.drop('Point')")
+        # ⛔ THE DROP IS AWAITED, NOT ASSUMED (#10807). FalkorDB retires a dropped
+        # index field ASYNCHRONOUSLY: until the label's one index finishes rebuilding,
+        # `CALL db.indexes()` still carries the FULLTEXT kind and an FTS query still
+        # answers from the PRE-drop definition. Asserting `hits == []` in that window
+        # reds on a LANDED drop, and the trace it then reads is a clean zero-hit run
+        # rather than the never-silent contract this test pins (measured on a loaded
+        # runner: `test (b)` in this module, run 41868531069, 3 ms to converge idle).
+        # The wait is bounded and returns its last read, so a drop that genuinely
+        # cannot happen still reds here instead of waiting forever.
+        index_rows_after_settle(
+            proj,
+            until=lambda rows: all(
+                index_kind_absent(rows, "Point", field, "FULLTEXT")
+                for field in ("content", "search_keys")))
         trace: list[dict] = []
         hits = run_fts_query(proj.g, "gym", leg_trace=trace)
         assert hits == []

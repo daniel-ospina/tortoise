@@ -36,7 +36,7 @@ import os
 import re
 import stat
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any, ClassVar
@@ -203,6 +203,9 @@ from .quota import (
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
 # (no `tortoise` imports), so this adds no import-cycle risk to this hot module.
+from .session_source_display import (
+    SESSION_SOURCE_SUMMARY_PREFIX as _SESSION_SOURCE_SUMMARY_PREFIX,
+)
 from .security import redact_secrets
 import threading
 from datetime import UTC
@@ -4097,27 +4100,238 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 })
 
 
+#: #10000: the DISPLAY prefix on a session Source's ``summary`` — imported, not
+#: defined here. It has ONE home (`tortoise/session_source_display.py`) because
+#: the CACHE PROJECTION reads the same value as the WITNESS that tells a
+#: post-#10000 row's lexicon ``_searchText`` from a pre-#10000 row's prose, and it
+#: may not import the capture to get it (#10965 / #10852 review P2).
+
+
+#: #10000: the transcript's own FRAMING label — the ``Speaker: text`` prefix
+#: ``_session_llm_transcript`` writes for every turn. It is not vocabulary the
+#: session used, so it may never become a topic, and THIS pattern is the only
+#: thing that stops it: ``_session_source_metadata`` strips it from the LINE it
+#: sits on BEFORE tokenising, so the label is gone while a body word that merely
+#: SPELLS a role survives.
+#:
+#: ⛔ POSITION, NEVER SPELLING (#10852 review, P2 — measured). This was a
+#: ``frozenset({"user", "assistant", "speaker", "system", "tool"})`` applied to
+#: EVERY token, so those five words could never be a session's vocabulary
+#: anywhere: ``_session_source_metadata("User: the system keeps restarting after
+#: the deploy")`` dropped ``system`` from the lexicon, and
+#: ``_session_source_metadata("User: system\nAssistant: tool")`` derived
+#: ``("", [])`` — ``summary=''`` with no
+#: ``_searchText``, i.e. exactly the #3518 unfindability the docstring forbids,
+#: reached by a transcript that HAS tokens of its own (the fourth cliff of that
+#: shape, after stopword-only / short-word-only / digit-only). ``system`` and
+#: ``tool`` are ordinary English CONTENT words; they are in that set only
+#: because ``_session_llm_transcript`` title-cases a role into the speaker
+#: position, and ``_normalize_turn_role`` does no casing of its own. The label is
+#: at a KNOWN POSITION (one ``"<Speaker>: <body>"`` line per turn, joined by
+#: ``\n``, speaker title-cased and matched against ``^[A-Z][\w .'-]{0,40}$``), so
+#: the fix is to delete that one prefix per line and tokenise the BODIES: a
+#: labels-only transcript still derives nothing (its bodies are empty), while a
+#: body word survives wherever it appears. Before this pattern existed the
+#: fallback admitted ``user``/``assistant`` into every ack-only session's lexicon
+#: — a constant pair, i.e. the same measurable defect
+#: ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out of ``_searchText`` to avoid
+#: (under the OR-union every such session would match a one-word source query
+#: for "user") — and the strip keeps that closed for the same reason.
+#:
+#: ``[ \t]*`` after the colon (never ``\s*``, which would swallow the newline
+#: that separates a labels-only turn from the next one's body): the builder
+#: always writes one space, and a hand-written/unit fixture may not
+#: (``"user:\nassistant:"``).
+#:
+#: ⚠️ Stated residual: a caller that hands this function a BARE SENTENCE whose
+#: first word is followed by a colon (``"Note: the deploy failed"``) loses that
+#: word. The capture path never does — it passes ``_session_llm_transcript``'s
+#: output, whose every line starts with the speaker — and the alternative
+#: (filtering the token stream by spelling) is the defect above.
+_SESSION_SOURCE_TURN_LABEL_RE = re.compile(
+    r"^[^\W\d_][\w .'-]{0,40}:[ \t]*", re.MULTILINE)
+
+
+def _session_source_lexicon(counts: Mapping[str, int]) -> list[str]:
+    """The six most frequent words, ties broken by the TOKEN itself.
+
+    ⛔ ``Counter.most_common`` breaks ties by FIRST-ENCOUNTERED order, and in the
+    ordinary short-session shape (every content word occurring once) that made
+    the lexicon the transcript's first six content words IN TRANSCRIPT ORDER —
+    i.e. a (comma-separated) re-wording of the session's own opening instruction,
+    and the reason the docstring's order-independence claim was false. Sorting
+    the ties by the token makes the lexicon a function of the WORD MULTISET
+    alone: REORDERING the turns cannot change it, while changing that multiset
+    (adding or editing a turn) does — the multiset is the INPUT, not a
+    guarantee. An earlier wording claimed "adding an identical turn" could not
+    change it; it can, and the counter-example is one line long: on
+    ``alpha beta`` / ``gamma gamma`` the lexicon is ``[gamma, alpha, beta]``, and
+    appending a copy of the first turn makes all three count 2, i.e.
+    ``[alpha, beta, gamma]`` (#10852 review, P3).
+    """
+    return [w for w, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]]
+
+
 def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
-    """Derive cheap capture metadata (summary + topics) for the session Source
-    from the extraction transcript (#1352) — no LLM call, deterministic:
-    the summary is the first substantive utterance, topics are the top
-    frequent content words. Returns ("", []) for an empty transcript."""
+    """Derive the session Source's searchable TOPIC LEXICON (#1352, #10000).
+
+    ⛔ §9.1/D1 (owner ruling 2026-09-23) keeps a session's transcript in the
+    RECORD — *"not in the graph, not a `Document` node, not a `Point`"*. This
+    builder used to return the transcript's FIRST SUBSTANTIVE UTTERANCE as
+    ``summary``, which put raw turn prose on the session's ``:Source`` node AND
+    into the Source FTS index (``_searchText``) — measured in
+    ``docs/verify/2026-10-31-record-capstone.md`` §4 item 2, *"the second prose
+    passthrough onto a node"*. Redaction (#4911) does not close that: a scrubbed
+    sentence is still the session's sentence.
+
+    So the derived metadata is the session's TOPIC LEXICON — never a CHOSEN sentence and
+    never a CHOSEN quote: the six most frequent content words of the (already redacted) transcript,
+    words the capture already derives, as one stable descriptor (⚠️ a space-less CJK run is
+    ONE token and can BE that sentence — see the residual below), keeping a captured session findable through
+    ``tortoise_fts_query(entity_type='source')`` — the regression #3518 closed,
+    and the reason this function must return SOMETHING for a non-empty
+    transcript. ``("", [])`` only when the transcript has no token of its OWN
+    at all — empty, blank, punctuation-only, or nothing but the ``Speaker:``
+    framing labels. The question is about TOKENS, never about letters or width:
+    a number is a token too (see the DIGIT-ONLY note below).
+
+    ⛔ A STOPWORD-ONLY transcript ("ok" / "yes") takes the UNFILTERED content
+    list rather than returning nothing. Returning nothing blanked an
+    acknowledgement-only session's ``summary``, gave it no ``_searchText`` and
+    left it unfindable — reintroducing the very #3518 regression the lexicon
+    exists to prevent, as a side effect of a filter that is a precision
+    preference and not part of the §9.1/D1 rule. It is still a LEXICON, so it
+    puts no CHOSEN sentence on the node (a whole space-less run can be one) — but it
+    drops the transcript's FRAMING labels (``_SESSION_SOURCE_TURN_LABEL_RE``): those
+    are the generator's ``Speaker:`` prefix, not words the session used, and indexing
+    them put a constant ``user, assistant`` pair on every acknowledgement-only session.
+
+    ⛔ THE LABEL IS DROPPED BY POSITION, NOT BY SPELLING (#10852 review, P2).
+    The strip happens per LINE, BEFORE tokenising, so it removes the speaker and
+    nothing else: ``system`` and ``tool`` are ordinary content words that were
+    in the label set only because a role can sit in that position, and filtering
+    them out of the whole token stream made them unreachable as vocabulary —
+    ``"User: the system keeps restarting"`` lost ``system``, and
+    ``"User: system\nAssistant: tool"`` derived ``("", [])``: ``summary=''``,
+    no ``_searchText``, the #3518 unfindability, on a transcript that HAS tokens
+    of its own. Both are pinned in
+    ``tests/test_10000_source_prose.py::test_a_role_word_that_is_also_a_content_word_survives``.
+
+    ⛔ That fallback is reached by THREE transcript shapes, and the presence test
+    must not exclude any of them: stopword-only ("ok" / "yes"), short-word-only
+    ("ok go"), and DIGIT-only ("42" — the SCRIPT/DIGIT notes below). The
+    3-character CONTENT floor is a RANKING
+    preference (a two-letter token discriminates poorly), so it is applied only
+    where the content counts are built — never to decide whether the transcript
+    has word tokens at all. Running it inside the presence test made a
+    non-empty transcript whose words are ALL short (``"User: ok go"``) take the
+    ``("", [])`` arm, which wrote ``summary=''`` and NO ``_searchText`` at all
+    (``_source_search_text(topics=[])`` is ``None``, and this writer never
+    passes ``summary``) — the #3518 unfindability this docstring forbids,
+    reintroduced one arm over (#10852 review, P2). The presence test is
+    therefore WIDTH-FREE and the floor lives in the content filter.
+
+    ⛔ The presence test is SCRIPT-FREE too — same class, one word over. The
+    token pattern used to be ``[A-Za-z][A-Za-z0-9_-]*``, an ASCII word class, so
+    a Cyrillic, Greek, Hebrew, Arabic, Devanagari, Thai or CJK transcript had NO
+    word tokens as far as this function could see and took the ``("", [])``
+    arm: ``summary=''`` and no ``_searchText`` — the #3518 unfindability, for a
+    whole class of languages (#10852 review, P2). The letter class became
+    ``[^\\W\\d_][\\w-]*`` (a Unicode LETTER, then word characters), which is the
+    same shape as before for ASCII and correct for every script Python's ``re``
+    knows — and it is what the CONTENT arm still uses. The stopword and framing
+    sets stay ASCII — that is only a PRECISION
+    filter (``.lower()`` still folds Latin), never a presence decision.
+
+    ⛔ DIGIT-ONLY is the third dimension of the same hole (#10852 review), and
+    the one the SCRIPT fix left behind: ``[^\\W\\d_]`` excludes digits as well
+    as non-ASCII. A transcript whose only non-framing tokens are numbers
+    (``"User: 42\\nAssistant: 100 200"`` — an ID/number-only session) therefore
+    had NO word tokens, took the ``("", [])`` arm, and was written
+    ``summary=''`` with ``_searchText`` NULL: silent on the node and absent from
+    the Source FTS index. ⛔ The REACHABLE production shape is
+    ``"Assistant: 100 200"``: ``_session_llm_transcript`` drops a turn whose
+    marker-free body carries no >=3-char extractable sentence, so the shorter
+    numeric turns never reach here (that is the shape the live leg in
+    ``tests/test_10000_source_prose.py`` captures; the two-turn form above is a
+    unit-level input, not a transcript this builder can emit).
+    Against ``main`` that is a genuine REGRESSION, not
+    only a doc inaccuracy — the pre-#10000 derivation fell back to
+    ``transcript.strip()[:200]``, so those digits DID reach the index (as prose,
+    the §9.1/D1 violation this change removes — but the findability was real),
+    and RediSearch tokenises on whitespace and punctuation, so a numeric run is
+    an ordinary index term rather than something search cannot express. The
+    presence test is therefore ``[^\\W_][\\w-]*`` — any run of word characters
+    that is not underscore-only, LETTER **or** DIGIT — while the CONTENT arm
+    keeps the letter class below, so a numeric token keeps a digit-only session
+    findable through the fallback without ranking against the session's words.
+
+    ⚠️ Stated residual: a script that does not delimit words with spaces (CJK,
+    not Thai) yields ONE run per script run, so the descriptor can carry that
+    run whole. Splitting it needs a segmenter (RediSearch ships one for Chinese
+    via Friso), not a regex — and the alternative here, returning ``("", [])``,
+    is the unfindability this function exists to prevent. ⛔ Thai is NOT that
+    case: ``\\w`` drops its combining marks, so its runs FRAGMENT — named, not traded.
+
+    ⛔ The descriptor is a function of the word MULTISET — frequency order, ties
+    broken by the token itself (``_session_source_lexicon``), so it does NOT
+    depend on the transcript's word order — and it never quotes: a summary that
+    echoed the utterance back (even truncated, even redacted) is the defect this
+    shape exists to remove. ``tests/test_10000_source_prose.py`` scans every
+    node's string properties for the capture's own TEXT and reds if it reaches
+    anything but the episodic turn store; a bag of the session's words is §4.4
+    metadata and is deliberately allowed in a word-delimited script; a fragment of its prose is not (a whole space-less run is the named exception).
+
+    ⛔ The DISPLAY value carries ``_SESSION_SOURCE_SUMMARY_PREFIX`` and the
+    INDEXED value does not — the two are deliberately different strings, and
+    ``_source_search_text`` takes the bare ``topics`` for exactly that reason.
+    Writing the prefixed descriptor anywhere the FTS index reads it is a real
+    search-quality regression: ``session``/``capture``/``topics`` are not
+    stopwords, so every captured session would match a query for any of the
+    three (measured: two sessions with disjoint vocabularies both returned for
+    "session capture topics"). An earlier cut of #10000 dropped the prefix from
+    BOTH values to fix that; the prefix is kept here because it costs the index
+    nothing once the index stops reading ``summary``, and a bare comma list in a
+    column named ``summary`` reads as an unfinished sentence.
+    """
     if not transcript.strip():
         return "", []
-    summary = ""
-    for line in transcript.splitlines():
-        text = line.split(": ", 1)[1] if ": " in line else line
-        text = text.strip()
-        if len(text) >= 10:
-            summary = text[:200]
-            break
-    if not summary:
-        summary = transcript.strip()[:200]
     from collections import Counter
-    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", transcript.lower())
-    counts = Counter(w for w in words if w not in _SESSION_SOURCE_STOPWORDS)
-    topics = [w for w, _ in counts.most_common(6)]
-    return summary, topics
+    # ⛔ WIDTH-FREE presence test, 3-char floor only when RANKING: see the
+    # docstring. A pattern with ``{2,}`` here conflates "no lexicon" with "no
+    # word tokens of 3+ characters", and that conflated case is a real, reachable
+    # transcript (``"User: ok go"`` — a kept turn with no long word).
+    # ⛔ SCRIPT-FREE too: ``[^\W\d_]`` is a Unicode LETTER, so this is the same
+    # word class as ``[A-Za-z]`` for English and a correct one for every other
+    # script — an ASCII class made a Cyrillic/CJK transcript wordless and wrote
+    # it ``summary=''`` with no ``_searchText`` (#10852 review, P2).
+    # ⛔ …and DIGIT-SEEING (#10852 review): the presence test asks whether the
+    # transcript has a token of its OWN, which is not a question about letters.
+    # ``[^\W_]`` (a word character that is not ``_``) admits a LETTER-or-DIGIT
+    # run, so an ID/number-only session is presence-True; the CONTENT arm below
+    # keeps the letter class, so a numeric token still does not RANK against the
+    # session's words — it reaches the fallback, which is what keeps the session
+    # findable. Without this, ``"User: 42\nAssistant: 100 200"`` returned
+    # ``("", [])``: ``_searchText`` NULL and unfindable (#3518), a regression
+    # against the pre-#10000 prose derivation that DID index those digits.
+    # ⛔ THE TURN LABELS GO FIRST, BY POSITION (#10852 review, P2): the speaker
+    # sits at the start of its line, so stripping there removes the label and
+    # leaves every body word — including ``system``/``tool``, which the old
+    # token-set filter killed wherever it appeared.
+    tokens = re.findall(r"[^\W_][\w-]*",
+                        _SESSION_SOURCE_TURN_LABEL_RE.sub("", transcript).lower())
+    if not tokens:  # no tokens at all (empty/blank/punctuation-only,
+        return "", []  # or nothing but the transcript's own Speaker: labels)
+    words = [w for w in tokens if re.match(r"[^\W\d_]", w)]
+    counts = Counter(w for w in words
+                     if w not in _SESSION_SOURCE_STOPWORDS and len(w) >= 3)
+    topics = _session_source_lexicon(counts)
+    if not topics:  # stopword-only, short-word-only OR digit-only: fall back
+        # to the transcript's own vocabulary. All three shapes are non-empty
+        # transcripts with nothing to derive a CONTENT lexicon from, and each
+        # must still yield a descriptor or the session is unfindable (#3518).
+        topics = _session_source_lexicon(Counter(tokens))
+    return _SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(topics), topics
 
 
 #: #3518: the ONE searchable-text field on a :Source — the field the Source
@@ -4127,21 +4341,34 @@ SOURCE_SEARCH_TEXT_FIELD = "_searchText"
 
 
 def _source_search_text(*, title: str | None = None,
-                        summary: str | None = None) -> str | None:
-    """#3518: the ONE rule for a Source's searchable text — the title when
-    present, else the summary (``None`` when neither carries text).
+                        summary: str | None = None,
+                        topics: list[str] | None = None) -> str | None:
+    """#3518: the ONE rule for a Source's searchable text — the ``title`` when
+    the writer has one, else the session's TOPIC LEXICON, else the ``summary``
+    (``None`` when none of them carries text).
 
     Both Source writers resolve their ``_searchText`` through here so the two
     cannot drift into different vocabularies: the indexer
     (``_index_source_merge`` → ``create_source(..., _searchText=...)``) passes
     its frontmatter ``title``; the capture path
     (``_materialize_session_source``) has no title and passes its derived
-    ``summary``. Before this, the indexer set the field but the capture path
+    ``topics``. Before this, the indexer set the field but the capture path
     never did, and no ``Source`` FTS index existed at all — a captured session
     was unfindable through ``tortoise_fts_query(entity_type='source')``.
+
+    ⛔ #10000: the capture path passes ``topics``, NOT its ``summary``. The two
+    differ by the DISPLAY prefix ``summary`` carries
+    (``_SESSION_SOURCE_SUMMARY_PREFIX``), and that prefix must never reach the
+    index: this leg OR-unions its query terms (``sparse.build_or_query``), so a
+    constant "session capture topics" in every capture's search text makes every
+    captured session match any source query containing one of those three words.
+    The lexicon alone is what discriminates; the prefix only reads well.
     """
-    text = title or summary
-    return text or None
+    if title:
+        return title
+    if topics:
+        return ", ".join(topics)
+    return summary or None
 
 
 def _session_extraction_estimate(conversation: list[dict], *,
@@ -10345,22 +10572,23 @@ class TortoiseSDK:
             # `EventLog.carried_records`); its absence is not proof of early
             # life, so this only ever ADDS a report, never invents one.
             #
-            # ⛔ AND THE MAP IS THE SECOND WITNESS (review round 16, finding 1).
-            # On the RESUME path `narrowed` is empty by construction, so the
-            # answer below used to be `False` — "a typo" — for an id the
-            # RETAINED MAP held as PRESENT. A map that says ``True`` was folded
-            # from records that named this point, so the honest answer to a
-            # journal whose file just went away is UNJUDGED (``None``), not the
-            # silence this whole method exists to end: `journal_unreadable` is
-            # the vocabulary's own word for "nothing can be judged here". The
-            # inverse map value (``False``) is NOT the same case — it is a
-            # record the map READ (a delete, a merge loser), so answering it
-            # silently is what that evidence says.
+            # ⛔ AND THE RETAINED MAP IS THE SECOND WITNESS (review round 16,
+            # finding 1). On the RESUME path `narrowed` is empty by
+            # construction, so the answer below used to be `False` — "a typo"
+            # — for an id the RETAINED MAP held as PRESENT. A map that says
+            # ``True`` was folded from records that named this point, so the
+            # honest answer to a journal whose file just went away is UNJUDGED
+            # (``None``), not the silence this whole method exists to end:
+            # `journal_unreadable` is the vocabulary's own word for "nothing
+            # can be judged here". The INVERSE map value (``False``) is NOT the
+            # same case — it is a record the map READ (a delete, a merge
+            # loser), so answering that silently is what its evidence says.
+            #
             # The retained map describes a file that is GONE, so it is dropped
-            # rather than left to answer a next call: an unlink frees the inode,
-            # and a re-created path can be handed the same `(st_dev, st_ino)`
-            # back — the one identity a memo cannot tell apart from the file it
-            # was folded from.
+            # rather than left to answer a later call: an unlink frees the
+            # inode, and a re-created path can be handed the same
+            # `(st_dev, st_ino)` back — the one identity a memo cannot tell
+            # apart from the file it was folded from.
             self._journal_presence_memo = None
             if self._journal_carried_records(log) or known.get(point_id) is True:
                 _logger.warning(
@@ -10392,54 +10620,131 @@ class TortoiseSDK:
         # scan per absent write on the append-active lane #7405 describes.
         seam = self._journal_seam(log, resume)
         stat_after = self._journal_stat_key(log)
+        # ⛔ THREE DIFFERENT FACTS, ONE ANSWER (review rounds 17/18/20; header
+        # corrected round 21). `stat_after is None`, "a new inode sits at the
+        # path", and "the same inode was truncated under the fold" are NOT the
+        # same evidence, and each arm below names its own with the citation
+        # that justifies it. But since round 20 they are the SAME ANSWER:
+        # every one of them drops the memo and hands `known` on to the needle
+        # as the WITNESS. So the three arms are, as of this writing,
+        # byte-identical — the split is documentation-of-evidence, NOT three
+        # behaviours, and the whole block is equivalent to
+        #
+        #   if (stat_after is None or stat_after[:2] != stat_key[:2]
+        #           or stat_after[2] < resume):
+        #
+        # Collapsing it would therefore be a semantic no-op today. It is left
+        # split because each arm's comment is the record of WHY that
+        # interleaving must be loud (rounds 17/18 answered differently, and
+        # THAT divergence — not the collapse — is what once put this tree BELOW
+        # `main` for one interleaving); round 20 made the answers agree, and
+        # this header is the correction that says so instead of still claiming
+        # two answers.
+        #
+        # * ``stat_after is None``: the path no longer names a file. `open()`
+        #   binds the INODE, and unlink(2) says a file with an open descriptor
+        #   "will remain in existence until the last file descriptor referring
+        #   to it is closed"
+        #   (<https://man7.org/linux/man-pages/man2/unlink.2.html>) — so the fold
+        #   DID read bytes this journal really held, and `known` (folded from
+        #   them) is valid EVIDENCE, not a stale map. It is handed to the needle
+        #   as the WITNESS: an id it holds as PRESENT must answer UNJUDGED
+        #   (``None`` ⇒ `journal_unreadable`), because the deletion that removed
+        #   the path can take the position sidecar with it, and then
+        #   `_journal_carried_records` cannot see the loss either. Without the
+        #   witness that loss was reported as "a typo" — silent — which is
+        #   #10515 indicator 1, and is exactly what `main` reported loudly.
+        # * REPLACEMENT: a new `st_dev`/`st_ino` (a rotate, an `mv`, a restore),
+        #   so `resume`/`seam` describe the NEW file while `known` came from the
+        #   OLD one. The map is NOT evidence about presence at THIS path — the
+        #   re-fold answers that, and the memo is always dropped. But it IS
+        #   evidence about the question `_journal_knows_point` actually asks
+        #   ("was a revision LOST"): `rename(2)` guarantees the fd the fold read
+        #   still named the OLD file, so a map entry of ``True`` was folded from
+        #   records that really existed at this path and really named this point.
+        #   It is handed on as the WITNESS, like the two arms below (review round
+        #   20, finding 1: leaving this arm map-free made it the ONLY post-fold
+        #   arm that stayed quiet). ⚠️ This arm is a deliberate TIGHTENING over
+        #   this PR's base, NOT the parity the ``stat_after is None`` arm has:
+        #   `origin/main` folded truncation TOGETHER WITH replacement into one
+        #   MAP-FREE arm (``stat_after[2] < resume or stat_after[:2] !=
+        #   stat_key[:2]`` → ``_journal_presence_needle(log, point_id)``), so an
+        #   id the retained map held PRESENT answered ``False`` there — "a
+        #   typo", with no counter and no WARNING. The window is NARROW: the
+        #   rotate/`mv`/restore must land INSIDE one fold, because a rotation
+        #   between calls is absorbed by the memo-identity check above, where
+        #   `known` is still ``{}`` and the witness is inert. But `rename(2)`
+        #   makes the map valid evidence for the question being asked, and
+        #   silence about a destroyed record is the class #10515 indicator 1
+        #   forbids.
+        # * TRUNCATION of the SAME inode (``stat_after[2] < resume``): no new file
+        #   exists — the bytes the fold read were merely cut away — and this arm
+        #   is reachable ONLY when the fold consumed them, so `known` is the one
+        #   surviving record of what was destroyed. It is handed on as the
+        #   WITNESS, exactly as on the ``stat_after is None`` arm (review round
+        #   18, finding 1: both sub-cases shared ONE map-free arm, and for this
+        #   interleaving that put the crossing call's answer BELOW `main`'s).
         if stat_after is None:
-            # ⛔ THE PATH WENT AWAY UNDER THE FOLD, AND THE MAP IS A WITNESS TO
-            # IT (review round 17, finding 1). unlink(2): "if the name was the
-            # last link to a file but any processes still have the file open,
-            # the file will remain in existence until the last file descriptor
-            # referring to it is closed"
-            # (<https://man7.org/linux/man-pages/man2/unlink.2.html>) — so a
-            # deletion that lands AFTER the fold's `open()` raises NOTHING
-            # inside the fold: the scan reads the (now nameless) inode to EOF
-            # through the live fd, and the disappearance surfaces only here, at
-            # the post-fold stat. That interleaving is the SAME world state as a
-            # deletion landing one microsecond earlier, which the fold's own
-            # `FileNotFoundError` arm answers UNJUDGED when the map holds the id
-            # — and the evidence here is STRONGER, because `known` was folded
-            # from bytes this very call just read. So the map earns the same
-            # answer: an id it holds as PRESENT is `None` (⇒
-            # `journal_unreadable`), never "a typo"; the inverse value stays
-            # silent, because that id's record was actually READ. One extra
-            # `known` entry cannot invent an alarm: it is the same predicate the
-            # normal map path reports `journal_known` from.
             self._journal_presence_memo = None
             return self._journal_presence_needle(log, point_id, known)
-        if stat_after[2] < resume or stat_after[:2] != stat_key[:2]:
-            # The journal no longer holds the bytes that were folded, or was
-            # REPLACED under the fold (a new `st_dev`/`st_ino`: a rotate, an
-            # `mv`, a restore) — so `resume`/`seam` describe the NEW file while
-            # `known` came from the OLD one. Memoising would serve another file's
-            # records; one re-fold costs less. ⛔ AND THIS ARM STAYS MAP-FREE: a
-            # truncation or a replacement means the map describes bytes the file
-            # no longer has (round 9's rule), so `known` must not be consulted
-            # here — the re-fold answers for the file that is there now.
+        if stat_after[:2] != stat_key[:2]:
+            # The journal was REPLACED under the fold (a new `st_dev`/`st_ino`: a
+            # rotate, an `mv`, a restore) — so `resume`/`seam` describe the NEW
+            # file while `known` came from the OLD one. Memoising would serve
+            # another file's records; one re-fold costs less.
             #
             # ⛔ AND THE RE-FOLD IS THE ANSWER, NOT JUST THE MEMO'S FATE (review
             # round 16, finding 1). The comment above already says this map is
-            # not a prefix of the current file — and the next line used to answer
-            # THIS call out of it anyway, so a rotation/`mv`/restore that landed
-            # during the fold could silence a ``journal_known`` loss for exactly
-            # the call that detected it (``known[point_id] is False`` from the
-            # OLD file while the NEW one holds a ``PointAdded``). `open()` binds
-            # the inode, so the fd the fold read keeps the old file while a
-            # fresh read of the PATH resolves to the new one — rename(2): "Open
-            # file descriptors for oldpath are also
-            # unaffected" (<https://man7.org/linux/man-pages/man2/rename.2.html>).
-            # So the discarded map is re-derived from the file that is there now,
+            # not a prefix of the current file — and the next line used to
+            # answer THIS call out of it anyway, so a rotation/`mv`/restore that
+            # landed during the fold could silence a ``journal_known`` loss for
+            # exactly the call that DETECTED it (`known[point_id] is False` from
+            # the OLD file while the NEW one holds a ``PointAdded``). `open()`
+            # binds the inode, so the fd the fold read keeps the old file while
+            # a fresh read of the PATH resolves to the new one — rename(2):
+            # "Open file descriptors for oldpath are also unaffected"
+            # (<https://man7.org/linux/man-pages/man2/rename.2.html>). So the
+            # discarded map is re-derived from the file that is there NOW,
             # needle-filtered: bounded memory, one pass, and an answer that
             # describes THIS path rather than the one that was moved away.
+            #
+            # ⛔ AND `known` GOES WITH IT AS A WITNESS (review round 20, finding
+            # 1). Round 16 was right that this map cannot answer for the NEW
+            # file — so the re-fold answers, and the memo goes — but the same
+            # `rename(2)` fact cuts the other way too: the fd the fold read is
+            # still the OLD file, so a map entry of ``True`` is a record of a
+            # revision that existed HERE and that the live graph does not hold.
+            # Answering a bare "a typo" for it is the silence #10515 indicator 1
+            # forbids, and it made this the only post-fold arm that is QUIET
+            # while both of its siblings are loud. The needle applies it the
+            # round-19 way, so it can only ever make the answer LOUDER: a
+            # vacuous re-read (`point_id not in state`) ⇒ ``None``
+            # (`journal_unreadable`), a folded delete/merge-loser ⇒ ``False``
+            # (silent, its own evidence), so no `journal_known` is ever claimed
+            # that this call cannot support.
             self._journal_presence_memo = None
-            return self._journal_presence_needle(log, point_id)
+            return self._journal_presence_needle(log, point_id, known)
+        if stat_after[2] < resume:
+            # ⛔ THE SAME INODE, WITH THE FOLDED BYTES TRUNCATED AWAY (review
+            # round 18, finding 1). This is NOT the replacement case above: no
+            # new file exists, so `known` still describes THIS journal — it was
+            # folded over ``[0, resume)`` from a file we are still looking at,
+            # and the shrink proves those bytes were destroyed after that read.
+            # The map is therefore the witness of what existed, and the re-fold
+            # of the now-shorter file cannot see it. Answering "a typo" there is
+            # the silent loss #10515 indicator 1 forbids. ⚠️ This arm is a
+            # deliberate TIGHTENING over this PR's base, NOT parity: `origin/main`
+            # folded truncation together with replacement into one MAP-FREE arm
+            # (``stat_after[2] < resume or stat_after[:2] != stat_key[:2]`` →
+            # ``_journal_presence_needle(log, point_id)``), so a retained PRESENT
+            # map met a re-read that no longer holds the id and the call answered
+            # ``False`` — silent. (At the older `fcc742b8a` the single arm did
+            # consult the map via ``known.get(point_id, False)``, which is where
+            # the parity reading came from; that is not the base this branch
+            # lands on.) The answer can only get LOUDER, never manufacture a
+            # ``journal_known``.
+            self._journal_presence_memo = None
+            return self._journal_presence_needle(log, point_id, known)
         self._journal_presence_memo = {
             'log': log, 'ident': stat_after[:2], 'folded_to': resume,
             'mtime_ns': stat_after[3], 'known': known, 'seam': seam,
@@ -10518,25 +10823,76 @@ class TortoiseSDK:
     def _journal_presence_needle(self, log, point_id: str, known=None):
         """Re-fold the journal AS IT IS NOW, filtered to *point_id* (#10543 r16).
 
-        The honest answer once the retained map has been declared untrustworthy:
-        the map is dropped from the memo AND from this call's answer, because it
-        was folded from a file the path no longer names. Filtered to the one id,
-        so the pass is bounded in memory (at most one entry) and single-purpose.
+        The honest answer once the retained map has been declared
+        untrustworthy for THIS path: the map is always dropped from the memo, and
+        it is ALSO handed to this call as a WITNESS on all THREE post-fold arms.
+        On the ``stat_after is None`` arm and on the truncation arm the path still
+        names the inode the fold read (through its fd, or after a shrink); on the
+        REPLACEMENT arm the fd the fold read still named the OLD file, which
+        `rename(2)` leaves untouched. So on every one of them `known` is a record
+        of what the path held while the re-fold answers for the file that is there
+        now — which is why dropping the witness on the replacement arm made it the
+        ONE post-fold arm that stayed silent about a destroyed record (review
+        round 20, finding 1).
+        Filtered to the one id, so the pass is bounded in memory (at most one
+        entry) and single-purpose.
 
-        ``known`` is the map the CALLER folded, and it is consulted ONLY by the
-        caller whose evidence still describes this journal: the post-fold
-        ``os.stat`` answering ``None`` (the path went away while the fold read it
-        through an open fd — review round 17, finding 1). Every other caller
-        passes nothing, because a truncated or REPLACED file never held the
-        folded bytes (round 9's rule).
+        *known* is the RETAINED MAP as a WITNESS, and it is passed on EVERY
+        post-fold arm, because on every one of them it is evidence about a
+        different question from the one the re-fold answers. The re-fold answers
+        "does this file, HERE AND NOW, name the id". `known` answers "did a
+        revision at this path NAME the id that the live graph no longer holds" —
+        which is the question ``_journal_knows_point`` exists to report, and
+        ``rename(2)`` ("Open file descriptors for oldpath are also unaffected") /
+        unlink(2) (an open file survives its name) are what make the fold's own
+        map valid evidence for it even when the path has moved on: the
+        ``stat_after is None`` arm (the path went away while the fold read it),
+        the truncation arm (the same inode, its folded bytes cut away), and the
+        replacement arm (a new inode at the path, the fold having read the old
+        one). A map that says ``True`` was folded from records that named this
+        point, so a path that no longer answers for it cannot be judged
+        (``None`` ⇒ ``journal_unreadable``) — the same reading the fold's own
+        ``FileNotFoundError`` arm applies to its retained map. No entry of it can
+        invent an alarm: only ``True`` is ever consulted, and only when the
+        re-read has no line for the id.
+
+        ⛔ THE WITNESS IS APPLIED TO EVERY NON-ANSWER, NOT JUST THE RAISED ONE
+        (review round 18, finding 1). A re-read that SUCCEEDS and carries no LINE
+        for the id is equally unable to confirm a witness that says the journal
+        HELD it — the path can be recreated between the post-fold ``stat`` and
+        this read, and then ``FileNotFoundError`` never fires. So a ``False``
+        from the re-read is ``None`` whenever the witness holds the id as
+        PRESENT: a destroyed record must never be reported as "a typo".
+
+        ⛔ BUT ONLY A VACUOUS ``False`` IS A NON-ANSWER (review round 19, finding
+        1). ``state.get(point_id, False)`` collapses two different facts, and
+        round 18's override tested the dumped value instead of the fact:
+
+        * VACUOUS — no record in the re-read names the id, so this read has no
+          evidence and the witness' ``True`` is unconfirmed ⇒ ``None``;
+        * POSITIVE — a presence-REMOVING record names the id and was folded to
+          ``False`` (``EntityMutated op='delete'``, a hard ``PointRetracted``, a
+          merge loser), so the needle MATCHED it, parsed it and folded it. The
+          journal now says the point is GONE, and that is the answer its own
+          evidence supports ⇒ ``False``, silent.
+
+        Escalating the second to ``None`` files ``journal_unreadable`` for an
+        ordinary write-after-delete — indicator 2 of the caller's own docstring,
+        "a counter that fires on every write-after-delete can never be alerted
+        on", and the exact reading this method family already applies to the
+        retained map a few hundred lines up (``sdk.py:10347-10359``: "The INVERSE
+        map value (``False``) is NOT the same case — it is a record the map READ
+        (a delete, a merge loser), so answering that silently is what its
+        evidence says"). ``point_id in state`` is what tells the two apart, and it
+        is the only term the round-18 condition lacked.
 
         Three outcomes, the same vocabulary the rest of this method uses:
         ``True``/``False`` from the records that are there now, and ``None``
         (UNJUDGED ⇒ ``journal_unreadable``) when the re-read cannot answer — a
-        file that went away with records behind it, **or one the caller's map
-        proves carried this id**, or any failure. ``False`` is reserved for the
-        shape its own evidence supports: a journal that carried nothing, whose
-        absent id really is just a typo.
+        file that went away with records behind it, a witness that said it held
+        the id while this read found no line for it, or any failure. ``False`` is
+        reserved for the shape its own evidence supports: a journal that carried
+        nothing (a typo), or one that positively says the point is gone.
         """
         state: dict[str, bool] = {}
         try:
@@ -10545,11 +10901,9 @@ class TortoiseSDK:
         except FileNotFoundError:
             # The SAME two facts the fold's own FileNotFoundError arm splits: a
             # path nothing ever wrote is a typo (silent), a journal that carried
-            # records and then went away is UNJUDGED. The caller's map is the
-            # third witness, and it is the only one that survives the deletion
-            # shape that takes the `.position` sidecar WITH the journal — a
-            # PRESENT entry proves the journal carried this id even when nothing
-            # else can answer.
+            # records and then went away is UNJUDGED — and so is an id the
+            # WITNESS map held as PRESENT, which is the one fact that survives
+            # the sidecar going away with the journal.
             if known is not None and known.get(point_id) is True:
                 return None
             return None if self._journal_carried_records(log) else False
@@ -10560,7 +10914,23 @@ class TortoiseSDK:
                 "rather than asserted to be a typo (#10515)",
                 point_id, exc_info=True)
             return None
-        return state.get(point_id, False)
+        answer = state.get(point_id, False)
+        if (answer is False and point_id not in state
+                and known is not None and known.get(point_id) is True):
+            # The re-read SUCCEEDED and found no LINE for the id, but the witness
+            # proves the journal this call folded NAMED this point: the records
+            # are gone (a truncation, or a path recreated before this read), so
+            # the absence cannot be judged. ``False`` here is the silence #10515
+            # indicator 1 forbids.
+            #
+            # ⛔ ``point_id not in state`` IS THE OTHER HALF (review round 19,
+            # finding 1). Without it this condition also caught a ``False`` that
+            # a DELETE record folded — positive evidence that the journal now
+            # says the point is gone — and escalated an ordinary
+            # write-after-delete to `journal_unreadable`, which is indicator 2 of
+            # the docstring this method answers to.
+            return None
+        return answer
 
     @staticmethod
     def _journal_carried_records(log) -> bool:
@@ -16480,20 +16850,66 @@ class TortoiseSDK:
         references edge (test_backfill_sources.py).
 
         #4911: the transcript is SCRUBBED before anything is derived from it or
-        persisted. ``summary`` is the first substantive utterance and ``topics``
-        are the six most frequent content words — i.e. the session's own turn
-        text — so redacting only the turn Points left the SAME credential in
-        ``Source.summary`` / ``Source.topics`` on the same write (reproduced in
-        review). ``contentHash`` is taken over the redacted transcript too, so
-        the hash describes what is stored.
+        persisted. ``topics`` are the six most frequent content words (the
+        transcript's whole vocabulary when it is stopword-only) and ``summary``
+        is a DISPLAY descriptor built FROM them (#10000: it used to be the first
+        substantive utterance, i.e. raw turn prose on a node — see
+        ``_session_source_metadata``) — so redacting only the turn Points left
+        the SAME credential in ``Source.summary`` / ``Source.topics`` on the
+        same write (reproduced in review). ``contentHash`` is taken over the
+        redacted transcript too, so the hash describes what is stored.
 
         #3518: it also populates ``_searchText`` — the field the Source FTS
         index is declared on — via the shared ``_source_search_text`` rule
-        (title-else-summary; the capture path has no title). Without it the
+        (title-else-lexicon; the capture path has no title). Without it the
         captured session was created but NOT findable through
-        ``tortoise_fts_query(entity_type='source')``. The SET is a
-        ``coalesce``, so a re-capture of an empty transcript cannot erase the
-        text a previous capture (or the indexer path) established.
+        ``tortoise_fts_query(entity_type='source')``. It indexes the BARE
+        lexicon, never ``summary``: the display prefix is a constant, and this
+        leg OR-unions, so indexing it would make every capture match a query for
+        "session"/"capture"/"topics" (#10000). The SET is a ``coalesce``, so a
+        re-capture of an empty transcript cannot erase the text a previous
+        capture (or the indexer path) established. ``summary`` is written under
+        that SAME guard, so the display column and the indexed column keep
+        together or replace together and can never disagree.
+
+        ⛔ A pre-fix node is NOT healed by a re-capture, and the reason is the
+        MINT GATE, not this clause: this method's only production caller sits
+        inside ``if not session_existed or (retry_failed_capture and not
+        no_provider)`` in ``capture_session``, so re-capturing an ALREADY
+        CAPTURED session id is the #1727 no-op replay and never reaches these
+        SETs. A node that holds the pre-fix pair was written by a run of this
+        same method — i.e. one where ``session_existed`` was False — so it
+        coexists with the ``:Session`` node of its own capture (``capture_ok``
+        True) and the stale ``summary``/``_searchText`` pair survives every
+        later capture of that id, in the graph and in the Source FTS index.
+        MEASURED, not reasoned (#10852 review, P1): capture, overwrite the node
+        with the pre-fix prose, re-capture the identical conversation and again
+        with an extra turn — the pair is unchanged, only the counts move.
+
+        The routes that DO clear it are ONE: a retry of a prior FAILED capture
+        (``retry_failed_capture``, #2335 — the gate admits that arm, so the
+        mint re-runs for the SAME node and the SETs above overwrite the pair).
+        Two things that look like repairs are NOT, and a reader who acts on
+        them leaves the prose exactly where it is (#10852 review, P3): a
+        capture under a NEW ``session_id`` materialises a DIFFERENT node, since
+        the MERGE key is ``url = "session:<session_id>"`` — the old node keeps
+        its pair; and a record-sourced re-projection is a PREVENTION route, not
+        a clearing one — its write is additive
+        (``MERGE … SET n += $props``, ``cache_projection.node_statement``) and
+        ``summary`` is declined on that door, so a node that ALREADY carries
+        the pair keeps it, and the projection only ever produces a prose-free
+        node where none existed. Clearing an existing node's pair otherwise
+        needs an explicit property clear — #11070's work, not a replay's.
+        Everything else is a replay.
+
+        ⛔ Do NOT make the healing true by re-SETting on the replay arm. A
+        replay that writes is not a replay: #2104/#1727 require a re-capture of
+        an existing session to be a TRUE no-op — it must not re-SET the first
+        capture's ``capturedAt``/``contentHash`` either — and an earlier cut of
+        #10000 changed the ``coalesce`` below to an equivalent ``CASE WHEN $st
+        IS NOT NULL …`` while claiming it healed, which the two identical
+        functions cannot do. Do not restore that claim, and do not "fix" the
+        indexer's ``coalesce($st, s._searchText, s.title)`` on its strength.
         Additive and idempotent: never touches ``_link_source`` or
         ``_session_event_write``; re-capturing a session re-MERGEs the same
         url. The references edge is skipped when ``event_id`` is None (Event
@@ -16530,10 +16946,12 @@ class TortoiseSDK:
         # capture path MUST populate it or the captured session stays
         # unfindable. The capture path has no title (the indexer path is the
         # one that carries frontmatter), so the shared rule resolves to the
-        # derived summary. `coalesce` keeps an existing value when a
-        # re-capture of an empty transcript yields no text, mirroring the
-        # merge semantics `_upsert_source` applies on the indexer side.
-        search_text = _source_search_text(summary=summary)
+        # derived TOPIC LEXICON — not to `summary`, which is the same lexicon
+        # behind a display prefix that must not be indexed (#10000). `coalesce`
+        # keeps an existing value when a re-capture of an empty transcript
+        # yields no text, mirroring the merge semantics `_upsert_source` applies
+        # on the indexer side.
+        search_text = _source_search_text(topics=topics)
         params = {
             "url": url,
             "sk": "agentSession",
@@ -16566,8 +16984,42 @@ class TortoiseSDK:
             "OR s.contentHash <> $ch THEN $now "
             "ELSE coalesce(s.updatedAt, $now) END",
             "s.contentHash=$ch",
-            "s.summary=$sum",
-            "s.topics=$topics",
+            # #10000: `summary` and `_searchText` move under the SAME guard —
+            # both keep their previous value exactly when the derivation is
+            # empty, so the display column and the indexed column cannot
+            # disagree. It used to be `s.summary=$sum` unconditionally while the
+            # `_searchText` SET had a keep-arm, so a text-less re-capture BLANKED
+            # `summary` and left the indexed text (measured) — two columns that
+            # `_source_search_text` deliberately ties together, diverging on
+            # caller-controlled input. `coalesce(..., '')` keeps the value a
+            # fresh text-less node has always had.
+            "s.summary=CASE WHEN $sum <> '' THEN $sum "
+            "ELSE coalesce(s.summary, '') END",
+            # #10000: `topics` moves under the SAME guard as `summary`. It used to
+            # be unconditional (`s.topics=$topics`), so a text-less re-capture
+            # left `topics=[]` while `summary`/`_searchText` kept the lexicon
+            # those topics name — the third column disagreeing with the two it
+            # is a view of.
+            "s.topics=CASE WHEN size($topics) > 0 THEN $topics "
+            "ELSE coalesce(s.topics, []) END",
+            # #10000: `coalesce` keeps the stored text ONLY when this capture
+            # derives none — the KEEP-ARM, which is all a keep-arm can be. It
+            # is NOT the healing mechanism, and neither is the DERIVATION: a
+            # PRE-FIX node (one that ALREADY carries the prose pair) is not
+            # healed by a re-capture at all, because the MINT GATE makes a
+            # re-capture of an already-captured session the #1727 no-op REPLAY,
+            # and a replay never reaches these SETs. The mechanism, and the
+            # routes that DO clear such a node, are in this method's docstring
+            # above; the survival is pinned by
+            # `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`.
+            # Load-bearing alongside it, and correct on its own: an earlier cut
+            # rewrote this clause as an equivalent `CASE WHEN $st IS NOT NULL
+            # …` and claimed THAT rewrite was the healing — the two forms are
+            # the same function, so the change was a no-op and its claim was
+            # false (measured — `#10852` review, P2). Do not restore either
+            # claim; the ⛔ in the docstring is the guard. The two capture
+            # writes cannot collide with the indexer either way: this writer
+            # only touches `session:<id>` Sources.
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
             # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
@@ -16652,7 +17104,17 @@ class TortoiseSDK:
             # other two: #9451 — the record must state the instant this write
             # STORED, which is the earlier writer's when the stub pre-existed
             # (`s.ingestedAt=coalesce(s.ingestedAt, $now)` keeps it), not `now`.
-            + " RETURN s.validFrom, s.is_episodic, s.ingestedAt",
+            # #10000: the three DERIVED columns are read back for exactly the
+            # same reason as the three above — `summary`/`topics`/`_searchText`
+            # now all have a keep-arm, so the record must state what this write
+            # STORED, not what the call derived. Journalling the call's empty
+            # derivation made `derived != replay(journal)`: a text-less
+            # re-capture kept the display column live and the replay wrote `''`
+            # over it (measured — `rebuild()` and `rebuild_all()` both blanked
+            # `summary` while `_searchText` survived, the #5024/#5097 class this
+            # carrier exists to close).
+            + f" RETURN s.validFrom, s.is_episodic, s.ingestedAt,"
+              f" s.summary, s.topics, s.{SOURCE_SEARCH_TEXT_FIELD}",
             params=params,
         ).result_set
         prior_valid_from = _rows[0][0] if _rows else None
@@ -16668,6 +17130,12 @@ class TortoiseSDK:
         # the very divergence this issue closes, on that one state.
         _stored = _rows[0][2] if _rows else None
         stored_ingested_at = now if _stored is None else _stored
+        # #10000: the stored derived columns (see the RETURN note above). The
+        # call's values are the fallback only for a MERGE that returned no row —
+        # nothing was written, so there is no stored value to state.
+        stored_summary = _rows[0][3] if _rows else summary
+        stored_topics = _rows[0][4] if _rows else topics
+        stored_search_text = _rows[0][5] if _rows else search_text
         # ⛔ §17.1 ORDER (#9206 review P1): THE RECORD IS APPENDED HERE, BEFORE
         # the `link_source_to_event` write below — not after it (where it used to
         # sit), and BEFORE the record's own explanatory block explains why it is
@@ -16717,11 +17185,11 @@ class TortoiseSDK:
             # in `record_projection._RECORD_ONLY_KEYS` so it never enters a
             # record's props tail.
             _ingestedAtStored=True,
-            **{SOURCE_SEARCH_TEXT_FIELD: search_text},
+            **{SOURCE_SEARCH_TEXT_FIELD: stored_search_text},
             sessionId=session_id,
             capturedAt=now,
-            summary=summary,
-            topics=topics,
+            summary=stored_summary,
+            topics=stored_topics,
             **(({"eventId": event_id}) if event_id else {}),
         )
         if event_id:
@@ -19865,7 +20333,24 @@ class TortoiseSDK:
                 # this arm's mixed-``idx`` sibling closes, on the direction axis).
                 # A node with no ``op_type`` is pre-v3.6 legacy; the rel type that
                 # carried it into this set IS its mechanism then.
-                _dirs = {_d for _, _d in _meta_rows}
+                # ⛔ A stored ``direction`` may be a RAW-WRITTEN non-scalar (list/
+                # map — hand edit, a foreign/legacy writer, a bulk import) and
+                # such a value is UNHASHABLE, so the bare set comprehension this
+                # replaced raised ``TypeError: unhashable type`` BEFORE any
+                # verdict — aborting every supersede that touched that operator,
+                # not only override-shaped ones (#10559).
+                # The reading mirrors #10552's 2a-DIRECT arm: a PRESENT
+                # non-string is judged BOTH ways (``<->``, which
+                # ``_canonical_direction`` returns verbatim for every type, so
+                # the stand-in flows through the existing predicate unchanged —
+                # fail-CLOSED, since a reader sees a present junk token as the
+                # mutual default), while ABSENT (``None``) keeps the edge type's
+                # own default exactly as before.
+                _dirs = {
+                    _d if isinstance(_d, str)
+                    else ("<->" if _d is not None else None)
+                    for _, _d in _meta_rows
+                }
                 # ⛔ A stored ``op_type`` OUTSIDE the pair is no exemption
                 # (#10418 review P3). ``create_operator`` routes every other
                 # ``op_type`` to a ``hasPart`` edge (``:20244``), so
@@ -19958,10 +20443,14 @@ class TortoiseSDK:
         #
         # ⛔ ONE predicate: ``claim_class.direction_blocks_create``, fed the
         # edge's stored direction — a string verbatim, the edge TYPE's default
-        # when ABSENT, both ways for a present non-string (see the per-row
-        # note) — and, for the first two, the same canonicalizer as
-        # ``create_operator``, ``create_direct_edge``, ``ingest``'s
-        # partial-absorb branch and #10195's operator pre-flight above. A
+        # when ABSENT, and a present non-string VERBATIM TOO, which
+        # ``direction_flows`` then reads as BOTH ways (see the per-row note) —
+        # and, all three of them, through the same canonicalizer as
+        # ``create_operator``, ``create_direct_edge`` and ``ingest``'s
+        # partial-absorb branch. #10195's operator pre-flight above reads the
+        # same predicate, but it screens a non-string to ``"<->"`` BEFORE
+        # canonicalizing — a hashability screen, not a second policy (see the
+        # per-row note). A
         # second copy of "may this edge exist" would be a finding of its own.
         # The REFUSAL message is that
         # predicate's own (``override_refusal``), with this surface named —
@@ -20130,56 +20619,60 @@ class TortoiseSDK:
                     continue
                 _rdict = (dict(_rel.properties)
                           if hasattr(_rel, "properties") else {})
-                # ⛔ Only a STRING token reaches the predicate: a raw-written
-                # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
-                # and ``direction_flows`` tests membership in a frozenset — so
-                # handing it over aborts the supersede with a ``TypeError`` the
-                # guard is not about. ⚠️ The three cases below are DIFFERENT,
-                # and none is read off ``create_direct_edge`` blindly: a string
-                # is judged on the leg set ``direction_flows`` gives it, a
-                # present non-string is judged BOTH ways (the hashable reader
-                # verdict, and the fail-closed stand-in where no reader verdict
-                # exists), and only the ABSENT case takes the creation door's
-                # canonical form — because that is the token the door WRITES,
-                # so no reader ever sees a door-made absent edge. A *string*
-                # token passes through verbatim (one outside the vocabulary is
-                # read by ``direction_flows`` as both ways — the leg set the EP
-                # backstop sees, so a door reading it more narrowly would judge
-                # ONE leg of a two-leg factor (the backstop NARROWS, it does not
-                # drop — measured: such a factor loads as ``'<-'`` with
-                # ``skipped == []``); an ABSENT token takes the
-                # edge TYPE's default (what ``create_direct_edge``
-                # canonicalizes it to before judging — deliberately NOT
+                # ⛔ ONE reader — no door-local copy of the direction policy
+                # (#10520 A4). The stored token goes straight to
+                # ``_canonical_direction``, the same canonicalization
+                # ``create_direct_edge`` applies, and the VERDICT then comes from
+                # ``claim_class.direction_blocks_create`` ->
+                # ``live.direction_flows``, the same normalizer the EP backstop
+                # reads. A PRESENT value is returned VERBATIM (only ABSENT is
+                # replaced by the edge TYPE's default — deliberately NOT
                 # ``ep.py``'s ``coalesce(r.direction, 'bidirectional')``, which
                 # would be the over-refusal the directionless-NAND pin exists to
-                # prevent); a PRESENT non-string token is judged BOTH ways: a
-                # HASHABLE one (``3``, ``True``) is read as both ways by
-                # ``direction_flows`` and ``ep.py``, so both ways matches the
-                # leg set they see, while an UNHASHABLE one (list/map) makes
-                # ``direction_flows`` raise ``TypeError`` — there is no reader
-                # verdict to mirror, so both ways is the fail-closed stand-in
-                # (and keeps that value out of a frozenset membership test).
+                # prevent), and a present JUNK value is read as BOTH ways by
+                # ``direction_flows`` — which is also the fail-closed reading the
+                # EP backstop sees. Its ``isinstance(..., str)`` screen is what
+                # keeps a NON-``str`` unhashable value (a list, a map) out of a
+                # frozenset membership test; it is NOT a guarantee for an
+                # unhashable ``str`` SUBCLASS, which passes that screen and would
+                # still raise inside ``canonical_direction``'s own membership test
+                # (unreachable from a graph read — neither FalkorDB nor a JSON
+                # projection can yield one). ⛔ Do NOT reintroduce a per-value
+                # branch here: a second copy of the policy is what let this door
+                # publish its own token as ``judged`` in the refusal below, and it
+                # is behaviour-invisible (it verdicts identically by design), so
+                # the SHAPE is what is pinned —
+                # ``tests/test_2351_claim_class.py::
+                # test_the_repoint_door_carries_no_door_local_direction_filter``
+                # is the mechanical guard a comment cannot be.
+                # ⛔ Scope of "ONE reader": the 2a-OPERATOR pre-flight above DOES
+                # still screen a stored direction (``_d if isinstance(_d, str)
+                # else ("<->" if _d is not None else None)``) — that is a
+                # HASHABILITY screen, not a copy of this policy: the value becomes
+                # a SET KEY there, and an unhashable list/map aborted the whole
+                # pre-flight (#10559). Its ``<->`` stand-in yields the same verdict
+                # as this door's reading; what it does NOT do is name the stored
+                # value in its refusal, publishing ``'<->'`` for a value the graph
+                # does not carry — that residue is tracked as **#11072** (it is NOT
+                # #11033, which is the ID axis of the same pre-flight), not this
+                # door's.
                 _raw_dir = _rdict.get("direction")
-                if isinstance(_raw_dir, str):
-                    _eff_dir = self._canonical_direction(_rtype, _raw_dir)
-                elif _raw_dir is None:
-                    # ABSENT: the edge TYPE's own default (NAND ->
-                    # ``unidirectional``), exactly as ``create_direct_edge``
-                    # canonicalizes it before judging.
-                    _eff_dir = self._canonical_direction(_rtype, None)
-                else:
-                    # ⛔ A PRESENT non-string token is NOT "absent" to any
-                    # reader: ``live.direction_flows`` reads it as BOTH ways
-                    # (unknown ⇒ the mutual default), which is also the leg set
-                    # ``ep.py`` sees. Judging it as the type default would judge
-                    # ONE leg of a two-leg wiring — for NAND that let a supersede
-                    # write ``asserted -[NAND {junk}]-> derived``, whose backward
-                    # leg is the override ``create_direct_edge(NAND, …,
-                    # 'bidirectional')`` refuses (measured). Both ways is the
-                    # fail-CLOSED reading, and it also keeps the unhashable case
-                    # away from ``direction_flows``' frozenset membership (which
-                    # raises ``TypeError``).
-                    _eff_dir = "bidirectional"
+                _eff_dir = self._canonical_direction(_rtype, _raw_dir)
+                # ⛔ SAY ONLY WHAT THE MESSAGE DOES NOT ALREADY SAY. The
+                # canonicalizer substitutes ONLY for an ABSENT value (a present
+                # one is returned VERBATIM), so rendering ``(judged X)`` beside
+                # ``direction X`` is pure duplication — and deleting the
+                # door-local filter is exactly what turned the parenthetical
+                # from "the token this door substituted" into a copy of the
+                # value beside it. Render it ONLY where the canonicalization
+                # SUBSTITUTED: that is the one reading the caller cannot take
+                # from the stored value itself. ⛔ The condition is "did this
+                # substitute" (``_raw_dir is None``), NOT "is the result the same
+                # object": those coincide only while every token is returned
+                # by identity, and a normalizer that returned an EQUAL BUT
+                # DISTINCT token would silently re-create the duplicate.
+                _judged = ("" if _raw_dir is not None
+                           else f" (judged {_eff_dir!r})")
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
                     _src_classes, _tgt_classes = _new_classes, _tid_classes
@@ -20197,8 +20690,7 @@ class TortoiseSDK:
                         surface=(f"supersede_point: re-pointing the "
                                  f"{_rtype} edge {_src_id!r}->{_tgt_id!r} "
                                  f"(from {old_id!r} to {new_id!r}, "
-                                 f"direction {_raw_dir!r} "
-                                 f"(judged {_eff_dir!r}))")))
+                                 f"direction {_raw_dir!r}{_judged})")))
 
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
@@ -22845,8 +23337,17 @@ class TortoiseSDK:
                 mitigation point is a calibrated live evidence point and the
                 decide flow ranks on the first try (no CalibrationError).
 
-        Raises ValueError if id not found, not an operator, strength out of
-        [0, 1], or credibility outside the ladder.
+        Raises ``ValueError`` if id not found, not an operator, strength out of
+        [0, 1], or credibility outside the ladder — AND
+        ``UnaddressableClaimError`` (a ``ValueError`` SUBCLASS, ``exceptions.py``,
+        #9754) when the operator's existing mitigation Point carries no ``id``:
+        the node this call would rewrite cannot be addressed at all, so refusing
+        is the only honest answer (it used to return ``{}`` — a false success).
+        The two are distinguishable BY CLASS, which is the point of the subclass:
+        a caller that can skip one unrepairable node and continue catches the
+        subclass (``commit_ops.apply_payload_operators`` does exactly that, per
+        item), while a caller that must abort on a defect in its OWN record
+        leaves the parent uncaught.
         Idempotent: a second call updates the existing CURRENT mitigation
         (reason + strength), does not create a duplicate. A mitigation the graph
         records as terminal (retracted/superseded/outdated/archived) is never
@@ -22928,21 +23429,50 @@ class TortoiseSDK:
         ).result_set
         if existing:
             mid = existing[0][0]
-            # #9262 (review cycle 2): an id-less mitigation Point (a
-            # hand-written / imported shape) makes ``mid`` None, and EVERY write
-            # in this branch is id-keyed — ``update_point``, the baseline writer
-            # and the word stamp all match zero rows. Until #9262 the baseline
-            # writer accepted what it could not bind, so this silently updated
-            # nothing and returned ``{}``; since #9262 it REFUSES that id, so
-            # without this guard the whole call aborts with a remedy the caller
-            # cannot execute (it named the OPERATOR, not the mitigation), and
-            # ``commit_ops`` would abort a write loop mid-graph. MEASURED on
-            # origin/main: the call returns ``{}`` and leaves
-            # ``_evidence[None] = (3.0, 1.0)``; that false PASS is a defect of
-            # its own (#9754) — this guard keeps the historical outcome rather
-            # than turning it into an abort.
+            # #9754: an id-less mitigation Point (a hand-written / imported
+            # shape) makes ``mid`` None, and EVERY write in this branch is
+            # id-keyed — ``update_point``, the baseline writer and the word
+            # stamp all match zero rows. #9262 guarded this branch to keep the
+            # historical outcome, but that historical outcome WAS the defect:
+            # ``return self.get_point(None)`` → ``{}``, an empty success the
+            # caller cannot distinguish from "there is no mitigation" (the
+            # reason/strength update did not land and no baseline was written,
+            # so EP's calibration gate then refuses the operator while
+            # ``calibrate_summary``'s advice — ``set_point_baseline(None, …)`` —
+            # cannot be executed). Measured: the call returns ``{}``.
+            # (An earlier version of this comment added "and leaves
+            # ``_evidence[None] = (3.0, 1.0)``" — false on both trees: #9262
+            # returned before ``set_point_baseline`` was ever reached, and
+            # ``_evidence`` is written only by ``create_point``'s baseline,
+            # ``set_point_baseline`` after its representability guard, and
+            # ``_hydrate_evidence`` — none of which this path enters. Dropped
+            # rather than carried forward: tests/test_calibration.py states the
+            # correct reading in this same change.)
+            #
+            # The repair is option 1 of #9754: REFUSE with the real cause. The
+            # message names the MITIGATION, never the operator the caller
+            # passed — the operator is addressable and its id is actionable by
+            # nobody here, so a refusal about it names a node the caller cannot
+            # repair. ``UnaddressableClaimError`` is the existing shape for
+            # "a node the run must price carries no usable id" (#9275), so
+            # callers already have one word for this class.
+            # ``apply_payload_operators`` classifies it per item (#9754): a
+            # single unaddressable mitigation must not abort a commit's whole
+            # write loop.
             if mid is None:
-                return self.get_point(mid)
+                from .exceptions import UnaddressableClaimError
+                raise UnaddressableClaimError(
+                    f"Operator {id!r} carries a mitigation Point with no id "
+                    "(a hand-written or imported shape), so the "
+                    "re-mitigation cannot be written: every write on this "
+                    "path is keyed on the mitigation's id. No reason, "
+                    "strength or baseline can be stored on it, and the "
+                    "calibration gate will keep refusing the operator while "
+                    "its advice (`set_point_baseline(<mitigation id>, …)`) "
+                    "has no id to name. Repair the graph: give the existing "
+                    "mitigation Point an id, or drop that unaddressable "
+                    "mitigation and call mitigate_operator again to mint an "
+                    "addressable one (#9754).")
             self.update_point(mid, content=f"[MITIGATION] {reason}",
                               mitigation_strength=strength)
             # An explicit belief on the idempotent-update path re-baselines
@@ -24305,7 +24835,29 @@ class TortoiseSDK:
                                f"mitigation) for multi-input fan-out",
                 })
             direction = conn.get("direction")
-            if direction is not None and direction not in self._INGEST_DIRECTION_VALUES:
+            if direction is not None and not isinstance(direction, str):
+                # #10520 (A3) / #11031 item 2: a NON-SCALAR ``direction`` is a
+                # SHAPE violation, REPORTED — never a crash. The membership test
+                # below is a raw frozenset test, and an unhashable value (a
+                # list/map from a JS caller or a bulk import) raised
+                # ``TypeError: unhashable type: 'list'``, aborting the WHOLE
+                # validator with a traceback instead of returning the violation it
+                # exists to return. The ``to`` arm screens its items the same way,
+                # for the same reason (#1091's shape guards): the contract's job
+                # is to NAME the bad field, and a traceback names nothing a caller
+                # can act on. ⛔ Scope: this closes the class for ``direction``
+                # ONLY. The sibling ``operator`` and ``relation`` keys are still
+                # raw frozenset membership tests, and a non-scalar there still
+                # raises ``TypeError`` — pre-existing, tracked as **#11071** (NOT
+                # #11031, whose three items are all direction surfaces), and
+                # deliberately not widened here.
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] 'direction' must "
+                               f"be a string token, got "
+                               f"{type(direction).__name__}",
+                })
+            elif direction is not None and direction not in self._INGEST_DIRECTION_VALUES:
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] direction must "

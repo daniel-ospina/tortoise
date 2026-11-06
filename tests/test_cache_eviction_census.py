@@ -33,6 +33,7 @@ from tortoise.cache_eviction import (
     ParityReport,
     assess,
     classify,
+    config_labels,
     load_parity_report,
     measure_state,
     node_total,
@@ -374,13 +375,42 @@ def test_config_labels_come_from_projections_registry_not_a_copy():
     The config term has ONE owner, `projection._config_classes()`. If this module
     kept its own list the two would drift the first time a pack is added, and the
     drift would show up as a config node counted as derived.
+
+    ⛔ This goes THROUGH `config_labels()`, and then through `assess()` — its only
+    caller — because a test named for that function must fail when the function
+    does. An earlier revision built the label set HERE and handed it to
+    `classify(config=...)` directly, so `return frozenset()` inside `config_labels()`
+    survived the entire suite: the empty set is the safe direction today and the
+    WRONG one the day a class is proven, which is exactly what that function's own
+    docstring is about.
     """
     from tortoise.projection import _config_classes
 
-    labels = {cls.label for cls in _config_classes()}
-    assert labels, "the config registry must not be empty"
-    for label in sorted(labels)[:3]:
-        assert classify(label, config=labels) == "config"
+    registry = frozenset(cls.label for cls in _config_classes())
+    assert registry, "the config registry must not be empty"
+    assert config_labels() == registry, (
+        "`config_labels()` must BE projection's registry, not a second copy: a "
+        "hand-kept list drifts the first time a pack is added"
+    )
+    for label in sorted(registry):
+        assert classify(label, config=config_labels()) == "config"
+
+    # And through the only consumer: a registry class reaches `assess` as `config`,
+    # is never eligible, and is never offered as evictable. With `frozenset()` here
+    # the authority below is `unclassified` — a different CLASS, not just a
+    # different word, so this cannot pass on the mutation.
+    config_label = sorted(registry)[0]
+    g = _FakeGraph({config_label: 3})
+    c = _FakeClient(used=900, maxmemory=0)
+
+    result = assess(c, g, "tortoise")
+
+    reading = {cls.label: cls for cls in result.classes}[config_label]
+    assert reading.authority == "config"
+    assert reading.eligible is False
+    assert reading.proven is False
+    assert config_label in result.plan["not_evictable"]
+    assert g.mutated == []
 
 
 def test_an_unknown_label_is_unclassified_and_refused_not_defaulted():
@@ -516,13 +546,15 @@ def _real_shape_report(**overrides):
     """A report in `tools/turn_parity_census.py`'s own shape (census()'s return).
 
     Keys copied from that function's return dict: `instrument` (REQUIRED by
-    `load_parity_report`), `population.episodic_graph_nodes` (the DELETE SET),
-    `dry_run.would_delete_turn_nodes` / `held_back_turn_nodes`, and a top-level
-    `verdict`. There is no `totals` and no `counts` — a loader reading those cannot
-    ever open the gate, which is why the real shape is pinned here.
+    `load_parity_report`), `graph` (REQUIRED too — the graph the GRAPH leg read, which
+    the consumer compares against the graph being measured), `population.episodic_graph_nodes`
+    (the DELETE SET), `dry_run.would_delete_turn_nodes` / `held_back_turn_nodes`, and a
+    top-level `verdict`. There is no `totals` and no `counts` — a loader reading those
+    cannot ever open the gate, which is why the real shape is pinned here.
     """
     payload = {
         "instrument": PARITY_INSTRUMENTS["turn"],
+        "graph": "tortoise",
         "verdict": "CLEAN",
         "population": {"episodic_graph_nodes": 120, "turn_shaped_nodes": 120},
         "dry_run": {"would_delete_turn_nodes": 120, "held_back_turn_nodes": 0},
@@ -583,16 +615,98 @@ def test_a_report_of_another_graph_is_refused(tmp_path):
         load_parity_report(str(path), graph_name="tortoise")
 
 
-def test_a_report_carrying_no_graph_identity_records_the_assertion(tmp_path):
-    """The instrument emits no graph name — the census says so instead of pretending."""
+def test_a_report_carrying_no_graph_identity_is_REFUSED(tmp_path):
+    """⛔ THE LOADER MUST NOT AUTHOR THE BINDING IT IS SUPPOSED TO CHECK.
+
+    Measured before the fix (review P1 on PR #11004): a report with no `graph` field was
+    ATTRIBUTED to the caller's own `graph_name`, so `mismatched` could never fire and
+    `unbound` was unreachable from `main()` — the only path that produces a real report.
+    The binding then proved exactly one thing: that the operator typed `--graph` and
+    repeated it in `--parity-graph`. The instrument now emits `graph`
+    (`turn_parity_census.census`), so a report without one is an artifact that cannot
+    say what it measured.
+
+    Mutation that goes RED here: deleting the `names no graph` refusal. NOT the
+    `graph_name` alias (measured: this payload carries neither key, so the alias still
+    yields None and the refusal fires — the ALIAS pin below owns that half), and NOT
+    the return-expression fill-in (a no-op once the refusal has passed).
+    """
+    import json
+
+    payload = _real_shape_report()
+    payload.pop("graph")
+    path = tmp_path / "x.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CacheReadError) as excinfo:
+        load_parity_report(str(path), graph_name="tortoise")
+
+    assert "names no graph" in str(excinfo.value)
+
+
+def test_a_null_graph_identity_is_refused_like_a_missing_one(tmp_path):
+    """A field present-but-null is the same absence, and must not be filled in."""
     import json
 
     path = tmp_path / "x.json"
-    path.write_text(json.dumps(_real_shape_report()), encoding="utf-8")
+    path.write_text(json.dumps(_real_shape_report(graph=None)), encoding="utf-8")
 
-    report = load_parity_report(str(path), graph_name="tortoise")
+    with pytest.raises(CacheReadError) as excinfo:
+        load_parity_report(str(path), graph_name="tortoise")
 
-    assert report.graph_name == "tortoise"
+    assert "names no graph" in str(excinfo.value)
+
+
+def test_a_null_graph_is_not_rescued_by_the_graph_name_ALIAS(tmp_path):
+    """⛔ The `graph_name` fallback re-opened the hole the refusal closes.
+
+    Measured before the fix (review P2 on PR #11097): `payload.get("graph") or
+    payload.get("graph_name")` resolved `{"graph": null, "graph_name": "tortoise"}` to
+    `"tortoise"` BEFORE the refusal could see it, so an artifact with no identity was
+    accepted on an operator-controlled field — and `proves()` returned True. Nothing
+    emits `graph_name` (`census()` emits `graph`), so the alias was a dead pre-fix shim
+    whose only live effect was keeping "the loader authors the identity" open.
+
+    Mutation that goes RED here: restoring the `or payload.get("graph_name")` fallback.
+    """
+    import json
+
+    path = tmp_path / "x.json"
+    path.write_text(
+        json.dumps(_real_shape_report(graph=None, graph_name="tortoise")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CacheReadError) as excinfo:
+        load_parity_report(str(path), graph_name="tortoise")
+
+    assert "names no graph" in str(excinfo.value)
+
+
+def test_the_parity_graph_help_states_the_rule_that_is_enforced(capsys):
+    """The flag's help is the only documentation read AT THE MOMENT OF CHOOSING it.
+
+    Measured before the fix (review P2 on PR #11097): the help still said *"the
+    instrument emits no graph identity"* and *"An operator ASSERTION"* — both false
+    after the loader began refusing an unattributed report, and the two halves steering
+    an operator toward the opposite of the new contract (one told them their report
+    carries no identity, which since the fix is a REFUSAL, not a note).
+    """
+    with pytest.raises(SystemExit) as exc:
+        _cli().main(["--help"])
+    assert exc.value.code == 0
+    text = capsys.readouterr().out
+    at = text.index("  --parity-graph")
+    rest = text[at + 1:]
+    block = " ".join(rest[:rest.index("\n  --")].split())
+    assert "emits no graph identity" not in block
+    assert "ASSERTION" not in block
+    assert "REFUSED" in block and "`graph`" in block
+    # Both residuals must survive on this surface too (review P2, cycle 7): the
+    # sibling tool stated the staleness clause and this one did not, so an operator
+    # re-using a CLEAN census taken before a re-capture read a warning about foreign
+    # instances only.
+    assert "EARLIER" in block
 
 
 def test_a_report_naming_NO_instrument_is_refused(tmp_path):
@@ -798,6 +912,10 @@ def test_parity_graph_must_name_the_graph_being_measured(tmp_path, capsys):
     other_graph> --parity-graph other_graph` produced a PLAN for `evict_probe` on
     evidence about `other_graph`. Comparing the report against an operator-typed
     string only proves the operator typed the same string twice.
+
+    This is the FLAG arm. The REPORT arm — the one that made the pre-fix outcome
+    still reachable through the argv this pin requires — is
+    `test_a_clean_census_of_another_graph_cannot_license_this_one`.
     """
     import json
 
@@ -811,6 +929,103 @@ def test_parity_graph_must_name_the_graph_being_measured(tmp_path, capsys):
 
     assert code == 1
     assert "must be the graph being measured" in capsys.readouterr().err
+
+
+def _turn_parity():
+    tools = Path(__file__).resolve().parent.parent / "tools"
+    sys.path.insert(0, str(tools))
+    import turn_parity_census
+
+    return turn_parity_census
+
+
+def _clean_turn_census(graph_name: str) -> dict:
+    """A CLEAN census produced by the REAL instrument, for *graph_name*.
+
+    The two dictionaries are the shapes `read_graph_turns` / `read_record_turns` return
+    (one turn, byte-identical on both sides), so `census()` reaches its CLEAN arm
+    without a store — the artifact an operator would hand to `--parity-report`.
+    """
+    node = {
+        "id": "s1_t0",
+        "content": "[user] body of s1_t0",
+        "speaker": "user",
+        "status": "draft",
+        "createdAt": "2026-10-25T00:00:00+00:00",
+        "pointKind": "event",
+        "embedding": None,
+        "sessions": {"s1"},
+    }
+    row = {
+        "node_key": "s1_t0",
+        "content": "[user] body of s1_t0",
+        "speaker": "user",
+        "status": "draft",
+        "created_at": "2026-10-25T00:00:00+00:00",
+        "point_kind": "event",
+        "is_episodic": True,
+        "embedding": None,
+    }
+    return _turn_parity().census(
+        {"nodes": {"s1_t0": node}},
+        {"rows_by_key": {"s1_t0": row}, "non_turn_shaped": 0},
+        sample=0, graph_name=graph_name)
+
+
+def test_a_clean_census_of_another_graph_cannot_license_this_one(tmp_path, capsys):
+    """⛔ THE HOLE THE ROUND-2 FIX LEFT OPEN (review P1 on PR #11004, measured).
+
+    `--graph A --parity-report <CLEAN census of B> --parity-graph A` (the argv the
+    round-2 fix REQUIRES — the flag must equal `--graph`) produced a PLAN for A on
+    evidence about B, because `load_parity_report` filled A into a report carrying no
+    graph identity. The two invocations need not even name the same instance: the census
+    takes `--graph-uri`, and the report comes from a separate
+    `turn_parity_census.py --uri …` run.
+
+    The report here is built by the REAL instrument (`turn_parity_census.census`), not a
+    hand-written dict, so the pin follows the artifact the operator actually hands over.
+
+    Mutation that goes RED here: deleting the `reported_graph != graph_name` comparison
+    (measured — the run then loads the FOREIGN report and refuses later for a different
+    reason, so the error no longer names both graphs). NOT the fill-in: this report
+    carries `graph: "other_graph"`, so a fill-in could not change its outcome.
+    """
+    import json
+
+    foreign = _clean_turn_census("other_graph")
+    assert foreign["graph"] == "other_graph"
+    assert (foreign["verdict"],
+            foreign["dry_run"]["would_delete_turn_nodes"],
+            foreign["population"]["episodic_graph_nodes"]) == ("CLEAN", 1, 1), \
+        foreign
+    path = tmp_path / "turns.json"
+    path.write_text(json.dumps(foreign), encoding="utf-8")
+
+    code = _cli().main([
+        "--graph-uri", "docker://h:1/tortoise", "--graph", "tortoise",
+        "--parity-report", str(path), "--parity-graph", "tortoise",
+    ])
+
+    assert code == 3, (code, capsys.readouterr().err)
+    err = capsys.readouterr().err
+    assert "other_graph" in err and "tortoise" in err
+
+
+def test_a_real_clean_census_of_THIS_graph_still_licenses_it(tmp_path):
+    """The positive arm: the fix must not refuse the honest report.
+
+    Without this, deleting the whole `graph` comparison would keep the refusal tests
+    green — a refusal-only suite cannot tell "the gate works" from "the gate is shut".
+    """
+    import json
+
+    path = tmp_path / "turns.json"
+    path.write_text(json.dumps(_clean_turn_census("tortoise")), encoding="utf-8")
+
+    report = load_parity_report(str(path), graph_name="tortoise")
+
+    assert report.graph_name == "tortoise"
+    assert report.proves() is True
 
 
 def test_an_unbounded_cache_is_not_reported_as_clean():
@@ -1552,7 +1767,8 @@ def test_both_clients_receive_the_username_and_tls_the_uri_named(monkeypatch):
 
 
 @pytest.mark.parametrize("uri", ["", "localhost", "localhost:6379",
-                                 "docker://:6379/g", "docker://h:not-a-port/g"])
+                                 "docker://:6379/g", "docker://h:not-a-port/g",
+                                 "docker://h:0/g"])
 def test_a_uri_that_names_no_host_and_port_is_refused(uri, capsys):
     """The ONE local rule kept beside the canonical derivation is a REFUSAL.
 
@@ -1562,6 +1778,48 @@ def test_a_uri_that_names_no_host_and_port_is_refused(uri, capsys):
     code = _cli().main(["--graph-uri", uri, "--graph", "g"])
 
     assert code == 1
+
+
+def test_a_uri_that_names_port_zero_refuses_instead_of_dialling_16379():
+    """`0` is a NAMED port, and the canonical rule substitutes its default for it.
+
+    ⛔ THE DEFAULT IS APPLIED INSIDE `resolve_db_endpoint` (`port=parsed.port or
+    16379`), so a "did the operator name a port?" test made BEFORE the call is the
+    wrong test: `0` is falsy, so `docker://h:0/g` passed the `port is None` guard and
+    then dialled **16379** — the embedded lane's default, where a graph server
+    genuinely listens (`AGENTS.md` / `tools/test_lane.py`). The operator named a
+    different instance and the census would have reported on that one, silently, with
+    a verdict indistinguishable from a correct reading. So the rule has to be checked
+    against the port that will ACTUALLY be dialled.
+    """
+    cli = _cli()
+
+    with pytest.raises(ValueError, match="16379"):
+        cli._endpoint("docker://h:0/g")
+
+    # Non-vacuity: the refusal is about the SUBSTITUTION, not about small ports —
+    # a port that is really written, including the default one itself, still resolves.
+    assert cli._endpoint("docker://h:6379/g").port == 6379
+    assert cli._endpoint("docker://h:16379/g").port == 16379
+
+
+def test_a_uri_that_names_port_zero_is_a_usage_error_before_any_socket(capsys,
+                                                                      monkeypatch):
+    """End-to-end: the refusal is exit 1 and touches no connection."""
+    cli = _cli()
+    monkeypatch.setattr(
+        cli, "_connection",
+        lambda endpoint: pytest.fail(
+            f"connected to {endpoint.host}:{endpoint.port} for a URI that named 0"),
+    )
+
+    code = cli.main(["--graph-uri", "docker://localhost:0/tortoise",
+                     "--graph", "tortoise"])
+    err = capsys.readouterr().err
+
+    assert code == 1, err
+    assert "16379" in err, err
+    assert "Traceback" not in err, err
 
 
 def test_an_unwritable_out_path_is_a_usage_error_not_a_traceback(tmp_path, capsys,
