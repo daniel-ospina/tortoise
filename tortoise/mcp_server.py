@@ -507,6 +507,37 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
     # import. Sanitized on the loop (pure and cheap), so the off-loop closure
     # carries only the safe value.
     safe_name = _mcp_auth._sanitize_for_log(name)
+    # #10602: count the breach on THIS thread, before the emit is submitted.
+    # ``submit`` returns a PRE-FAILED future when the telemetry pool's bounded
+    # backlog is full — the saturation that also causes breaches — so a counter
+    # incremented inside ``_emit`` would under-count precisely when it matters.
+    #
+    # EXACTLY-ONCE across the whole `/mcp` surface: this helper is the seam's
+    # only counting site, and the seam reaches it from exactly one place — the
+    # ``else`` of ``if _wait_bound_refused():``. The two ``dispatched=False``
+    # returns deliberately emit nothing (the transport already answered and
+    # already counted, as ``mcp``), so one refused MCP request is one count no
+    # matter which detector saw it. `test_the_mcp_module_has_exactly_one
+    # _breach_counting_site` pins that a second site is not added.
+    #
+    # ⛔ THE COUNT IS CLAIMED, not merely performed. `_wait_bound_refused()` is
+    # one-directional (it suppresses THIS seam when the middleware went first),
+    # so in the reverse order — the seam refusing first, the middleware's own
+    # bound expiring later in the same request — the middleware would count a
+    # second time for one refusal. `_claim_wait_bound_count()` makes whichever
+    # detector fires FIRST the only counter, in both orders.
+    #
+    # ⛔ WRAPPED, the same rule the emit below carries: telemetry must never
+    # turn a refusal into a generic error. This call sits on the refusal path
+    # BEFORE `_wait_bound_refusal_result` builds its `-32009` body, so a raise
+    # here would replace that legible refusal with a bare tool error — the
+    # observation destroying the thing it observes (#3834/#10602).
+    if _claim_wait_bound_count():
+        try:
+            monitoring.record_wait_bound_breach(
+                monitoring.WAIT_BOUND_SURFACE_MCP)
+        except Exception:  # measurement must never break a refusal
+            _log.debug("mcp wait-bound count failed", exc_info=True)
 
     def _emit() -> None:
         try:
@@ -550,6 +581,15 @@ _WAIT_BOUND_ARRIVAL_KEY = "_wait_bound_t0"
 #: answered the caller (#3834 F-2). The seam reads it so one request records
 #: exactly one ``transport_wait_bound_exceeded``.
 _WAIT_BOUND_REFUSED_KEY = "_wait_bound_refused"
+
+#: The key claiming the #10602 breach COUNT for this request. ``_WAIT_BOUND_REFUSED_KEY``
+#: is one-directional — it suppresses this seam when the middleware went first,
+#: never the other way — so a request whose seam refused first would be counted a
+#: second time when the middleware's own bound expires later in the same request
+#: (fastmcp's ``json_response`` mode: no response starts before dispatch, so the
+#: seam's deadline has not collapsed and it can win the race).
+#: Same literal as ``hosted_api._WAIT_BOUND_COUNTED_STATE``.
+_WAIT_BOUND_COUNTED_KEY = "_wait_bound_counted"
 
 
 def _wait_bound_state() -> dict | None:
@@ -624,6 +664,29 @@ def _wait_bound_refused() -> bool:
     """
     state = _wait_bound_state()
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
+
+
+def _claim_wait_bound_count() -> bool:
+    """Claim the breach count for this request; True when THIS detector owns it.
+
+    #10602: the counter drives a capacity decision, so one refused request must
+    move it by exactly one across the WHOLE ``/mcp`` surface — not once per
+    detector that noticed. ``hosted_api.WaitBoundMiddleware`` and this seam can
+    both observe the same refusal, and their order is not fixed (see
+    ``_WAIT_BOUND_COUNTED_KEY``), so the claim is a checked write on the shared
+    ``scope["state"]``: the first detector to reach it counts, every later one
+    is a no-op.
+
+    Off-HTTP there is no shared dict, so every call owns its own count — that is
+    not a double count, it is two unrelated callers.
+    """
+    state = _wait_bound_state()
+    if state is None:
+        return True
+    if state.get(_WAIT_BOUND_COUNTED_KEY):
+        return False
+    state[_WAIT_BOUND_COUNTED_KEY] = True
+    return True
 
 
 #: The four retry rules shipped WITH a breached write's refusal. Exactly ONE is
@@ -3543,7 +3606,7 @@ def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
     #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding eight
-    tool bodies (six live, two retired-but-served), each of which returns it
+    tool bodies (five live, three retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
     payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
     it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
@@ -3809,7 +3872,7 @@ def tortoise_paginated_query(kind: str | None = None,
 
 def tortoise_check_structure() -> list[dict]:
     """Check Gate 0→4 chain integrity (orphans, dangling refs).
-    Alias → overview(section='structure_check') (epic #888 W3)."""
+    Alias → graph_overview(section='structure_check') (epic #888 W3)."""
     return _safe(_get_org_sdk().check_structure)
 
 
@@ -3839,25 +3902,25 @@ def tortoise_summarize_structure() -> dict:
     Returns {total, operators, gate0_jtbds..gate4_requirements, gate_total}.
     total counts every non-operator kind (statements, observations, decisions,
     ...), not just the product-strategy gates; operators is reported
-    separately. Alias → overview(section='structure') (epic #888 W3)."""
+    separately. Alias → graph_overview(section='structure') (epic #888 W3)."""
     return _safe(_get_org_sdk().summarize_structure)
 
 
 def tortoise_list_pointkinds() -> list[dict]:
     """List all pointKinds present in the graph with counts. What EXISTS.
-    Alias → overview(section='pointkinds') (epic #888 W3)."""
+    Alias → graph_overview(section='pointkinds') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_pointkinds)
 
 
 def tortoise_list_sources() -> list[dict]:
     """List all Sources with point counts. Where data came FROM.
-    Alias → overview(section='sources') (epic #888 W3)."""
+    Alias → graph_overview(section='sources') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_sources)
 
 
 def tortoise_list_namespaces() -> list[dict]:
     """List installed pack namespaces.
-    Alias → overview(section='namespaces') (epic #888 W3)."""
+    Alias → graph_overview(section='namespaces') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_namespaces)
 
 
@@ -3938,7 +4001,7 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
 
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED.
-    Alias → overview(section='tags') (epic #888 W3)."""
+    Alias → graph_overview(section='tags') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_tags)
 
 
@@ -4722,7 +4785,7 @@ def tortoise_list_graphs() -> list[str]:
     `org_{org_id}` / legacy `team_{org_id}` equality, plus each of the org's
     OTHER graphs' namespaces — no cross-tenant enumeration). Stdio: full list
     (operator context).
-    Alias → overview(section='graphs') (epic #888 W3).
+    Alias → graph_overview(section='graphs') (epic #888 W3).
 
     #9340: this is the DISCOVERY surface for the `graph` tool argument, so a
     workspace that holds more than one graph must be able to see them here. It
@@ -4758,14 +4821,14 @@ def tortoise_list_graphs() -> list[str]:
 def tortoise_status() -> dict:
     """Graph health + entity counts + FalkorDB connectivity.
     Returns {connected, counts: {Point, Event, ...}, total_entities}.
-    Alias → overview(section='status') (epic #888 W3).
+    Alias → graph_overview(section='status') (epic #888 W3).
     """
     return _safe(_get_org_sdk().status)
 
 
 def tortoise_health() -> dict:
     """Health check + basic metrics: graph_size, last_ingest, error_count, uptime.
-    Alias → overview(section='health') (epic #888 W3).
+    Alias → graph_overview(section='health') (epic #888 W3).
 
     #2202 (health-truthful): probes the SDK THIS server actually serves —
     the request-scoped org SDK over HTTP and the base SDK over stdio — so the
@@ -4860,13 +4923,13 @@ def tortoise_ingest_corpus(directory: str) -> dict:
 def tortoise_taxonomy() -> dict[str, int]:
     """Count entities by node label. Returns {Point: N, Event: N, Subject: N,
     Object: N, Source: N} (D10: a document is a Source, not a :Document node).
-    Alias → overview(section='taxonomy') (epic #888 W3)."""
+    Alias → graph_overview(section='taxonomy') (epic #888 W3)."""
     return _safe(_get_org_sdk().taxonomy)
 
 
 def tortoise_list_topics(entity_id: str) -> dict:
     """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}.
-    Alias → overview(section='topics', entity_id=...) (epic #888 W3)."""
+    Alias → graph_overview(section='topics', entity_id=...) (epic #888 W3)."""
     return _safe(_get_org_sdk().list_topics, entity_id)
 
 
@@ -4992,7 +5055,7 @@ def tortoise_analyze(question: str,
 
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
     """Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
-    Alias → overview(section='stale', days=, limit=) (epic #888 W3)."""
+    Alias → graph_overview(section='stale', days=, limit=) (epic #888 W3)."""
     return _safe(_get_org_sdk().stale_points, days=days, limit=limit)
 
 
@@ -5485,6 +5548,37 @@ _OVERVIEW_SECTIONS = (
     "taxonomy", "structure", "structure_check", "pointkinds", "tags",
     "sources", "namespaces", "graphs", "topics", "health", "status",
     "stale",
+    # #4282 — the three sections the approved container `graph_overview` absorbs
+    # (`docs/product/canonical-mcp-tools.md`, row 6). Each dispatches to the tool
+    # body it replaces; none is re-implemented here.
+    #
+    # `issue_insight` is deliberately NOT here: its Phase-0.1 destination
+    # (`tools/bridge_table.py` DESTINATION) is `search_knowledge`, so it travels with
+    # that container rather than this one, and the door is still live. Adding a second
+    # advertised door onto that read would also give one SDK method two different
+    # defaults — the container's shared `limit=50` against the door's `limit=2`.
+    "validate_domain", "audit", "dream_health",
+)
+
+#: Sections that REQUIRE an argument, so the no-`section` combined summary cannot
+#: call them. `topics` was the only one; #4282 added `validate_domain` (needs
+#: `domain`). `audit` and `dream_health` take no argument but are ALSO kept out of
+#: the default summary on purpose: the summary a caller gets with no `section` must
+#: stay byte-identical to what `tortoise_overview` returned before this
+#: consolidation, and adding keys to it is a behaviour change nobody asked for.
+#: Pass the section explicitly for any of them.
+#:
+#: PINNED LITERALLY, not derived: `_OVERVIEW_DEFAULT_SUMMARY_KEYS` below is the
+#: assertable form of "the default envelope did not move", and a test compares it to
+#: the pinned tuple — a derivation from these two constants would agree with any
+#: edit to them and could never fail.
+_OVERVIEW_SUMMARY_SKIP = frozenset({"topics", "validate_domain", "audit", "dream_health"})
+
+#: The exact keys (in dispatch order) the no-`section` summary returns. 11 before
+#: #4282 and 11 after it — that equality is the claim this constant makes testable.
+_OVERVIEW_DEFAULT_SUMMARY_KEYS = (
+    "taxonomy", "structure", "structure_check", "pointkinds", "tags", "sources",
+    "namespaces", "graphs", "health", "status", "stale",
 )
 
 
@@ -5611,7 +5705,9 @@ def _overview_summary(rows: Any, group_field: str, out_field: str,
 
 
 def _overview_section(section: str, entity_id: str | None,
-                      days: int, limit: int) -> Any:
+                      days: int, limit: int,
+                      domain: str | None = None,
+                      point_kinds: list[str] | None = None) -> Any:
     """Dispatch one overview section to its original tool body."""
     if section == "taxonomy":
         return tortoise_taxonomy()
@@ -5640,6 +5736,21 @@ def _overview_section(section: str, entity_id: str | None,
         return tortoise_status()
     if section == "stale":
         return tortoise_stale(days=days, limit=limit)
+    # ── #4282: the three sections this batch adds (a fourth, `issue_insight`, is NOT
+    # in this batch — its destination is `search_knowledge`) ──────────────────
+    if section == "validate_domain":
+        if not domain:
+            return _SafeError(
+                {"error": "graph_overview(section='validate_domain') requires "
+                          "domain"})
+        return tortoise_validate_domain(domain)
+    if section == "audit":
+        return tortoise_audit(point_kinds=point_kinds)
+    if section == "dream_health":
+        # Keeps the sibling door's own transport guard: `dream_health` is the one
+        # member excluded from tenant HTTP (`http_policy=False`), and the guard
+        # that refuses it there lives in the handler, not in the registry.
+        return tortoise_dream_health()
     return _SafeError(
         {"error": f"overview: unknown section {section!r}. "
                   f"Valid sections: {', '.join(_OVERVIEW_SECTIONS)}"})
@@ -5648,17 +5759,22 @@ def _overview_section(section: str, entity_id: str | None,
 def tortoise_overview(section: str | None = None,
                       entity_id: str | None = None,
                       days: int = 30,
-                      limit: int = 50) -> Any:
+                      limit: int = 50,
+                      domain: str | None = None,
+                      point_kinds: list[str] | None = None) -> Any:
     """Graph orientation in one call — consolidates the list_*/status/health/
     taxonomy/structure zoo (epic #888 W3, PR #912).
 
-    section selects one orient surface:
+    section selects one orient surface. The full set is `_OVERVIEW_SECTIONS`:
       taxonomy | structure | structure_check | pointkinds | tags | sources |
-      namespaces | graphs | topics | health | status | stale
+      namespaces | graphs | topics | health | status | stale | validate_domain |
+      audit | dream_health
     Each section returns exactly what the legacy tool returned.
 
-    Omit section → compact combined summary: {section: result} for every
-    section except topics (which requires entity_id). The UNCAPPED sections
+    Omit section → compact combined summary: {section: result} for every section NOT in
+    `_OVERVIEW_SUMMARY_SKIP` — `topics` (requires entity_id) and the three #4282 additions
+    are excluded, so the default envelope stays the eleven keys it has always had
+    (`_OVERVIEW_DEFAULT_SUMMARY_KEYS`). The UNCAPPED sections
     whose size grows with the graph's ROWS rather than its shape (a fixed
     vocabulary) are reported as bounded counts, never as rows, so the summary
     stays compact as the graph grows (#3510). Each number in a section's
@@ -5678,8 +5794,10 @@ def tortoise_overview(section: str | None = None,
     if section is None:
         combined: dict[str, Any] = {}
         for sec in _OVERVIEW_SECTIONS:
-            if sec == "topics":
-                continue  # requires entity_id — not part of the default summary
+            if sec in _OVERVIEW_SUMMARY_SKIP:
+                # requires an argument, or is deliberately not part of the
+                # default summary — see `_OVERVIEW_SUMMARY_SKIP`.
+                continue
             result = _overview_section(sec, entity_id, days, limit)
             # #3510: every data-proportional section is folded to bounded
             # counts here — the rows themselves stay behind the explicit
@@ -5702,7 +5820,44 @@ def tortoise_overview(section: str | None = None,
     if not isinstance(section, str):
         return _SafeError({"error": f"overview: section must be a string, got "
                                     f"{type(section).__name__}"})
-    return _overview_section(section.strip().lower(), entity_id, days, limit)
+    return _overview_section(section.strip().lower(), entity_id, days, limit,
+                             domain=domain, point_kinds=point_kinds)
+
+
+def tortoise_graph_overview(section: str | None = None,
+                            entity_id: str | None = None,
+                            days: int = 30,
+                            limit: int = 50,
+                            domain: str | None = None,
+                            point_kinds: list[str] | None = None) -> Any:
+    """What is in this memory graph and how it is shaped (#4282 row 6).
+
+    The approved container name for the orientation family. `section` selects the
+    view; every value dispatches to the tool body it replaces, so the absorbed
+    doors and this one cannot disagree:
+
+      taxonomy | structure | structure_check | pointkinds | tags | sources |
+      namespaces | graphs | topics | health | status | stale        (`overview`)
+      validate_domain   requires `domain`   — was `tortoise_validate_domain`
+      audit             takes  `point_kinds` — was `tortoise_audit`
+      dream_health                           — was `tortoise_dream_health`
+
+    `structure_check` KEEPS its own door live on purpose: that read is the one
+    member with a WRAP envelope (`-> list[dict]`), and this container returns
+    `Any`, so retiring the door would move the #8482 failure repair off the
+    advertised path — a `_safe` failure payload the array schema cannot carry.
+    The section and the door return the same rows; the door is what carries the
+    repair, and it retires once the container has a declared envelope.
+
+    Omit `section` → the compact combined summary `tortoise_overview` returned.
+    That default is deliberately UNCHANGED by this consolidation: the four
+    argument-taking or newly-absorbed sections stay out of it
+    (`_OVERVIEW_SUMMARY_SKIP`), so a caller who passes no section sees exactly the
+    envelope it saw before.
+    """
+    return tortoise_overview(section=section, entity_id=entity_id, days=days,
+                             limit=limit, domain=domain,
+                             point_kinds=point_kinds)
 
 
 _GET_TYPES = ("point", "operator", "entity", "event", "session",

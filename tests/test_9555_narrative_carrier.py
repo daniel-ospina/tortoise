@@ -1826,7 +1826,14 @@ def _assert_vector_reads_the_narrative(line: str, where: str, home: str) -> None
     verb + the backticked home, with no backtick between them), and a column is
     the `` `home`.`col` `` / `` `home`'s col `` SHAPE, never a bare period.
     """
-    assert f"the S1 narrative read from `{home}`" in line, (
+    #: ⛔ THE FRAGMENTS, not the literal: the object must be the S1 narrative and
+    #: the pointer must be `read … from <home>`, in that order, in one sentence,
+    #: with no inverting insert between them — while an INSERTION
+    #: (`the S1 narrative is read directly from …`) stays accepted. A full literal
+    #: refused that correct re-wording, the same spelling-lock class review cycle
+    #: 22 measured on the other four claim asserts (closed in `ebccde8f7` for those
+    #: four; this fifth one was left behind and is closed here).
+    assert _claim_present(line, "the S1 narrative", "read", f"from `{home}`"), (
         f"{where} no longer states that the source vector's text IS the S1 "
         f"narrative read from `{home}` — `{home}` appearing on the line is not "
         f"enough: rewriting the OBJECT (`the one-line `summary` read from "
@@ -2372,6 +2379,8 @@ _VECTOR_REWORDINGS: list[tuple[str, str, str]] = [
     ('ends-on-the-backticked-home', "a correct sentence that simply ENDS on the backticked home",
      "whose embedded text is the S1 narrative read from `{home}`. It is one "
      "vector attached to the `:Source` node"),
+    ('adverb-inserted-before-the-pointer', "an adverb inserted between the read and its pointer — the fifth claim's spelling lock (review cycle 22 class)",
+     "the S1 narrative is read directly from `{home}`"),
     ('head-document-wording', "the head document's own wording (control: green before AND after the fix)",
      "whose embedded text is the S1 narrative read from `{home}` — ⛔ never "
      "from `:Source.summary`"),
@@ -2918,6 +2927,13 @@ _CONSTRUCTION_PROBES: tuple[tuple[str, str], ...] = (
     ("not solely", "solely"),
     ("not least", "least"),
     ("not alone", "alone"),
+    #: ⛔ The POST-POSITIONAL form of `alone`: the clause is *"not the narrative
+    #: alone"*, so the contiguous `not alone` above does not match it and this
+    #: row — the one case that WAS mislabelled at `a6a1b28df` (it carried
+    #: `not-so-much-as-asserted`) — was the single inversion case the table never
+    #: covered. A guard that misses the one regression it documents does not
+    #: cover that regression (measured: relabelling this row still ran GREEN).
+    ("not the narrative alone", "not-alone"),
 )
 
 
@@ -3115,6 +3131,133 @@ def test_the_declared_narrative_over_block_is_the_documented_one():
         f"fail-open) or the docstring names a check the code does not perform")
 
 
+#: The SHAPES `_WILL_BEFORE_LEXICON` must refuse: a future modal that PRODUCES the
+#: topic lexicon as what the summary's value becomes. Each is a re-wording of the
+#: retired future tense the constant's own docstring names, so the guard is held to
+#: the CLAIM and not to one spelling (the defect `_RETIRED_FUTURE_DERIVATION`
+#: cannot cover).
+_WILL_PRODUCING_LEXICON_INVERSIONS = (
+    "`#10852` will replace it with a display descriptor over the session's TOPIC LEXICON",
+    "its VALUE will become a display descriptor over the session's TOPIC LEXICON",
+    "its VALUE will be a display descriptor over the session's TOPIC LEXICON",
+    "its VALUE will be replaced by a display descriptor over the session's TOPIC LEXICON",
+    "its VALUE will turn into a display descriptor over the session's TOPIC LEXICON",
+    "the door will produce a display descriptor over the session's TOPIC LEXICON",
+)
+
+#: The SHAPES `_WILL_BEFORE_LEXICON` must ACCEPT: a future modal that CONSUMES the
+#: lexicon as an input. They are correct sentences about a future consumer, and the
+#: bare `\bwill\b … TOPIC LEXICON` form refused every one of them with a diagnosis
+#: ("§9.4 announces the topic lexicon as a FUTURE change") that is false of them.
+_WILL_CONSUMING_LEXICON_ACCEPTS = (
+    "a future vector cache will key on the session's TOPIC LEXICON",
+    "a future vector cache will be keyed on the session's TOPIC LEXICON",
+    "a future cache will read from the session's TOPIC LEXICON",
+)
+
+
+def test_the_future_modal_guard_is_about_PRODUCING_the_lexicon_not_reading_it():
+    """*What value makes this test fail?* A guard that refuses a correct sentence.
+
+    Review cycle 22 measured this over-block at `82e061f35` and the lane DECLARED
+    it rather than fixing it: a bare `\bwill\b[^.;]{0,80}TOPIC LEXICON` refused
+    *"a future vector cache will key on the session's TOPIC LEXICON"* — a correct
+    sentence, in which the lexicon is an INPUT — and reported it as *"§9.4
+    announces the topic lexicon as a FUTURE change"*, which is false of it. A
+    false RED on correct prose in a `tier1` module blocks every docs-only PR that
+    writes such a sentence.
+
+    Both directions are asserted, because narrowing a guard is only safe if what
+    it was closing stays closed: every PRODUCTION shape (including the composed
+    re-wording cycle 21 measured GREEN) is still refused, and every CONSUMING
+    shape is now accepted.
+    """
+    for consuming in _WILL_CONSUMING_LEXICON_ACCEPTS:
+        assert _WILL_BEFORE_LEXICON.search(consuming) is None, (
+            f"the future-modal guard refuses a sentence in which the lexicon is "
+            f"an INPUT, not something the summary's value becomes: {consuming!r} "
+            f"— matched {_WILL_BEFORE_LEXICON.search(consuming).group(0)!r}. "
+            f"Over-blocking here reds a docs-only PR for writing a correct "
+            f"sentence about a future consumer")
+    for producing in _WILL_PRODUCING_LEXICON_INVERSIONS:
+        assert _WILL_BEFORE_LEXICON.search(producing) is not None, (
+            f"the future-modal guard no longer refuses a sentence announcing the "
+            f"lexicon as what the summary's value will BECOME: {producing!r} — "
+            f"narrowing the SCOPE to production predicates re-opened the "
+            f"fail-open it was closing (the lexicon LANDED, so a future modal "
+            f"producing it tells a designer the current derivation is something "
+            f"else)")
+
+
+def test_a_claim_tolerates_inserted_words_but_never_an_inserted_inversion():
+    """*What value makes this test fail?* A claim guard that is a spelling lock.
+
+    The five claim asserts added over cycles 20–22 were full literals, so at
+    `82e061f35` (review cycle 22) a CORRECT re-wording red them: inserting `built`
+    into *"a display descriptor over"*, or writing the identity verdict as *"was
+    already implemented"*, turned the pin RED on prose that states the pinned
+    claim. `_claim_present` matches the claim's fragments with a bounded gap so
+    those re-wordings pass — and refuses the gap that INVERTS it, which is the
+    fail-open the literal assert existed to close (cycles 20–21 measured an
+    inserted `not` staying GREEN).
+    """
+    assert _claim_present(
+        "its VALUE is a built display descriptor over the session's TOPIC LEXICON",
+        "its VALUE is", "display descriptor over", "TOPIC LEXICON"), (
+        "a re-wording that INSERTS a word between the claim's fragments is "
+        "refused, so the assert is still a spelling lock — the exact false red "
+        "review cycle 22 measured")
+    assert _claim_present(
+        '*"identity is URL + content hash"* was **already implemented**.',
+        '"identity is URL + content hash"*', "already implemented"), (
+        "the identity verdict is refused when the copula carrying it is `was` "
+        "rather than `is`, which is a correct re-wording of the same claim")
+    # Non-vacuity: the INVERTING inserts the literal assert was closing must
+    # still be refused, or the tolerance re-opened the fail-open.
+    for inverted in (
+        "its VALUE is **not** a display descriptor over the session's TOPIC LEXICON",
+        "its VALUE is never a display descriptor over the session's TOPIC LEXICON",
+    ):
+        assert not _claim_present(
+            inverted, "its VALUE is", "display descriptor over", "TOPIC LEXICON"), (
+            f"`_claim_present` ACCEPTS an inverted claim: {inverted!r} — the "
+            f"bounded gap must not admit the word that inverts the claim, "
+            f"which is the fail-open the literal assert was closing")
+    #: ⛔ THE CONTRACTION SPELLING — the gap guard's own fail-OPEN, measured. The
+    #: first cut's local `not|never|no|none|nor|cannot|without` list does not match
+    #: `isn't`, so this sentence was ACCEPTED by the guard added to close exactly
+    #: this inversion. Reusing `_NEGATION_CUE` for the gap check (it carries the
+    #: `-n't` arm) is what refuses it, and that is why the check is the file's
+    #: shared set rather than a second hand-rolled one.
+    _section = _ontology_section_of("summary")
+    assert not _claim_present(
+        f"a session's `summary` isn't {_section} metadata",
+        "a session's `summary`", f"{_section} metadata"), (
+        f"`_claim_present` ACCEPTS `a session's `summary` isn't "
+        f"{_section} metadata` — a negated claim in the CONTRACTION spelling. "
+        f"`_CLAIM_GAP_FORBIDDEN` has to read the file's shared `_NEGATION_CUE`; "
+        f"a local cue list misses `-n't` and re-opens the fail-open this guard "
+        f"exists to close")
+    #: …and the FIFTH claim, whose literal was left behind by `ebccde8f7`: an
+    #: INSERTED adverb passes, its negated and re-specified forms do not.
+    assert _claim_present(
+        f"the S1 narrative is read directly from `{_HOME}`",
+        "the S1 narrative", "read", f"from `{_HOME}`"), (
+        "the vector-object claim is still a spelling lock: inserting an adverb "
+        "between the read and its pointer refused a CORRECT re-wording of §9.4 "
+        "and §12.1b, the same false red cycle 22 measured on the other four "
+        "claims")
+    for inverted in (
+        f"the S1 narrative is NOT read from `{_HOME}`",
+        f"the one-line `summary` read from `{_HOME}`.`summary`",
+    ):
+        assert not _claim_present(
+            inverted, "the S1 narrative", "read", f"from `{_HOME}`"), (
+            f"`_claim_present` ACCEPTS an inversion of the vector-object claim: "
+            f"{inverted!r} — the negated pointer and the column reading are the "
+            f"two holes `_assert_vector_reads_the_narrative` exists to close")
+
+
 #: The false red that NOT admitting `rather than` / `instead of` as cues costs, and
 #: it is the price of the fail-CLOSED direction. Admitting them was MEASURED to
 #: bind the negation ACROSS the term they negate — *"rather than the narrative the
@@ -3276,6 +3419,141 @@ def test_the_not_only_but_fail_open_is_closed():
         f"the case no longer isolates the trap's guard: {line!r}")
 
 
+#: Words a re-wording of a pinned claim may NOT slip in without the pin reding.
+#: The claim asserts below exist because an inserted NEGATION (or a restored
+#: future modal) INVERTED the sentence with the pin still GREEN (cycles 20–21),
+#: so the tolerance `_claim_present` grants is over ordinary words only.
+#:
+#: ⛔ THE NEGATION HALF IS `_NEGATION_CUE`, THE FILE'S OWN SHARED SET, not a
+#: second hand-rolled list. The first cut was a local `\b(?:not|never|no|none|nor|
+#: cannot|without)\b` and it missed the CONTRACTION arm: measured, *"a session's
+#: `summary` isn't §4.6 metadata"* was ACCEPTED by `_claim_present` — a fail-OPEN
+#: in the very guard added to close one, and exactly what `_NEGATION_CUE`'s own
+#: header warns about (*"a cue admitted by one and missed by the other is the same
+#: hole twice over"*). Reusing it makes the vocabulary complete by construction; a
+#: cue added there reaches every guard at once. The bare `no` / `none` / `nor` /
+#: `without` and the future modals are kept because `_NEGATION_CUE` does not carry
+#: them and a restored `will replace` in a gap is the cycle-21 defect.
+_CLAIM_GAP_FORBIDDEN = re.compile(
+    rf"(?:{_NEGATION_CUE}"
+    r"|\b(?:no|none|nor|without)\b"
+    r"|\b(?:will|would|shall|should|may|might|must)\b)",
+    re.IGNORECASE)
+
+
+def _claim_present(span: str, *fragments: str, max_gap: int = 60) -> bool:
+    """Whether ``span`` states ``fragments`` IN ORDER, tolerating inserted words.
+
+    ⛔ WHY THIS EXISTS — a full-literal ``in`` assert is a SPELLING lock, and this
+    file paid for that twice. Review cycle 22 (measured at `82e061f35`): the
+    claim asserts added over cycles 20–22 RED a CORRECT re-wording of the
+    documentation — inserting `built` into *"a display descriptor over"*, or
+    writing the same identity verdict as *"was already implemented"*, turned the
+    pin RED on prose that states exactly the pinned claim. This module is in
+    `tier1`, so every docs-only re-wording of these files would red CI for the
+    wrong reason; that is a false block, not a gate.
+
+    The claim is its SUBJECT plus its PREDICATE plus its OBJECT, so those are
+    matched as FRAGMENTS with a bounded gap between them — a re-wording may
+    insert a word, it may not insert a word that INVERTS the claim. The gap is
+    confined to one sentence (`[^.;]`) so a claim cannot be assembled out of two
+    unrelated sentences that happen to sit next to each other, and
+    `_CLAIM_GAP_FORBIDDEN` is applied to the GAPS ALONE — never to the fragments,
+    or a claim that legitimately carries `never` as a fragment (*"never a copy of
+    the turn's prose"*) would refuse itself. An inserted `not` / `never`, or a
+    restored `will replace`, still REDs (cycles 20–21 measured that mutation
+    GREEN before those words were bound).
+    """
+    if not fragments:
+        return False
+    gap = rf"([^.;]{{0,{max_gap}}}?)"
+    pattern = gap.join(re.escape(f) for f in fragments)
+    for match in re.finditer(pattern, span):
+        if not any(_CLAIM_GAP_FORBIDDEN.search(g) for g in match.groups()):
+            return True
+    return False
+
+
+#: A future MODAL announcing the topic lexicon as what the summary's value will
+#: BECOME. `_RETIRED_FUTURE_DERIVATION` pins one spelling of the retired future
+#: tense; a re-wording ("`#10852` will replace with a display descriptor over the
+#: session's TOPIC LEXICON") walks past that and is caught here instead.
+#:
+#: ⛔ SCOPE — the modality must be about PRODUCING the lexicon, not about reading
+#: it. As a bare `\bwill\b[^.;]{0,80}TOPIC LEXICON` this guard refused *"a future
+#: vector cache will key on the session's TOPIC LEXICON"* — a CORRECT sentence in
+#: which the lexicon is an INPUT — and diagnosed it as *"§9.4 announces the topic
+#: lexicon as a FUTURE change"*, a claim false of that sentence (measured at
+#: `82e061f35`, review cycle 22; the over-block was declared rather than fixed and
+#: is fixed here). So the modal has to reach the lexicon through a PRODUCTION
+#: predicate: a copula introducing a noun phrase, `become`, `replace … with`,
+#: `turn … into`, `produce`, or `be replaced by/with`. A future `will key on` /
+#: `will read from` the lexicon is the lexicon being CONSUMED — the relationship
+#: §9.4 states — and is left alone.
+_WILL_BEFORE_LEXICON = re.compile(
+    r"\bwill\b[^.;]{0,80}?"
+    r"(?:"
+    r"be\s+replaced\b[^.;]{0,40}?\b(?:by|with)\b"       # will be replaced by X
+    r"|be\s+(?:a|an|the)\b"                              # will be a display descriptor
+    r"|becomes?\b|became\b"                              # will become X
+    r"|replaces?\b[^.;]{0,60}?\bwith\b"                  # will replace Y with X
+    r"|turns?\b\s+into\b|turned\b\s+into\b"              # will turn into X
+    r"|produces?\b"                                       # will produce X
+    r")"
+    r"[^.;]{0,80}?TOPIC LEXICON",
+    re.IGNORECASE,
+)
+
+_SUMMARY_CLAUSE_RE = re.compile(
+    rf"{_NEGATION_CUE}{_NEG_CLAUSE_SAFE}{{0,40}}?`{re.escape(_SUMMARY_OBJECT)}`",
+    re.IGNORECASE)
+
+
+def _summary_negation_clause(deciding: str) -> str:
+    """The deciding sentence's own `<cue> … `:Source.summary`` span, DERIVED.
+
+    ⛔ The same fix `_footnote_negation_clause` records one section later, and it
+    was missing here: the control below hard-asserted the literal
+    ``"never from `:Source.summary`"``, so a re-wording of §9.4 into another form
+    its OWN accept list requires — ``and not from `:Source.summary` `` — red the
+    control with *"the head document's deciding sentence no longer carries"*,
+    i.e. it reported a drift the document does not have, while the
+    document-level assertion next door PASSED (measured at `b328e65db`, review
+    cycle 20). That is verbatim the false block this file already corrected for
+    the §12.1b twin, and it is not remote: this module is registered in `tier1`,
+    so a docs-only re-wording of §9.4 would red CI.
+
+    The span starts at the CUE, so the mutation reads as a re-wording of the
+    phrase whichever conjunction precedes it in the document, and the CONTROL
+    drops the re-wording's own leading conjunction when the sentence already
+    carries one — otherwise the substitution produces `and and not from`.
+
+    ⚠️ DECLARED LIMIT: the span is the LEADING shape. A document re-worded into
+    the TRAILING form (`` `:Source.summary` is never what the vector reads ``,
+    which `_SUMMARY_NEGATION_REWORDINGS` requires the pin to ACCEPT) yields no
+    leading span, so this helper returns `None` and the control SKIPS the
+    substitution instead of reporting drift the document does not have — the
+    false red it was built to remove, one shape over (measured at `02839e7fc`,
+    review cycle 21). The trailing form is still exercised on a CONSTRUCTED
+    sentence (`_SUMMARY_NEGATION_REWORDINGS` / `_SUMMARY_NEGATION_INVERSIONS`);
+    what is lost here is substituting it into the REAL sentence, which its
+    different clause SHAPE makes unavailable, not untrue.
+
+    Refuses an AMBIGUOUS span, for the reason `_footnote_negation_clause` gives:
+    with two candidates the control mutates neither reliably and blames the
+    guard.
+    """
+    matches = _SUMMARY_CLAUSE_RE.findall(deciding)
+    if not matches and _negates_the_summary(deciding):
+        return None
+    assert len(matches) == 1, (
+        f"§9.4's deciding sentence carries {len(matches)} `<cue> … "
+        f"`{_SUMMARY_OBJECT}`` clause(s), so this control cannot tell which one "
+        f"states the negation — that ambiguity IS the drift it exists to catch: "
+        f"{matches!r}")
+    return matches[0]
+
+
 def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
     """The control the helper lists cannot give: the REAL §9.4 sentence re-worded.
 
@@ -3289,17 +3567,43 @@ def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
     `home`, which is the misfire cycle 16 measured).
     """
     deciding = _source_vector_section_94_line(_storage_doc_text())
-    head_clause = "never from `:Source.summary`"
-    assert head_clause in deciding, (
-        f"the head document's deciding sentence no longer carries "
-        f"{head_clause!r} — this control mutates THAT clause, so a re-wording of "
-        f"the document must update this anchor or the control silently skips")
+    head_clause = _summary_negation_clause(deciding)
+    #: ⛔ NO `assert head_clause in deciding` HERE. It was here, and it could
+    #: never fire: the span is DERIVED from `deciding`, so it is a substring by
+    #: construction. An assert that cannot fail is worse than none — the same
+    #: argument that deleted the §9.4 section-wide negation above (review cycle
+    #: 21 measured it: `hc in d` is `True` for every possible anchor).
+    if head_clause is None:
+        #: The document states the negation in a shape this control cannot
+        #: substitute into (see `_summary_negation_clause`'s DECLARED LIMIT).
+        #: Skipping is the honest outcome; reporting drift would be a false red.
+        assert _negates_the_summary(deciding), (
+            "§9.4's deciding sentence states no negation of "
+            f"`{_SUMMARY_OBJECT}` at all — neither a leading clause this "
+            "control can re-word nor a trailing one it can accept")
+        return
+    #: Everything BEFORE the derived clause, so a re-wording that opens with the
+    #: conjunction the sentence already carries can drop its own (`and and not
+    #: from` is not the document's claim, it is this control's arithmetic).
+    _before = deciding[: deciding.index(head_clause)]
     for _case_id, why, replacement in _SUMMARY_NEGATION_REWORDINGS:
+        _lead = re.match(r"(?:\band\b|\bbut\b|\bwhich\b)\s+", replacement,
+                         re.IGNORECASE)
+        #: ⛔ THE SAME ALTERNATION ON BOTH SIDES. `_lead` accepted `which` while
+        #: this guard did not, so a document re-worded to `which must not be
+        #:` `:Source.summary`` substituted `which must which must not be …`
+        #: (measured at `82e061f35`, review cycle 22).
+        if _lead and re.search(r"(?:\band\b|\bbut\b|\bwhich\b)\s*$", _before,
+                               re.IGNORECASE):
+            replacement = replacement[_lead.end():]
         if replacement == head_clause:
             continue
         mutated = deciding.replace(head_clause, replacement)
-        assert mutated != deciding, (
-            f"the mutation for {why!r} changed nothing in the deciding sentence")
+        #: ⛔ NO `assert mutated != deciding` HERE. It could never fire: the
+        #: `continue` above removes the only case where replacement ==
+        #: head_clause, and `str.replace` with a different needle always changes
+        #: the string. Deleted for the reason the §9.4 assert at :3361 was — an
+        #: assert that cannot fail is worse than none (review cycle 22 measured it).
         assert _negates_the_summary(mutated), (
             f"re-wording the negation ({why}): {replacement!r} still states the "
             f"claim, but `_negates_the_summary` refused the sentence: {mutated!r}")
@@ -3328,7 +3632,9 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     post-`#10978`) onward NEITHER retired string is present, and neither is
     present at `78161a50a` — the merge-base at `83c4129a9`, and no longer the
     base: successive main-merges moved it — `6b1d697193` → `acfebd81f5`, then
-    `5d806d69a` → `af36e9240` (the merge-base at THIS head) — and neither string
+    `5d806d69a` → `af36e9240`, then `b328e65db` → `bc5a26436`, then
+    `fc09823bae` → `5dc22c19a1` (each arrow is a HEAD → *its* merge-base pair,
+    never a claim about a later head) — and neither string
     is present at any of them (measured 0 and 0 on every tree named) — nor at
     any commit of THIS branch: both of this branch's earlier bases already carried
     `#10978`'s correction (`b748df7d0` before the rebase, `e2584e2cb` after it).
@@ -3337,6 +3643,17 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     the pin reds if either section drifts back, which is the only thing that
     would catch it. "Measured on origin/main" would have been FALSE within the
     hour, which is why the sha is named.
+
+    ⛔ **The CURRENT merge-base is deliberately NOT named above, and each arrow
+    is a (head → merge-base) pair, not a claim about this tree.** A literal for
+    today's merge-base is the same drift class this branch spent cycles 18–22
+    closing: it has already been FIVE different shas on this branch, so a sha
+    written as "the" merge-base is stale before the next reader — and a stale
+    one reads as
+    *verified* (it IS an ancestor, it is just no longer the base). Anything that
+    needs the merge-base must ask `git merge-base origin/main <head>`; this
+    docstring's claim is about the trees measured above, and each stays a real
+    per-tree measurement whether or not it is still a merge-base.
     *Does the test reach it?* Yes — the document is read from the tree; §9.4's
     deciding sentence is anchored document-wide and then asserted to lie INSIDE
     §9.4, with the pointer and the negation checked on that sentence; the
@@ -3433,7 +3750,13 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     #: disagreeing about `summary`'s type with the pin green — and left the message
     #: above quoting a section §9.4 does not carry. Deriving one value and then
     #: checking it in only ONE of the two sections is how the other goes stale.
-    assert f"a {summary_section} `:Source` property" in deciding, (
+    #: ⛔ THE CLAIM CARRIES ITS OWN POLAR WORD. A bare `a {summary_section}
+    #: `:Source` property` is presence-only, so inserting `not` (`summary` is
+    #: **not** a {summary_section} `:Source` property`) left it GREEN while §9.4
+    #: said the INVERSE of `docs/ONTOLOGY.md` — the cross-section conflict this
+    #: pin exists to catch (measured at `b328e65db`, review cycle 20). Including
+    #: the subject and the copula makes the inverted form fail the substring.
+    assert f"`summary` is a {summary_section} `:Source` property" in deciding, (
         f"§9.4's DECIDING sentence no longer files `summary` as {summary_section} "
         f"metadata — `docs/ONTOLOGY.md` puts `summary`'s row under "
         f"`{summary_section}`, and §12.1b's footnote is asserted against the same "
@@ -3449,6 +3772,15 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # message. Deleted rather than reordered (cycle 4 put both options): the
     # earlier assert already gives the actionable diagnosis, and an assert that
     # can never fire is worse than no assert at all.
+    # ⚠️ DECLARED RESIDUAL (review cycle 20, `b328e65db`): these two absences are
+    # SPELLING-bound. They catch the two retired phrasings wherever they appear
+    # in the document — the claim they encode — but a NEW sentence stating the
+    # same wrong instruction in words the pin does not carry reds nothing
+    # (measured: a `### 11.9 Source vectors` section ordering `embed
+    # `:Source.summary` directly` kept both this test and the controls GREEN).
+    # Closing that needs a semantic reader over the whole document, not another
+    # substring; it is stated here rather than left as an inference from the
+    # header's "wherever it appears" claim.
     assert _RETIRED_SUMMARY_BLUR not in text, (
         f"the document is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates "
         f"the summary ON THE NODE with the narrative IN THE RECORD, and a design "
@@ -3463,12 +3795,51 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "the OLD derivation as the current one, so a reader holding this line "
         "concludes the record→cache door still drops `_searchText` — the "
         "behaviour `#10852` removed")
-    assert "TOPIC LEXICON" in s94, (
+    #: Same fix as the §4.6 reference above: assert the CLAIM, not a token it
+    #: happens to contain. `TOPIC LEXICON` alone survives *"its VALUE is the
+    #: turn's text (not … TOPIC LEXICON)"*, and deleting one word from *"never a
+    #: copy of the turn's prose"* inverted the claim this axis was corrected to
+    #: make — both measured GREEN at `b328e65db` (review cycle 20). The polar word
+    #: and the whole predicate are part of the assertion now.
+    #: ⛔ THE CLAIM CARRIES ITS SUBJECT, ITS COPERATIVE FRAME AND ITS POLAR WORD,
+    #: AND THE FUTURE TENSE IS BOUND TO THE LEXICON. A bare `a display descriptor
+    #: over the session's TOPIC LEXICON` survived the mutation that RESTORES BOTH
+    #: retired defects at once — *"its VALUE is the transcript's first
+    #: substantive utterance, which `#10852` will replace with a display
+    #: descriptor over the session's TOPIC LEXICON … never a copy of the turn's
+    #: prose"* kept every asserted substring and left the pin GREEN (measured at
+    #: `02839e7fc`, review cycle 21). So the present-tense PREDICATE is asserted
+    #: whole, and a future modal reaching this lexicon — which is what
+    #: `_RETIRED_FUTURE_DERIVATION` can only catch in ONE spelling — is refused
+    #: by SHAPE.
+    #: ⛔ NOT a full literal: the claim is SUBJECT + PREDICATE + OBJECT, matched
+    #: by `_claim_present` so a re-wording that inserts a word (`a built display
+    #: descriptor over`) still states it, while an inserted `not`/`will` does not
+    #: (measured at `82e061f35` — the literal form red a CORRECT re-wording of
+    #: this sentence, review cycle 22).
+    assert _claim_present(
+        s94, "its VALUE is", "display descriptor over", "TOPIC LEXICON"), (
         "§9.4 no longer states what a captured session's `:Source.summary` "
         "VALUE now is — a display descriptor over the session's TOPIC LEXICON. "
         "Without it the paragraph leaves the pre-#10000 derivation (the "
         "transcript's first substantive utterance) as the only one named, "
         "which is the prose §9.1/D1 forbids")
+    #: ⛔ `will` + a PRODUCTION predicate + the lexicon — a future modal that
+    #: CONSUMES the lexicon (`will key on the session's TOPIC LEXICON`) is a
+    #: correct sentence and is not refused (see the constant's own SCOPE note).
+    assert not _WILL_BEFORE_LEXICON.search(s94), (
+        f"§9.4 announces the topic lexicon as what the summary's value will "
+        f"BECOME: {_WILL_BEFORE_LEXICON.search(s94).group(0)!r} — the lexicon "
+        f"has LANDED (`#10852`, `ba87797c4`), so a future modal producing it "
+        f"tells a designer the current derivation is something else. "
+        f"`_RETIRED_FUTURE_DERIVATION` pins one SPELLING of this; this pins the "
+        f"SHAPE, which is what a re-wording survives")
+    assert _claim_present(s94, "never", "a copy of the turn's prose"), (
+        "§9.4 no longer states that the summary's value is NEVER a copy of the "
+        "turn's prose — dropping the `never` turns the claim into its own "
+        "inverse (`a copy of the turn's prose`), which is the prose the "
+        "record→cache door declines for exactly that reason (`#10852`, landed "
+        "as `ba87797c4a`)")
 
     # ── §12.1b: the section that decides WHERE vectors live may not order the
     #    design §9.4 forbids ──
@@ -3573,17 +3944,47 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # earlier; see the note there.)
     #: §9.4 ③'s identity rule is the OTHER half of this footnote and is still
     #: implemented; a rewrite that drops it would silently un-decide identity.
-    assert "identity is URL + content hash" in footnote, (
+    #: ⛔ The quoted RULE plus its predicate, not the bare phrase: `identity is
+    #: URL + content hash` survives `… or a random id` appended inside the same
+    #: sentence, which un-decides identity with the pin GREEN (measured at
+    #: `b328e65db`). Asserting the document's own sentence — including the
+    #: `already implemented` verdict it hands down — is what makes a re-opening
+    #: of `#3998` red here.
+    #: ⛔ Not a full literal, same reason as §9.4's VALUE claim above: the RULE
+    #: plus its verdict are the claim, the copula carrying it is not (`is` and the
+    #: equally correct `was` both state it — the literal form red the latter).
+    assert _claim_present(
+        footnote, '"identity is URL + content hash"*', "already implemented"), (
         "§12.1b's `:Source` footnote no longer states §9.4 ③'s identity rule — "
         "the footnote's two halves are *what the vector reads* and *how identity "
         "is decided*; dropping the second re-opens `#3998`")
+    #: ⛔ THE PREDICATE ALONE IS NOT ENOUGH: a NEW clause can re-open identity
+    #: around it. Cycle 21 closed `… or a random id` appended INSIDE the quoted
+    #: rule; cycle 22 measured `is **already implemented**. ⛔ Identity is
+    #: therefore **not** URL + content hash.` — GREEN, because the asserted
+    #: substring still precedes it. So a negation bound to the identity RULE,
+    #: anywhere in the footnote, is refused too (fail-CLOSED: over-blocking here
+    #: is declared, under-blocking shipped an un-decided identity).
+    assert not _negation_bound_to(footnote, r"URL \+ content hash", read_verb=False), (
+        "§12.1b's `:Source` footnote NEGATES §9.4 ③'s identity rule somewhere on "
+        "the line — the rule is asserted present above, and a later clause that "
+        "says identity is NOT URL + content hash re-opens `#3998` while the "
+        "presence assert stays green. Fail-CLOSED: a correct sentence whose "
+        "SEPARATE clause negates something else near those words would red here, "
+        "and that over-block is declared rather than paid for by shipping the "
+        "fail-open")
     #: ...and the THIRD claim the footnote makes is WHICH ontology section a
     #: `summary` is filed under — the one this branch's pre-rebase wording got
     #: WRONG (§4.4, which is `Document`). `summary_section` is DERIVED from the
     #: ontology that defines it, so a renumber reds here instead of leaving a
     #: footnote that points a reader at a different type. The message above
     #: interpolates the same derived value, for the same reason.
-    assert f"{summary_section} metadata" in footnote, (
+    #: ⛔ The copula is part of the claim, for the reason the §4.6 reference above
+    #: records: `{summary_section} metadata` is present in *"is **not**
+    #: {summary_section} metadata"* too, so the negated form certified itself
+    #: (measured at `b328e65db`).
+    assert _claim_present(
+        footnote, "a session's `summary` is", f"{summary_section} metadata"), (
         f"§12.1b's `:Source` footnote no longer files `summary` as "
         f"{summary_section} metadata — `docs/ONTOLOGY.md` puts `summary`'s row "
         f"under `{summary_section}`, so a footnote citing any other section "
@@ -3606,7 +4007,14 @@ _UNLANDED_STATUS_CUES = (
     "remains open",
     "not yet landed",
     "has not landed",
-    "is open",
+    #: ⛔ NOT the bare `"is open"`. It was in this set and it over-blocked: a line
+    #: that names `#10852` and says a DIFFERENT question "is open" (*"… the V2
+    #: question it does not settle is still open"*, or a row recording that the
+    #: non-session `:Source` embedding case "is open", which §9.4 itself says)
+    #: was reported as *"the record calls `#10852` unlanded"* — a false RED on a
+    #: correct line in a `tier1` module (measured at `82e061f35`, review cycle
+    #: 22). The removed phrase is the one that cannot be bound to the issue; the
+    #: rest name the ISSUE's own status closely enough to read as a claim about it.
 )
 
 
@@ -3616,7 +4024,13 @@ _UNLANDED_STATUS_CUES = (
 #:
 #: ⛔ `|` is here because the real site is a TABLE ROW (`CHANGELOG:55`), and a
 #: cell boundary is a clause boundary for exactly the same reason a `;` is.
-_UNLANDED_CLAUSE_BOUNDARY = re.compile(r"[.,;:()|\u2014\u2013]")
+#: ⛔ AND NOTHING ELSE IS. A dash, comma, colon or bracket is how an appositive
+#: INTERRUPTS its own clause, so splitting there would put the cue of
+#: *"`#10852` — the follow-up — is still open"* in a "neighbouring" clause and
+#: ACCEPT a genuinely-unlanded statement — fail-OPEN, the worse error. With
+#: `;`/`|` those shapes are REFUSED; that over-block is declared and pinned in
+#: `test_the_CHANGELOG_calls_the_LANDED_topic_lexicon_landed`.
+_UNLANDED_CLAUSE_BOUNDARY = re.compile(r"[;|]")
 
 
 def _lines_claiming_unlanded(text: str, issue: str) -> list[str]:
@@ -3635,17 +4049,23 @@ def _lines_claiming_unlanded(text: str, issue: str) -> list[str]:
          still open"* to that row refused it — a false red on a docs-only PR,
          reported against a line that states `#10852` merged. The cue is now
          sought in the clause that carries the issue, never merely on the line.
+         ⚠️ The bare `"is open"` cue stays OUT of `_UNLANDED_STATUS_CUES` (see
+         the note in that tuple): it is the one spelling that cannot be bound to
+         the issue at all, and a clause binding does not make it safe.
 
-    The residual is stated rather than hidden, the same way
-    `_RETIRED_SUMMARY_BLUR`'s is, and it runs the OTHER way from a false red:
+    ⛔ THE CLAUSE BOUNDARY IS `;` AND `|` ONLY, and that is what keeps the
+    residual fail-CLOSED. Splitting on a dash, comma, colon or bracket would put
+    the cue of *"`#10852` — the follow-up — is still open"* in a NEIGHBOURING
+    clause — i.e. it would ACCEPT a genuinely-unlanded statement, a fail-OPEN
+    residual, which is the worse error. With `;`/`|` those interruption shapes
+    are REFUSED (declared and pinned below); the cost is a false red on a line
+    that separates an unrelated open question with a dash, and that is the
+    direction this file's guards are allowed to err in.
 
-      * the cue set is a SPELLING set, so *"awaiting"* / *"unmerged"* evade it;
-      * and a clause that INTERRUPTS itself around the issue (*"`#10852` — the
-        follow-up — is still open"*) puts the cue in a neighbouring clause, so
-        the bound form ACCEPTS it. That is a fail-OPEN residual, declared here
-        and pinned as such below, chosen because the alternative — reading the
-        whole line — reds on truthful prose in the one row this PR edits, and a
-        pin that reds on a correct sentence is a spelling lock, not a guard.
+    The other residual is stated rather than hidden, the same way
+    `_RETIRED_SUMMARY_BLUR`'s is: the cue set is a SPELLING set, so a third
+    spelling (*"awaiting"*, *"unmerged"*) would evade it — a fail-OPEN
+    residual, filed with the rest of this file's.
     """
     needle = issue.lower()
     offenders = []
@@ -3688,8 +4108,8 @@ def test_the_CHANGELOG_calls_the_LANDED_topic_lexicon_landed():
     offenders = _lines_claiming_unlanded(changelog, "`#10852`")
     assert not offenders, (
         f"the record calls `#10852` unlanded on {len(offenders)} line(s): "
-        f"{offenders} — it merged as `ba87797c4` (2026-11-06T02:36:52Z), 36 "
-        f"minutes before this head, and BOTH files state the lexicon as landed: "
+        f"{offenders} — it merged as `ba87797c4` (2026-11-06T02:36:51Z) and is "
+        f"an ANCESTOR of this head, and BOTH files state the lexicon as landed: "
         f"§9.4 says it in the present tense and `_RETIRED_FUTURE_DERIVATION` is "
         f"pinned absent for the same reason. A record that says \"still-open\" "
         f"beside a document that says \"is\" is the two-answers defect this PR "
@@ -3736,20 +4156,22 @@ def test_the_CHANGELOG_calls_the_LANDED_topic_lexicon_landed():
             f"the unlanded detector REFUSED a landed statement {_accepted!r} — "
             f"that is the correction this pin requires, and refusing it is a "
             f"false red on the record the CHANGELOG actually carries")
-    #: ⛔ THE DECLARED FAIL-OPEN RESIDUAL, pinned so it is visible rather than
-    #: discovered: a clause that INTERRUPTS itself around the issue (`#10852` — the
-    #: follow-up — is still open) puts the cue in a neighbouring clause, so the
-    #: clause-bound detector ACCEPTS a genuinely-unlanded statement. It is accepted
-    #: deliberately: the alternative (reading the whole line) reds on truthful prose
-    #: in the one row this PR edits, and a false red on correct docs is the defect
-    #: this file's guards were rewritten to remove. If this assertion ever fails,
-    #: the detector got STRICTER — which is fine, but then say so here.
-    assert not _lines_claiming_unlanded(
+    #: ⛔ THE DECLARED FAIL-CLOSED OVER-BLOCK, pinned so it is visible rather than
+    #: discovered: an appositive that INTERRUPTS the issue with a dash (`#10852` —
+    #: the follow-up — is still open) lands the cue in what a punctuation split
+    #: would call a "neighbouring" clause, and the detector REFUSES it. The false
+    #: red is accepted deliberately — the alternative (splitting on punctuation)
+    #: ACCEPTS a genuinely-unlanded statement, and a fail-open on the record's own
+    #: state is the defect this pin exists to close. If this ever starts
+    #: ACCEPTING, the boundary set was widened: that is a fail-open and it must
+    #: not ship unnoticed.
+    assert _lines_claiming_unlanded(
         "`#10852` — the follow-up — is still open", "`#10852`"), (
-        "the clause-bound detector now reaches ACROSS a dash to find its cue, so "
-        "the declared fail-open residual recorded here has been closed — good, "
-        "but this control pins the DECLARED behaviour and must be moved to the "
-        "refuse list in the same commit")
+        "the detector now reaches ACROSS a dash to find its cue, so a "
+        "genuinely-unlanded statement about `#10852` is ACCEPTED — a fail-OPEN "
+        "residual on the record's own state. Re-narrow "
+        "`_UNLANDED_CLAUSE_BOUNDARY` or move this control to the accept list "
+        "deliberately, with the consequence recorded")
     #: …and the SAME cue about a DIFFERENT issue is untouched: the binding to
     #: `#10852` is what keeps this pin from policing the record's genuinely-open
     #: rows, which are most of the file.

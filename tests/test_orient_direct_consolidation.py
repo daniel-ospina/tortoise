@@ -730,13 +730,15 @@ class TestRegistry:
     def test_new_tools_registered_with_readonly_policy(self):
         from tortoise.tool_registry import TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
-        assert "tortoise_overview" in names
+        # #4282: `tortoise_overview` retired into the approved container, so the live W3
+        # orientation tool is `tortoise_graph_overview`.
+        assert "tortoise_graph_overview" in names
         # `tortoise_get` retires into `tortoise_get_entity` (owner decision,
         # docs/product/canonical-mcp-tools.md @ approval_pr 4120), so the live
         # W3 fetch tool is `get_entity`.
         assert "tortoise_get_entity" in names
         for t in TOOL_REGISTRY:
-            if t.name in ("tortoise_overview", "tortoise_get_entity"):
+            if t.name in ("tortoise_graph_overview", "tortoise_get_entity"):
                 assert t.http_policy is True
                 assert t.annotations.readOnlyHint is True
 
@@ -746,17 +748,18 @@ class TestRegistry:
         import tortoise.mcp_server as mcp_mod
         from tortoise.tool_registry import TOOL_REGISTRY
         for t in TOOL_REGISTRY:
-            if t.name in ("tortoise_overview", "tortoise_get_entity"):
+            if t.name in ("tortoise_graph_overview", "tortoise_get_entity"):
                 assert t.name in mcp_mod.__dict__, t.name
                 assert callable(mcp_mod.__dict__[t.name])
 
     def test_group_assignments(self):
         from tortoise.tool_registry import GROUP_BY_NAME
-        assert GROUP_BY_NAME["tortoise_overview"] == "reasoning"
+        assert GROUP_BY_NAME["tortoise_graph_overview"] == "reasoning"
+        assert GROUP_BY_NAME["tortoise_overview"] == "reasoning"  # retired, group retained
         assert GROUP_BY_NAME["tortoise_get_entity"] == "graph"
 
     def test_http_allowed_derived(self):
         from tortoise.tool_registry import get_http_allowed
         allowed = get_http_allowed()
-        assert "tortoise_overview" in allowed
+        assert "tortoise_graph_overview" in allowed
         assert "tortoise_get_entity" in allowed

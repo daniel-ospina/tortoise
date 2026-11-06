@@ -989,7 +989,23 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
     assert held.wait(5.0), "the slot holder never started"
     try:
         with tc:
-            _wait_for_probe(selfhost, timeout=25.0)
+            # ⚠️ NOT the ad-hoc `25.0` this call carried: the wait bound is the
+            # module's documented HARNESS tolerance for a loaded runner, which
+            # is what `_HEALTH_VERDICT_WAIT_S` (90 s, raised from 40 s after a
+            # loaded box expired it on a HEALTHY daemon) exists for. 25 s sat
+            # BELOW that documented tolerance and red-ed a required check on a
+            # healthy daemon — CI run 42186465222, job 127800485941, `test (d)`:
+            # the failure reported `strand re-arms used 2/2` with the snapshot
+            # still `{'ok': False, … 'probe in flight (0.0s)'}`, i.e. a probe was
+            # MEASURING at the deadline. Two queued cycles (2 × the 2.0 s
+            # acquisition budget) plus ONE cold embedded-FalkorDB start is
+            # already ~26 s before the runner's own load is counted.
+            #
+            # It weakens nothing: the assertion below is unchanged (a MEASURED
+            # `ok is True`), and the remedy's BOUNDEDNESS is pinned where that
+            # property belongs — `test_the_strand_remedy_is_bounded`, on its own
+            # 3.0 s bound.
+            _wait_for_probe(selfhost)
     finally:
         release.set()
     assert selfhost._HEALTH_PROBE.snapshot()["ok"] is True
@@ -1099,8 +1115,11 @@ class TestHealthTruthMCP:
             })
             assert r.status_code == 200, r.text
             names = [t["name"] for t in body["result"]["tools"]]
-            assert "tortoise_overview" in names
-            # #3883: tortoise_health is RETIRED — callable and warned, never listed.
+            # #4282: the orientation container is `tortoise_graph_overview`;
+            # #3883: `tortoise_health` — and now `tortoise_overview` itself — are
+            # RETIRED, callable and warned, never listed.
+            assert "tortoise_graph_overview" in names
+            assert "tortoise_overview" not in names
             assert "tortoise_health" not in names
 
         stray_after = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
