@@ -7267,8 +7267,11 @@ def _maybe_onboarding_auto_complete(*,
 # gate order: boundary 422 → admission 429 (#3060) / in-flight 409 (#3129)
 # → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402
 # → ingest_rate_limited 429 (#4051 §3.1 — the per-org window, NOT the
-# admission 429 above); the tool docstring below carries the full list,
-# including the inner extractor-provider 503 that can follow them.
+# admission 429 above, and deliberately LAST: an org at its quota gets the
+# permanent 402, never a retryable throttle for a request that can never
+# fit); the tool docstring below carries the list up to the points 402 — the
+# ingest 429 is documented HERE and not there, see below — including the
+# inner extractor-provider 503 that can follow them.
 # ⛔ The 429 note lives HERE and NOT in the tool docstring: the docstring is a
 # `co_consts` member, so prose there moves `_code_digest` and reds the required
 # `surface-guard` job (measured at head c0cb695152 — served_from
