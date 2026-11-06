@@ -306,21 +306,8 @@ def _printed_remedies(text: str, pattern: str) -> list[str]:
     for line in text.replace("\\\n", " ").splitlines():
         if line.lstrip().startswith("#"):
             continue
-        found.extend(match.group(0) for match in re.finditer(pattern, _strip_trailing_comment(line)))
+        found.extend(match.group(0) for match in re.finditer(pattern, _strip_shell_comment(line)))
     return found
-
-
-def _strip_trailing_comment(line: str) -> str:
-    """Drop a trailing `# …`, quote-aware, so a NOTE beside a printed line is not read as output.
-
-    `echo "…"  # cf. supabase migration repair --status applied <version>` had its comment scanned as
-    a printed remedy and RED the suite for text that is never echoed (measured, review cycle 11).
-    A `#` after the last quote closes a shell line and is a comment; a `#` INSIDE the quotes is
-    content and is left alone. With no quotes at all, any `#` is a comment.
-    """
-    quote_at = max(line.rfind('"'), line.rfind("'"))
-    hash_at = line.find("#", quote_at + 1)
-    return line[:hash_at] if hash_at != -1 else line
 
 
 def _mutating_steps_with_job() -> list[tuple[str, dict, dict]]:
@@ -782,9 +769,16 @@ def test_printed_remediations_pass_yes_too() -> None:
     # Asserted on the STRIPPED command, not the raw line: `db push --project-ref …   # add --yes later`
     # kept a substring assertion satisfied while an operator copy-pasting it would hit the v3 consent
     # gate and apply nothing — the same shape closed for the workflow one branch above (measured,
-    # review cycle 13). `_strip_trailing_comment` is the helper that already exists for this.
+    # review cycle 13).
+    #
+    # ⛔ ONE scanner, not two. The first attempt at this called a second helper,
+    # `_strip_trailing_comment`, which anchored on the LAST quote in the line: a comment that itself
+    # contained a quote (`# don't forget --yes`) came back UNCHANGED, so the assertion passed on text
+    # no operator can run (measured GREEN, review cycle 14). `_strip_shell_comment` tracks quote STATE
+    # as it scans, so it answers for every comment shape; keeping both was two owners of one predicate,
+    # and that is how they diverged.
     unconsented = [
-        remedy for remedy in readme_remedies if "--yes" not in _strip_trailing_comment(remedy)
+        remedy for remedy in readme_remedies if "--yes" not in _strip_shell_comment(remedy)
     ]
     assert not unconsented, (
         f"supabase/README.md prints {len(unconsented)} manual-fallback command(s) without `--yes` "
