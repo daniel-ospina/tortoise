@@ -1113,6 +1113,66 @@ def test_a_held_surface_is_stripped_from_the_slots_that_reference_it():
         "(its kind may be repaired by _clean_slots; its REFERENCE must survive)")
 
 
+def test_a_reference_that_is_ONLY_an_OBJECT_slot_is_held_too():
+    """The carrier set must cover BOTH participant roles, not only `subject`.
+
+    Measured: narrowing `_SLOT_ENTITY_ROLES` to `("subject",)` left the whole
+    suite green — the `object` half of the second reference set was pinned by
+    nothing, so a regression that stopped judging it would mint a phantom with no
+    red row (review cycle 6, P3)."""
+    el = _slot_only_embed_list()
+    slots = el["points"][0]["slots"]
+    slots["object"] = slots.pop("subject")
+    routed = route_mentions(copy.deepcopy(el), "")
+    stats = routed["mention_stats"]
+    assert stats["hold_abandoned_no_claim"] == 0, (
+        "an `object` slot reference IS a claim to record the mention on")
+    assert stats["held_surfaces"] == 1
+    assert [m["surface"] for m in routed["mentions"]] == ["it"]
+    assert not (routed["points"][0].get("slots") or {}).get("object"), (
+        f"the dangling object slot survived: {routed['points'][0].get('slots')}")
+    payload, _ = _mint(el)
+    assert "it" not in _entity_names(payload), (
+        "the phantom minted through the `object` slot reference")
+
+
+def test_an_EVENT_whose_only_carrier_is_a_slot_is_held_and_its_slot_stripped():
+    """An EVENT is a carrier in BOTH reference sets, so its typed slots must be
+    stripped like a point's.
+
+    Measured: skipping the slot branch for `eventKind` carriers left the whole
+    suite green while the event's `slots.subject` survived the hold — exactly the
+    dangling slot Layer-1 reports as `slot subject 'it' … does not resolve to an
+    emitted entity`, an extraction-error warning for a decision the run made on
+    purpose (review cycle 6, P3). Asserted on the ROUTED list for the same reason
+    the point row is: Layer-1 also drops a dangling slot, so a payload-only
+    assertion stays green whether WE stripped it or Layer-1 reported it."""
+    el = {
+        "entities": [{"name": "it", "kind": "core:other"}],
+        "points": [],
+        "events": [{
+            "content": "an event that uses it in its own sentence",
+            "eventKind": "occurrence",
+            "about_entities": [],
+            "startedAt": None,
+            "slots": {"subject": [{"name": "it", "kind": "core:other",
+                                   "confidence": 0.9}]},
+        }],
+        "operators": [],
+    }
+    routed = route_mentions(copy.deepcopy(el), "")
+    stats = routed["mention_stats"]
+    assert stats["hold_abandoned_no_claim"] == 0, (
+        "an event slot reference IS a claim to record the mention on")
+    assert "it" not in {e["name"] for e in routed["entities"]}
+    assert not (routed["events"][0].get("slots") or {}).get("subject"), (
+        f"the event's dangling slot survived: {routed['events'][0].get('slots')}")
+    assert stats["events_stripped"] == 1
+    assert stats["mention_carrier_is_event"] == 1
+    assert stats.get("mention_unrecorded_surfaces") == ["it"], (
+        "an event-only hold writes no DM1 record and must SAY so")
+
+
 def test_a_slot_only_hold_survives_the_union_pass():
     """The carried decision must cover the second reference set too: pass 2 sees
     the payload pass 1 rewrote (entity gone, slot gone), so re-deriving would
