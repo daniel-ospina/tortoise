@@ -9939,9 +9939,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # claim would make the row false without saying so.
     _attached = sum(len(p.get("mentions") or []) for p in payload_points
                     if isinstance(p, dict))
-    _records = [m for m in (embed_list.get("mentions") or []) if isinstance(m, dict)]
+    _armed = _referentiality.enabled()
+    _records = ([m for m in (embed_list.get("mentions") or []) if isinstance(m, dict)]
+                if _armed else [])
     _emitted_refs = {_norm(str(p.get("content") or "")) for p in payload_points
-                     if isinstance(p, dict)}
+                     if isinstance(p, dict)}   # payload content IS the write's form
     unresolved = [m for m in _records
                   if _norm(str(m.get("claim_ref") or "")) not in _emitted_refs]
     if unresolved:
@@ -10323,8 +10325,8 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     **A mention the model emitted itself is never promoted.** ``mentions[]`` is a
     one-way channel: an entry there is a statement that the phrase is not a node,
     so it is recorded and never re-read into ``entities[]``. When the flag is
-    OFF the whole channel is ignored and counted (``channel_ignored``) — the
-    unmeasured state must not lose a surface to a field nobody armed.
+    OFF the whole channel is ignored and the list is returned UNCHANGED (the
+    unmeasured state must not lose a surface to a field nobody armed).
 
     **A mention no claim can carry is refused** (the issue's own contract row: a
     mention with no claim is not a record). Two DIFFERENT refusals, counted
@@ -10387,7 +10389,12 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         if not surface or surface in hold:
             continue
         recorded_rule = str(m.get("rule_id") or "")
-        if recorded_rule in _referentiality.RULES[:-1]:      # the three cue rules
+        # ⛔ The model's `rule_id` is a CLAIM. Trusting it let an entry tagged
+        # "referentiality.pronoun" remove a surface `judge()` says is a referent —
+        # a 70-reference must-keep deleted on model say-so (review cycle 3, P1).
+        # The cue is RE-RUN and must agree with the claim.
+        verdict = _referentiality.judge(surface)
+        if verdict is not None and verdict[0] == recorded_rule:
             hold.setdefault(surface, (recorded_rule,
                                       "already recorded on a claim"))
 
@@ -10424,6 +10431,10 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     kept_events: list = []
     records: list[dict] = []
     held_surfaces: set[str] = set()
+    #: a surface whose hold was REFUSED (no claim to record it against). It is
+    #: NOT held: it neither strips aboutness nor prunes operators nor counts as
+    #: held, so `held_surfaces` says exactly what its name says.
+    abandoned_surfaces: set[str] = set()
 
     for entity in entities:
         if not isinstance(entity, dict):
@@ -10438,6 +10449,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             # Nothing to record it against. Keep the entity (fail-open) and NAME
             # the refusal so the rate is visible.
             stats["hold_abandoned_no_claim"] += 1
+            abandoned_surfaces.add(name)
             kept_entities.append(entity)
             continue
         if not carriers:
@@ -10489,10 +10501,17 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     # An endpoint surface that is in nobody's `entities[]` is still materialised
     # as a statement Point by mint-before-wire (#2552), so the cue is consulted on
     # the endpoints themselves (review cycle 2, P2).
+    # ⛔ The verdict goes into `hold` TOO, not only `held_surfaces`: `by_rule` is
+    # built from `hold`, so an endpoint-only surface raised KeyError, and the
+    # caller's fail-open guard then voided the ENTIRE selection — the hold, the
+    # about_entities strip and the prune (review cycle 3, P1).
     for surface in _operator_endpoint_surfaces(embed_list.get("operators")):
-        if surface and surface not in held_surfaces \
-                and _referentiality.judge(surface) is not None:
+        if not surface or surface in held_surfaces or surface in abandoned_surfaces:
+            continue
+        verdict = _referentiality.judge(surface)
+        if verdict is not None:
             held_surfaces.add(surface)
+            hold.setdefault(surface, verdict)
     kept_operators, dropped = _prune_held_operators(
         embed_list.get("operators"), held_surfaces)
     stats["operators_dropped"] = dropped
@@ -10643,7 +10662,11 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
                 span_source = label
                 break
     return {"surface": surface,
-            "claim_ref": str(claim.get("content") or ""),
+            # ⛔ The claim's content is TRUNCATED by `execute_embed` before it
+            # becomes the point. Recording the raw text made the ref unresolvable
+            # for any claim over `_MAX_CONTENT`, losing the mention AND reporting
+            # it as a fold that never happened (review cycle 3, P2).
+            "claim_ref": _write_span(str(claim.get("content") or ""), _MAX_CONTENT),
             "quote": str(quote or "")[:_MAX_QUOTE],
             "span_start": span_start,
             "span_end": span_end,
@@ -10746,8 +10769,17 @@ def _mentions_for_claim(embed_list: dict, content: str,
             if v is None or v == "":
                 continue
             if k in _MENTION_CAPS:
-                v = str(v)[:_MENTION_CAPS[k]]
-            record[k] = v
+                record[k] = str(v)[:_MENTION_CAPS[k]]
+            elif k in ("span_start", "span_end"):
+                record[k] = v if isinstance(v, int) else None
+            else:
+                # `claim_ref`/`rule_id`/`span_source` are `str` on the model: a
+                # non-str value 422'd the payload (review cycle 3, P3).
+                record[k] = str(v)
+        if record.get("span_start") is None:
+            record.pop("span_start", None)
+        if record.get("span_end") is None:
+            record.pop("span_end", None)
         if not record.get("surface"):
             continue
         # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
@@ -12778,7 +12810,7 @@ _SCHEMA_PRIMITIVES: dict[str, tuple[type, ...]] = {
     "eventKind": (str,), "src": (str,), "dst": (str,),
     "op_type": (str,), "chain": (str,), "finding": (str,),
     "action": (str,), "searched_for": (str,), "found": (bool,),
-    "id": (str,), "surface": (str,),   # #11021: the mention channel
+    "id": (str,),
 }
 
 

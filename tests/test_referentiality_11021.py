@@ -326,6 +326,64 @@ def test_an_operator_naming_a_held_surface_is_dropped():
         "mint-before-wire fabricated a claim Point from a pronoun endpoint")
 
 
+def test_an_endpoint_only_pronoun_does_not_abort_the_selection():
+    """The endpoint pass put the surface in `held_surfaces` but not in `hold`, so
+    `by_rule` raised KeyError and the caller's fail-open guard voided the WHOLE
+    selection — the pronoun minted and the operator survived (review cycle 3, P1)."""
+    el = _embed_list("the admin-merge rail")
+    el["operators"] = [{"src": "it",           # `it` is NOT in entities[]
+                        "dst": "the admin-merge rail", "op_type": "IMPL"}]
+    routed = route_mentions(el, "")
+    assert routed["mention_stats"]["operators_dropped"] == 1
+    assert routed["mention_stats"]["held_surfaces"] == 1
+    assert routed["operators"] == []
+
+
+def test_a_model_supplied_cue_rule_cannot_delete_a_referent():
+    """A channel entry tagged `referentiality.pronoun` for a surface `judge()` says
+    is a REFERENT must not re-arm a hold — the tag is a claim, not a fact (review
+    cycle 3, P1)."""
+    el = _embed_list("the admin-merge rail")
+    el["mentions"] = [{"surface": "the admin-merge rail",
+                       "claim_ref": el["points"][0]["content"],
+                       "rule_id": ref.RULE_PRONOUN, "quote": "the admin-merge rail"}]
+    routed = route_mentions(el, "")
+    assert [e["name"] for e in routed["entities"]] == ["the admin-merge rail"]
+    assert routed["mentions"] == []
+
+
+def test_an_abandoned_hold_neither_strips_nor_prunes_nor_counts():
+    """`held_surfaces` must say what its name says: a surface whose hold was
+    REFUSED (no claim to record it against) keeps its entity, keeps its operators,
+    and is not counted (review cycle 3, P2)."""
+    el = {"entities": [{"name": "the problem", "kind": "core:other"},
+                       {"name": "the admin-merge rail", "kind": "core:other"}],
+          "points": [{"content": "a claim about the rail", "pointKind": "statement",
+                      "about_entities": ["the admin-merge rail"]}],
+          "events": [], "mentions": [],
+          "operators": [{"src": "the problem", "dst": "the admin-merge rail",
+                         "op_type": "IMPL"}]}
+    routed = route_mentions(el, "")
+    stats = routed["mention_stats"]
+    assert stats["hold_abandoned_no_claim"] == 1
+    assert stats["held_surfaces"] == 0
+    assert stats["operators_dropped"] == 0
+    assert routed["operators"] == el["operators"]
+
+
+def test_a_long_claim_s_mention_still_lands():
+    """`execute_embed` truncates a claim to `_MAX_CONTENT`; a `claim_ref` recorded
+    from the RAW text never resolved, so the mention was lost and reported as a
+    fold that never happened (review cycle 3, P2)."""
+    el = _embed_list("it")
+    el["points"][0]["content"] = "x" * 1300 + " it"
+    payload, ctx = _mint(el)
+    assert ctx["res"]["stats"]["mentions_attached"] == 1, (
+        f"the mention did not land: {ctx['res']['stats']}")
+    assert ctx["res"]["stats"]["mentions_unresolved"] == 0
+    assert _mentions_of(payload)[0]["surface"] == "it"
+
+
 def test_S4_cannot_overwrite_a_held_record_s_rule_and_span():
     """S4's contract-shaped re-statement carries no `rule_id` and no span, so
     "S4 wins on collision" replaced the derived record with a provenance-free one
@@ -453,10 +511,11 @@ def test_the_contract_carries_the_channel():
         "_ParseError on the default path")
 
 
-def test_an_unarmed_run_reports_no_record_it_did_not_make():
+def test_an_unarmed_run_reports_no_record_it_did_not_make(monkeypatch):
     """With the flag OFF the channel is ignored, so the accounting must not claim
     records it never wrote, and must not warn about a fold that never happened
     (review cycle 2, P2)."""
+    monkeypatch.delenv(ref.ENV_FLAG, raising=False)   # the autouse fixture ARMS it
     el = _embed_list("config/ci-surfaces.yml")
     el["mentions"] = [{"surface": "the problem", "claim_ref": None}]
     res = execute_embed(route_mentions(el, ""), {}, session_id="unarmed-accounting")
