@@ -1280,18 +1280,30 @@ def parity_difference(cache_props: Mapping[str, Any],
         # `invented`'s only sanctioned repair is a re-projection, i.e. re-opening
         # the door. Measured red-first in
         # `tests/test_record_serve.py::test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention`.
-        # ⚠️ SCOPED, so the arm is not read as covering more than it does: with
-        # the record side supplied THE WAY THIS MODULE SAYS TO SUPPLY IT
-        # (`read_node`, i.e. `node_from_row`'s map — the contract stated at the
-        # top of this function), NEITHER name can reach this loop, because the
-        # decline and the deny are absent from that map BY CONSTRUCTION. The arm
-        # is therefore DEFENSIVE for the sanctioned shape and OPERATIVE for a
-        # caller that hands RAW record rows (an audit that opened the record with
-        # its own SQL) — and a raw row brings the record's COLUMN spellings, so
-        # the same caller also reds on `sessionId`-vs-`session_id`-style pairs
-        # (measured). Which is why `read_node`'s map remains the shape to use,
-        # and why this is a guard against a false RED rather than a rule about
-        # the sanctioned path.
+        # ⚠️ SCOPED, and the scope is narrower than it first looked — MEASURED,
+        # not reasoned (#11224's review, P2): with the record side supplied THE
+        # WAY THIS MODULE SAYS TO SUPPLY IT (`read_node`'s map = the projector's
+        # `node_from_row` map, plus the event-stream `status` fold for the labels
+        # that have one — a fold that adds no declined or not-projectable name),
+        # `not_projectable` CANNOT reach this loop, and NEITHER CAN `summary`:
+        # both are absent from that map by construction. ⛔ BUT `_searchText`
+        # CAN — whether it is declined is decided PER ROW, and since #10965 a
+        # post-#10000 episodic row PROJECTS it (`cache_projection._props_from_row`
+        # relaxes the decline when the row's `summary` is the topic join;
+        # `episodic_source_declined_properties`' own docstring says the set stays
+        # the full pair). So on that population this arm is OPERATIVE on the
+        # sanctioned path, and it FORGIVES a real gap: a cache node that lost the
+        # one field the Source FTS index is declared on answers `clean`.
+        # MEASURED (a post-#10000 row whose cache answer lacks `_searchText`):
+        # `parity_difference(...).clean is True`, `explained_missing
+        # ['_searchText']`. ⛔ That is a FALSE GREEN and it is FILED, not
+        # absorbed here — `#11233` owns the fix (exclude `_searchText` from the
+        # decline in this direction, or decide it per row), and until it lands
+        # `record_reconcile` is the instrument that still compares the name.
+        # What remains true of the arm: it is the right shape for a caller that
+        # hands RAW record rows (an audit that opened the record with its own
+        # SQL) — and such a caller also reds on `sessionId`-vs-`session_id`-style
+        # pairs (measured), which is why `read_node`'s map stays the shape to use.
         # ⚠️ The same mirror for the §9.1/D1 DECLINE (`declined`, #10853) is
         # applied here for the same reason and by the same rule: the record keeps
         # `summary`/`_searchText` and the projection declines to materialise
