@@ -1,8 +1,8 @@
 """The production home for *"this embedding writer is legitimately exempt"* (#11085).
 
-**Why this module exists.** `#10541` classified the embedding-writer population (0 bypasses at every
-head since; the class counts move as writers are declared, so read `WRITER_CENSUS` rather than a
-number restated here) but the only place that classification lived was
+**Why this module exists.** `#10541` classified the embedding-writer population (the class counts
+move as writers are declared, so read `WRITER_CENSUS` rather than a number restated here) but the
+only place that classification lived was
 `tools/dod_5090_probe.py::WRITER_CENSUS`, which is a **read-only instrument** and says so at its own
 `:1264` (*"the census CLASSIFIES the unresolved set; it does not license moving this verdict"*). An
 audit instrument is not a product decision: the answer to *"is this writer allowed to store a vector
@@ -82,8 +82,8 @@ count them.
 ⚠️ `tortoise.sdk::_journal_event_raw_write` is
 visible for a DIFFERENT reason — `_EMBED_WRITE` matches the `embedding=None` in its SIGNATURE — so
 it is not evidence that a literal subscript is what gets a carrier seen; the writers that genuinely
-owe their visibility to `#11274`'s AST pass are the four named at the top of this section, not every
-container-key declaration in the table. A writer is also
+owe their visibility to `#11274`'s AST pass are the ones the container-key bullet above names as
+found — not every container-key declaration in the table. A writer is also
 excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
 *named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module) or when its
 module will not parse. ⛔ **The `gated` escape is not hypothetical, and it is the widest one:**
@@ -318,7 +318,8 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`tortoise/sdk.py::_embedding_repair_attempt` DOES compute and store — "
             "`embedding = self._session_embedding(...)` and `set_embedding_clause(\"e\")` in its "
             "own body. It is both a producer on the `#5008` chain and a repair by ROLE, which is "
-            "why `exempt` (the `#10541` wording for the class that stores nothing) would contradict "
+            "why `exempt` (the `#10541` wording — see `EXEMPT`'s own docstring, which covers BOTH "
+            "'no write to gate' and 'a write gated out by a ruling') would contradict "
             "the class the chain's own seam carries",
             "#5008",
         ),
