@@ -3654,6 +3654,12 @@ surfaces:
   # write-freedom pins need a REAL `GRAPH.LIST` to be measured against, so four
   # helpers here build throwaway EMBEDDED redislite stores (no server, no
   # network — `DELIBERATE_EMBEDDED_LANE` in `tests/test_uri_env_mutations_declared.py`).
+  # ⚠️ NOT hermetic since #11112/#11113: the presence check, the write-freedom
+  # pins and the LOST-store arm need a REAL `GRAPH.LIST` (and a real RDB) to be
+  # measured against, so FOUR helpers here build throwaway EMBEDDED redislite
+  # stores (no server, no network — `DELIBERATE_EMBEDDED_LANE` in
+  # `tests/test_uri_env_mutations_declared.py`, whose declaration enumerates the
+  # same four; keep the two counts in step).
   # The pure comparison core and the CLI contract remain store-free.
   - test_10017_turn_parity_census.py
   - test_subject_layer_read_surfaces_4889.py  # #4889: the Subject-layer read surfaces fail loud instead of silently empty
