@@ -2918,6 +2918,13 @@ _CONSTRUCTION_PROBES: tuple[tuple[str, str], ...] = (
     ("not solely", "solely"),
     ("not least", "least"),
     ("not alone", "alone"),
+    #: ⛔ The POST-POSITIONAL form of `alone`: the clause is *"not the narrative
+    #: alone"*, so the contiguous `not alone` above does not match it and this
+    #: row — the one case that WAS mislabelled at `a6a1b28df` (it carried
+    #: `not-so-much-as-asserted`) — was the single inversion case the table never
+    #: covered. A guard that misses the one regression it documents does not
+    #: cover that regression (measured: relabelling this row still ran GREEN).
+    ("not the narrative alone", "not-alone"),
 )
 
 
@@ -3276,6 +3283,63 @@ def test_the_not_only_but_fail_open_is_closed():
         f"the case no longer isolates the trap's guard: {line!r}")
 
 
+#: A future MODAL reaching the topic lexicon — the SHAPE the retired future
+#: tense takes. `_RETIRED_FUTURE_DERIVATION` pins one spelling of it; a
+#: re-wording ("`#10852` will replace with a display descriptor over the
+#: session's TOPIC LEXICON") walks past that and is caught here instead.
+_WILL_BEFORE_LEXICON = re.compile(
+    r"\bwill\b[^.;]{0,80}TOPIC LEXICON", re.IGNORECASE)
+
+_SUMMARY_CLAUSE_RE = re.compile(
+    rf"{_NEGATION_CUE}{_NEG_CLAUSE_SAFE}{{0,40}}?`{re.escape(_SUMMARY_OBJECT)}`",
+    re.IGNORECASE)
+
+
+def _summary_negation_clause(deciding: str) -> str:
+    """The deciding sentence's own `<cue> … `:Source.summary`` span, DERIVED.
+
+    ⛔ The same fix `_footnote_negation_clause` records one section later, and it
+    was missing here: the control below hard-asserted the literal
+    ``"never from `:Source.summary`"``, so a re-wording of §9.4 into another form
+    its OWN accept list requires — ``and not from `:Source.summary` `` — red the
+    control with *"the head document's deciding sentence no longer carries"*,
+    i.e. it reported a drift the document does not have, while the
+    document-level assertion next door PASSED (measured at `b328e65db`, review
+    cycle 20). That is verbatim the false block this file already corrected for
+    the §12.1b twin, and it is not remote: this module is registered in `tier1`,
+    so a docs-only re-wording of §9.4 would red CI.
+
+    The span starts at the CUE, so the mutation reads as a re-wording of the
+    phrase whichever conjunction precedes it in the document, and the CONTROL
+    drops the re-wording's own leading conjunction when the sentence already
+    carries one — otherwise the substitution produces `and and not from`.
+
+    ⚠️ DECLARED LIMIT: the span is the LEADING shape. A document re-worded into
+    the TRAILING form (`` `:Source.summary` is never what the vector reads ``,
+    which `_SUMMARY_NEGATION_REWORDINGS` requires the pin to ACCEPT) yields no
+    leading span, so this helper returns `None` and the control SKIPS the
+    substitution instead of reporting drift the document does not have — the
+    false red it was built to remove, one shape over (measured at `02839e7fc`,
+    review cycle 21). The trailing form is still exercised on a CONSTRUCTED
+    sentence (`_SUMMARY_NEGATION_REWORDINGS` / `_SUMMARY_NEGATION_INVERSIONS`);
+    what is lost here is substituting it into the REAL sentence, which its
+    different clause SHAPE makes unavailable, not untrue.
+
+    Refuses an AMBIGUOUS span, for the reason `_footnote_negation_clause` gives:
+    with two candidates the control mutates neither reliably and blames the
+    guard.
+    """
+    matches = _SUMMARY_CLAUSE_RE.findall(deciding)
+    if not matches and _negates_the_summary(deciding):
+        return None
+    assert len(matches) == 1, (
+        f"§9.4's deciding sentence carries {len(matches)} `<cue> … "
+        f"`{_SUMMARY_OBJECT}`` clause(s), so this control cannot tell which one "
+        f"states the negation — that ambiguity IS the drift it exists to catch: "
+        f"{matches!r}")
+    return matches[0]
+
+
 def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
     """The control the helper lists cannot give: the REAL §9.4 sentence re-worded.
 
@@ -3289,12 +3353,30 @@ def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
     `home`, which is the misfire cycle 16 measured).
     """
     deciding = _source_vector_section_94_line(_storage_doc_text())
-    head_clause = "never from `:Source.summary`"
-    assert head_clause in deciding, (
-        f"the head document's deciding sentence no longer carries "
-        f"{head_clause!r} — this control mutates THAT clause, so a re-wording of "
-        f"the document must update this anchor or the control silently skips")
+    head_clause = _summary_negation_clause(deciding)
+    #: ⛔ NO `assert head_clause in deciding` HERE. It was here, and it could
+    #: never fire: the span is DERIVED from `deciding`, so it is a substring by
+    #: construction. An assert that cannot fail is worse than none — the same
+    #: argument that deleted the §9.4 section-wide negation above (review cycle
+    #: 21 measured it: `hc in d` is `True` for every possible anchor).
+    if head_clause is None:
+        #: The document states the negation in a shape this control cannot
+        #: substitute into (see `_summary_negation_clause`'s DECLARED LIMIT).
+        #: Skipping is the honest outcome; reporting drift would be a false red.
+        assert _negates_the_summary(deciding), (
+            "§9.4's deciding sentence states no negation of "
+            f"`{_SUMMARY_OBJECT}` at all — neither a leading clause this "
+            "control can re-word nor a trailing one it can accept")
+        return
+    #: Everything BEFORE the derived clause, so a re-wording that opens with the
+    #: conjunction the sentence already carries can drop its own (`and and not
+    #: from` is not the document's claim, it is this control's arithmetic).
+    _before = deciding[: deciding.index(head_clause)]
     for _case_id, why, replacement in _SUMMARY_NEGATION_REWORDINGS:
+        _lead = re.match(r"(?:\band\b|\bbut\b|\bwhich\b)\s+", replacement,
+                         re.IGNORECASE)
+        if _lead and re.search(r"(?:\band\b|\bbut\b)\s*$", _before, re.IGNORECASE):
+            replacement = replacement[_lead.end():]
         if replacement == head_clause:
             continue
         mutated = deciding.replace(head_clause, replacement)
@@ -3328,7 +3410,9 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     post-`#10978`) onward NEITHER retired string is present, and neither is
     present at `78161a50a` — the merge-base at `83c4129a9`, and no longer the
     base: successive main-merges moved it — `6b1d697193` → `acfebd81f5`, then
-    `5d806d69a` → `af36e9240` (the merge-base at THIS head) — and neither string
+    `5d806d69a` → `af36e9240` (the merge-base at `5d806d69a`; ⚠️ **not** at THIS
+    head, whose merge-base is `bc5a26436` — the last main-merge into
+    `b328e65db` moved it again) — and neither string
     is present at any of them (measured 0 and 0 on every tree named) — nor at
     any commit of THIS branch: both of this branch's earlier bases already carried
     `#10978`'s correction (`b748df7d0` before the rebase, `e2584e2cb` after it).
@@ -3433,7 +3517,13 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     #: disagreeing about `summary`'s type with the pin green — and left the message
     #: above quoting a section §9.4 does not carry. Deriving one value and then
     #: checking it in only ONE of the two sections is how the other goes stale.
-    assert f"a {summary_section} `:Source` property" in deciding, (
+    #: ⛔ THE CLAIM CARRIES ITS OWN POLAR WORD. A bare `a {summary_section}
+    #: `:Source` property` is presence-only, so inserting `not` (`summary` is
+    #: **not** a {summary_section} `:Source` property`) left it GREEN while §9.4
+    #: said the INVERSE of `docs/ONTOLOGY.md` — the cross-section conflict this
+    #: pin exists to catch (measured at `b328e65db`, review cycle 20). Including
+    #: the subject and the copula makes the inverted form fail the substring.
+    assert f"`summary` is a {summary_section} `:Source` property" in deciding, (
         f"§9.4's DECIDING sentence no longer files `summary` as {summary_section} "
         f"metadata — `docs/ONTOLOGY.md` puts `summary`'s row under "
         f"`{summary_section}`, and §12.1b's footnote is asserted against the same "
@@ -3449,6 +3539,15 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # message. Deleted rather than reordered (cycle 4 put both options): the
     # earlier assert already gives the actionable diagnosis, and an assert that
     # can never fire is worse than no assert at all.
+    # ⚠️ DECLARED RESIDUAL (review cycle 20, `b328e65db`): these two absences are
+    # SPELLING-bound. They catch the two retired phrasings wherever they appear
+    # in the document — the claim they encode — but a NEW sentence stating the
+    # same wrong instruction in words the pin does not carry reds nothing
+    # (measured: a `### 11.9 Source vectors` section ordering `embed
+    # `:Source.summary` directly` kept both this test and the controls GREEN).
+    # Closing that needs a semantic reader over the whole document, not another
+    # substring; it is stated here rather than left as an inference from the
+    # header's "wherever it appears" claim.
     assert _RETIRED_SUMMARY_BLUR not in text, (
         f"the document is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates "
         f"the summary ON THE NODE with the narrative IN THE RECORD, and a design "
@@ -3463,12 +3562,42 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         "the OLD derivation as the current one, so a reader holding this line "
         "concludes the record→cache door still drops `_searchText` — the "
         "behaviour `#10852` removed")
-    assert "TOPIC LEXICON" in s94, (
+    #: Same fix as the §4.6 reference above: assert the CLAIM, not a token it
+    #: happens to contain. `TOPIC LEXICON` alone survives *"its VALUE is the
+    #: turn's text (not … TOPIC LEXICON)"*, and deleting one word from *"never a
+    #: copy of the turn's prose"* inverted the claim this axis was corrected to
+    #: make — both measured GREEN at `b328e65db` (review cycle 20). The polar word
+    #: and the whole predicate are part of the assertion now.
+    #: ⛔ THE CLAIM CARRIES ITS SUBJECT, ITS COPERATIVE FRAME AND ITS POLAR WORD,
+    #: AND THE FUTURE TENSE IS BOUND TO THE LEXICON. A bare `a display descriptor
+    #: over the session's TOPIC LEXICON` survived the mutation that RESTORES BOTH
+    #: retired defects at once — *"its VALUE is the transcript's first
+    #: substantive utterance, which `#10852` will replace with a display
+    #: descriptor over the session's TOPIC LEXICON … never a copy of the turn's
+    #: prose"* kept every asserted substring and left the pin GREEN (measured at
+    #: `02839e7fc`, review cycle 21). So the present-tense PREDICATE is asserted
+    #: whole, and a future modal reaching this lexicon — which is what
+    #: `_RETIRED_FUTURE_DERIVATION` can only catch in ONE spelling — is refused
+    #: by SHAPE.
+    assert "its VALUE is a display descriptor over the session's TOPIC LEXICON" in s94, (
         "§9.4 no longer states what a captured session's `:Source.summary` "
         "VALUE now is — a display descriptor over the session's TOPIC LEXICON. "
         "Without it the paragraph leaves the pre-#10000 derivation (the "
         "transcript's first substantive utterance) as the only one named, "
         "which is the prose §9.1/D1 forbids")
+    assert not _WILL_BEFORE_LEXICON.search(s94), (
+        f"§9.4 announces the topic lexicon as a FUTURE change: "
+        f"{_WILL_BEFORE_LEXICON.search(s94).group(0)!r} — the lexicon has "
+        f"LANDED (`#10852`, `ba87797c4`), so a future modal reaching it tells a "
+        f"designer the current derivation is something else. `_RETIRED_FUTURE_"
+        f"DERIVATION` pins one SPELLING of this; this pins the SHAPE, which is "
+        f"what a re-wording survives")
+    assert "never a copy of the turn's prose" in s94, (
+        "§9.4 no longer states that the summary's value is NEVER a copy of the "
+        "turn's prose — dropping the `never` turns the claim into its own "
+        "inverse (`a copy of the turn's prose`), which is the prose the "
+        "record→cache door declines for exactly that reason (`#10852`, landed "
+        "as `ba87797c4a`)")
 
     # ── §12.1b: the section that decides WHERE vectors live may not order the
     #    design §9.4 forbids ──
@@ -3573,7 +3702,13 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # earlier; see the note there.)
     #: §9.4 ③'s identity rule is the OTHER half of this footnote and is still
     #: implemented; a rewrite that drops it would silently un-decide identity.
-    assert "identity is URL + content hash" in footnote, (
+    #: ⛔ The quoted RULE plus its predicate, not the bare phrase: `identity is
+    #: URL + content hash` survives `… or a random id` appended inside the same
+    #: sentence, which un-decides identity with the pin GREEN (measured at
+    #: `b328e65db`). Asserting the document's own sentence — including the
+    #: `already implemented` verdict it hands down — is what makes a re-opening
+    #: of `#3998` red here.
+    assert '"identity is URL + content hash"* is **already implemented**.' in footnote, (
         "§12.1b's `:Source` footnote no longer states §9.4 ③'s identity rule — "
         "the footnote's two halves are *what the vector reads* and *how identity "
         "is decided*; dropping the second re-opens `#3998`")
@@ -3583,7 +3718,11 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     #: ontology that defines it, so a renumber reds here instead of leaving a
     #: footnote that points a reader at a different type. The message above
     #: interpolates the same derived value, for the same reason.
-    assert f"{summary_section} metadata" in footnote, (
+    #: ⛔ The copula is part of the claim, for the reason the §4.6 reference above
+    #: records: `{summary_section} metadata` is present in *"is **not**
+    #: {summary_section} metadata"* too, so the negated form certified itself
+    #: (measured at `b328e65db`).
+    assert f"a session's `summary` is {summary_section} metadata" in footnote, (
         f"§12.1b's `:Source` footnote no longer files `summary` as "
         f"{summary_section} metadata — `docs/ONTOLOGY.md` puts `summary`'s row "
         f"under `{summary_section}`, so a footnote citing any other section "
