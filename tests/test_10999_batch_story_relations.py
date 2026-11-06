@@ -910,3 +910,232 @@ def test_a_single_relation_object_where_a_list_was_asked_for_counts_as_one():
     assert result["relations"] == []
     assert result["stats"]["relations_dropped"] == 1
     assert any("connections_incomplete" in w for w in result["warnings"])
+
+
+# ── 11. round-6 review of the merged head (delta c5da11b4c) ───────────────
+#
+# Every defect below was REPRODUCED at the head before its fix. Each test is
+# the reproduction, not a restatement of the fix.
+
+
+def test_entities_differing_only_in_case_are_distinct_relations():
+    """Round-6 P2 (silent loss + a false report): the collapse key folded the
+    resolved ENDPOINT names.
+
+    Endpoints are already canonical emitted spellings by the time the key is
+    built, so the `.casefold()` added nothing for a true duplicate — it merged
+    two DISTINCT Layer-1 entities whose names differ only in case (they survive
+    `execute_embed`'s `(name, kind)` dedupe as two Objects) and reported
+    `relations_dropped == 0`, so the caller was told nothing was lost.
+    """
+    emission = {
+        "entities": [
+            {"name": "Billing", "kind": "core:rule"},
+            {"name": "billing", "kind": "core:plan"},
+            {"name": "Ledger", "kind": "core:rule"},
+        ],
+        "points": [], "events": [], "operators": [],
+        "relations": [
+            {"src": "Billing", "dst": "Ledger", "predicate": "IMPL"},
+            {"src": "billing", "dst": "Ledger", "predicate": "IMPL"},
+        ],
+    }
+    result = _run(emission)
+    assert [e["name"] for e in result["payload"]["entities"]] == [
+        "Billing", "billing", "Ledger"]
+    assert [(r["src"], r["dst"]) for r in result["relations"]] == [
+        ("Billing", "Ledger"), ("billing", "Ledger")]
+    assert result["stats"]["relations_dropped"] == 0
+
+
+def test_a_self_relation_reached_only_after_resolution_is_dropped():
+    """Round-6 P3: the self-relation guard ran on the RAW spellings, before
+    resolution.
+
+    Two spellings can each resolve to the SAME emitted entity through a
+    DIFFERENT fold while sharing neither fold with each other (`_norm` collapses
+    the whitespace run; `.casefold()` folds ß→ss), so the raw guard saw two
+    names and the relation reached the record as `(X)-[IMPL]->(X)`.
+    """
+    emission = {
+        "entities": [
+            {"name": "Straße B", "kind": "core:rule"},
+            {"name": "Other", "kind": "core:rule"},
+        ],
+        "points": [], "events": [], "operators": [],
+        "relations": [{"src": "straße  b", "dst": "STRASSE B",
+                       "predicate": "IMPL"}],
+    }
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    assert any("self-relation" in w for w in result["warnings"])
+
+
+def test_an_ambiguous_same_name_pair_is_named_not_silently_carried():
+    """Round-6 P2: the EXACT arm returned on the first name hit with no
+    uniqueness test, while the fold arm refuses to guess.
+
+    `execute_embed` keeps same-name/different-kind entities as distinct Objects
+    (its dedupe key is `(name, kind)`), so an endpoint spelled exactly like a
+    two-Object name denotes BOTH and the record carried no warning. The channel
+    stays fail-open (the relation is kept — dropping is the destructive
+    direction), but the ambiguity is NAMED so the write leg cannot attribute
+    the edge silently.
+    """
+    emission = {
+        "entities": [
+            {"name": "Billing", "kind": "core:rule"},
+            {"name": "Billing", "kind": "core:plan"},
+            {"name": "Ledger", "kind": "core:rule"},
+        ],
+        "points": [], "events": [], "operators": [],
+        "relations": [{"src": "Billing", "dst": "Ledger",
+                       "predicate": "IMPL"}],
+    }
+    result = _run(emission)
+    assert len([e for e in result["payload"]["entities"]
+                if e["name"] == "Billing"]) == 2
+    assert len(result["relations"]) == 1
+    assert any("ambiguous" in w and "Billing" in w
+               for w in result["warnings"]), result["warnings"]
+
+
+def test_the_rule4_restore_matches_a_casefold_only_endpoint_spelling():
+    """Round-6 P2: the Rule-4 RESTORE (the arm this PR added) matched only the
+    `_norm` key, so a casefold-only endpoint spelling restored nothing.
+
+    The DISCARD arm was widened to both folds; the restore arm — whose whole
+    purpose is the cross-pass case the channel introduces — was not, so the
+    entity stayed gone and S5 then dropped the edge as unresolvable.
+    """
+    emission = {
+        "entities": [{"name": "Other", "kind": "core:rule"}],
+        "points": [], "events": [], "operators": [],
+        "relations": [{"src": "Other", "dst": "STRASSE",
+                       "predicate": "IMPL"}],
+    }
+    prior = {"removed_entities": {
+        "straße": {"name": "Straße", "kind": "core:rule"}}}
+    out, warns = vg.apply_vet(emission, {}, prior=prior)
+    assert [e["name"] for e in out["entities"]] == ["Other", "Straße"]
+    assert any("restored" in w for w in warns), warns
+    assert [(r["src"], r["dst"]) for r in _run(out)["relations"]] == [
+        ("Other", "Straße")]
+
+
+def test_the_recovery_ladder_keeps_sections_after_a_mistyped_relations():
+    """Round-6 P2 (regression): adding `relations` to `_OUTPUT_SCHEMA` made a
+    mistyped section truncate the recovered emission.
+
+    The ladder accepts the LONGEST prefix that validates, so a `relations`
+    value shaped as one OBJECT (the exact mistype S5 drops and COUNTS, by
+    design) failed the gate and the accepted prefix ended before it — taking
+    every section the model emitted after it with it, where the same response
+    returned them before this PR. S5 owns this section's shape failure, so the
+    gate must not fail the candidate over it.
+    """
+    text = ('{"entities": [{"name": "A", "kind": "core:rule"}], '
+            '"relations": {"src": "A", "dst": "B", "predicate": "IMPL"}, '
+            '"points": [{"content": "the point that matters"}]')
+    parsed = v2._longest_valid_prefix(text)
+    assert parsed is not None
+    assert parsed.get("points") == [{"content": "the point that matters"}], parsed
+    # the tolerance is EXACTLY the non-list mistype S5 counts; an item-level
+    # shape error is still refused (pinned by the §1 shape-gate tests)
+    ok, issues = v2._validate_output_shape(
+        {"relations": {"src": "A"}, "points": [{"content": "p"}]})
+    assert ok, issues
+
+
+def test_a_non_string_predicate_is_named_as_a_SHAPE_error():
+    """Round-6 P3: a non-string predicate was coerced with `str()` and then
+    reported as an INVENTED VERB, sending the model to fix a vocabulary mistake
+    it did not make (`_SCHEMA_PRIMITIVES`' own comment claimed the gate
+    prevented this, and on rung 1 it does not)."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": 42}]
+    result = _run(emission)
+    assert result["relations"] == []
+    assert result["stats"]["relations_dropped"] == 1
+    rel_warns = [w for w in result["warnings"] if "relations[0]" in w]
+    assert rel_warns and "not a string" in rel_warns[0], rel_warns
+
+
+def test_a_non_dict_relation_entry_is_clipped_in_the_warning():
+    """Round-6 P3: the non-dict arm `repr`'d the whole entry into the warning —
+    unbounded model text in a structure every consumer carries, where every
+    sibling arm in the same loop clips."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = ["x" * 5000]
+    result = _run(emission)
+    assert result["stats"]["relations_dropped"] == 1
+    warns = [w for w in result["warnings"]
+             if "non-dict relation entry" in w]
+    assert warns and len(warns[0]) < 200, warns
+
+
+def test_a_non_string_semantics_is_named_not_silently_ignored():
+    """Round-6 P3: the one optional field of the new section failed silently on
+    a wrong type, while its out-of-vocabulary STRING case is named."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "IMPL", "semantics": 7}]
+    result = _run(emission)
+    assert len(result["relations"]) == 1
+    assert result["relations"][0].get("semantics") is None
+    assert any("semantics" in w for w in result["warnings"]), result["warnings"]
+
+
+def test_the_prose_pair_is_carried_verbatim_and_no_relation_token_reaches_it():
+    """#10000 (P0) — the pin, non-vacuously.
+
+    The earlier pin was `assert "story_arc" not in payload or not
+    payload["story_arc"]`, whose left disjunct is always False (the payload
+    ALWAYS carries `story_arc`) and whose right one was True only because the
+    fixture never passed one — so it would have stayed green if the channel
+    ever started writing the prose pair. This drives a real `summary` and
+    `story_arc` through S5 with a NON-EMPTY channel and asserts the prose
+    arrives verbatim, the channel stays out of the payload, and no relation
+    token reaches either prose field.
+    """
+    result = v2.execute_embed(copy.deepcopy(EMISSION), {}, session_id="s-10999",
+                              summary="the batch narrative", story_arc="the arc")
+    assert result["relations"], "the channel is non-empty — this pin is not vacuous"
+    assert result["payload"]["summary"] == "the batch narrative"
+    assert result["payload"]["story_arc"] == "the arc"
+    assert "relations" not in result["payload"]
+    carried = f"{result['payload']['summary']} {result['payload']['story_arc']}"
+    assert "IMPL" not in carried
+    assert "Retry Storm" not in carried
+
+
+def test_the_vet_guard_and_the_resolver_agree_on_the_endpoint_fold():
+    """Round-6 P2 (the "one home" claim's boundary): `vet_gate` cannot import
+    `extractor_v2` (cycle), so its DISCARD/Rule-4 arm derives the endpoint fold
+    itself. Nothing pinned the two derivations to agree, so a future fold change
+    in `extractor_v2._endpoint_fold_keys` would silently re-open the discard gap
+    this PR closed.
+
+    This is a DRIFT PIN, not a reproduction: it passes at the head, and it is
+    the red that fires if either side changes alone.
+    """
+    corpus = [
+        ("Straße", "STRASSE"), ("Straße", "straße"),
+        ("Retry  Storm", "retry storm"), ("Retry Storm", "RETRY  STORM"),
+        ("İstanbul", "istanbul"), ("İstanbul", "i̇stanbul"),
+        ("ﬁle", "FILE"), ("Σίσυφος", "σίσυφοσ"),
+    ]
+    for emitted, ref in corpus:
+        embedding = {
+            "entities": [{"name": emitted, "kind": "core:rule"}],
+            "points": [], "events": [], "operators": [],
+            "relations": [{"src": ref, "dst": "Peer", "predicate": "IMPL"}],
+        }
+        protected = vg._referenced_entity_names(embedding, set())
+        exact = {emitted}
+        resolved = v2._resolve_relation_endpoint(
+            ref, exact, v2._endpoint_fold_index(exact))
+        assert (vg._norm(emitted) in protected) == (resolved is not None), (
+            emitted, ref, protected, resolved)

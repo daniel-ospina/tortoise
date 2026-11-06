@@ -1140,8 +1140,23 @@ def apply_vet(embed_list: Mapping[str, Any],
     layer1_referenced = _referenced_entity_names(
         out, set(), relation_endpoints=False)
     to_restore = _referenced_entity_names(out, set()) - present
-    for name in sorted(to_restore):
+    # The DISCARD arm above matches an endpoint on EITHER fold; the RESTORE
+    # lookup must be fold-complete too, or the cross-pass case this arm exists
+    # for fails one spelling variant in: `prior_entities` is keyed by `_norm`
+    # (see `_entity_map`), so a casefold-only endpoint spelling ('STRASSE' vs
+    # 'Straße', 'İ' vs 'i') restored nothing and S5 then dropped the edge as
+    # unresolvable. Unique-or-nothing, and never a SECOND copy of an entity
+    # this pass already holds under a different casefold.
+    present_folded = {key.casefold() for key in present}
+    for ref_name in sorted(to_restore):
+        name = ref_name
         original = prior_entities.get(name)
+        if original is None:
+            folded = [key for key in prior_entities
+                      if key.casefold() == name.casefold()]
+            if len(folded) == 1 and folded[0].casefold() not in present_folded:
+                name = folded[0]
+                original = prior_entities[name]
         if original is not None and str(original.get("name") or ""):
             # STRIP, as above: the emitted name is stripped (see the downgrade
             # branch for why).
@@ -1149,7 +1164,7 @@ def apply_vet(embed_list: Mapping[str, Any],
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
                 out["entities"].append(original)
-            if name in layer1_referenced:
+            if ref_name in layer1_referenced or name in layer1_referenced:
                 warnings.append(
                     f"vet: entity {name!r} was discarded by an earlier pass "
                     "but is referenced after S4 — restored (Layer-1 "
@@ -1160,7 +1175,7 @@ def apply_vet(embed_list: Mapping[str, Any],
                     "but an entity↔entity relation now names it — restored "
                     "(the relation is the story's own assertion; this is NOT "
                     "a Layer-1 reference)")
-        elif name in layer1_referenced:
+        elif ref_name in layer1_referenced:
             warnings.append(
                 "vet: ⚠️ a surviving candidate references entity "
                 f"{name!r}, which no pass emitted — it cannot be restored "

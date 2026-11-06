@@ -5403,8 +5403,9 @@ def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
     emitted = {str(e.get("name")).strip() for e in out.get("entities") or []
                if isinstance(e, dict) and e.get("name")}
     # Keyed by BOTH folds — `_endpoint_fold_keys`, the same enumeration S5's
-    # resolver probes, through the same `_endpoint_fold_index`/`_fold_hits`
-    # pair — so the rename stage and the resolver cannot disagree about which
+    # resolver probes, through the same `_endpoint_fold_index`/
+    # `_endpoint_fold_hits` pair — so the rename stage and the resolver cannot
+    # disagree about which
     # spellings are the same entity (`_norm` collapses a whitespace RUN,
     # `.casefold()` folds ß/İ; neither is a superset of the other). The rule
     # lives in ONE place; this stage expresses only its own POLICY over it
@@ -8762,13 +8763,16 @@ def _endpoint_fold_index(names: set[str]) -> dict[str, list[str]]:
 
 
 def _endpoint_fold_hits(ref: str, folded: dict[str, list[str]]) -> list[str]:
-    """Every indexed name sharing EITHER fold with ``ref``, deduped, in order.
+    """Every indexed name sharing EITHER fold with ``ref``, deduped.
 
     A ``list`` (not a set) for ONE consumed property: the LENGTH. Both callers
     decide on it — one hit is an unambiguous resolution, two or more is an
     ambiguity neither stage may guess through — and no caller reads the ORDER
-    (each takes ``hits[0]`` only when ``len(hits) == 1``). The list also keeps
-    a spelling indexed on both folds from being counted twice.
+    (each takes ``hits[0]`` only when ``len(hits) == 1``). The ORDER is not a
+    policy either: the buckets are built by iterating a ``set`` in
+    `_endpoint_fold_index`, so it is stable within a run and NOT across runs
+    (``PYTHONHASHSEED``). The list also keeps a spelling indexed on both folds
+    from being counted twice.
     """
     hits: list[str] = []
     for key in _endpoint_fold_keys(ref):
@@ -8865,16 +8869,43 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     folded_semantics: dict[str, str] = {}
     for _meaning in sorted(str(s) for s in (SEMANTICS_VALUES or ())):
         folded_semantics.setdefault(_meaning.casefold(), _meaning)
+    # Names this emission produced MORE THAN ONCE (same `name`, different
+    # `kind` — `execute_embed` keeps those as distinct Layer-1 Objects). An
+    # endpoint spelled exactly like such a name denotes BOTH, and the fold arm's
+    # own rule is that ambiguity is never guessed through; the channel stays
+    # fail-open (keeping is safe, dropping is destructive), so the ambiguity is
+    # NAMED here rather than silently carried.
+    name_counts: dict[str, int] = {}
+    for _e in payload_entities:
+        if isinstance(_e, dict):
+            _n = str(_e.get("name") or "").strip()
+            if _n:
+                name_counts[_n] = name_counts.get(_n, 0) + 1
+
     kept: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     dropped = 0
     for i, item in enumerate(raw):
         if not isinstance(item, dict):
-            warnings.append(f"non-dict relation entry {item!r} skipped")
+            warnings.append(
+                f"non-dict relation entry {_clip(item, 60)!r} skipped")
             dropped += 1
             continue
         src = str(item.get("src") or "").strip()
         dst = str(item.get("dst") or "").strip()
+        # A non-string predicate is a SHAPE error and must not be reported as
+        # an invented VERB (`str(42)` -> "42" -> "not a declared relation
+        # verb"), which sends the model to fix a vocabulary mistake it did not
+        # make. `_SCHEMA_PRIMITIVES` types it, but rung 1 of the parse ladder
+        # returns parsed JSON without running that gate.
+        if item.get("predicate") is not None and \
+                not isinstance(item.get("predicate"), str):
+            warnings.append(
+                f"relations[{i}] predicate is "
+                f"{type(item.get('predicate')).__name__}, not a string — "
+                "dropped (a SHAPE error, not a vocabulary one)")
+            dropped += 1
+            continue
         predicate = str(item.get("predicate") or "").strip()
         if not (src and dst and predicate):
             warnings.append(
@@ -8903,6 +8934,17 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                 "(#10999: an endpoint is never invented)")
             dropped += 1
             continue
+        # The self-relation guard above runs on the RAW spellings; two of them
+        # can each resolve to the SAME emitted entity through a DIFFERENT fold
+        # while sharing neither fold with each other (`_norm` collapses the
+        # whitespace run, `.casefold()` folds ß→ss). The RESOLVED names are the
+        # identity the edge would actually carry, so re-test on them.
+        if r_src == r_dst:
+            warnings.append(
+                f"relations[{i}] is a self-relation "
+                f"('{_clip(r_src, 40)}') — dropped")
+            dropped += 1
+            continue
         if declared is not None:
             canonical_verb = folded_declared.get(predicate.casefold())
             if canonical_verb is None:
@@ -8920,12 +8962,35 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                 f"relations[{i}] predicate '{_clip(predicate, 40)}' could not "
                 "be checked against the declared vocabulary (registry "
                 "unreadable) — kept, unverified")
-        key = (r_src.casefold(), r_dst.casefold(), predicate.casefold())
+        # The endpoints are already CANONICAL emitted spellings (resolution
+        # returns the emitted name), so folding them adds nothing for a true
+        # duplicate and silently merges two DISTINCT entities whose names
+        # differ only in case — a collapse reported as `dropped == 0`.
+        key = (r_src, r_dst, predicate.casefold())
         if key in seen:
             continue
         seen.add(key)
+        # Named only for a relation that is actually KEPT (after the predicate
+        # gate and the duplicate collapse), so "carried" is not claimed for an
+        # item this loop drops, nor emitted twice for a collapsed duplicate.
+        for _side, _resolved in (("src", r_src), ("dst", r_dst)):
+            if name_counts.get(_resolved, 0) > 1:
+                warnings.append(
+                    f"relations[{i}] {_side} '{_clip(_resolved, 40)}' names "
+                    f"{name_counts[_resolved]} entities this emission produced "
+                    "(same name, different kinds) — carried, but the edge's "
+                    "endpoint is ambiguous until the write leg carries kind"
+                )
         rel = {"src": r_src, "dst": r_dst, "predicate": predicate}
         semantics = item.get("semantics")
+        if semantics is not None and not isinstance(semantics, str):
+            # The optional field's wrong TYPE failed silently, while its
+            # out-of-vocabulary STRING case is named — same accounting rule.
+            warnings.append(
+                f"relations[{i}] semantics is "
+                f"{type(semantics).__name__}, not a string — ignored, the "
+                "relation is kept")
+            semantics = None
         if isinstance(semantics, str) and semantics.strip():
             semantics = semantics.strip()
             # #10999 review: `semantics` is a CLOSED vocabulary (ONTOLOGY §8)
@@ -12594,7 +12659,9 @@ def _validate_output_shape(parsed) -> tuple[bool, list[str]]:
     must carry its required keys with primitive values; unknown keys and
     empty arrays are VALID (fields ride through by reference — S5's
     execution validation owns semantic repair). ``retractions`` items need
-    ``content`` OR ``id`` (the contract's ``content|id``)."""
+    ``content`` OR ``id`` (the contract's ``content|id``). The ONE shape
+    exception is a non-list ``relations``: S5 drops and counts it (fail-open),
+    so this gate must not fail the candidate and truncate the emission."""
     issues: list[str] = []
     if not isinstance(parsed, dict):
         return False, [f"top-level output is {type(parsed).__name__}, not an object"]
@@ -12603,6 +12670,15 @@ def _validate_output_shape(parsed) -> tuple[bool, list[str]]:
             continue
         items = parsed[section]
         if not isinstance(items, list):
+            if section == "relations":
+                # S5 OWNS this section's shape failure: `_assemble_relations`
+                # drops the whole section and COUNTS it into
+                # `connections_incomplete` (fail-open, #10999). Failing the
+                # candidate here would make the recovery ladder accept a
+                # SHORTER prefix instead, silently losing every section the
+                # model emitted after `relations` — a mistype S5 already handles
+                # correctly must not truncate the emission.
+                continue
             issues.append(f"section {section!r} is {type(items).__name__}, not a list")
             continue
         for idx, item in enumerate(items):
