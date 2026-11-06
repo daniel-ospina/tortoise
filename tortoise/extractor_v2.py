@@ -85,8 +85,8 @@ S4's removal relies on (*"did we account for everything the narrative said?"*),
 and S2.3 CLASSIFY is the fold's other half as this record counts it. Both
 stages are present in the tree (``_vet_gate.apply_vet``,
 ``kind_classifier.classify_items``) and both are wired into
-``extract_session_v2`` behind flags that DEFAULT OFF (``TORTOISE_VET``,
-``TORTOISE_CLASSIFY_LATER``), so on the default arm neither has run at all.
+``extract_session_v2`` behind flags: ``TORTOISE_CLASSIFY_LATER`` DEFAULTS OFF, and
+``TORTOISE_VET`` too — but since #10996 S2.2's mechanical half defaults ON.
 Presence is not sufficiency either: the fold's REMEDY half is unimplemented in
 both.
 
@@ -7466,9 +7466,9 @@ def classify_consolidation(point: dict, priors: list[dict], *,
                            merge_flagged: bool = False) -> DecisionRecord:
     """D1: the consolidation classifier (no LLM, no graph I/O).
 
-    Maps (candidate point + S3-retrieved priors + entity/attribute context)
-    to one of ADD / UPDATE / NOOP / DELETE in priority order, plus the MERGE
-    (D12/O4) the `merge_flagged` operand admits:
+    Maps (candidate point + S3-retrieved priors + entity/attribute context) to
+    one of ADD / UPDATE / NOOP / MERGE in priority order (⛔ never DELETE: D5,
+    only retractions) plus the MERGE (D12/O4) `merge_flagged` admits:
 
       1. NOOP (identical)   — normalized content equals a prior (the
                               existing exact/content-hash dedup).  A fold is

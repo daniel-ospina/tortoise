@@ -1749,35 +1749,57 @@ def _argmax_row(doc: str, arm: str) -> str:
 def test_the_two_flags_are_unset_on_every_deploy_surface():
     """The FACT the wording rests on, measured from the tree instead of asserted.
 
-    If a deploy surface ever starts setting these, the deployed arm BECOMES the
-    flags-ON arm: this test fails and points at the two documents that must then
-    change (and at the log, which becomes a production measurement worth re-taking).
+    If a deploy surface ever starts setting these, the deployed configuration
+    stops being the default one: this test fails and points at the documents
+    that must then change (and at the log, which becomes a measurement of an
+    explicitly-pinned arm rather than of the default).
+
+    `#10996`: the DEFAULT is now the gate-armed half (``TORTOISE_VALUE_GATE``
+    defaults ON), so "unset everywhere" means production runs the mechanical
+    predicate with the seam and classify-later off — not that nothing runs.
     """
     for rel in ("fly.toml", ".github/scripts/fly-managed-secrets.txt"):
         text = (_REPO_ROOT / rel).read_text(encoding="utf-8")
         for flag in ("TORTOISE_VET", "TORTOISE_VALUE_GATE",
                      "TORTOISE_S2_DECISION_SEAM"):
             assert flag not in text, (
-                f"{rel} now sets {flag}: the deployed configuration is the flags-ON "
-                "arm, so the probe's arm table and E1-E2.md's note must stop saying "
-                "production leaves all of them OFF")
+                f"{rel} now sets {flag}: the deployed configuration is no longer "
+                "the default arm, so the probe's arm table and E1-E2.md's note "
+                "must say which arm production actually runs")
 
 
 def test_the_flags_are_off_when_unset(monkeypatch):
-    """Unset ⇒ off-path, which is why ``before`` is the deploy — measured, not asserted.
+    """The arm's switches, measured off the resolvers instead of asserted.
 
     All THREE S2.2 switches are deleted, not the two the arm table names: #5087
     added ``TORTOISE_S2_DECISION_SEAM`` as a second contributor to
     ``_vet_enabled``, so a leftover ambient value would arm the seam inside the
     arm this test calls OFF (and an armed seam is a network call and a spend).
+
+    ⛔ Rewritten for `#10996`: **unset no longer means off for the value gate.**
+    The S2.2 mechanical half defaults ON (``EXTRACTOR-V4-ARCHITECTURE.md``
+    §S2.2), so the probe's OFF arm is the explicit ``TORTOISE_VALUE_GATE=0``
+    kill-switch and this test reads that value. The inverted default is the
+    point, not an accident: a probe that merely POPPED the variable would
+    produce an ON arm on both sides of the comparison.
     """
     from tortoise import extractor_v2
 
     monkeypatch.delenv("TORTOISE_VET", raising=False)
-    monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
     monkeypatch.delenv("TORTOISE_S2_DECISION_SEAM", raising=False)
+
+    # unset ⇒ the pass is armed by the mechanical half alone (#10996)
+    monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
     assert extractor_v2._vet_enabled() is False
+    assert extractor_v2._value_gate_enabled() is True, (
+        "the S2.2 mechanical half must default ON — a probe that relied on "
+        "'unset is off' would now measure an ON arm twice")
+
+    # explicit 0 ⇒ the OFF arm the probe actually runs
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
     assert extractor_v2._value_gate_enabled() is False
+
+    # and the forced-ON arm still means forced on
     monkeypatch.setenv("TORTOISE_VET", "1")
     monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
     assert extractor_v2._vet_enabled() is True, (
@@ -1786,22 +1808,81 @@ def test_the_flags_are_off_when_unset(monkeypatch):
     assert extractor_v2._value_gate_enabled() is True
 
 
-def test_the_scored_arm_does_not_claim_to_be_what_production_runs():
-    """The pre-fix sentence, verbatim, must not come back."""
+def test_the_probe_arms_every_switch_explicitly(monkeypatch):
+    """`#10996` V5 — Step 0, the prerequisite that keeps E1's OFF arm OFF.
+
+    ``run_arm`` used to produce its ``vet=False`` arm by POPPING the switches,
+    which is an OFF arm only while the flag is default-OFF. With the mechanical
+    half defaulting ON, a pop-only arm silently becomes the ON arm and the
+    before/after comparison collapses — the highest-consequence regression in
+    this change (``test_the_committed_log_is_what_the_probe_prints`` would red,
+    and re-taking the log would leave both E1 arms in one configuration).
+
+    Both halves are pinned: the SOURCE writes the value explicitly in both
+    directions, and the BEHAVIOUR — driven through the real pipeline — reports
+    the gate off on the off arm and on on the on arm.
+    """
+    from tortoise import extractor_v2
+
+    monkeypatch.delenv("TORTOISE_VALUE_GATE", raising=False)
+    src = Path(probe.__file__).read_text(encoding="utf-8")
+    assert 'os.environ["TORTOISE_VALUE_GATE"] = "1" if vet else "0"' in src, (
+        "run_arm no longer sets the value gate EXPLICITLY for both arms: with "
+        "the default ON, a popped switch makes the OFF arm an ON arm")
+
+    corpus = probe.load_corpus(probe.DEFAULT_CORPUS)
+    embed_list = probe.build_embed_list(corpus)
+    off = probe.run_arm(embed_list, vet=False)
+    assert off["vet"]["enabled"] is False, (
+        "the probe's OFF arm armed the pass — E1's baseline would measure the "
+        "gate against itself")
+    assert off["vet"]["s2"] == {}, (
+        "the OFF arm reported VET statistics, so the pass ran on it")
+
+    on = probe.run_arm(embed_list, vet=True)
+    assert on["vet"]["enabled"] is True
+    assert on["vet"]["s2"]["stats"]["mechanical"]["enabled"] is True
+
+    assert extractor_v2._value_gate_enabled() is True, (
+        "run_arm restored the wrong ambient value after the arm")
+
+
+def test_the_arm_table_names_which_arm_production_runs():
+    """One arm cannot be production in the probe and a what-if in the bundle.
+
+    `#10996` rewrote the claim this pin was written for, and the pin is rewritten
+    with it rather than deleted:
+
+    * the old text called ``before`` **the deployed config** because the value
+      gate defaulted OFF. It no longer does — the S2.2 mechanical half defaults
+      ON — so ``before`` is the explicitly-OFF arm and the scored arm IS the
+      configuration production runs by default. Leaving the old sentence
+      standing would put a false claim in the artifact E1 is read from.
+    * what survives is the reason the pin existed: the table must SAY which arm
+      is production, and the scored arm must be described by what it sets. The
+      forbidden sentence ("exactly what production wires today") stays
+      forbidden: it is how two arms came to both be the deploy.
+    """
     doc = probe.__doc__
     assert "exactly what production wires today" not in doc, (
-        "the scored arm claims to be what production runs, while the `before` arm is "
-        "also called the shipped default — the deployed config sets none of the "
-        "three S2.2 switches")
-    row = _argmax_row(doc, "after-vet-shipped")
-    assert "forced on" in row.lower(), (
-        "the scored arm must say the two flags are FORCED ON (its `TORTOISE_VET=1` "
-        f"is an override of a default-OFF flag): {row}")
-    assert "not what production" in row.lower(), (
-        f"the scored arm must say what it is NOT — production runs with all three OFF: {row}")
+        "the arm table claims an arm is what production runs while another arm "
+        "is also called the deployed configuration")
+
+    scored = _argmax_row(doc, "after-vet-shipped")
+    assert "production runs by default" in scored.lower(), (
+        "the scored arm must SAY that the gate-armed configuration is what "
+        f"production runs by default since #10996: {scored}")
+    assert "not what production" not in scored.lower(), (
+        "the scored arm still denies being production while the value gate "
+        f"defaults ON — that denial is what #10996 falsified: {scored}")
+
     before = _argmax_row(doc, "before")
-    assert "DEPLOYED config runs today" in before, (
-        f"the `before` arm must be named as the deployed configuration: {before}")
+    assert "explicitly off" in before.lower(), (
+        "the `before` arm must be named as the EXPLICITLY-OFF arm — popping a "
+        f"default-ON switch does not produce an OFF arm: {before}")
+    assert "deployed config runs today" not in before.lower(), (
+        "the `before` arm still claims to be the deployed configuration, which "
+        f"runs the gate-armed arm by default since #10996: {before}")
 
 
 def test_the_bundle_doc_carries_the_same_reconciliation():

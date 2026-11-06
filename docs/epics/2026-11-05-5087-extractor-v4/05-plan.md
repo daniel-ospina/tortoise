@@ -48,7 +48,7 @@ The epic has no end-user UI. Its four **acting users** are the agent (writer), t
 | a mention promoted to a node | SF2/SF3 | candidate `discarded` by the referentiality rule (recorded with `rule_id` + `counterfactual`) |
 | a narrative that is degraded, not empty | SF1 | run `degraded`, re-narrated **once** |
 | an unchecked item committed | SF7 | candidate `held` |
-| a candidate classified that consolidation will delete | SF4 | the candidate is not classified (§10996) |
+| a candidate classified that consolidation will delete | SF4 | **withdrawn** — no `DELETE` verdict is producible (`classify_consolidation` returns ADD/NOOP/UPDATE/MERGE, D5); whoever introduces a producer owes the prune (§10996) |
 | an unresolved lookup read as new | SF5 | candidate `held` with `lookup_state: unresolved` |
 | a partial run | SF8 | run `failed`, journal unchanged for the run |
 | a connection that could not be wired | SF6 | run `degraded`, `connections_incomplete` recorded |

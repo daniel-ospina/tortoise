@@ -261,11 +261,22 @@ mechanisms:
     symbols:
       - check_batch
     note: >-
-      Flag-gated (`TORTOISE_VET`), off by default — the gate is off-path until
-      the flag says otherwise. `TORTOISE_S2_DECISION_SEAM` (#5087) is a SECOND
-      switch that also arms this step, overriding even an explicit
-      `TORTOISE_VET=0`: the seam IS the arbiter, and an arbiter no gate consults
-      is the inert-enforcer class.
+      TWO halves, two defaults (since #10996). The MECHANICAL half runs by
+      default: `TORTOISE_VALUE_GATE` unset arms the #4899 identifier-only
+      predicate, which is what §S2.2 requires (*"unset must not mean 'the
+      predicate never runs'"*) now that its rate is measured and committed
+      (`docs/evidence/9889/e1-gate-drops.json`: 0 drops of 61 Objects, 0 of 13
+      bare-definite, positive controls firing) — the residual is the point/event
+      rate, which that artifact does not cover (`#10996` V8).
+      The ARBITER half stays OPT-IN (`TORTOISE_VET`, or the seam below), because
+      arming a decision-only model puts a paid network call on the write path
+      (`docs/architecture/S2-DECISION-SEAM.md` §6): the spend decision is not
+      this default. `TORTOISE_S2_DECISION_SEAM` (#5087) is a THIRD switch that
+      also arms this step, overriding even an explicit `TORTOISE_VET=0`: the
+      seam IS the arbiter, and an arbiter no gate consults is the
+      inert-enforcer class. `TORTOISE_CLASSIFY_LATER` (S2.3) is unchanged and
+      still defaults off. Kill-switch: `TORTOISE_VALUE_GATE=0` (blank/garbage
+      read OFF too — the safe residual for a discard predicate).
 
   - id: source_dedup
     name: "S0a NORMALIZE + HASH → S0b SOURCE DEDUP"
