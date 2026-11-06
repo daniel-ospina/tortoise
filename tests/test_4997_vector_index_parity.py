@@ -275,6 +275,11 @@ def _bare(index_rows=None, raise_on_indexes=False, *, ver=(4, 18, 3),
     proj._is_embedded = embedded
     proj._graph_name = graph
     proj._skip_guard = True
+    # The endpoint identity a real server projection carries (`_host`, set by
+    # `FalkorProjection.__init__`). Present here so the #11087 pair register's
+    # key is the PRODUCTION shape — stable across two projections of one store —
+    # instead of falling back to the instance address (#11311 review P1/P2).
+    proj._host = "test-host"
     proj._falkordb_version = ver
     proj._vector_index_api = None
     proj._vector_indexed_labels = None
@@ -637,6 +642,22 @@ def test_a_re_read_that_cannot_measure_clears_an_already_populated_pair(caplog):
         assert proj._vector_indexed_labels is None
         assert not _pair_records(caplog)
 
+    # ⛔ …and the same lane must DROP the pair-register entry, not only the
+    # attributes (#11311 review P3). The answered-`None` pop had no test: only
+    # the RAISING lane's pop was pinned above, so deleting this one kept the
+    # suite green. Drive measured(A) → answered-None → measured(A): the third
+    # read is news again, because an unmeasured store has no contract to have
+    # already reported. Without the pop the pair VALUE is unchanged, the
+    # register still holds it, and nothing is emitted.
+    proj.g = _RecordingGraph(_rows(*[_vector_row(label) for label in SERVED]))
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        proj._record_vector_index_inventory()
+    assert len(_pair_records(caplog)) == 1, (
+        "a re-measure after an answered-None read must REPORT again — the "
+        "register entry has to be dropped on that lane, not just on the raising one"
+    )
+
 
 def test_a_wholly_unparseable_catalogue_is_reported_as_measured_and_empty(caplog):
     """#11087: the MALFORMED-ROW lane is **not** the NOT-MEASURED lane.
@@ -726,7 +747,8 @@ def test_the_pair_is_reported_on_every_setup_and_a_repaired_store_announces_it(c
     warnings = [r for r in caplog.records
                 if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
     assert len(warnings) == 1, (
-        "the WARNING stays latched — #11087 unlatches the REPORT only"
+        "the WARNING stays latched on the key — #11087 dedups the REPORT on the "
+        "pair VALUE instead"
     )
 
 
@@ -751,6 +773,33 @@ def test_an_unchanged_pair_is_not_reported_twice(caplog):
     pairs = _pair_records(caplog)
     assert len(pairs) == 1, (
         f"an unchanged pair must be reported once, not per setup (got {len(pairs)})"
+    )
+
+
+def test_a_second_projection_of_the_same_store_does_not_repeat_the_pair(caplog):
+    """#11087/#11311: the register's key is STABLE across projections.
+
+    This is the property the register exists for and the one a same-instance
+    test cannot see: the hosted path builds a NEW projection per request, so
+    "an unchanged pair reports once" is a claim about two DIFFERENT objects for
+    one (endpoint, graph).
+
+    ⛔ Falsifiable only because `_bare()` carries a `_host`: keyed on
+    `id(self)` — which is what `_falkordb_version_cache_key() or id(self)`
+    yields once the redis client hides its endpoint — the two projections get
+    two keys and this records 2 (measured on #11311's first cut).
+    """
+    rows_for_both = [_vector_row("Point")]
+    first = _bare(rows_for_both, graph="test_11087_pair_stable")
+    with caplog.at_level(logging.INFO):
+        first._ensure_indexes()
+        second = _bare(rows_for_both, graph="test_11087_pair_stable")
+        second._ensure_indexes()      # a per-request rebuild, same catalogue
+
+    pairs = _pair_records(caplog)
+    assert len(pairs) == 1, (
+        "one store, one contract: a rebuild must not re-report the same pair "
+        f"(got {len(pairs)} record(s) from two projections)"
     )
 
 

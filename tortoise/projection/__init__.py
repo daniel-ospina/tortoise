@@ -685,15 +685,32 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #     case an over-eager latch would hide forever.
 # `_VECTOR_INDEX_GAP_WARNED` cannot express this (a set of keys with no value),
 # which is why it is a separate register rather than a reuse.
+#
+# ⛔ THE REGISTER'S KEY IS *NOT* THE WARNING'S KEY, and that is deliberate. The
+# warning's key comes from `_falkordb_version_cache_key() or id(self)`, and on a
+# redis-py that hides the endpoint behind `connection_pool.connection_kwargs`
+# that helper returns None — so the warning's key is an OBJECT ADDRESS on the
+# very per-request path this register exists for. Keyed that way the register
+# would hold one entry per live request slot (address recycling, not store
+# identity), so a per-request rebuild would still repeat the line, and every
+# entry would be pinned to a dead object. `_pair_report_key` therefore prefers
+# the cache key, then the projection's own `_host` (set on every server
+# projection), and only then the address — for a bare unit mock, which is the
+# one shape with no endpoint identity at all.
 _VECTOR_INDEX_PAIR_REPORTED: dict[tuple, tuple[frozenset, frozenset]] = {}
 _VECTOR_INDEX_PAIR_LOCK = threading.Lock()
 
 
 def _reset_vector_gap_warnings() -> None:
-    """Test hook: drop the warned-graph latch (mirrors
+    """Test hook: drop BOTH per-`(endpoint, graph)` registers.
+
+    `_VECTOR_INDEX_GAP_WARNED` (the #4997 WARNING latch) and
+    `_VECTOR_INDEX_PAIR_REPORTED` (the #11087 pair report's value latch,
+    registered by `_record_vector_index_inventory`) are process-global, so
+    without this a latch entry from one test suppresses the warning — or the
+    REPORT — in the next one on the same (endpoint, graph). Mirrors
     `_reset_falkordb_version_cache`, which tests/test_falkordb_compat.py
-    already imports). Without this, a latch entry from one test suppresses the
-    warning in the next one on the same (endpoint, graph)."""
+    already imports."""
     with _VECTOR_INDEX_GAP_LOCK:
         _VECTOR_INDEX_GAP_WARNED.clear()
     with _VECTOR_INDEX_PAIR_LOCK:
@@ -18586,6 +18603,26 @@ class FalkorProjection(
             return ("embedded", str(path))
         return None
 
+    def _pair_report_key(self, key: tuple) -> tuple:
+        """The key the #11087 pair register is stored under — STABLE across
+        projections of the same store, which the warning's key is not.
+
+        `_falkordb_version_cache_key()` answers `None` when the redis client
+        hides its endpoint (redis-py exposes it at
+        `connection_pool.connection_kwargs`, not as `_host`/`host`), so the
+        warning's `endpoint or id(self)` key becomes an OBJECT ADDRESS on
+        exactly the per-request path the pair register exists to quiet. Keyed
+        that way the register would collect one entry per live request slot and
+        a rebuild would still repeat the line. So: the cache key when it
+        resolves, else the projection's own `_host`, else — for a bare unit
+        mock, the only shape with no endpoint identity — the address.
+        """
+        endpoint = self._falkordb_version_cache_key()
+        if endpoint is None:
+            host = getattr(self, "_host", None)
+            endpoint = ("host", str(host)) if host else key[0]
+        return (endpoint, self._graph_name)
+
     def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
         """Measure which of the labels the vector leg SERVES carry a VECTOR
         index on this engine, and REPORT THE PAIR — then the gap. (#4997, #11087)
@@ -18690,12 +18727,16 @@ class FalkorProjection(
 
         log = logging.getLogger(__name__)
         key = None
+        pair_key = None
         try:
             # Everything that can throw lives inside this guard — including
             # the latch-key computation, because `_falkordb_version_cache_key`
             # reads `self.db`, which is absent on a bare projection.
             endpoint = self._falkordb_version_cache_key() or id(self)
             key = (endpoint, self._graph_name)
+            # #11087/#11311 review P1: the register gets its OWN, stable key —
+            # see `_pair_report_key` for why the warning's key is unusable here.
+            pair_key = self._pair_report_key(key)
 
             # #5434: reuse the rows `_schema_is_current` already read when the
             # caller supplied them (the fast path); otherwise probe HERE (the
@@ -18717,7 +18758,7 @@ class FalkorProjection(
                 # rather than a repeat, even if it reports the same pair as
                 # before the read failed.
                 with _VECTOR_INDEX_PAIR_LOCK:
-                    _VECTOR_INDEX_PAIR_REPORTED.pop(key, None)
+                    _VECTOR_INDEX_PAIR_REPORTED.pop(pair_key, None)
                 return
 
             served = set(ENTITY_TYPE_LABELS.values())
@@ -18756,9 +18797,9 @@ class FalkorProjection(
             self._vector_index_served_labels = None
             # #11087: as in the answered-`None` lane — an unmeasured store has no
             # pair to have already reported, so the register entry goes.
-            if key is not None:
+            if pair_key is not None:
                 with _VECTOR_INDEX_PAIR_LOCK:
-                    _VECTOR_INDEX_PAIR_REPORTED.pop(key, None)
+                    _VECTOR_INDEX_PAIR_REPORTED.pop(pair_key, None)
             return
 
         # #11087 (S4): REPORT THE PAIR whenever it has CHANGED — the positive
@@ -18771,9 +18812,9 @@ class FalkorProjection(
         # `_VECTOR_INDEX_PAIR_REPORTED` for why the latch is on the VALUE.
         pair = (frozenset(serves_reported), frozenset(indexes_reported))
         with _VECTOR_INDEX_PAIR_LOCK:
-            changed = _VECTOR_INDEX_PAIR_REPORTED.get(key) != pair
+            changed = _VECTOR_INDEX_PAIR_REPORTED.get(pair_key) != pair
             if changed:
-                _VECTOR_INDEX_PAIR_REPORTED[key] = pair
+                _VECTOR_INDEX_PAIR_REPORTED[pair_key] = pair
         if changed:
             log.info(
                 "#11087: vector contract on %s: serves=%s indexes=%s",
