@@ -60,13 +60,22 @@ Usage::
 Exit status: 0 when the measurement was taken (whatever the number is — a gate
 that drops nothing is a RESULT, not a failure); 2 when no selected section
 yields any candidate text in the graph, because a zero-denominator reading of
-"0 drops" is not a result; 2 when `--sections` names a section (or nothing) this
+"0 drops" is not a result; 2 when the graph yields no `:Object` name, because the
+legacy census keys are published on every run and `0 of 0 Objects` is that same
+zero-denominator reading; 2 when `--sections` names a section (or nothing) this
 instrument does not census.
 
 ⚠️ A section that yielded ZERO candidates is reported `measured: false` (and
 named in `unmeasured_sections`), never as "0 drops": an empty section is a zero
 denominator for that half of the pass condition, and `coverage_complete` says so
-in the record. Read `coverage_complete` before reading `drops_total`.
+in the record, and the Step-4 headline below is then `null` rather than a `0`.
+
+⛔ **THE PASS CONDITION'S NUMBER IS `step4_points_events_drops`.** `#10996` Step 4
+is written over points+events, not over Objects. Read `coverage_complete` first,
+then that field. **`drops_total` is the LEGACY Objects-only count** that
+`e1_e2_scores.py` validates; reading it as the pass condition is a false PASS
+whenever the Objects are clean and the claims are not — the exact shape `#11201`
+was filed about.
 
 ⚠️ What a 0-drop RESULT does NOT say. `vet_gate.apply_vet` Rule 2 downgrades a
 discard whose Object is still REFERENCED by a statement, and every audited Object
@@ -210,7 +219,7 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
     unknown = [s for s in sections if s not in SECTION_LABELS]
     if unknown or not sections:
         print(f"REFUSED: --sections names {unknown or 'nothing'} — this "
-              f"instrument censors {sorted(SECTION_LABELS)}")
+              f"instrument censuses {sorted(SECTION_LABELS)}")
         raise SystemExit(2)
     population = section_population(graph_uri(base, graph))
 
@@ -293,6 +302,16 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
         "drops_across_sections": (sum((b["drops_total"] or 0)
                                       for b in per_section.values())
                                   + (0 if "objects" in per_section else len(drops))),
+        # ⛔ THE PASS CONDITION'S OWN NUMBER (#10996 Step 4: "0 drops over
+        # points+events"). `drops_total` above is the LEGACY Objects-only count,
+        # and taking it for the pass condition is a false PASS whenever the
+        # Objects are clean and the claims are not. `None` — never a 0 — when a
+        # half is unmeasured: a sum's default would manufacture exactly the
+        # measured-looking zero this review round removed one level down.
+        "step4_points_events_drops": (
+            None if any(s in unmeasured for s in ("points", "events"))
+            else (per_section["points"]["drops_total"] or 0)
+            + (per_section["events"]["drops_total"] or 0)),
     }
 
 
@@ -331,11 +350,23 @@ def main(argv: list[str] | None = None) -> int:
     print(f"value_gate drops: {record['drops_total']} "
           f"(among bare_definite: {len(record['drops_among_bare_definite'])}) "
           f"controls alive={record['predicate_alive']} "
+          f"STEP-4 (points+events) drops: {record['step4_points_events_drops']} "
           f"across sections: {record['drops_across_sections']} "
           f"coverage_complete={record['coverage_complete']}")
     if not any(block["candidates"] for block in record["sections"].values()):
         print("REFUSED: no selected section yields candidate text — 0 drops "
               "would be a zero-denominator reading, not a result")
+        return 2
+    if not record["objects"]:
+        # ⛔ RESTORED, not relaxed: the legacy keys (`objects`, `bare_definite`,
+        # `value_gate_drops`, `drops_total`) are published on EVERY run and
+        # `e1_e2_scores.py` reads them as a census, so a candidate-bearing graph
+        # with no `:Object` name would publish "0 of 0 Objects". Widening the
+        # denominator to the pass's sections made this guard reachable in a new
+        # way; it must not become the hole it replaced.
+        print("REFUSED: the graph yields no Object names — `0 of 0 Objects` is "
+              "a zero-denominator reading, not a result (the legacy census keys "
+              "are published on every run)")
         return 2
     if not record["predicate_alive"]:
         print("REFUSED: the positive controls no longer drop — the predicate is "

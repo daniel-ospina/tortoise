@@ -288,8 +288,49 @@ def test_e1_gate_drops_discloses_an_empty_section_instead_of_zero(monkeypatch, t
         "well as on the console")
     assert record["coverage_complete"] is False
     assert record["unmeasured_sections"] == ["events"]
+    assert record["step4_points_events_drops"] is None, (
+        "a missing half makes the Step-4 number UNTAKEN (null), never 0 — a "
+        "sum's default is the same false zero one level up")
     out = capsys.readouterr().out
     assert "events=0/UNMEASURED" in out
+
+
+def test_e1_gate_drops_publishes_the_pass_conditions_own_number(monkeypatch, tmp_path):
+    """The Step-4 number is points+events, in its OWN field (#11201).
+
+    `drops_total` is the LEGACY Objects-only count. A reader who takes it for the
+    pass condition reads a false PASS — coverage complete, `drops_total: 0`,
+    while the `points` the condition is written over dropped N.
+    """
+    exit_code, record = _measure(monkeypatch, tmp_path, population={
+        "objects": ["the deploy rail"],
+        "points": ["#4118", "the lease fix"],
+        "events": ["closes #4118"],
+    })
+
+    assert exit_code == 0
+    assert record["sections"]["points"]["drops_total"] == 1
+    assert record["sections"]["events"]["drops_total"] == 1
+    assert record["step4_points_events_drops"] == 2, (
+        "the pass condition's number is points+events drops, published as its own "
+        "field so the Objects-only count cannot be read for it")
+    assert record["drops_total"] == 0, (
+        "the legacy Objects-only field keeps its meaning (and its name)")
+
+
+def test_e1_gate_drops_still_refuses_a_graph_with_no_objects(monkeypatch, tmp_path,
+                                                             capsys):
+    """Widening the denominator must not drop the Objects guard.
+
+    The legacy census keys are published on EVERY run and `e1_e2_scores.py` reads
+    them as a census, so a candidate-bearing graph with no `:Object` name would
+    publish "0 of 0 Objects" — the reading this probe has always refused.
+    """
+    exit_code = _run_gate_drops(monkeypatch, tmp_path, population={
+        "objects": [], "points": ["the lease fix"], "events": ["the retro"]})
+
+    assert exit_code == 2
+    assert "no Object names" in capsys.readouterr().out
 
 
 def test_e1_gate_drops_point_drops_come_from_the_predicate_not_a_constant(
