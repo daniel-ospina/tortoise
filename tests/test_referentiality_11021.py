@@ -773,9 +773,9 @@ def _union_pass(el: dict, **s4_changes) -> dict:
     once = route_mentions(copy.deepcopy(el), "")
     for key, value in s4_changes.items():
         if key == "add_entity":
-            once["entities"] = list(once["entities"]) + [value]
+            once["entities"] = [*once["entities"], value]
         elif key == "add_point":
-            once["points"] = list(once["points"]) + [value]
+            once["points"] = [*once["points"], value]
         else:                                     # pragma: no cover - test helper
             raise AssertionError(f"unknown s4 change {key!r}")
     return route_mentions(once, "")
@@ -838,9 +838,9 @@ def test_a_bare_about_reference_S4_added_is_still_stripped():
     behind it) kept the reference — and Layer-1 422'd the whole session, where
     the fail-open `try/except` could not see it (review cycle 4, P1-a)."""
     once = route_mentions(_embed_list("it"), "")
-    once["points"] = list(once["points"]) + [
-        {"content": "S4's new claim", "pointKind": "statement",
-         "about_entities": ["it"]}]
+    once["points"] = [*once["points"],
+                      {"content": "S4's new claim", "pointKind": "statement",
+                       "about_entities": ["it"]}]
     twice = route_mentions(once, "")
     assert twice["points"][-1]["about_entities"] == [], (
         "a bare reference to a held surface survived the union pass")
