@@ -2473,8 +2473,10 @@ def test_one_character_after_the_auxiliary_does_not_turn_a_subject_into_a_gloss(
     """The aux-tail guard tested `[ \\t]*` after the auxiliary, so `is` was refused and `is,`,
     `*is*`, `` `is` ``, `is;` and `is.` — the same clause subject with ONE character of emphasis or
     punctuation after it — were admitted, and the reference was CLEANED (measured at `fd5dfe39f`,
-    review P3). One character is not a discriminator; the tail is now the module's own
-    punctuation/emphasis set, which only widens REFUSALS and so cannot cost a claim.
+    review P3). One character is not a discriminator, and an ENUMERATED set cannot say that: the
+    first fix listed eighteen characters and twenty outside it still bypassed. The tail is now
+    INVERTED — ``[\\W_]``, every non-word character plus `_` — which only widens REFUSALS and so cannot
+    cost a claim.
 
     The honest battery is asserted alongside, so the widening cannot be made green by refusing
     glosses generally.
