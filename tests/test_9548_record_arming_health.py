@@ -682,11 +682,12 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
     # "SAME names" inverted to "DIFFERENT names" matched nothing. So the pair's
     # bullet and the SAME-names sentence are both pinned, on a whitespace-normalised
     # copy so a reflow cannot red them (#9548 review P2).
-    # ⚠️ The SAME-names pin runs to the END of its sentence (`(#9188/#9231/#9307)`),
-    # not to `publishes`: that sentence is about "the record counters" collectively,
-    # and a pin that stopped at `publishes` was measured GREEN on an edit that kept
-    # the clause and appended `— EXCEPT the positive pair below …` to it, i.e. a
-    # docstring narrowing the claim to exclude the pair (#9548 review P3, twice).
+    # ⚠️ The SAME-names pin runs to the END of its sentence — the full stop after
+    # `is claimed about.` — and each earlier stop point was MEASURED open, not
+    # assumed: stopping at `publishes` stayed green on a narrowing appended there,
+    # and stopping at `(#9188/#9231/#9307)` stayed green on one appended after the
+    # citation. Anything short of the sentence lets the docstring narrow the claim
+    # to exclude the pair while the pin reports the claim intact (#9548 review P3).
     # ⛔ The RUNBOOK half of this claim is pinned in `tests/test_deploy_workflow.py::
     # test_the_runbook_field_row_documents_the_positive_pair`, deliberately and not
     # here: a runbook-only diff selects no surface and runs `tier1` only, and this
@@ -703,7 +704,9 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
     )
     assert (
         "the record counters, under the SAME names ``metrics()`` publishes "
-        "(#9188/#9231/#9307)" in doc
+        "(#9188/#9231/#9307) — the hosted app has no ``/metrics`` route, so without "
+        "them indicator (b) of #9548 (``record_write_failures`` = 0) has no reader at "
+        "all on the deployment it is claimed about." in doc
     ), (
         "`_record_health`'s docstring no longer claims the record counters are "
         "published under `metrics()`'s own names (or has narrowed that claim so it "
