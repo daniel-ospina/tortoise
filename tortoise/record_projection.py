@@ -767,7 +767,13 @@ class RecordStatementError(RecordProjectionError):
     LINE of ``str(exc)`` for every exception, not only a driver-shaped one, so a
     multi-line NON-driver cause keeps its first line and drops the rest —
     measured, on a `Statement` cause: ``ValueError("line one\\nline two")``
-    reported ``ValueError: line one`` where the pre-fix arm carried both. It is
+    reported ``ValueError: line one`` where the pre-fix arm carried both. A cause
+    whose FIRST line is BLANK keeps nothing at all: ``splitlines()`` yields the
+    empty head, :func:`_primary_message` returns ``""``, and
+    :func:`_driver_fault` renders the type alone — ``ValueError("\\nline two")``
+    reports ``failed (ValueError)`` with no ``…``/``<withheld>`` marker, i.e.
+    indistinguishable from a cause that genuinely carried no message
+    (#11124 review cycle 3). It is
     the same narrowing the message arm has applied SINCE #10648 (before it,
     :func:`replay` composed ``f"{type(exc).__name__}: {exc!s}"`` — full
     ``str(exc)`` — and only then took ``_driver_fault(exc)`` inside
@@ -782,11 +788,15 @@ class RecordStatementError(RecordProjectionError):
 
     ⚠️ THE COST IS BOUNDED TO A MULTI-LINE **NON-DRIVER** CAUSE, and that
     qualifier is load-bearing rather than decorative (#11124 review cycle 2):
-    the only in-tree multi-line cause is DRIVER-SHAPED — the ``pgcode``/``diag``
-    double in this module's own test file — and for that shape
-    :func:`_primary_message` returns the protocol's single-line ``M`` field, so
-    nothing is lost. It is the plain ``Exception("a\\nb")`` shape that loses its
-    tail, and no in-tree caller passes one.
+    the only in-tree multi-line cause is DRIVER-SHAPED — the
+    :class:`_DriverShapeError` double in
+    ``tests/test_9548_record_search_keys_shape.py`` (the other ``pgcode``/``diag``
+    double in-tree, :class:`_DriverError` in
+    ``tests/test_record_searchkeys_10620.py``, is never passed as a *cause*) —
+    and for that shape :func:`_primary_message` returns the protocol's
+    single-line ``M`` field, so nothing is lost. It is the plain
+    ``Exception("a\\nb")`` shape that loses its tail, and no in-tree caller
+    passes one.
 
     No in-tree PRODUCTION caller builds this form today (only :func:`replay`
     raises the class, via the message form; the cause form is built by this
