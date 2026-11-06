@@ -654,9 +654,11 @@ def _journal_calls(code: str) -> int:
     are pinned in isolation by `test_journal_calls_helper_excludes_non_calls` so
     they cannot silently go stale. It must NOT be OR-ed back into the failure
     condition, where it can only add a false BLOCK to what the AST half already
-    decides. It excludes a shadow `def` and a bare import; a COMMENT is removed by
-    MASKING (`_mask_strings_and_comments`) before it ever sees the text, not by
-    this helper.
+    decides. It excludes a shadow `def` and a bare import, but it is
+    comment-BLIND: it does not mask, so `# _journal_append(name)` counts as a call.
+    Comment-blindness is why it cannot be put back in the decision — the census
+    resolves ownership through the AST, which excludes all three shapes by
+    construction.
 
     A `def _journal_append(...)` is a local SHADOW, not the record: it defines
     the symbol and journals nothing, so counting it as a call lets a block go
@@ -708,14 +710,16 @@ def _raw_detach_violations(root=None):
             # `DETACH DELETE` and the uniqueness half are matched on the RAW
             # block: both legitimately live inside string MATERIAL (`os.urandom`
             # is normally inside the f-string that BUILDS the name, so masking
-            # would erase it). The OWNERSHIP half must be a CALL — matched on the
-            # MASKED block and with its paren, so a comment that NAMES it, a bare
-            # IMPORT of it, or a local `def` SHADOW of it cannot satisfy the
-            # guard. Same defect #10170 fixed for `from_uri` (`_sites_in_file`
-            # masks before matching), still open here — each shape below was
-            # measured GREEN before the corresponding tightening (#11182):
-            # comment-only, import-with-no-call, and `def _journal_append`.
-            code = _mask_strings_and_comments(block)
+            # would erase it).
+            #
+            # ⛔ The OWNERSHIP half is resolved by `_journal_sites`' AST walk over
+            # the WHOLE FILE, not matched as text in this block: an `ast.Call`
+            # cannot be a comment, a bare import or a `def _journal_append`
+            # SHADOW, so those shapes are excluded BY CONSTRUCTION rather than by
+            # masking — the tightening #10170 needed for `from_uri`
+            # (`_sites_in_file`) and #11182 measured here. (The old text matcher,
+            # `_journal_calls`, was removed from the failure decision in round 9:
+            # it also FALSE-BLOCKED a legal `_journal_append (name)`.)
             lineno = src.count(chr(10), 0, m.start()) + 1
             # The journal is an ownership RECORD only for a name the sweep's
             # vocabulary accepts — see `_non_owned_handles`. Resolved over the
@@ -1537,8 +1541,9 @@ def test_journal_calls_helper_excludes_non_calls():
     assert _journal_calls("    def _journal_append(n): pass") == 0
     assert _journal_calls("    async def _journal_append(n): pass") == 0
     assert _journal_calls("    import _journal_append") == 0
-    # NOTE it does NOT exclude a COMMENT on unmasked input — the census always
-    # passes MASKED code, so masking (not this helper) is what removes one.
+    # NOTE it is comment-BLIND: it does not mask, so a bare mention counts. That
+    # is one of the reasons it is no longer in the presence decision — the AST
+    # half excludes a comment BY CONSTRUCTION (a comment is not an `ast.Call`).
     assert _journal_calls("    # _journal_append(name)") == 1
 
 
