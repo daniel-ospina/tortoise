@@ -986,6 +986,17 @@ PLACEMENT_DOC = (
 #: #10663 before it shipped.
 PACKAGED_PLACEMENT_TABLE = Path(__file__).resolve().parent / "_placement_table.json"
 
+#: The carrier's generator version — BUMP it when the emitted SHAPE changes.
+#:
+#: ONE value, shared: ``tools/gen_placement_table.py`` imports it and stamps it
+#: into ``_generated_by``, and :func:`_read_packaged_placement_rows` REFUSES a
+#: carrier that carries any other value (#10663 review, P2). It lives here, in
+#: the package, rather than in ``tools/`` because the READER is the one that has
+#: to enforce it: a provenance stamp written by the generator and read by nobody
+#: is decoration, so a carrier produced by a different generator version — or
+#: from a different doc — was accepted as authoritative.
+PLACEMENT_TABLE_GENERATOR = "gen_placement_table/2"
+
 #: section heading in the placement table → the physical table.
 _PLACEMENT_SECTION_TABLE: dict[str, str] = {
     "Event": "event",
@@ -1168,41 +1179,90 @@ def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
     `None` is the SOURCE-CHECKOUT-without-regeneration case (a `git clean` that
     dropped the generated file): the doc is on disk there and is read instead.
 
-    A file that IS present and does not parse is NOT `None` — a corrupt carrier
-    is a packaging fault and is reported as one, never papered over with a
-    fallback that hides it. The same holds for a carrier that parses to ZERO
-    rows (#10663 review, P2): an empty table is never legitimate, and accepting
-    it hands the projection an empty namespace, which maps every record property
-    to nothing and degrades the cache silently. Every drift pin in
-    `tests/test_10663_placement_table_packaged.py` is RELATIVE (carrier vs the
-    same parser over the doc, generator vs committed bytes), so an empty carrier
-    that agrees with an empty parse keeps all of them green — the #1929/#9231
-    silent-empty class, one artefact over.
+    EVERY OTHER state of a PRESENT carrier is a packaging fault and is reported
+    as one, never papered over with a fallback that hides it (#10663 review):
+
+    * **unparseable** — not JSON, or not an object;
+    * **from another generator** — `_generated_by` is not
+      :data:`PLACEMENT_TABLE_GENERATOR`, so its SHAPE is unknown here;
+    * **shape-wrong** — a row that is not exactly two strings. The old
+      ``[(str(a), str(b)) for a, b in rows]`` was the silent one: iterating a
+      DICT row yields its **keys**, so ``{"table": "point", …}`` became
+      ``("table", "property")`` for every row and every record column then
+      projected as unmapped, with no exception anywhere;
+    * **EMPTY** — zero rows. An empty namespace is never legitimate;
+    * **truncated** — fewer rows than its own `_row_count` declares.
+
+    The two RELATIVE pins in `tests/test_10663_placement_table_packaged.py`
+    (carrier vs the same parser over the doc, generator vs the committed bytes)
+    cannot see any of these: an artefact that agrees with itself keeps them —
+    and `--check` — green. This function is the only thing that reads the
+    SHIPPED artefact for what it is (the #1929/#9231 silent-empty class).
     """
     import json
 
-    if not PACKAGED_PLACEMENT_TABLE.exists():
-        return None
-    try:
-        payload = json.loads(PACKAGED_PLACEMENT_TABLE.read_text(encoding="utf-8"))
-        rows = payload["rows"]
-        parsed = [(str(table), str(prop)) for table, prop in rows]
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        raise PlacementTableUnavailable(
-            f"the packaged placement table at {PACKAGED_PLACEMENT_TABLE} is "
-            f"unreadable ({type(e).__name__}: {e}) — regenerate it with "
-            f"`uv run python tools/gen_placement_table.py`. This is a fault in "
-            f"the INSTALL, not in the record."
-        ) from e
-    if not parsed:
-        raise PlacementTableUnavailable(
-            f"the packaged placement table at {PACKAGED_PLACEMENT_TABLE} is "
-            f"EMPTY (it parsed to zero rows) — an empty table would project "
-            f"every record property as unmapped, silently. Regenerate it with "
-            f"`uv run python tools/gen_placement_table.py`; if the doc itself "
-            f"parsed empty, the doc is the fault. This is a fault in the "
-            f"INSTALL, not in the record."
+    def _fault(reason: str) -> PlacementTableUnavailable:
+        return PlacementTableUnavailable(
+            f"the packaged placement table at {PACKAGED_PLACEMENT_TABLE} {reason} "
+            f"— regenerate it with `uv run python tools/gen_placement_table.py`. "
+            f"This is a fault in the INSTALL, not in the record."
         )
+
+    # NOT `Path.exists()`. It swallows ELOOP/EBADF and reports a carrier that IS
+    # there as ABSENT — which does not merely lose the message, it takes the
+    # DOC FALLBACK, so in an image the operator is told the table is not on disk
+    # and told to regenerate a file that is on disk. Only ENOENT is the benign
+    # source-checkout case; every other read error (ELOOP, EACCES, ENOTDIR, …)
+    # is a fault in the INSTALL and is reported as one.
+    try:
+        text = PACKAGED_PLACEMENT_TABLE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise _fault(f"is unreadable ({type(e).__name__}: {e})") from e
+
+    try:
+        payload = json.loads(text)
+    except ValueError as e:
+        raise _fault(f"is unreadable ({type(e).__name__}: {e})") from e
+    if not isinstance(payload, dict):
+        raise _fault(
+            f"is unreadable (its top level is {type(payload).__name__}, not an "
+            f"object)")
+
+    # PROVENANCE FIRST: it decides what the rest of the file is even supposed to
+    # look like, so a shape check running before it would report a version skew
+    # as a malformed row.
+    if payload.get("_generated_by") != PLACEMENT_TABLE_GENERATOR:
+        raise _fault(
+            f"was generated by {payload.get('_generated_by')!r}, not by "
+            f"{PLACEMENT_TABLE_GENERATOR!r} — it is STALE against the reader")
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise _fault(
+            f"is unreadable (`rows` is {type(rows).__name__}, not a list)")
+    parsed: list[tuple[str, str]] = []
+    for index, row in enumerate(rows):
+        if (not isinstance(row, list) or len(row) != 2
+                or not all(isinstance(part, str) and part for part in row)):
+            raise _fault(
+                f"has a MALFORMED row at index {index} ({row!r}) — every row "
+                f"must be a two-element list of non-empty strings")
+        parsed.append((row[0], row[1]))
+
+    if not parsed:
+        raise _fault(
+            "is EMPTY (it parsed to zero rows) — an empty table would project "
+            "every record property as unmapped, silently; if the doc itself "
+            "parsed empty, the doc is the fault")
+
+    declared_count = payload.get("_row_count")
+    if declared_count != len(parsed):
+        raise _fault(
+            f"declares `_row_count` = {declared_count!r} but holds {len(parsed)} "
+            f"rows — it is TRUNCATED or was hand-edited")
+
     return parsed
 
 

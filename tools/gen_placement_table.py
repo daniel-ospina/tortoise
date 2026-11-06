@@ -21,7 +21,8 @@ USAGE
     uv run python tools/gen_placement_table.py --check   # exit 1 if stale
 
 WHAT the file holds: the parsed `(table, property)` rows and provenance (the
-source path, its sha256, and the parser it came through). No
+source path, its sha256, the row COUNT, and the generator version it came
+through — the last two are ENFORCED by the reader, not decorative). No
 `ADDITIONAL_PRIMARY_COLUMNS` — those are schema-spelled decisions appended by
 `cache_projection`, and a carrier that invented them would be a second
 declaration of the schema.
@@ -41,12 +42,17 @@ sys.path.insert(0, str(REPO_ROOT))
 from tortoise.cache_projection import (  # noqa: E402
     PACKAGED_PLACEMENT_TABLE,
     PLACEMENT_DOC,
+    PLACEMENT_TABLE_GENERATOR,
     parse_placement_rows,
 )
 
-#: The generator's own version — bump it when the emitted SHAPE changes, so a
-#: stale carrier is legible as stale rather than merely different.
-GENERATOR = "gen_placement_table/1"
+#: The generator's own version — the ONE value, owned by the package (#10663
+#: review, P2). Bumping it is what makes a stale carrier legible as stale rather
+#: than merely different: `_read_packaged_placement_rows` REFUSES any other value
+#: in `_generated_by`, so "bumped the shape and forgot to regenerate" fails
+#: closed at runtime instead of being silently accepted as authoritative. The
+#: local alias keeps the name this tool's own prose uses.
+GENERATOR = PLACEMENT_TABLE_GENERATOR
 
 
 def build() -> str:
@@ -61,6 +67,11 @@ def build() -> str:
         "_generated_by": GENERATOR,
         "_source": str(PLACEMENT_DOC.relative_to(REPO_ROOT)),
         "_source_sha256": hashlib.sha256(raw).hexdigest(),
+        # The row COUNT, so the reader can refuse a truncated carrier. Without
+        # it, a carrier holding the first N rows parses cleanly and is accepted
+        # as the WHOLE namespace — the silent-partial form of the same fault the
+        # empty check closes (#10663 review, P2).
+        "_row_count": len(rows),
         "_note": (
             "GENERATED — do not hand-edit. Regenerate with "
             "`uv run python tools/gen_placement_table.py`; the doc named in "

@@ -72,12 +72,28 @@ def _clear_placement_caches():
 
 
 def test_the_carrier_ships_inside_the_package():
-    """Not beside it, not above it: inside `tortoise/`, which every image COPYs."""
-    assert cp.PACKAGED_PLACEMENT_TABLE.exists(), (
+    """Not beside it, not above it: inside `tortoise/`, which every image COPYs.
+
+    Derived from the REPO ROOT, not from the constant: `PACKAGED_PLACEMENT_TABLE`
+    is DEFINED as `Path(__file__).resolve().parent / "_placement_table.json"`, so
+    asserting `... .parent == Path(__file__).parent` restated the definition and
+    stayed green for the one edit this test is named for — moving the carrier
+    OUT of the package kept it passing as long as the new path existed (#10663
+    review, P3).
+    """
+    carrier = cp.PACKAGED_PLACEMENT_TABLE.resolve()
+    assert carrier.exists(), (
         f"the packaged placement table is missing at "
         f"{cp.PACKAGED_PLACEMENT_TABLE} — regenerate it with "
         f"`uv run python tools/gen_placement_table.py`")
-    assert cp.PACKAGED_PLACEMENT_TABLE.parent == Path(cp.__file__).parent
+    assert (REPO_ROOT / "tortoise") in carrier.parents, (
+        f"{carrier} is not inside `tortoise/` — only `tortoise/` is COPY'd into "
+        f"the images, so a carrier anywhere else is unreadable in production "
+        f"while every source checkout stays green (#10663)")
+    assert carrier.parent != REPO_ROOT, (
+        f"{carrier} sits BESIDE the package, not in it — the image COPYs the "
+        f"package directory only, which is the #10663 defect")
+    assert carrier.name == cp.PACKAGED_PLACEMENT_TABLE.name
 
 
 def test_the_carrier_declares_exactly_what_the_doc_declares():
@@ -152,11 +168,13 @@ def test_a_missing_carrier_falls_back_to_the_doc_in_a_checkout(tmp_path,
 
     A checkout whose carrier was dropped (a stale clone, a wiped working tree)
     still has the doc, and `_read_placement_rows()` must read it rather than
-    refuse. The two carrier-removal tests around this one patch BOTH carriers
-    absent and so exercise only the "raise" path; without this one, deleting
-    the fallback — or turning a missing carrier into a raise instead of `None`
-    — merged green, and every record verb in such a checkout would refuse with
-    no signal.
+    refuse. Only `test_both_carriers_missing_is_a_named_packaging_fault` patches
+    BOTH carriers absent; the neighbours here each patch ONE — the
+    carrier-preferred proof above patches only the doc, and the corrupt/empty/
+    malformed-carrier tests below patch only the carrier — so without this one,
+    deleting the fallback — or turning a missing carrier into a raise instead of
+    `None` — merged green, and every record verb in such a checkout would refuse
+    with no signal.
     """
     monkeypatch.setattr(cp, "PACKAGED_PLACEMENT_TABLE", tmp_path / "absent.json")
     assert cp.PLACEMENT_DOC.exists(), "the fixture presumes a source checkout"
@@ -212,8 +230,12 @@ def test_an_empty_carrier_is_refused_not_read_as_no_rows(tmp_path, monkeypatch):
     `--check`, green. Nothing else in the tree reads the SHIPPED artefact.
     """
     empty = tmp_path / "_placement_table.json"
-    empty.write_text(json.dumps({"rows": [], "_source_sha256": "0" * 64}),
-                     encoding="utf-8")
+    empty.write_text(json.dumps({
+        "_generated_by": cp.PLACEMENT_TABLE_GENERATOR,
+        "_row_count": 0,
+        "rows": [],
+        "_source_sha256": "0" * 64,
+    }), encoding="utf-8")
     monkeypatch.setattr(cp, "PACKAGED_PLACEMENT_TABLE", empty)
     assert cp.PLACEMENT_DOC.exists(), "the fixture presumes a source checkout"
 
@@ -231,6 +253,133 @@ def test_an_empty_carrier_is_refused_not_read_as_no_rows(tmp_path, monkeypatch):
     # projection actually makes — an empty namespace must never be usable.
     with pytest.raises(cp.PlacementTableUnavailable):
         cp.placement_columns()
+
+
+# ── 2b. A carrier that PARSES is not necessarily a namespace ──────────────
+#
+# Every test below writes a carrier that `json.loads` accepts — the class the
+# "corrupt carrier" test above cannot reach. Measured on the pre-fix reader,
+# each one was ACCEPTED and produced a wrong namespace with no error at all.
+
+def _carrier(tmp_path: Path, payload: object, monkeypatch) -> Path:
+    """Write `payload` as the packaged carrier and point the reader at it."""
+    path = tmp_path / "_placement_table.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(cp, "PACKAGED_PLACEMENT_TABLE", path)
+    return path
+
+
+def _real_payload() -> dict:
+    return json.loads(cp.PACKAGED_PLACEMENT_TABLE.read_text(encoding="utf-8"))
+
+
+def test_a_dict_shaped_row_is_refused_not_read_as_its_keys(tmp_path,
+                                                          monkeypatch):
+    """`for table, prop in rows` over a DICT row yields its KEYS — silently.
+
+    Measured pre-fix: three `{"table": "point", "property": "pointKind"}` rows
+    became `[("table", "property"), …]`, so `placement_columns("point")` held
+    only the schema extras, every record column fell to `UnknownRecordColumn`,
+    the CLI reported *"the record is unreadable"* and exited 2 — the exact
+    misdiagnosis #10663 exists to eliminate, with `PlacementTableUnavailable`
+    never raised because nothing ever failed.
+    """
+    _carrier(tmp_path, {
+        "_generated_by": cp.PLACEMENT_TABLE_GENERATOR,
+        "_row_count": 3,
+        "rows": [{"table": "point", "property": "pointKind"}] * 3,
+    }, monkeypatch)
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+    assert "MALFORMED row at index 0" in str(excinfo.value), str(excinfo.value)
+
+    with pytest.raises(cp.PlacementTableUnavailable):
+        cp.placement_columns()
+
+
+def test_a_non_string_row_is_refused_not_coerced(tmp_path, monkeypatch):
+    """`[['point', 42]]` was accepted as `("point", "42")` by `str()` coercion.
+
+    The coercion is what made a malformed carrier indistinguishable from a
+    correct one: any scalar silently became a property name.
+    """
+    _carrier(tmp_path, {
+        "_generated_by": cp.PLACEMENT_TABLE_GENERATOR,
+        "_row_count": 1,
+        "rows": [["point", 42]],
+    }, monkeypatch)
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+    assert "MALFORMED" in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_truncated_carrier_is_refused_by_its_own_row_count(tmp_path,
+                                                            monkeypatch):
+    """A carrier holding the FIRST N ROWS parses cleanly — and is not the table.
+
+    Measured pre-fix: the first 3 rows of the real carrier were accepted as the
+    whole namespace. Every relative pin stays green on that file, because the
+    generator that produced it agrees with it.
+    """
+    payload = _real_payload()
+    total = payload["_row_count"]
+    payload["rows"] = payload["rows"][:3]
+    _carrier(tmp_path, payload, monkeypatch)
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+    message = str(excinfo.value)
+    assert "TRUNCATED" in message, message
+    assert str(total) in message, message
+    assert "3 rows" in message, message
+
+
+def test_a_carrier_from_another_generator_version_is_refused(tmp_path,
+                                                            monkeypatch):
+    """Provenance the READER enforces — `_generated_by` used to be decorative.
+
+    A carrier written by a generator whose emitted shape this reader does not
+    know must be refused, not read as authoritative: that is the whole point of
+    stamping a version into it.
+    """
+    payload = _real_payload()
+    payload["_generated_by"] = "gen_placement_table/0"
+    _carrier(tmp_path, payload, monkeypatch)
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+    message = str(excinfo.value)
+    assert "gen_placement_table/0" in message, message
+    assert cp.PLACEMENT_TABLE_GENERATOR in message, message
+    assert "STALE" in message, message
+
+
+def test_a_symlink_loop_at_the_carrier_path_is_a_fault_not_an_absence(
+        tmp_path, monkeypatch):
+    """`Path.exists()` collapses ELOOP into "absent" — and takes the doc fallback.
+
+    Measured (`Path.exists()` on a symlink loop returns False, while
+    `read_text()` raises ELOOP): the reader used to report a carrier that IS on
+    disk as "not on disk", reaching for a `docs/` tree an image does not have,
+    and telling the operator to regenerate a file that is already there. Only
+    ENOENT is the benign source-checkout case (#10663 review, P3).
+    """
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    try:
+        a.symlink_to(b)
+        b.symlink_to(a)
+    except (OSError, NotImplementedError) as e:  # pragma: no cover - platform
+        pytest.skip(f"symlinks unavailable: {e}")
+    monkeypatch.setattr(cp, "PACKAGED_PLACEMENT_TABLE", a)
+    assert cp.PLACEMENT_DOC.exists(), "the fixture presumes a source checkout"
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+    assert "unreadable" in str(excinfo.value), str(excinfo.value)
+    assert "is not on disk" not in str(excinfo.value), str(excinfo.value)
 
 
 # ── 3. The carrier reaches an installed user ───────────────────────────────
