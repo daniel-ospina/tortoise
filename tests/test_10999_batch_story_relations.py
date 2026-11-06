@@ -186,6 +186,41 @@ def test_case_insensitive_endpoint_resolves_to_the_emitted_spelling():
         ("Retry Storm", "Deadline Rule")]
 
 
+def test_whitespace_variant_endpoint_resolves_to_the_emitted_spelling():
+    """The endpoint's loose arm is the pipeline's OWN name identity, ``_norm``
+    (whitespace-collapsed + lower) — not case-folding alone.
+
+    ``_norm`` is what decides name identity everywhere else in this pipeline:
+    ``_merge_key`` builds the relation's dedupe key with it, and
+    ``vet_gate._norm`` matches entity references with it. So an endpoint that
+    differs from the emitted name only by a whitespace RUN is the same entity
+    to every other stage, and it is the one spelling variant a casefold-only
+    arm drops as "does not resolve" — an edge lost to a space.
+    """
+    emission = copy.deepcopy(EMISSION)
+    emission["entities"][0]["name"] = "Retry  Storm"      # inner double space
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "IMPL"}]
+    result = _run(emission)
+    # the SPACE of the emitted name wins — resolution canonicalises the endpoint
+    assert [(r["src"], r["dst"]) for r in result["relations"]] == [
+        ("Retry  Storm", "Deadline Rule")]
+    assert result["stats"]["relations_dropped"] == 0
+
+
+def test_self_relation_across_spellings_is_dropped_as_a_self_relation():
+    """A self-edge is a self-edge whatever its two spellings: the check uses
+    the same ``_norm`` identity, so it is DIAGNOSED as a self-relation rather
+    than misreported as an unresolvable endpoint."""
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "retry  storm",
+                              "predicate": "IMPL"}]
+    result = _run(emission)
+    assert result["relations"] == []
+    assert any("self-relation" in w for w in result["warnings"]), \
+        result["warnings"]
+
+
 def test_ambiguous_case_fold_resolves_to_nothing():
     """Two entities differing only in case: guessing which one the story
     meant would attribute the edge to the WRONG node."""
