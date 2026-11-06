@@ -14837,8 +14837,10 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # demo session's read refuses with `record_unavailable` (503), and on an
     # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split
     # the counter note above exists to eliminate. Destructive, so it is out of
-    # this change's scope and belongs to the graph-side purge of §9.1's
-    # residual (a), `#10017`. Blast radius: opt-in sample content that
+    # this change's scope and belongs to §9.1's residual (a) — a graph-side
+    # removal no instrument ships today, and NOT `#10017`, whose purge is the
+    # legacy turn population and never matches a `:Source` (`#11325`).
+    # Blast radius: opt-in sample content that
     # `org.point_count` excludes — but the demo `:Session` is still returned by
     # the session reads, so the pre-existing nodes stay reachable there and in
     # search (with their counter, which is why the repair must move both).

@@ -140,15 +140,16 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
   — which the record's TABLE ALSO holds and which no projection may ever write,
   because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE
-  CLEAR — ``record-restore`` / ``rebuild_from_record`` wipe the graph first
+  CLEAR: the graph-side removal of the column itself (``REMOVE n.story_arc``) or
+  ``record-restore`` / ``rebuild_from_record``, which wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
-  legacy copy — ⚠️ on a SERVER graph that restore is refused PRE-WIPE unless the
-  graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
-  → the projection's ``_assert_test_graph``, #2944), which is EVERY production
-  name ``org_<org_id>``, so on a production cache the targeted ``REMOVE`` is the
-  only route that works (an embedded ``path=`` DB is exempt from the name
-  check, not from supervision) — or the graph-side removal of the column itself
-  (``REMOVE n.story_arc``) — and it has NO repair that RESTORES the value. ⛔ That is the
+  legacy copy too — ⚠️ on a SERVER graph that restore is refused PRE-WIPE unless
+  the graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
+  → the projection's ``_assert_test_graph``, #2944), and no production name does
+  (``org_<org_id>``, its ``org_<org_id>_<gid>`` child and a legacy
+  ``team_<org_id>`` alike), so on a production cache nothing SHIPPED clears it
+  (an embedded ``path=`` DB is exempt from the name check, not from
+  supervision) — and it has NO repair that RESTORES the value. ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
   forbids every projection from writing it into the graph and no in-tree route
