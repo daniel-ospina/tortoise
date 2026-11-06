@@ -5142,15 +5142,6 @@ surfaces:
   - test_pack_cli.py
   - test_pack_content_v3.py
   - test_pack_extraction_slots_v31.py  # #1026 Stage 2: manifest v3.1 extraction behaviour slots (entityCues resolution, refused entityPatterns) — registered late; its absence reddened manifest-integrity on main from #5647 (9c4788400-era) until this line
-  # #11001 landed `tests/test_pack_hierarchy_11001.py` WITHOUT a registration, so
-  # from that merge `--integrity` reported `manifest drift: ['test_pack_hierarchy_11001.py']`
-  # on EVERY PR's merged tree — the #3153/#2876 main-side drift class, this time
-  # blocking #11210's merge. Registered here, beside the pack suites it belongs
-  # with: the module under test (`tortoise/pack_hierarchy.py`) matches no
-  # SOURCE_PATTERN and falls through to `core`, which is the surface that runs
-  # this file. Measured: `select(['tortoise/pack_hierarchy.py']) -> ['core']`,
-  # this file selected.
-  - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
   # #2818: the per-kind VALUE-FIELD declaration surface — `values` in
@@ -5187,6 +5178,15 @@ surfaces:
   # the same `main` drift, so `origin/main` `eee753b48` carried three rows and
   # `--integrity` reds on the duplicate. The `core` row beside the pack suites is
   # the survivor; NOT a removal of the registration.)
+  # ⛔ THREE LANES REGISTERED THIS SAME ROW and the manifest only takes one:
+  # #11210 (`7bfbc4669`) and #11222 (`eee753b48`) each added the identical entry
+  # while this one was in flight, so `--integrity` reported
+  # `duplicate entry 'test_pack_hierarchy_11001.py' at .surfaces.core[]` and the
+  # REQUIRED `manifest-integrity` leg went red again — on the REPAIR. The copies
+  # are deduped to this one; the append class (a conflict-free replay duplicating
+  # a `core` entry, with the file still valid YAML) is **#10032**, which owns the
+  # root — this note is the instance, not a second report of it.
+  - test_pack_hierarchy_11001.py
   # #9068: the #5475 pack-approval-set residuals MEASURED — a :Pipeline row,
   # a journal-less fold, and the DECLARED offline re-typing. Registered beside
   # the pack tests it reads (`pack_state.graph_kind_namespaces` /
