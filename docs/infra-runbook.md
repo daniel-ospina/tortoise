@@ -3410,12 +3410,12 @@ operator who read the line above as "CI defends this" would never run it.
 > relayed here because they lived ONLY on the issue** — which is the defect this section was
 > corrected for:
 >
-> * **2026-11-05T20:58:18Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6669289145),
+> - **2026-11-05T20:58:18Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6669289145),
 >   `owner-decision-relay`) — *"#9548 yes i never authorised to wait. we need this asap."* So
 >   **"wait for authorisation" is no longer a valid state**, no lane may cite `#9548` as a reason to
 >   pause, and *"the only legitimate stop is a **specific technical blocker**, named with its failing
 >   step."*
-> * **2026-11-05T22:10:54Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6670861090),
+> - **2026-11-05T22:10:54Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6670861090),
 >   `owner-decision-relay`) — *"doesn't matter much because i'm the only one using tortoise before we
 >   finish the p0 and p1 … so just do what's fastest."* So: **arm the hosted deployment directly and
 >   apply the pending migrations directly — no staging detour, no rehearsal deploy, no extra cycle to
@@ -3454,11 +3454,11 @@ operator who read the line above as "CI defends this" would never run it.
 > `GET /health` re-read **2026-11-05T23:54:47Z** serves build **`46ea687dc`**
 > (`started_at 2026-11-05T23:14:03Z`). Two facts follow, and they are DIFFERENT facts:
 >
-> * **The deployed CODE carries `#10648`** (`fafb8fdcc`) — verified in-tree, not from the endpoint:
+> - **The deployed CODE carries `#10648`** (`fafb8fdcc`) — verified in-tree, not from the endpoint:
 >   `git merge-base --is-ancestor fafb8fdcc 46ea687dc` → **0**. So "the serving build predates the
 >   fix and does not carry it" is **false as of that deploy**, and the drop can no longer be
 >   attributed to an unfixed build.
-> * **The deployed IMAGE carries both migrations** — `migrations_head:
+> - **The deployed IMAGE carries both migrations** — `migrations_head:
 >   20261102000002_record_point_search_keys_text`, i.e. `20261102000001_graphs_promote_default` and
 >   `20261102000002_…_search_keys_text` are in the image too. ⛔ **That is NOT "applied to the
 >   database"** — this file's own `migrations_head` row (`:1025`) says so in as many words: the value
@@ -3467,21 +3467,40 @@ operator who read the line above as "CI defends this" would never run it.
 >   fact, read from `supabase_migrations.schema_migrations` — and it was **not** read here, so it is
 >   **not** claimed. (The same applies to the 2026-11-05 decision's own third proof, *"the migrations
 >   visible in `supabase_migrations`"* — that proof has not been collected.)
+> - **Whether they are APPLIED has a measurement too, and calling it "unmeasured" would be the same
+>   defect one layer down.** The repo's own fail-closed drift gate, run **2026-11-03T18:56:04Z**
+>   (run `41694722380`, quoted in `#9548` comment
+>   [`6613140019`](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6613140019)),
+>   read `supabase_migrations.schema_migrations` — the artefact `:1025` names — and reported:
+>
+>   ```text
+>   BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):
+>       - 20261102000001
+>       - 20261102000002
+>     note: BLOCKING list above is the COMPLETE repo-ahead set — 2 of 2 repo-ahead pending
+>   ```
+>
+>   A **complete-set** verdict, so the last measurement says **both are PENDING**, and it is
+>   independently corroborated (`11-residual-plan-and-decomposition.md:64`: *"present in the repo,
+>   unapplied in production"*). Nothing recorded since shows them applied — `#9548` `6669720078`
+>   records that *"the deployment cannot be refreshed until the migration apply runs"* and
+>   `6672017685` records `supabase-deploy` failing. So the question is **measured, dated, and not
+>   re-measured since** — not unknown, and not for a lane to assume either way.
 >
 > So: the reason this section gave for believing the `point.search_keys` narrowing was absent —
-> *"the serving build predates `#10648`"* — **is gone**, but the applied-schema question is **open and
-> unmeasured**, not resolved. What still survives unchanged is the blocker: **no backup can be taken
-> from this environment** until a **direct** backup-capable DSN exists, so any further migration
-> would run unbacked — and whether that is acceptable is the owner's call, not a lane's (see the two
-> 2026-11-05 decisions above).
+> *"the serving build predates `#10648`"* — **is gone**, and what replaces it is a **dated
+> measurement, not a gap**: last read 2026-11-03, both pending. What still survives unchanged is the
+> blocker: **no backup can be taken from this environment** until a **direct** backup-capable DSN
+> exists, so running that apply would be unbacked — and whether that is acceptable is the owner's
+> call, not a lane's (see the two 2026-11-05 decisions above).
 >
-> **So the accurate state — measured 2026-11-05T23:54:47Z — is AUTHORISED · CODE DEPLOYED ·
-> APPLIED SCHEMA UNMEASURED · BACKUP CREDENTIAL STILL MISSING.** A lane reading this section must not
-> re-derive "postponed"; it reports the missing backup credential, and it reads
-> `supabase_migrations.schema_migrations` before asserting that a migration is or is not applied.
-> (This is a **measurement**, not a standing fact — re-read `/health` and stamp the date. The deploy
-> that invalidated the previous wording landed 2026-11-05T23:14:03Z, ~40 minutes after that wording
-> was written.)
+> **So the accurate state is AUTHORISED · CODE DEPLOYED (2026-11-05T23:54:47Z) · APPLIED SCHEMA LAST
+> MEASURED 2026-11-03 (BOTH PENDING) AND NOT RE-MEASURED SINCE · BACKUP CREDENTIAL STILL MISSING.**
+> A lane reading this section must not re-derive "postponed"; it reports the missing backup
+> credential, and it re-reads `supabase_migrations.schema_migrations` before asserting the CURRENT
+> applied set — the 2026-11-03 reading is evidence of what was true then, not of what is true now.
+> (Both halves are **measurements**, not standing facts. The deploy that invalidated the previous
+> wording landed 2026-11-05T23:14:03Z, ~40 minutes after that wording was written.)
 >
 > ---
 >
