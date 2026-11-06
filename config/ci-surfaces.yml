@@ -2930,6 +2930,7 @@ surfaces:
   # the change selects `api` and this `core` arm never runs. The file is now
   # DUAL-REGISTERED (see the `api` arm above).
   - test_7968_org_purge_rpc.py
+  - test_supabase_deploy_applier_config.py
   # #2886: the wiring seam's hermetic adapter guard
   # (`tools/longmem_eval/retrieve.py::temporal_aggregate_verdict` over the
   # core's `resolve_temporal_aggregate`). Dual-registered (`core` + `eval`,
@@ -7661,6 +7662,7 @@ tier1:
 - test_sdk_dedup.py
 - test_sdk_ep.py
 - test_supabase_control.py
+- test_supabase_deploy_applier_config.py  # #10896: the applier guard also pins the `--yes` remedies PRINTED in `supabase/README.md`. A README-only diff selects NO surface (`ci_selection.py --changed-files supabase/README.md` → `surfaces: []`), so the `core` row alone leaves that half of the guard ungraded on its own trigger — measured. Dual-registered with `core`, the repo's pattern for exactly this.
 - test_taxonomy.py
 - test_tool_registry.py
 - test_tool_risk_tiers.py  # #4122: the tier ⇔ hint ⇔ permission pins, fast and DB-free — a docs-only PR still grades them, which matters because the tier tables are GENERATED into `docs/product/`
