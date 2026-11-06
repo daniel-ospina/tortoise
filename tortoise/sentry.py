@@ -138,8 +138,10 @@ def init() -> bool:
             # by this same `init`) then captures that re-raised exception itself —
             # through `sentry_sdk.capture_event`, NOT through
             # `tortoise.sentry.capture_exception`, so the refusal there is not on
-            # that path. Measured with a real client and an aborted POST: 2 events
-            # per abort before, 1 after the handler change. `ignore_errors` is
+            # that path. Measured with a real client and an aborted POST: on
+            # `origin/main` THREE `capture_event` calls per abort — which
+            # `DedupeIntegration` collapses to ONE delivered envelope — and 0
+            # delivered at this head. `ignore_errors` is
             # evaluated in `Client._should_capture`, i.e. BEFORE
             # `_prepare_event`/`serialize`, which is where the remaining cost was
             # (measured `_capture_exception`: 3-7 ms -> 0.15-0.18 ms). The
@@ -164,8 +166,10 @@ def init() -> bool:
             # a real upstream reset process-wide.
             #
             # ⚠️ `BrokenResourceError` is the one entry whose direction is not
-            # self-evident: anyio raises it from `SocketStream.send/receive`
-            # wherever `transport.is_closing()`, outbound as well as inbound, and
+            # self-evident: anyio raises it from `SocketStream.send` and
+            # `.receive` on `self._protocol.exception` (the `transport.is_closing()`
+            # checks in that backend are the WAIT condition and a write-failure
+            # handler, not the raise condition), outbound as well as inbound, and
             # `mcp_server.py:7394` documents a demonstrated raise from a broken
             # INCOMING (client-fed) stream — a comment, not a handler; nothing in
             # this tree captures or logs the type. So the inbound shape is the one
