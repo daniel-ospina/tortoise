@@ -1074,11 +1074,21 @@ def declare_invariant(
             f"{key!r} already declares a {existing.ttl_s}s ceiling; refusing to widen it to "
             f"{ttl_s}s. Tightening is allowed; widening is how a TTL quietly becomes a stale read."
         )
-    declared: NegativeAnswer | None = (
-        existing.negative if negative is _KEEP_NEGATIVE and existing is not None else None
-    )
-    if isinstance(negative, NegativeAnswer):
+    # ⛔ EACH ARM IS EXPLICIT, INCLUDING THE REFUSAL. An `if isinstance(negative, NegativeAnswer)`
+    # shape leaves every OTHER value falling through to `None`, so `negative="oops"` would DROP the
+    # declaration silently — the very defect this parameter was added to close, one line below where
+    # it was closed. ``_KEEP_NEGATIVE``/``None``/``NegativeAnswer`` are the whole language; anything
+    # else is a caller bug and says so.
+    declared: NegativeAnswer | None
+    if negative is _KEEP_NEGATIVE:
+        declared = existing.negative if existing is not None else None
+    elif negative is None or isinstance(negative, NegativeAnswer):
         declared = negative
+    else:
+        raise TtlNotPermitted(
+            f"{key!r} was declared with negative={negative!r}. Pass a NegativeAnswer, ``None`` to "
+            f"define no negative, or omit it to KEEP the one already declared."
+        )
     # ⛔ A TIGHTENING THAT OUTRUNS THE NEGATIVE'S OWN TTL IS REFUSED WITH A WAY OUT, not left to
     # `_validate_negative`'s generic message: the preserved declaration is the reason, and the
     # caller is the only one who can say what replaces it.

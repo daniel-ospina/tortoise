@@ -53,7 +53,7 @@ M66-M71 rather than left colliding with M64-M65; a mutation id must name exactly
   M86 protection ROUTE guard deleted ................. KILLED   M87 stderr spelling return deleted ......... KILLED
   M88 `read()` skips `_validate_negative` ............ KILLED   M89 tightening DROPS the negative .......... KILLED
   M90 door skips `_validate_negative` ................ KILLED   M91 tighten-past-negative refusal deleted .... KILLED
-  M92 sentinel never recognised as a value ........... KILLED
+  M92 sentinel never recognised as a value ........... KILLED   M93 `negative=` falls through to a DROP ....... KILLED
 ⛔ M82-M85 are the round-18 fix lane's numbering (the documented-negative work, #11047). Each was
 RUN against this head, and each states what it does NOT cover:
   M82 (`_gh_reader`'s `neg = spec.negative` forced to `None`, i.e. the 404 falls back through the
@@ -84,7 +84,7 @@ RUN against this head, and each states what it does NOT cover:
   M87 (the measured `gh: Branch not protected (HTTP 404)` stderr return replaced with `False`):
   **2 failed, 337 passed** — the stderr-drained reader arm and the direct helper arm. Also SURVIVED
   the previous cut, for the reason recorded under M84.
-⛔ M88-M92 are round 19's numbering (the guard-at-every-door fix, #11047). Each was RUN at this
+⛔ M88-M93 are round 19's numbering (the guard-at-every-door fix, #11047). Each was RUN at this
 head, and each states what it does NOT cover:
   M88 (`_validate_negative(key, _spec)` deleted from `read()`'s defence-in-depth): **1 failed, 343
   passed** — `test_read_REFUSES_a_spec_injected_with_a_negative_it_would_not_accept`. ⛔ THE PRE-FIX
@@ -108,6 +108,12 @@ head, and each states what it does NOT cover:
   genuine-no-checks arm. ⛔ THE SECOND ONE PINS A COST, NOT A FEATURE: it fails if the trade is
   "fixed" in the other direction too, which is why its docstring names why the RAW-body alternative
   is the fail-OPEN one.
+  M93 (the `negative=` arms reduced to `if isinstance(negative, NegativeAnswer)` — the shape written
+  first, and the reason M93 exists): **1 failed, 343 passed** — the door arm's malformed-value leg.
+  Every value that is neither the sentinel nor a `NegativeAnswer` falls through to `None`, i.e. to a
+  SILENT DROP, which is the pre-fix defect one line below where it was fixed. ⛔ IT SURVIVED THE
+  FIRST CUT of this round for exactly that reason: the arm tested the three SUPPORTED values and
+  never a malformed one, so the hazard lived in the shape and not in the behaviour.
 ⛔ M73's LEDGER ROW OVERSTATED ITS COVERAGE AND THAT IS NOW FIXED, not re-labelled. The old
 parametrization had 5 arms, two of which (`/commits/main/status`, `/commits/abc/check-runs`) were
 satisfied by the EARLIER `/commits` marker, and six of the ten deny-list markers had no arm at all —
@@ -1881,6 +1887,19 @@ def test_the_declaration_guard_runs_at_the_PUBLIC_DOOR_not_only_at_import() -> N
         )
         assert C.INVARIANTS[key].negative is not None
         assert C.INVARIANTS[key].negative.ttl_s == C.NEGATIVE_ANSWER_TTL_S
+        # ⛔ AND A VALUE THAT IS NEITHER A `NegativeAnswer` NOR `None` IS A CALLER BUG, NOT A DROP.
+        # An `isinstance`-shaped body leaves every other value falling through to `None`, i.e. the
+        # same silent loss this parameter was added to close, one line below where it was closed.
+        with pytest.raises(C.TtlNotPermitted):
+            C.declare_invariant(
+                key,
+                ttl_s=1800,
+                argv=saved.argv,
+                projection=saved.projection,
+                project=saved.project,
+                negative="oops",  # type: ignore[arg-type]
+            )
+        assert C.INVARIANTS[key].negative is not None, "a malformed negative silently dropped it"
     finally:
         C.INVARIANTS[key] = saved
 
