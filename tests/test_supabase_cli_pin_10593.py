@@ -848,13 +848,23 @@ def test_a_case_variant_second_step_cannot_pin_a_different_major() -> None:
     disagree with the other about how many steps there are.
     """
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    config = CONFIG.read_text(encoding="utf-8")
+    config = CONFIG.read_text("utf-8")
+    # Derive the live pin, like the four sibling mutation arms already do. The workflow says the pin
+    # is taken up BY HAND (`supabase-deploy.yml`: an `x.y.z` in a `with:` input is invisible to
+    # Dependabot), so a hardcoded value here REDs a required suite on a bump that is correct and
+    # expected — with a message claiming the MUTATION failed, which sends the reader after a diff
+    # that does not exist (found in review, P2; the same defect this file already fixed elsewhere).
+    pin = _requested_version(workflow)
+    canonical = f"        with:\n          version: {pin}"
+    assert canonical in workflow, (
+        "the setup-cli step's `with:` no longer has the canonical shape these mutations drive — "
+        "update them rather than silently proving nothing"
+    )
 
     for spelling in ("Supabase/setup-cli@v1", "SUPABASE/SETUP-CLI@v1"):
         smuggled = workflow.replace(
-            "        with:\n          version: 2.122.1",
-            "        with:\n          version: 2.122.1\n"
-            f"      - uses: {spelling}\n        with:\n          version: 3.0.0",
+            canonical,
+            f"{canonical}\n      - uses: {spelling}\n        with:\n          version: 3.0.0",
             1,
         )
         assert spelling in smuggled, f"mutation did not apply for {spelling!r} — vacuous"
@@ -876,13 +886,12 @@ def test_a_case_variant_second_step_cannot_pin_a_different_major() -> None:
     # The boundary arm: a DIFFERENT action whose name merely STARTS with ours is not the step, so
     # widening the match for case-insensitivity must not swallow a fork/decoy into the count.
     decoy = workflow.replace(
-        "        with:\n          version: 2.122.1",
-        "        with:\n          version: 2.122.1\n"
-        "      - uses: supabase/setup-cli-fork@v1\n        with:\n          version: 3.0.0",
+        canonical,
+        f"{canonical}\n      - uses: supabase/setup-cli-fork@v1\n        with:\n          version: 3.0.0",
         1,
     )
     assert "supabase/setup-cli-fork@v1" in decoy, "mutation did not apply — vacuous"
-    assert _requested_version(decoy) == "2.122.1", (
+    assert _requested_version(decoy) == pin, (
         "an action whose name merely starts with `supabase/setup-cli` was counted as the step"
     )
 
