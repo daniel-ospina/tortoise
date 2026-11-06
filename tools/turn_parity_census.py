@@ -13,7 +13,11 @@ store does not already hold, instead of creating it (#11112 — a typo'd
 opening the store is free of side effects: on the EMBEDDED leg the redislite
 open itself rewrites the RDB file (measured: 1,402,361 → 1,402,370 B on one
 read), which is why the byte census must be taken around a run, not from a
-copy the run itself touched. On the URI leg the bind issues no graph write
+copy the run itself touched. A `--db-path` that does NOT exist is CREATED by
+that open before the presence check can refuse (measured: a refusal on a typo'd
+`--db-path` leaves an empty `typo.db` + its `-construct.lock` — no GRAPH is
+created, which is the claim, but the FILE is, so a mistyped path leaves a
+stray file to explain). On the URI leg the bind issues no graph write
 (measured: `GRAPH.LIST` unchanged), but it IS a connection, and "no graph
 write" is not "no server-side effect" — the census never claims the latter.
 
