@@ -107,12 +107,17 @@ class TestTheRiskAxis:
         only thing this test may assert is a figure no code path can recompute.
         """
         reading = {e.name for e in served() if e.risk in ("read", MAINTENANCE_TIER)}
-        # #4282 Phase 3.2 removed TWO reading tools (81 -> 76 live, 99 -> 94
-        # served): `tortoise_onboarding_state` and
-        # `tortoise_onboarding_github_status` — the two tenant-visible reads the
-        # owner's 2026-09-22 ruling rehomed to the tenancy block. 51 -> 49.
-        assert len(reading) == 49, sorted(reading)   # 46 read + 3 maintenance
-        assert len(served()) == 94, sorted(e.name for e in served())
+        # Two recorded moves land on this pin together, and the merged figure is the
+        # only one both of them imply:
+        #   #4282 (this change) — `tortoise_graph_overview` joins as a `read` (+1) while
+        #   the FIVE names it absorbed retire, so the SERVED set (live + retired shims)
+        #   grows by exactly the one new entry: 99 -> 100, reading-eligible 51 -> 52.
+        #   #4282 Phase 3.2 (main) — removed TWO reading tools (`tortoise_onboarding_state`
+        #   and `tortoise_onboarding_github_status`, the tenant-visible reads the owner's
+        #   2026-09-22 ruling rehomed) without adding a name: 100 -> 95 served, 52 -> 50.
+        # Neither side's own figure is the answer: 95 and 50 is.
+        assert len(reading) == 50, sorted(reading)   # 47 read + 3 maintenance
+        assert len(served()) == 95, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".

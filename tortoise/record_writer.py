@@ -1336,6 +1336,24 @@ def _count_position_unproven() -> None:
         monitoring.record_position_unproven()
 
 
+def _count_write_applied() -> None:
+    """Count one record write this process COMMITTED. **Never raises.**
+
+    The POSITIVE channel beside the three failure/decline counters siblings
+    above (#9548): without it an armed-and-writing deployment and one that has
+    never been reached both read ``record_write_failures: {}`` on ``/health``,
+    which is exactly how this P0 was closed on an empty object.
+
+    Called AFTER ``connection.commit()`` returns, never at
+    ``RecordWriteOutcome.APPLIED`` — APPLIED means the statements ran, so it
+    would report a write that a later rollback discards. Same swallow as its
+    siblings, for the same reason: the caller's write already persisted.
+    """
+    with contextlib.suppress(Exception):
+        from . import monitoring
+        monitoring.record_write_applied()
+
+
 def _note_unproven_position(record: Mapping[str, Any]) -> None:
     """Count AND (at most once per window) WARN that layer 1 skipped a record.
 
@@ -1773,6 +1791,12 @@ def write_live_record(record: Mapping[str, Any], *,
         connection = write.connection
         if connection is not None:
             connection.commit()
+            # AFTER the commit, and only when the seam's OWN connection
+            # committed: this is the record's positive channel (#9548). Every
+            # other record counter is a failure/decline channel, so without
+            # this one `record_write_failures: {}` cannot tell a writing
+            # deployment from one that was never reached.
+            _count_write_applied()
         if seq is None:
             # No position was consumed, so the watermark must not report one
             # as if it had been (a caller advancing `last_seq + 1` must neither

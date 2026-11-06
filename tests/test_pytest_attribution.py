@@ -1035,6 +1035,183 @@ def test_bad_invocation_is_exit_2(argv: list[str]) -> None:
     assert "::error::pytest-attribution:" in result.stdout
 
 
+# ── 1c. a killed leg states its FAILURE SET from its own junitxml (#10914) ──
+#
+# A leg killed at its watchdog never reaches `-r fEs`, so its LOG carries no
+# `FAILED <nodeid>` record: the failing testcase appears only as a `-v` progress
+# line. Measured on run 42050189058, job `test (f)` (907 passed, **1 failed**,
+# killed at its 26m budget): `ci_exemption.py ids` read ZERO ids from that log, so
+# the #9984 predicate fell back to `job-unreadable::test-f` and the merge was
+# BLOCKED — while the leg's own `--junitxml` held the nodeid AND its exception type
+# on disk. The record existed; nothing read it.
+#
+# These tests pin the three properties that make reading it safe:
+#   1. the emission is pytest's OWN `-r fEs` shape, so the rail derives the same id
+#      and the same signature a completed run would (pinned against the rail itself
+#      in §2b — the equivalence is EXECUTED, not asserted);
+#   2. a leg that owns a verdict never re-emits — one failure, one source;
+#   3. an absent/unparseable artifact is NAMED as unknown and emits no id, so a
+#      missing junitxml can never read as "no test failed".
+
+#: A killed leg's log: pytest's `-v` progress stream, no session summary, and no
+#: `FAILED`/`ERROR` record — the shape the rail reads as `ids=0`.
+KILLED_LEG_LOG = (
+    "==================== test session starts ====================\n"
+    "platform linux -- Python 3.12.14, pytest-9.1.1, pluggy-1.5.0\n"
+    "plugins: xdist-3.8.0, timeout-2.4.0\n"
+    "timeout: 300.0s\ntimeout method: signal\n"
+    "created: 4/4 workers\n"
+    "tests/test_capture_cost_measurement.py::test_a_cost_row_is_emitted PASSED [ 17%]\n"
+    "tests/test_capture_cost_measurement.py::test_emission_write_is_handed_off_the_event_loop"
+    " FAILED [ 18%]\n"
+    # Started, never resolved: the kill landed here (the in-flight report's subject).
+    "tests/test_capture_phase_d_dedup.py::test_capture_promotes_a_new_operator\n"
+)
+
+#: The junitxml that leg wrote — pytest's own xunit1 output, COPY-EDITED FROM A REAL
+#: RUN of each failure shape (see `test_the_emitted_detail_matches_pytest_s_own_block`
+#: for the matching `-r fEs`/FAILURES rendering each one is compared against).
+JUNIT_KILLED_LEG = """<?xml version="1.0" encoding="utf-8"?>\
+<testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="3" \
+skipped="0" tests="4" time="1570.0">\
+<testcase classname="tests.test_capture_cost_measurement" \
+name="test_emission_write_is_handed_off_the_event_loop" \
+file="tests/test_capture_cost_measurement.py" line="3097" time="300.0">\
+<failure message="Failed: Timeout (&gt;300.0s) from pytest-timeout.">\
+def test_emission_write_is_handed_off_the_event_loop():
+&gt;       resp = _b7_capture_client.post("/v1/sessions", json={...})
+E       Failed: Timeout (&gt;300.0s) from pytest-timeout.
+
+tests/test_capture_cost_measurement.py:3143: Failed</failure></testcase>\
+<testcase classname="tests.test_capture_cost_measurement" name="test_a_cost_row_is_emitted" \
+file="tests/test_capture_cost_measurement.py" line="1428" time="0.1" />\
+<testcase classname="tests.test_x" name="test_shape[2]" file="tests/test_x.py" line="9" \
+time="0.1"><failure message="assert 2 == 1">v = 2
+
+    @pytest.mark.parametrize("v", [1, 2])
+    def test_shape(v):
+&gt;       assert v == 1
+E       assert 2 == 1
+
+tests/test_x.py:12: AssertionError</failure></testcase>\
+<testcase classname="tests.test_x.TestShape" name="test_class_leaf" file="tests/test_x.py" \
+line="19" time="0.1"><failure message="assert 3 == 1">    def test_class_leaf(self):
+&gt;       assert 3 == 1
+E       assert 3 == 1
+
+tests/test_x.py:20: AssertionError</failure></testcase>\
+</testsuite></testsuites>
+"""
+
+EMITTED_TIMEOUT = (
+    "FAILED tests/test_capture_cost_measurement.py::"
+    "test_emission_write_is_handed_off_the_event_loop"
+    " - Failed: Timeout (>300.0s) from pytest-timeout."
+)
+EMITTED_ASSERTION = "FAILED tests/test_x.py::test_shape[2] - AssertionError: assert 2 == 1"
+#: The CLASS-based failure. `testcase/@name` is the leaf only, so this id is only
+#: reconstructable from `@classname` — `file::name` would name `TestShape`'s sibling
+#: as if it were a module-level test (i.e. a nodeid pytest never wrote).
+EMITTED_CLASS_LEAF = (
+    "FAILED tests/test_x.py::TestShape::test_class_leaf - AssertionError: assert 3 == 1")
+
+
+def _killed_leg(tmp_path: Path, junit: str | None = JUNIT_KILLED_LEG) -> tuple[Path, Path]:
+    log = tmp_path / "pytest.log"
+    log.write_text(KILLED_LEG_LOG, encoding="utf-8")
+    path = tmp_path / "junit.xml"
+    if junit is not None:
+        path.write_text(junit, encoding="utf-8")
+    return log, path
+
+
+def _reported_failures(stdout: str) -> list[str]:
+    """The `FAILED`/`ERROR` records the reporter itself emitted (not its prose)."""
+    return [ln for ln in stdout.splitlines() if re.match(r"^(FAILED|ERROR) ", ln)]
+
+
+def test_a_killed_leg_states_its_failing_testcases_from_its_own_junitxml(
+        tmp_path: Path) -> None:
+    """The measured gap: the leg's own artifact names what its log could not.
+
+    Both failures are reported — the parametrized id keeps its `[2]` suffix (a
+    truncated id is a DIFFERENT test, and the comparable database keys on it) — and
+    each carries pytest's `<ExceptionType>: <E-line>` shape, which is what gives the
+    rail a signature to compare against main instead of an unsigned row.
+    """
+    log, junit = _killed_leg(tmp_path)
+    result = run_script(log, "--junit", str(junit), rc="137")
+    assert result.returncode == 0, result.stderr
+    assert "INCOMPLETE" in result.stdout, "the leg must still be named unobservable"
+    assert _reported_failures(result.stdout) == [
+        EMITTED_TIMEOUT, EMITTED_ASSERTION, EMITTED_CLASS_LEAF], (
+        f"the reporter did not state the leg's own failing testcases:\n{result.stdout}")
+
+
+def test_a_completed_leg_never_re_emits_its_failures_from_the_junitxml(
+        tmp_path: Path) -> None:
+    """One failure, ONE source: a leg that owns a summary already published them.
+
+    Re-emitting would put the same id in the log twice with a second provenance — a
+    signature that could disagree with the block the rail prefers.
+    """
+    log = tmp_path / "pytest.log"
+    log.write_text(
+        "==================== test session starts ====================\n"
+        "tests/test_x.py::test_shape[2] FAILED [ 50%]\n"
+        "==================== short test summary info ====================\n"
+        "FAILED tests/test_x.py::test_shape[2] - assert 2 == 1\n"
+        "= 1 failed in 0.50s =\n",
+        encoding="utf-8")
+    junit = tmp_path / "junit.xml"
+    junit.write_text(JUNIT_KILLED_LEG, encoding="utf-8")
+    result = run_script(log, "--junit", str(junit), rc="1")
+    assert result.returncode == 0, result.stderr
+    assert _reported_failures(result.stdout) == [], (
+        f"a completed leg re-emitted its own failure records:\n{result.stdout}")
+
+
+@pytest.mark.parametrize(
+    ("junit_state", "expected"),
+    [
+        ("missing", "does not exist"),
+        ("empty", "holds no failing testcase"),
+        ("unparseable", "could not be parsed"),
+    ],
+)
+def test_an_unreadable_junitxml_is_named_unknown_never_an_empty_failure_set(
+        tmp_path: Path, junit_state: str, expected: str) -> None:
+    """Fail CLOSED: no artifact is UNKNOWN, and UNKNOWN is not "nothing failed".
+
+    The interesting failure is silent: a reporter that emitted nothing at all here
+    would be indistinguishable from a clean leg, which is the class this file exists
+    to prevent.
+    """
+    junit_text = {
+        "missing": None,
+        "empty": '<?xml version="1.0"?><testsuites><testsuite /></testsuites>',
+        "unparseable": "<testsuites><testsuite><testcase ",
+    }[junit_state]
+    log, junit = _killed_leg(tmp_path, junit=junit_text)
+    result = run_script(log, "--junit", str(junit), rc="137")
+    assert result.returncode == 0, result.stderr
+    assert _reported_failures(result.stdout) == [], (
+        f"an unreadable junitxml produced a failure id:\n{result.stdout}")
+    assert expected in result.stdout, (
+        f"the {junit_state} artifact was not NAMED (expected {expected!r}):\n"
+        f"{result.stdout}")
+
+
+def test_a_leg_that_wrote_no_junitxml_states_no_test_level_identity(
+        tmp_path: Path) -> None:
+    """`--junit` is optional, and its absence is stated — never silently empty."""
+    log, _ = _killed_leg(tmp_path, junit=None)
+    result = run_script(log, rc="137")
+    assert result.returncode == 0, result.stderr
+    assert _reported_failures(result.stdout) == [], result.stdout
+    assert "no --junit was passed" in result.stdout, result.stdout
+
+
 # ── 2. the rail, executed — the marker is ATTRIBUTABLE ─────────────────────
 
 
@@ -1086,6 +1263,214 @@ def test_incomplete_marker_becomes_a_named_attributable_failure(tmp_path: Path) 
     keys, rc = _rail_ids(_capture(INCOMPLETE_MARKER), tmp_path)
     assert rc == 0
     assert "test-leg-INCOMPLETE-no-pytest-summary-failure-set-unobservable" in keys, keys
+
+
+# ── 2b. the emitted record IS the rail's record — measured, not asserted ────
+#
+# The point of emitting from the junitxml is not "the log now names a test". It is
+# that the rail can COMPARE that name against main, which needs the same id AND the
+# same signature a completed run produces for the same failure. Below: the same two
+# failures rendered both ways — as pytest renders them on a completed run (FAILURES
+# block + `-r fEs`), and as this reporter renders them from the killed leg's
+# junitxml — through the SAME two doors, compared for equality. If a future edit
+# changes the emission shape (drops the `<Type>: ` prefix, truncates a parametrized
+# suffix), the two sides stop matching here.
+
+#: The SAME failures as `JUNIT_KILLED_LEG`, in the shape a COMPLETED run writes: the
+#: FAILURES block (where the rail takes the exception TYPE from, via pytest's
+#: `path.py:LINE: ExceptionType` trailer) and the `-r fEs` short summary.
+COMPLETED_LEG_LOG = """\
+___________________ test_emission_write_is_handed_off_the_event_loop ___________________
+    def test_emission_write_is_handed_off_the_event_loop():
+>       resp = _b7_capture_client.post("/v1/sessions", json={...})
+E       Failed: Timeout (>300.0s) from pytest-timeout.
+
+tests/test_capture_cost_measurement.py:3143: Failed
+_____________________________ test_shape[2] ______________________________
+    @pytest.mark.parametrize("v", [1, 2])
+    def test_shape(v):
+>       assert v == 1
+E       assert 2 == 1
+
+tests/test_x.py:12: AssertionError
+_____________________________ test_class_leaf ______________________________
+    def test_class_leaf(self):
+>       assert 3 == 1
+E       assert 3 == 1
+
+tests/test_x.py:20: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_capture_cost_measurement.py::test_emission_write_is_handed_off_the_event_loop - Failed: Timeout (>300.0s) from ...
+FAILED tests/test_x.py::test_shape[2] - assert 2 == 1
+FAILED tests/test_x.py::TestShape::test_class_leaf - assert 3 == 1
+===================== 3 failed in 300.4s ======================
+"""
+
+
+def _rail_signatures(text: str, tmp_path: Path) -> dict[str, set[str]]:
+    """`ci_exemption.py signatures` over a de-stamped capture, as nodeid -> signatures.
+
+    De-stamped on purpose: the #9984 predicate removes the per-line transport stamp
+    (`strip_transport_stamps`) before EITHER door reads the per-job log, and the
+    signature door's `_LOG_PREFIX_RE` requires a tab before a timestamp — so a
+    stamped line never matches its `^FAILED` anchor (#10202 review 4).
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cap = tmp_path / "capture-signatures.txt"
+    cap.write_text(text)
+    result = subprocess.run(
+        [sys.executable, str(EXEMPTION_PY), "signatures", "--log", str(cap)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    out: dict[str, set[str]] = {}
+    for line in result.stdout.splitlines():
+        if not line or line.startswith("ci-exemption:"):
+            continue
+        nodeid, _, sig = line.partition("\t")
+        if nodeid.strip():
+            out.setdefault(nodeid.strip(), set()).add(sig.strip())
+    return out
+
+
+@pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
+def test_the_junit_emission_reaches_the_rail_as_the_same_failure(tmp_path: Path) -> None:
+    """Both renderings of one failure must land on the SAME id and signature."""
+    log, junit = _killed_leg(tmp_path)
+    killed = run_script(log, "--junit", str(junit), rc="137")
+    assert killed.returncode == 0, killed.stderr
+    emitted = _rail_signatures(killed.stdout, tmp_path / "killed")
+    completed = _rail_signatures(COMPLETED_LEG_LOG, tmp_path / "completed")
+    assert emitted, (
+        "the rail read NO id from the reporter's own output — the emission is "
+        f"unattributable, which is the whole defect:\n{killed.stdout}")
+    assert emitted == completed, (
+        "the killed leg's junitxml does not reproduce the failure a completed run "
+        f"records for the same test — the rows are not comparable:\n"
+        f"emitted:   {emitted}\ncompleted: {completed}")
+    # And the ids are the real ones, suffix and all.
+    assert set(emitted) == {
+        "tests/test_capture_cost_measurement.py::"
+        "test_emission_write_is_handed_off_the_event_loop",
+        "tests/test_x.py::test_shape[2]",
+        "tests/test_x.py::TestShape::test_class_leaf",
+    }, emitted
+
+
+#: Two failing tests that share a LEAF name inside one file, in two different
+#: classes — the shape `file::name` cannot represent. Pre-fix the reporter emitted
+#: `tests/test_x.py::test_class_leaf` TWICE: one id, so one of the two failures
+#: silently disappeared from the reported set.
+JUNIT_SAME_LEAF_TWO_CLASSES = """<?xml version="1.0" encoding="utf-8"?>\
+<testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" \
+skipped="0" tests="2" time="1.0">\
+<testcase classname="tests.test_x.TestAlpha" name="test_leaf" file="tests/test_x.py" \
+line="9" time="0.1"><failure message="assert 1 == 2">E       assert 1 == 2\n\ntests/test_x.py:10: AssertionError</failure></testcase>\
+<testcase classname="tests.test_x.TestBeta" name="test_leaf" file="tests/test_x.py" \
+line="19" time="0.1"><failure message="assert 3 == 4">E       assert 3 == 4\n\ntests/test_x.py:20: AssertionError</failure></testcase>\
+</testsuite></testsuites>
+"""
+
+
+def test_two_classes_sharing_a_leaf_name_keep_DISTINCT_nodeids(tmp_path: Path) -> None:
+    """The collapse arm: `file::name` makes two failures one id.
+
+    Both failures must reach the rail as the ids pytest itself recorded. Pre-fix the
+    reporter emitted the SAME line twice (`tests/test_x.py::test_leaf`), so the rail
+    saw one failure and the other vanished from the reported set — the failure set
+    `ci_exemption.py signatures` then compares against main is short by one.
+    """
+    log, junit = _killed_leg(tmp_path, junit=JUNIT_SAME_LEAF_TWO_CLASSES)
+    result = run_script(log, "--junit", str(junit), rc="137")
+    assert result.returncode == 0, result.stderr
+    assert _reported_failures(result.stdout) == [
+        "FAILED tests/test_x.py::TestAlpha::test_leaf - AssertionError: assert 1 == 2",
+        "FAILED tests/test_x.py::TestBeta::test_leaf - AssertionError: assert 3 == 4",
+    ], f"the class segment was dropped, collapsing two failures onto one id:\n{result.stdout}"
+    assert len(set(_reported_failures(result.stdout))) == 2, result.stdout
+
+
+def test_a_classname_naming_another_module_is_NOT_attributed_to_this_file(
+        tmp_path: Path) -> None:
+    """The honest arm: when the class chain cannot be attributed, say so.
+
+    `classname` and `file` disagree about the module, so the trailing capitalised
+    components belong to some other nodeid. Emitting `file::name` here would be an
+    invented plausible id — the docstring's own rule is to name the gap instead.
+    """
+    mismatched = JUNIT_KILLED_LEG.replace(
+        'classname="tests.test_x.TestShape" name="test_class_leaf"',
+        'classname="tests.test_other.TestShape" name="test_class_leaf"')
+    log, junit = _killed_leg(tmp_path, junit=mismatched)
+    result = run_script(log, "--junit", str(junit), rc="137")
+    assert result.returncode == 0, result.stderr
+    assert not [ln for ln in _reported_failures(result.stdout) if "test_class_leaf" in ln], (
+        f"a mismatched classname produced a fabricated nodeid:\n{result.stdout}")
+    assert "does not match" in result.stdout, result.stdout
+
+
+# ── 2c. the wiring: a leg that WRITES a junitxml must PASS it ──────────────
+#
+# The emission above is worthless if the call site forgets `--junit`: the leg falls
+# straight back to stating nothing, which is the `ids=0` → `job-unreadable::` →
+# BLOCK path this change closes (#10914). So the pairing is derived from the
+# workflow rather than remembered: for EVERY reporter call, the pytest invocation it
+# reports on is located, and when that invocation writes `--junitxml=`, the call
+# must name the same artifact with `--junit`.
+#
+# It is a REQUIRED pairing, not a suggestion, only where the artifact exists — the
+# `test-concurrency-falkor` leg runs a fixed nodeid list with no `--junitxml` at all,
+# so it is correctly exempt by construction (not by an allow-list that would rot).
+
+_JUNITXML_ARG_RE = re.compile(r"--junitxml=(\"[^\"]+\"|\S+)")
+
+
+def _joined_command(lines: list[str], start: int) -> str:
+    """A bash command as written: the line at `start` plus its `\\` continuations."""
+    parts = [lines[start]]
+    i = start
+    while parts[-1].rstrip().endswith("\\") and i + 1 < len(lines):
+        i += 1
+        parts.append(lines[i])
+    return "\n".join(parts)
+
+
+def test_every_leg_that_writes_a_junitxml_passes_it_to_the_reporter() -> None:
+    lines = WORKFLOW.read_text().splitlines()
+    # A commented-out invocation is not a site; `# ... python -m pytest` in the prose
+    # above every leg is common in this file and must not be counted.
+    pytest_sites = [
+        i for i, ln in enumerate(lines)
+        if re.search(r"\bpython\s+-m\s+pytest\b", ln) and not ln.strip().startswith("#")
+    ]
+    checked = 0
+    for site, line in enumerate(lines):
+        if "bash .github/scripts/pytest-attribution.sh" not in line:
+            continue
+        assert not line.strip().startswith("#"), (
+            f"python-ci.yml:{site + 1}: the reporter call is COMMENTED OUT:\n{line}")
+        call = _joined_command(lines, site)
+        prior = [i for i in pytest_sites if i < site]
+        assert prior, (
+            f"python-ci.yml:{site + 1}: no `python -m pytest` invocation above this "
+            "reporter call — this guard no longer knows what the call reports on")
+        invocation = _joined_command(lines, prior[-1])
+        junit = _JUNITXML_ARG_RE.search(invocation)
+        if junit is None:
+            # The leg keeps no junitxml: there is no artifact to name (#10914's
+            # concurrency leg). Nothing to require.
+            continue
+        checked += 1
+        assert "--junit" in call, (
+            f"python-ci.yml:{site + 1}: this leg writes {junit.group(0)} but does not "
+            "pass it to the reporter — a kill at its watchdog then states NO failing "
+            "testcase, which is the `ids=0` → `job-unreadable::` → BLOCK defect this "
+            f"change closes (#10914):\n{call}")
+    assert checked >= 6, (
+        f"only {checked} reporter call(s) in python-ci.yml were checked for the "
+        "--junit pairing — the legs that write a junitxml are not the ones this "
+        "guard just inspected, so it has gone vacuous (raise/lower this floor with "
+        "the leg inventory, never to make a red go away)")
 
 
 # ── 3. coverage of the workflow's legs (structural) ────────────────────────
@@ -1756,3 +2141,315 @@ def test_a_failing_pytest_still_reds_the_step(
     # ...and the reporter ran FIRST, naming what was in flight when the leg died.
     assert INCOMPLETE_MARKER in result.stdout, result.stdout
     assert "tests/e2e/hosted/test_boot.py::test_serves_health" in result.stdout, result.stdout
+
+
+# ── 5. the kill banner states WHEN the leg died, not only how long its budget was ──
+#
+# #3719 (open) carries three measured instances of the SAME misreading, two of them
+# on this PR's own required legs:
+#
+#   * #10917 `test (f)`, run 41843678044 — `rc=137` at **1215 s** of a **1620 s**
+#     budget, reported as "killed after 27m".
+#   * #10914 `test (a)`, run 41952788142 — `rc=137` at **346 s** of a **1560 s**
+#     budget, with `##[error]The runner has received a shutdown signal` right after;
+#     reported as "killed after 26m", and that sentence is the line the dispatch
+#     brief for this very lane quoted as its reason to exist.
+#   * #10914 `test-carve-out (b)`, same run — a COMPLETE `505 passed in 518.25s`,
+#     step still `rc=137`, reported as "killed after 19m".
+#
+# `timeout`'s own manual is why the exit code cannot answer it: 124 means "the
+# deadline was reached", 137 is 128+SIGKILL and is produced BOTH by `timeout -k`'s
+# follow-up kill AND by an unrelated OOM or a runner shutdown. The ELAPSED time
+# separates them — a watchdog kill cannot land before the deadline it implements —
+# and the step already has it (`$SECONDS` stamped just before the `timeout` call).
+#
+# Two layers, matching the ones above: the script is EXECUTED against the measured
+# instances (so the sentence is tested, not the string), and the workflow is checked
+# STRUCTURALLY for the call + its start stamp at every banner site (so a newly added
+# leg cannot quietly restore the bare budget-as-elapsed sentence).
+
+KILL_SCRIPT = REPO / ".github" / "scripts" / "pytest-kill-attribution.sh"
+
+#: (rc, elapsed, budget_minutes, the arm the measured instance belongs to)
+#: Each elapsed/budget pair is a MEASURED run, not an invented one — see above.
+MEASURED_KILLS = [
+    (137, 1215, 27, "outside"),   # #10917 test (f)
+    (137, 346, 26, "outside"),    # #10914 test (a)   — runner shutdown
+    (137, 518, 19, "outside"),    # #10914 test-carve-out (b) — after a full summary
+    (124, 1561, 26, "deadline"),  # a real watchdog expiry (SIGINT at the deadline)
+    (137, 1562, 26, "deadline"),  # timeout's -k 10 follow-up on an ignored SIGINT
+    (2, 1560, 26, "deadline"),    # pytest's own SIGINT summary at the deadline
+]
+
+
+def run_kill_attribution(
+    *argv: str, timeout: float = 60
+) -> subprocess.CompletedProcess[str]:
+    """Run the attribution reporter the way the workflow does."""
+    return subprocess.run(
+        ["bash", str(KILL_SCRIPT), *argv],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout,
+    )
+
+
+@pytest.mark.parametrize(
+    ("rc", "elapsed", "budget_min", "arm"),
+    MEASURED_KILLS,
+    ids=[f"{rc}-{elapsed}s-of-{b}m-{arm}" for rc, elapsed, b, arm in MEASURED_KILLS],
+)
+def test_a_measured_kill_is_attributed_to_the_right_cause(
+    rc: int, elapsed: int, budget_min: int, arm: str
+) -> None:
+    """The measured instances are classified by ELAPSED vs BUDGET, not by rc.
+
+    This is the whole point: `rc` alone cannot separate them (124/137/2 all reach
+    this banner through different histories), so the test asserts the two arms
+    disagree on the SAME rc and agree across different ones.
+    """
+    result = run_kill_attribution(
+        "--rc", str(rc), "--elapsed", str(elapsed), "--budget-min", str(budget_min)
+    )
+    assert result.returncode == 0, result.stderr
+    budget_s = budget_min * 60
+    if arm == "outside":
+        assert "BEFORE the watchdog could fire" in result.stdout, result.stdout
+        assert f"{budget_s - elapsed}s BEFORE" in result.stdout, result.stdout
+        assert "is NOT the cause" in result.stdout, result.stdout
+        # The actionable sentence: raising the budget is the WRONG lever here.
+        assert "Do not raise watchdog_minutes" in result.stdout, result.stdout
+    else:
+        assert "the watchdog's own deadline was reached" in result.stdout, result.stdout
+        assert "is the lever" in result.stdout, result.stdout
+        assert "BEFORE the watchdog could fire" not in result.stdout, result.stdout
+
+
+def test_rc_137_before_the_budget_is_never_read_as_a_budget_exhaustion() -> None:
+    """The regression that cost two triage cycles: 137 at 346 s of 1560 s.
+
+    Asserted separately from the parametrized table because this is the exact
+    shape that reddened BOTH of this PR's failing required legs, and because a
+    single-line edit to the comparison (`-lt` → `-ge`) would still satisfy the
+    table's `outside` arm on one row while inverting this one.
+    """
+    result = run_kill_attribution("--rc", "137", "--elapsed", "346", "--budget-min", "26")
+    assert result.returncode == 0, result.stderr
+    assert "died 346s into a 1560s budget" in result.stdout, result.stdout
+    assert "1214s BEFORE" in result.stdout, result.stdout
+    assert "runner shutdown/cancel" in result.stdout, result.stdout
+    assert "#3719" in result.stdout, result.stdout
+
+
+def test_a_missing_start_stamp_fails_closed() -> None:
+    """No elapsed must NOT default to 0 — that would assert an external kill on nothing.
+
+    The workflow passes `--elapsed "${PYTEST_T0:+…}"`, which expands to the EMPTY
+    string when the stamp is missing (a step body edited to drop it, a shell that
+    resets `SECONDS`). `0` would land squarely in the "outside the budget" arm and
+    print a confident wrong cause; UNKNOWN is the honest report.
+    """
+    for absent in (["--elapsed", ""], []):
+        result = run_kill_attribution("--rc", "137", "--budget-min", "26", *absent)
+        assert result.returncode == 0, result.stderr
+        assert "elapsed UNKNOWN" in result.stdout, (absent, result.stdout)
+        assert "BEFORE the watchdog could fire" not in result.stdout, result.stdout
+        assert "deadline was reached" not in result.stdout, result.stdout
+    # ...and a non-numeric stamp is the same unknown, not a crash.
+    junk = run_kill_attribution("--rc", "137", "--elapsed", "12s", "--budget-min", "26")
+    assert junk.returncode == 0, junk.stderr
+    assert "elapsed UNKNOWN" in junk.stdout, junk.stdout
+
+
+def test_a_leg_that_exited_normally_gets_no_attribution() -> None:
+    """Only a kill owes a sentence: rc=0/1 must print nothing at all.
+
+    The banner's own guard is `rc ∈ {124,137,2}`, and a second opinion printed on a
+    normal failure would put a budget-shaped sentence on a leg whose nodeids are the
+    answer — the same false attribution, in the other direction.
+    """
+    for rc in (0, 1, 5):
+        result = run_kill_attribution("--rc", str(rc), "--elapsed", "10", "--budget-min", "26")
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "", result.stdout
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["--rc", "137"],
+        ["--budget-min", "26"],
+        ["--rc", "abc", "--elapsed", "1", "--budget-min", "26"],
+        ["--rc", "137", "--elapsed", "1", "--budget-min", "twenty-six"],
+        ["--rc", "137", "--elapsed", "1", "--budget-min", "26", "--nope"],
+    ],
+    ids=["no-args", "no-budget", "no-rc", "junk-rc", "junk-budget", "unknown-flag"],
+)
+def test_kill_attribution_bad_invocation_is_exit_2(argv: list[str]) -> None:
+    """A misuse of the KILL reporter is a usage error, so it cannot read as a report.
+
+    Named distinctly from `test_bad_invocation_is_exit_2` above (which covers the
+    older `pytest-attribution.sh`): two same-named definitions in one module are a
+    silent shadow — the earlier one stops being collected and `ruff`'s F811 reds the
+    required `lint` leg, which is how this pair was caught.
+    """
+    assert run_kill_attribution(*argv).returncode == 2, argv
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--rc"], ["--budget-min"], ["--elapsed"], ["--rc", "137", "--elapsed"]],
+    ids=["rc-last", "budget-last", "elapsed-last", "elapsed-last-after-a-pair"],
+)
+def test_a_flag_with_a_missing_value_is_exit_2_not_a_hang(argv: list[str]) -> None:
+    """A trailing flag must be a usage error, not a spin loop.
+
+    Measured at `dbf7cf9d8` (the head this was found on): `timeout 3 bash
+    .github/scripts/pytest-kill-attribution.sh --rc 137 --elapsed` exits **124**
+    — killed by `timeout` because it never terminated. Each arm read its value
+    with `${2:-}` and then ran `shift 2` unconditionally; when the flag is the
+    LAST argv element `shift 2` fails (`2 > $#`), shifts nothing, and — with
+    `set -uo pipefail` and no `-e` — the `while [ $# -gt 0 ]` loop re-reads the
+    same flag for ever. The banner then looks like a wedged shell rather than
+    the usage error it is, and the reporter's stated purpose is that a human or
+    a lane reruns it BY HAND.
+
+    The bound below is what turns the pre-fix hang into a FAILURE instead of a
+    60 s stall per case; the guard is on the count of remaining argv, so
+    `["--elapsed", ""]` (the documented absent-stamp call) must still report
+    UNKNOWN — see `test_a_missing_start_stamp_fails_closed` for that direction.
+    """
+    try:
+        result = run_kill_attribution(*argv, timeout=10)
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            f"{argv} HUNG: a flag with a missing value must be a usage error "
+            "(exit 2), not a spin loop. `shift 2` on a one-element tail shifts "
+            "nothing and `set -uo pipefail` carries no `-e`, so the argv loop "
+            "never advances — guard each arm on `[ $# -ge 2 ]` before shifting."
+        )
+    assert result.returncode == 2, (argv, result.returncode, result.stdout, result.stderr)
+    # The message names the flag that was left dangling — the LAST argv element,
+    # which is `--elapsed` in the shape where an earlier pair is already consumed.
+    assert f"{argv[-1]} requires a value" in result.stderr, (argv, result.stderr)
+
+
+def test_the_reporter_is_never_the_verdict() -> None:
+    """Every REPORTING arm exits 0, so the step's status stays pytest's own.
+
+    `_run_step_body`'s "a failing pytest still reds the step" case above is the
+    other half of this contract: the reporter runs before `exit $rc`, and a non-zero
+    reporter would mask the leg's real status.
+    """
+    for argv in (
+        ["--rc", "137", "--elapsed", "346", "--budget-min", "26"],
+        ["--rc", "124", "--elapsed", "1561", "--budget-min", "26"],
+        ["--rc", "137", "--budget-min", "26"],
+        ["--rc", "0", "--elapsed", "1", "--budget-min", "26"],
+    ):
+        assert run_kill_attribution(*argv).returncode == 0, argv
+
+
+#: `timeout -s INT -k 10 <budget>m stdbuf -oL python -m pytest …` — the ONE line per
+#: leg whose expiry the banner is about. Matched on the `pytest` invocation so a
+#: comment that merely quotes the shape cannot be counted as a site.
+_TIMEOUT_PYTEST_RE = re.compile(r"^timeout\s+.*\bpython\s+-m\s+pytest\b")
+_START_STAMP = "PYTEST_T0=$SECONDS"
+
+
+def _kill_banner_sites(lines: list[str]) -> list[int]:
+    """Indices of the lines that print `WATCHDOG: … killed after <budget>m`."""
+    return [
+        i
+        for i, line in enumerate(lines)
+        if "WATCHDOG:" in line and "killed after" in line and not line.strip().startswith("#")
+    ]
+
+
+def test_every_kill_banner_is_followed_by_the_measured_attribution() -> None:
+    """EVERY `killed after <budget>m` banner is followed by the measured sentence.
+
+    The defect is per-leg, so a newly added leg that prints the banner without the
+    attribution silently restores the false sentence at that site — which is exactly
+    how #10914 lost two triage cycles. The assertion is a FLOOR over the three sites
+    `python-ci.yml` actually has — the 40m `test-slow` leg included, whose own header
+    cites the 39.6-min-against-40m instance — plus the pairing each site must carry:
+
+    * a `PYTEST_T0=$SECONDS` stamp BETWEEN that leg's `timeout … python -m pytest`
+      line and its banner (a stamp placed at step start, or dropped, either counts
+      the last-failed pre-phase as pytest time or reports nothing); and
+    * the reporter call in the banner's own arm, so the numbers handed to it are
+      this leg's.
+
+    ⛔ NAMED OMISSION, not a silent gap: `post-merge-validation.yml` has the same
+    banner (`WATCHDOG: pytest killed after 50m`) with a LITERAL budget and no start
+    stamp. It is a post-merge leg, not one of the required PR contexts this lane
+    reddened, so it is deliberately out of scope here — wiring it is the same
+    three-line change at its site (recorded on #3719).
+    """
+    lines = WORKFLOW.read_text().splitlines()
+    sites = _kill_banner_sites(lines)
+    assert len(sites) == 3, (
+        "the kill-banner inventory moved — re-derive it from the workflow and update "
+        f"this floor deliberately, found {len(sites)} site(s) at "
+        + ", ".join(str(i + 1) for i in sites)
+    )
+    for site in sites:
+        # The report is emitted as prose, so the call is separated from the banner by
+        # the rationale comment block. Walk the non-comment lines instead of a fixed
+        # line window: a window that is too narrow silently checks nothing, and one
+        # that is too wide could pair a site with its NEIGHBOUR's call.
+        following = [
+            ln for ln in lines[site + 1 : site + 25] if not ln.strip().startswith("#")
+        ]
+        assert following, f"python-ci.yml:{site + 1}: nothing follows the kill banner"
+        first = next(
+            (i for i, ln in enumerate(following) if "pytest-kill-attribution.sh" in ln),
+            None,
+        )
+        assert first is not None, (
+            f"python-ci.yml:{site + 1}: the kill banner prints the BUDGET as if it were "
+            "the elapsed time and nothing follows it — a triager reads 'killed after "
+            "Nm' as the cause (#3719, #10914)"
+        )
+        # The call is a `\`-continued bash command; its own lines carry the flags.
+        call = [following[first]]
+        for ln in following[first + 1 :]:
+            if not call[-1].rstrip().endswith("\\"):
+                break
+            call.append(ln)
+        arm = "\n".join(call)
+        assert "--elapsed" in arm, (
+            f"python-ci.yml:{site + 1}: the call passes no elapsed:\n{arm}"
+        )
+        assert "PYTEST_T0" in arm, (
+            f"python-ci.yml:{site + 1}: the elapsed is not derived from a pytest start "
+            f"stamp — a step-start `$SECONDS` counts the last-failed pre-phase:\n{arm}"
+        )
+        assert "--budget-min" in arm, (
+            f"python-ci.yml:{site + 1}: the call passes no budget:\n{arm}"
+        )
+        # ...and the stamp sits between THIS leg's pytest invocation and its banner.
+        # `timeout -s INT -k 10 …` and the stamp are adjacent, so the search starts at
+        # the PREVIOUS leg's invocation (or the top of the file) — a stamp counted from
+        # the top could be another leg's, and one placed at step start would count the
+        # last-failed pre-phase as pytest time.
+        timeouts = [
+            i for i in range(site) if _TIMEOUT_PYTEST_RE.match(lines[i].strip())
+        ]
+        assert timeouts, (
+            f"python-ci.yml:{site + 1}: no `timeout … python -m pytest` line above this "
+            "banner — the site moved and this guard no longer knows what it is checking"
+        )
+        timeout_at = timeouts[-1]
+        start_at = timeouts[-2] + 1 if len(timeouts) > 1 else 0
+        stamps = [
+            i for i in range(start_at, site) if lines[i].strip() == _START_STAMP
+        ]
+        assert stamps, (
+            f"python-ci.yml:{timeout_at + 1}: pytest's start is not stamped before the "
+            f"`timeout` call that the banner at line {site + 1} reports on"
+        )
