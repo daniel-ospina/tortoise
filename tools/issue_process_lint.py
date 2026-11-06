@@ -254,8 +254,8 @@ DECLINE_RE = re.compile(
     # (a) the author's convention: `deliberately not …`
     rf"deliberately{_EMPH}not"
     rf"(?={_DECLINE_TAIL}$"
-    rf"|{_EMPH}{_DET}{_CLOSING_STEM}(?P<obj_a>{_EMPH}{_DET}{_REF_OBJ})?{_DECLINE_TAIL}"
-    rf"(?:$|[,;]|{_EMPH}and{_EMPH}))"
+    rf"|{_EMPH}{_DET}(?P<stem_a>{_CLOSING_STEM})(?P<obj_a>{_EMPH}{_DET}{_REF_OBJ})?"
+    rf"{_DECLINE_TAIL}(?:$|[,;]|{_EMPH}and{_EMPH}))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
     rf"(?P<obj_b>{_EMPH}{_DET}{_REF_OBJ})?{_DECLINE_TAIL}$",
@@ -396,12 +396,18 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
     cannot disagree about which claim an author answered (a second copy of this rule would be a
     second definition of "the author answered", and the disagreement would show up as a false PASS).
 
-    The two tests are stated on `_DECLINE_BRIDGE_RE` and its comment block; the shape here is:
-      * no reference BEFORE the decline on its line -> no target. A decline that precedes every
-        reference (`Not closing this one.` on its own line) is not evidence about anything on the
-        line, and the flag is the safe direction;
-      * the bridge between that reference and the negation must be punctuation plus at most a
-        one-word subject and copula — anything else means the sentence has a SUBJECT OF ITS OWN.
+    The tests are stated on `_DECLINE_BRIDGE_RE` and its comment block; the shape here is:
+      * a decline that NAMES its objects owns them, and nothing else. The objects are every `#N`
+        the clause names (one, two, or a comma/`and` list) — never the ref that merely happens to
+        sit before the sentence;
+      * otherwise the decline is about the nearest reference PRECEDING it, whose bridge to the
+        negation must be the short closed vocabulary on `_DECLINE_BRIDGE_RE` — anything else means
+        the sentence has a SUBJECT OF ITS OWN. No preceding reference at all -> no target, because
+        a decline that precedes every reference on its line is not evidence about any of them;
+      * an alternative-(a) object that the scan CANNOT READ (a blanked inline code span or HTML
+        comment, which `strip_code` turns into whitespace) is not evidence either: it falls to no
+        target rather than to proximity. Measured at `049548f2c` (review, P3):
+        ``Part of #11000 — deliberately not closing `#11078`.`` read CLEAN that way.
     """
     out: dict[int, set[int]] = {}
     for i, line in enumerate(text.splitlines()):
@@ -420,10 +426,48 @@ def _decline_targets(text: str) -> dict[int, set[int]]:
             # BEFORE the sentence — and cleared it. Measured at `e7dd41058` (review, P2): the claim
             # `#11000` was silently dropped and arm 1 read CLEAN. A named object is the strongest
             # possible statement of what the sentence is about, so it OVERRIDES the proximity rule.
-            named = [int(x) for x in _REF_POS_RE.findall(obj)]
+            #
+            # EVERY object the clause names, not just the first: the capture groups hold one `#N`,
+            # so a written-out list (`deliberately not closing #100, #200.`) put only `#100` in
+            # `obj` and the region scan below had to be added — without it the SECOND named ref was
+            # flagged as un-declined, and `Part of #100 — deliberately not closing #200, #100.`
+            # (rc 0 at `e7dd41058`) became rc 3 (review P2). The region stops at the clause end
+            # (`.`/`;`), so a following sentence's refs are never swept in.
+            # The object ZONE: what follows the decline, up to the end of its clause. It stops at
+            # `.`/`;` and at a conjunction that does NOT continue an object list — `#100 and #200`
+            # continues one (the word before `and` is a ref), while `Closes and #200 is deliberately
+            # not Closes.` starts a SECOND sentence (the word before `and` is the closing verb), and
+            # sweeping its ref in dropped the first sentence's own reference.
+            after_stem = line[(m.end("stem_a") if m.group("stem_a") else m.end()):]
+            stop = len(after_stem)
+            for sep in (".", ";"):
+                j = after_stem.find(sep)
+                if j != -1:
+                    stop = min(stop, j)
+            zone = after_stem[:stop]
+            for conj in re.finditer(r"\b(?:and|or)\b", zone, re.IGNORECASE):
+                if not _REF_POS_RE.search(zone[:conj.start()][-12:]):
+                    zone = zone[:conj.start()]
+                    break
+            named = [int(x) for x in _REF_POS_RE.findall(obj)] + \
+                    [int(x) for x in _REF_POS_RE.findall(zone)]
             if named:
                 targets.update(named)
                 continue
+            # ⛔ AN UNREADABLE OBJECT IS NOT EVIDENCE. `strip_code` blanks an inline-code span or an
+            # HTML comment to WHITESPACE, so `deliberately not closing `#11078`.` reaches this
+            # function as `deliberately not closing         .` — the stem is there, the object is
+            # gone. Falling through to proximity then cleared the ref BEFORE the sentence, which is
+            # the same silent-drop the named-object rule exists to stop (measured at `049548f2c`,
+            # review P3). An object region that begins with whitespace and names neither a ref nor a
+            # reference noun is therefore no target at all — the flag direction. A region that
+            # starts immediately with punctuation (`deliberately not Closes.`, `not closing.`) is
+            # the clause-terminal convention and is unaffected.
+            if m.group("stem_a") is not None:
+                if (after_stem[:1].isspace()
+                        and not _REF_POS_RE.search(after_stem)
+                        and not re.search(_REF_NOUN, after_stem, re.IGNORECASE)):
+                    continue
             before = [r for r in refs if r[1] <= m.start()]
             if not before:
                 continue
