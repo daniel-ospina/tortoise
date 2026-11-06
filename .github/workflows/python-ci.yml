@@ -1002,11 +1002,11 @@ jobs:
       # so the pip half is #7612's own payload — the torch wheel set, installed in
       # this job by `.github/actions/install-cpu-torch` with `pip` — and pip alone
       # accounts for 93% of the 3,882,423,064 B payload that was uploaded (that
-      # row is 3,616,385,308 B on its own). FOUR other jobs write
-      # `pip-<os>-<hash uv.lock>` — `test-slow`, `test-concurrency-falkor`,
-      # `test-d14-hosted-api`, `test-record-postgres` — so THIS job only ever
-      # needed to READ that key: restore-only costs it nothing. The uv half has no
-      # other writer, so it keeps one, explicitly and bounded.
+      # row is 3,616,385,308 B on its own). TWO other jobs still write
+      # `pip-<os>-<hash uv.lock>` — `test-slow` and `test-d14-hosted-api`; #11063
+      # moved `test-concurrency-falkor` and `test-record-postgres` to
+      # `actions/cache/restore@`, so neither writes it, and THIS job only ever
+      # READ that key. The uv half keeps one writer, explicitly and bounded.
       #
       # HOW BIG IS THE UV HALF? Only one scope has both keys and it is NOT this
       # job's scope: `refs/heads/main` holds `uv-pip-…` at 662,393,744 B and
@@ -1163,7 +1163,7 @@ jobs:
         #
         # Recorded, not hidden: that load-bearing writer is ITSELF an
         # `actions/cache@v4` implicit save, on a 15 m cap whose own SUM
-        # `docs/ops/ci-wall-clock.md` §2 records at about 30 m. It is a member of
+        # `docs/ops/ci-wall-clock.md` §2 calls unmeasured past 21 m in-step. It is a member of
         # the un-fixed class (see "Not fixed here" on #11063), not an exception to
         # it, so this job's restore-only shape is only as durable as that job is
         # un-cancelled.
@@ -2071,7 +2071,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           # ⛔ `~/.cache/uv` ALONE. Adding `~/.cache/pip` here is what made the
-          # payload 3.88 GB; that half is written by THREE other jobs and is read
+          # payload 3.88 GB; that half is written on the shared key by TWO other jobs and is read
           # above, so a second writer would only re-upload 3.6 GB per miss shard.
           path: ~/.cache/uv
           key: uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -2929,8 +2929,8 @@ jobs:
         # POST cache SAVE is charged against this job's `timeout-minutes` and
         # has no timeout of its own, so at a 15m cap it can never be amortized —
         # and the `cancelled` it causes reds a REQUIRED check on a green leg
-        # (#5219). This job only ever READ the shared key; `test`, `test-slow`
-        # and `test-d14-hosted-api` write it on every run.
+        # (#5219). This job only ever READ the shared key; `test-d14-hosted-api`
+        # writes it on every run, `test-slow` only when `slow_run == 'true'`.
         uses: actions/cache/restore@v4
         continue-on-error: true
         with:
@@ -3473,15 +3473,15 @@ jobs:
         # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
         # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
         # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
-        # (floor-clamped, `carve_shards: 3`) + ~1.5m setup/provision, i.e. ~9m
-        # of headroom against a ~9m COLD save and none at all against a slow
-        # one. Raising the cap instead would re-open #3239's stale-head
+        # (floor-clamped, `carve_shards: 3`) + a 10m embedder cap + ~1m setup
+        # + the 1m38s HF POST ≈ 31.6m — already ~1.6m PAST the 30m cap, and worse
+        # against a slow one. Raising the cap instead would re-open #3239's stale-head
         # exposure (the cap IS that exposure) and buy finite headroom under an
         # UNBOUNDED term — the save has no timeout of its own.
         #
         # Nothing is lost by not saving here: the key is SHARED
-        # (`pip-<os>-<hash uv.lock>`), and it is written on EVERY run by
-        # `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`.
+        # (`pip-<os>-<hash uv.lock>`), written on EVERY run by `test-d14-hosted-api`
+        # (unconditional, PR + push) and by `test-slow` only under `slow_run`.
         # This job only ever READ it.
         #
         # `continue-on-error`: a cache-SERVICE error (transport/503) must never
@@ -4646,8 +4646,8 @@ jobs:
         # withheld a REQUIRED check on a diff that never touched this job.
         #
         # Nothing is lost by not saving here: the key is SHARED
-        # (`pip-<os>-<hash uv.lock>`) and is written by ONLY `test-slow` (60m) and
-        # `test-d14-hosted-api` (50m) — both have the headroom this job does not.
+        # (`pip-<os>-<hash uv.lock>`) and is written by ONLY `test-d14-hosted-api`
+        # (50m, headroom this job does not have) and `test-slow` (60m, at its cap).
         # ⛔ NOT `test`: restore-only on this path since #11063, it saves
         # `.pytest_cache` and `~/.cache/uv`. This job only ever READ the key.
         uses: actions/cache/restore@v4
