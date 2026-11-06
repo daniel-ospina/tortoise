@@ -331,8 +331,10 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "vector\", and a foreign vector is CARRIED (restored verbatim on replay) "
         "with NO attestation, because its origin is not ours to vouch for. The "
         "server vector is stamped by `_point` (a different function, under its own "
-        "seam), and the SDK surface refuses a caller-supplied `embedding` outright, "
-        "so this is reachable only from a direct `EventAPI` caller"),
+        "seam). ⛔ The caller vector is NOT refused by the SDK: `create_point`/"
+        "`update_point` store one VERBATIM by a recorded decision (PR `#3018` review P2), "
+        "so this door is tenant-reachable and this row is only its JOURNAL-side half — "
+        "the gate-side half is `gated` and lies outside this census's population"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "

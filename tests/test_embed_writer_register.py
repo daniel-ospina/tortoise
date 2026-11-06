@@ -2,13 +2,15 @@
 cannot bypass silently **within the population the instrument can see**.
 
 ⛔ The qualifier is not decoration and `#11086` must not drop it: discovery is
-`tools/dod_5090_probe.py::_EMBED_WRITE`, a source-text regex, so a writer that spells its write as
-a map-merge (`SET n += $p` carrying `{"embedding": …}`), a dict key (`rec["embedding"] = x`), an
-inline property map (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace (`SET n = $map`),
-**or** that reaches the store through a helper the vocabulary does not name (live today:
-`tortoise.sdk::_write_capture_turns`, `tortoise.cache_projection::node_statement`) is ABSENT from
-the census rather than undeclared — and every test below is green. `tortoise/embed_writer_register.py`'s
-module docstring states the same boundary; `#11274` owns widening it.
+`tools/dod_5090_probe.py::_EMBED_WRITE` (a source-text regex) PLUS
+`_writes_an_embedding` (an AST pass that decides the CONTAINER-KEY shape
+`rec["embedding"] = …`, `#11274`), so a writer that spells its write as a map-merge
+(`SET n += $p` carrying `{"embedding": …}`), an inline property map
+(`MERGE (n:Point {…, embedding: $e})`), a whole-node replace (`SET n = $map`), a property name
+INTERPOLATED into the clause (live: `tortoise.cache_projection::node_statement`), or through a
+container HELPER / COMPUTED key (`clean.setdefault("embedding", None)`, `d[KEY] = v`) is ABSENT
+from the census rather than undeclared — and every test below is green. `#11274` owns widening
+it; the register's module docstring states the same boundary.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (6 recognised producers,
 9 legitimately exempt, 0 bypasses) but left that classification in `tools/dod_5090_probe.py`'s
@@ -348,13 +350,14 @@ def test_the_instrument_and_the_product_declare_the_same_writers():
         "the census classifies writers the product does not declare: "
         f"{sorted(set(census) - declared)}"
     )
-    # ⛔ `declared - _writers_outside_the_gate()`, NOT `declared - set(census) - outside`. Every
-    # `unresolved_write` key IS in the static `WRITER_CENSUS`, so subtracting the census dropped the
-    # keys before staleness was ever tested: a writer repaired so it no longer stores outside the
-    # gate — the case this arm exists for — was masked, and the arm could only ever fire on the one
-    # register key that is not in the census (`tortoise.session_indexer::main`). Measured on the
-    # live sets at the repair: `declared - census - outside == []` AND `declared - outside == []`,
-    # so the narrowing changes no verdict today and restores the direction the message claims.
+    # ⛔ `declared - _writers_outside_the_gate()`, NOT `declared - set(census) - outside`. The old
+    # arithmetic could fire on ONE key only: census(19) is a SUBSET of declared(20), so
+    # `declared - set(census) == {tortoise.session_indexer::main}` - subtracting the static census
+    # removed every writer that had a row BEFORE staleness was tested, which is why a writer
+    # repaired so it no longer stores outside the gate (the case this arm exists for) was masked.
+    # The repair restores the direction the failure message claims; on the live sets at this head
+    # both expressions yield `[]` (`declared == _writers_outside_the_gate()`, 20 == 20), so it
+    # changes no verdict today.
     stale = declared - _writers_outside_the_gate()
     assert not stale, (
         "the register declares writers the instrument no longer finds outside the gate "

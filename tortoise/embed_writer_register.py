@@ -78,7 +78,7 @@ module will not parse. ⛔ **The `gated` escape is not hypothetical, and it is t
 `tortoise.sdk::create_point` and `tortoise.sdk::update_point` reach `encode_for_row` on the normal
 path, so discovery classes them `gated` and owes them no declaration — yet **a caller-supplied
 `embedding` is stored VERBATIM by a recorded decision** (`tortoise/sdk.py:6457-6460`;
-`_create_map["embedding"] = "$embedding"` assigned AFTER the props loop, `:14049-14057`; PR `#3018`
+`_create_map["embedding"] = "$embedding"` assigned AFTER the props loop, `:14048-14057`; PR `#3018`
 review P2), i.e. the gate does not decide that path. Both are reachable from the MCP surface
 (`tortoise_create_point`, `tortoise_update_point`), so the sentence this register can keep is
 **"no writer discovery finds OUTSIDE the gate is undeclared"** — never "no caller can supply a
@@ -122,8 +122,10 @@ RECOGNISED_PRODUCER = "recognised_producer"
 
 #: A function that is not a producer of a STORED vector at all: it renders the clause, forwards one,
 #: journals one, reads one, sets a FLAG or emits a DIAGNOSTIC, or merely MENTIONS one in a
-#: comment/docstring — or it stores one under a **named** owner exemption (`#4094` today; the
-#: `#5008` session writers that DO store are declared `recognised_producer`, not this class).
+#: comment/docstring — or it stores one under a **named** owner exemption (`#4094` today; and
+#: `tortoise.sdk::_write_capture_turns`, a `#5008` session writer that DOES store, is exempt as the
+#: sanctioned turn-record CARRIER — so `#5008` is NOT a class marker here: `_session_event_write`
+#: and `ingest_corpus` are `recognised_producer` and `_write_capture_turns` is this class).
 #: ⚠️ The class therefore folds two very different dispositions into one value — "no write to gate"
 #: (`tortoise.consistency::_compare_views`) and "a write gated out by a ruling"
 #: (`tortoise.sdk::_update_entity`) — which an enforcement point cannot tell apart; a consumer that
@@ -356,7 +358,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "own entry). ⛔ The caller vector is NOT refused by the SDK — `create_point`/"
             "`update_point` store one VERBATIM by a recorded decision "
             "(`tortoise/sdk.py:6457-6460`; `_create_map[\"embedding\"] = \"$embedding\"` is "
-            "assigned AFTER the props loop, `:14049-14057`; PR `#3018` review P2), so this door "
+            "assigned AFTER the props loop, `:14048-14057`; PR `#3018` review P2), so this door "
             "is tenant-reachable through the MCP tools and this row is its JOURNAL-side half. "
             "The gate-side half is a `gated` classification and therefore OUTSIDE this "
             "register's population — see the closure-claim caveat below",
@@ -533,7 +535,7 @@ def undeclared(writers: Iterable[str]) -> tuple[str, ...]:
 
     ⛔ Precondition: ``writers`` must ALREADY be restricted to writers outside the gate (this
     register's population — ``unresolved_write`` ∪ ``ungated``). Handing it the instrument's whole
-    map answers with the ~9 ``gated``/``producer`` writers that legitimately need no declaration,
+    map answers with the ``gated``/``producer`` writers that legitimately need no declaration,
     and :func:`classify` then raises for each of them — a false refusal on a correct write. The
     restriction lives in `tests/test_embed_writer_register.py::NEEDS_A_DECLARATION` because it is
     the INSTRUMENT's vocabulary; this module deliberately imports nothing, so it cannot own it.
