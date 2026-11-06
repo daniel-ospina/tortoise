@@ -3153,14 +3153,16 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         from tortoise.sentry import is_benign_exception as _is_benign
 
         # `inbound_request=True` — this handler runs while serving an inbound
-        # request. ⚠️ That says WHERE the exception surfaced, not which end caused
-        # it (review finding, measured): a dependency RST reached inside a route
-        # arrives here as the same bare `ConnectionResetError` that a caller's own
-        # abort produces. The ambiguity is bounded, not eliminated — the names are
-        # deliberately NOT in the client-global `ignore_errors`, so the
-        # `ServerErrorMiddleware` re-raise still delivers one event per abort (the
-        # residual described above), and uvicorn still logs its own ERROR. The only
-        # thing a misclassification costs is this handler's own sub-ERROR line.
+        # request. ⛔ That establishes the REQUEST is inbound, not which socket
+        # reset (review round 9, P2 — measured): starlette/uvicorn raise neither
+        # of the direction-ambiguous classes, a caller hang-up arrives as
+        # `ClientDisconnect`, and an aborted send reaches no handler at all. An
+        # exact-named reset here is an app/upstream failure, and calling it benign
+        # costs the ERROR record (this DEBUG write is dropped in the hosted
+        # deployment) and the `method`/`path` tags — the event itself still goes
+        # out via the Starlette re-raise. Accepted for round 4's reason; the full
+        # statement and the alternative are in `REQUEST_LAYER_DISCONNECT_NAMES`'
+        # note.
         _benign = _is_benign(exc, inbound_request=True)
     except Exception:  # noqa: BLE001, RUF100 — classification never breaks the 500 response
         _benign = False

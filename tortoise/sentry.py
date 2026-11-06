@@ -44,18 +44,31 @@ BENIGN_EXCEPTION_NAMES = frozenset({"ClientDisconnect", "BrokenResourceError"})
 #: connector, any dependency — the identical class means "the UPSTREAM we called
 #: reset us", i.e. a real dependency outage (sentry review round 4, P2).
 #:
-#: They may therefore be treated as benign ONLY where the layer is known: inside
-#: `hosted_api._unhandled_exception_handler`, which by construction runs while
-#: serving an inbound request. They are deliberately NOT in
-#: `ignore_errors`/`BENIGN_EXCEPTION_NAMES`, because that is a CLIENT-GLOBAL
-#: filter (`Client._should_capture` runs for EVERY event from every path) and a
-#: global entry would silence a real upstream reset everywhere in the process,
-#: including `oauth._log_and_capture`'s "single capture" for the token boundary.
+#: They are therefore NOT in `ignore_errors`/`BENIGN_EXCEPTION_NAMES`, which is a
+#: CLIENT-GLOBAL filter (`Client._should_capture` runs for EVERY event from every
+#: path): a global entry would silence a real upstream reset everywhere in the
+#: process, including `oauth._log_and_capture`'s "single capture" for the token
+#: boundary.
 #:
-#: The residual is bounded and measured: a reset on the ASGI send path still
-#: produces ONE event per abort via the re-raise, costing ~0.09 ms since
-#: `include_source_context=False` — versus blinding the whole process to
-#: upstream resets.
+#: ⚠️ WHAT THE REQUEST LAYER ACTUALLY ESTABLISHES (review round 9, P2 — measured;
+#: this corrects an earlier claim here that the handler is "the one place the
+#: layer is known"): that the request is INBOUND — **not** which socket reset.
+#: The framework never raises either class: `starlette` and `uvicorn` contain zero
+#: `ConnectionResetError`/`BrokenPipeError` raise sites; a caller hanging up
+#: (mid-body RST or FIN) arrives as `ClientDisconnect` (`starlette.requests`,
+#: raised while the body is streamed); and uvicorn's `send` returns early when the
+#: client is already gone, so an aborted send reaches no handler at all. An
+#: EXACT-NAMED reset arriving in `_unhandled_exception_handler` is therefore
+#: evidence of an app/upstream failure, and treating it as benign costs (a) the
+#: ERROR record — the DEBUG write is dropped in the hosted deployment, see
+#: `hosted_api` — and (b) the `method`/`path` tags on the capture. The EVENT
+#: itself still goes out through the Starlette re-raise, so this is an
+#: attribution cost, not a blind spot.
+#:
+#: That cost is ACCEPTED rather than reversing round 4's decision (keep these
+#: names out of the client-global set). The alternative, if the lost tags ever
+#: bite, is to drop them from this set too — `ClientDisconnect` already covers
+#: the caller-hang-up case.
 REQUEST_LAYER_DISCONNECT_NAMES = BENIGN_EXCEPTION_NAMES | frozenset(
     {"ConnectionResetError", "BrokenPipeError"}
 )
@@ -91,7 +104,7 @@ def init() -> bool:
             # #11092: source context is ON by default, and building an event then
             # READS AND DECODES THE SOURCE FILE OF EVERY FRAME
             # (`sentry_sdk.utils.get_source_context` -> `SourceLoader.get_source`
-            # -> `tokenize.detect_encoding`/`find_cookie`) in the thread that logged
+            # -> `tokenize.detect_encoding`'s cookie scan) in the thread that logged
             # the error — on the hosted API that is the asyncio event loop, holding
             # the GIL. Measured on tortoise-y4mjjq 2026-11-04: three `py-spy dump`s
             # in a row parked the MainThread in exactly that stack while every
@@ -197,19 +210,23 @@ def is_benign_exception(exc: BaseException, *, inbound_request: bool = False) ->
     `inbound_request` selects WHICH name set (review round 4, P2). The default is
     the direction-UNAMBIGUOUS set (`BENIGN_EXCEPTION_NAMES`), because that is
     what `capture_exception` and the client-global `ignore_errors` filter can
-    safely use for the whole process. Only a caller that KNOWS the layer is an
-    inbound request — `hosted_api._unhandled_exception_handler` — passes
+    safely use for the whole process. Only a caller that KNOWS the request is
+    inbound — `hosted_api._unhandled_exception_handler` — passes
     `inbound_request=True`, which admits `ConnectionResetError` and
     `BrokenPipeError` as well. ⚠️ The LAYER says where the exception SURFACED,
-    never which end caused it (review finding, measured): a caller that sends RST
-    surfaces at the handler as a bare `ConnectionResetError`, and so does a
-    DEPENDENCY RST reached inside a route — `session_verify._api` catches only
-    `HTTPError`/`URLError`, and `URLError` is a SIBLING of `ConnectionResetError`
-    under `OSError`, so a bare reset escapes it. The ambiguity is therefore
-    bounded, not eliminated, and the bound is what makes this acceptable: neither
+    not which end caused it. MEASURED (review round 9, P2): the framework raises
+    neither ambiguous class — a caller hang-up arrives as `ClientDisconnect`
+    (`starlette.requests`, raised while the body is streamed) and uvicorn's `send`
+    returns early for a client already gone, so an aborted send reaches no handler
+    at all. The way these names DO arrive here is an app/upstream failure — e.g. a
+    bare reset escaping `session_verify._api`, which catches only
+    `HTTPError`/`URLError` and `URLError` is a SIBLING of `ConnectionResetError`
+    under `OSError`. The ambiguity is therefore bounded, not eliminated: neither
     name is in the client-global `ignore_errors`, so the `ServerErrorMiddleware`
-    re-raise still delivers ONE event per abort, and the only thing an
-    misclassification costs is THIS handler's own sub-ERROR log line.
+    re-raise still delivers ONE event per abort. What a misclassification costs is
+    THIS handler's sub-ERROR line — dropped in the hosted deployment, see
+    `hosted_api` — and the `method`/`path` tags on the capture; the full statement
+    and the alternative are in `REQUEST_LAYER_DISCONNECT_NAMES`' note.
 
     ⛔ The name match is EXACT on purpose (review round 3, P3). Walking the MRO
     makes this helper broader than the SDK's own `ignore_errors` — and broader is

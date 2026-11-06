@@ -313,12 +313,16 @@ def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
 def test_unhandled_handler_treats_an_inbound_reset_as_a_disconnect(
     enabled_sentry: dict[str, list], caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Review round 4 (P2): the handler is the ONE place the layer is known.
+    """Review round 4 (P2): the handler passes the `inbound_request` flag.
 
-    `ConnectionResetError` is direction-ambiguous, so it is benign only when the
-    peer is the CALLER. This drives the handler with it and asserts the inbound
-    wiring (`inbound_request=True`) is actually passed — without it, a reset
-    storm on the send path would log at ERROR and capture per abort again.
+    `ConnectionResetError` is direction-ambiguous, so it is benign only behind a
+    layer that knows the request is inbound. This drives the handler with it and
+    asserts that wiring (`inbound_request=True`) is actually passed — without it
+    the exception would log at ERROR and be captured. ⛔ What the wiring does and
+    does not establish is measured in `REQUEST_LAYER_DISCONNECT_NAMES`' note
+    (review round 9, P2): the framework raises neither ambiguous class, a caller
+    hang-up arrives as `ClientDisconnect`, so an exact-named reset where this flag
+    applies is an app/upstream failure being classified benign.
     """
     import tortoise.hosted_api as hapi
     import tortoise.sentry as sentry_mod
