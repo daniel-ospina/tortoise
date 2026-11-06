@@ -69,16 +69,43 @@ Sources (see the manifest header for the full rationale):
                          existence half is a reviewer's job, and the `OVERRIDES:`
                          marker on the named issue is what makes it checkable.
 
+Mitigation ledger (#11122) — the OTHER half of the contract
+----------------------------------------------------------
+``.github/scripts/fly-secret-mitigations.txt`` declares names that are
+**deliberately ABSENT** from the app: an operator removed the secret as a live
+mitigation and the deploy must not put it back. The manifest above says what the
+deploy MANAGES; the ledger says what it must NOT manage, for now, on purpose.
+
+That distinction is not expressible in the manifest, and its absence was
+measured (2026-11-05/06): ``SENTRY_DSN`` was unset on ``tortoise-y4mjjq`` as the
+mitigation for #11092's serialization storm, and **two consecutive deploys put
+it back** — on builds that provably did not contain the fix — because the
+``flyctl secrets set`` step asserts a desired state and cannot tell
+"unconfigured" from "deliberately removed 40 minutes ago".
+
+The ledger is honoured at SYNC time, in the workflow (a ledgered name is dropped
+from the payload argv), NOT here: an exception that only quiets a gate is a
+false exception — the measured Argo CD trap, where ``ignoreDifferences`` hides a
+difference during comparison while the sync still applies the desired value.
+THIS gate's job is the reverse half, so the exception cannot rot: it proves the
+filter actually suppressed the name, that a ledgered name is not already live on
+Fly (where the entry would be untrue AND would freeze that secret's rotation),
+and that the entry has not expired.
+
 Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
   0 — every Fly secret is declared and every declaration is honoured
   1 — drift found (undeclared Fly secret, a declaration the deploy does not
-      honour, a name whose declaration names NO managing source, or a guarded
-      declaration whose GitHub secret does not exist)
+      honour, a name whose declaration names NO managing source, a guarded
+      declaration whose GitHub secret does not exist, a ledger entry the deploy
+      does not suppress, a ledger entry whose name is live on Fly, or an expired
+      ledger entry)
   2 — could not determine state (missing/unparsable manifest, unreadable or
       EMPTY secret list, malformed entry — including a `fly-only:` declaration
       whose issue ref is empty or malformed — absent GH_SECRETS_PRESENT, a
-      payload that cannot be read). Fail-closed: an unreadable state is never
-      clean.
+      payload that cannot be read, a ledger that is missing, malformed, names a
+      name the manifest does not declare, names a non-`gh-secret:` source, or
+      names one of the app's MANDATORY secrets). Fail-closed: an unreadable
+      state is never clean.
 
 Env seams (all optional; used by the hermetic test suite):
   FLY_SECRETS_FILE          fixture path holding the ``--json`` secret list
@@ -93,6 +120,12 @@ Env seams (all optional; used by the hermetic test suite):
                             builds it from the ``${{ secrets.X }}`` values it
                             propagates, because no CI token can list repo
                             secrets. Unset is exit 2, never "all present".
+  FLY_MITIGATION_LEDGER     mitigation-ledger path override (#11122). Also
+                            seeded into the stubbed payload run, so the sample
+                            the gate classifies is filtered by the SAME ledger a
+                            real deploy would read.
+  FLY_MITIGATION_TODAY      ``YYYY-MM-DD`` override for "today" when judging
+                            ledger expiry (hermetic tests; production uses UTC).
   FLY_STUB_TIMEOUT          seconds before the stubbed payload run is treated as
                             unclassifiable (default 30) — a test seam.
 
@@ -105,6 +138,7 @@ may-never-run step at exit 0. The deploy workflow provisions it with
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
@@ -114,10 +148,38 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_MANIFEST = REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
 DEFAULT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
+DEFAULT_LEDGER = REPO_ROOT / ".github" / "scripts" / "fly-secret-mitigations.txt"
+
+# The names the deploy HARD-FAILS on (`Verify secrets exist` in
+# deploy-hosted.yml): the API cannot boot, or the deploy's own guards cannot run,
+# without them. A mitigation-ledger entry naming one of these is REFUSED —
+# removing it is not a mitigation, it is an outage, and an entry would make the
+# machinery cooperate with the outage.
+#
+# Kept here rather than derived from the workflow because the derive would have to
+# parse a shell `if` body for the names whose branch calls `exit 1` — a second,
+# fragile owner of the same fact. `tests/test_deploy_workflow.py`
+# (`test_the_ledger_mandatory_set_matches_the_verify_gate`) pins this constant
+# against the workflow's actual hard-fail list, so the two cannot drift silently.
+# `SUPABASE_ACCESS_TOKEN` and `FLY_API_TOKEN` are in the workflow's hard-fail set
+# but are never Fly secrets, so the manifest-declaration rule already refuses a
+# ledger entry for them; they are listed here because the pin is an EQUALITY.
+MANDATORY_FLY_SECRETS = frozenset(
+    {
+        "FASTAPI_INTERNAL_KEY",
+        "TORTOISE_SECRET_PEPPER",
+        "FALKORDB_CLOUD_URI",
+        "SUPABASE_ACCESS_TOKEN",
+        "FLY_API_TOKEN",
+        "STRIPE_SECRET_KEY",
+        "STRIPE_WEBHOOK_SECRET",
+    }
+)
 
 
 def read_gh_secret_presence() -> set[str]:
@@ -192,6 +254,17 @@ _PAYLOAD_CMD_RE = re.compile(
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 # The Actions template reference substituted before the shell runs.
 _SECRET_TMPL_RE = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}")
+# A mitigation-ledger entry: `<NAME> owner=<owner> expires=<YYYY-MM-DD> reason=<…>`.
+# STRICT and ordered on purpose — the ledger is read by a bash filter too (builtins
+# only, under `bash -e -u`), which takes the first whitespace-delimited token as
+# the name, so the name must be first and the rest must not be able to move. The
+# `reason` runs to end of line and may contain `#`: it cites the incident
+# (`#11092`), and comment-stripping at the first `#` truncated exactly the field
+# that makes the entry reviewable.
+_LEDGER_RE = re.compile(
+    r"^(?P<name>[A-Z][A-Z0-9_]*)\s+owner=(?P<owner>\S+)\s+"
+    r"expires=(?P<expires>\d{4}-\d{2}-\d{2})\s+reason=(?P<reason>.+)$"
+)
 
 
 def _yaml_module():
@@ -403,6 +476,12 @@ def _capture_payload(
             "PATH": stub_dir,
             "HOME": stub_dir,
             "GITHUB_SHA": "fixture-sha",
+            # #11122: seed the ledger the payload shell filters ARGS by, resolved
+            # ABSOLUTE, so the sample this harness classifies is filtered by the
+            # same ledger a real deploy reads regardless of the caller's cwd (a
+            # relative default would silently read "no mitigations" from a tmp
+            # cwd and make the gate certify an unfiltered payload).
+            "FLY_MITIGATION_LEDGER": str(ledger_path()),
         }
         # The step's and the job's `env:` are inherited by the payload shell, and a
         # guard may read one (`[ -z "$VAR" ]`). They are modelled with the same
@@ -590,6 +669,103 @@ def read_manifest(path: Path) -> dict[str, str]:
     return entries
 
 
+class Mitigation(NamedTuple):
+    """One ledger entry — who removed the secret, until when, and why."""
+
+    name: str
+    owner: str
+    expires: dt.date
+    reason: str
+
+    def lapsed(self, today: dt.date) -> bool:
+        """``expires`` is the LAST authorised day, so it lapses the day after."""
+        return today > self.expires
+
+
+def ledger_path() -> Path:
+    """The mitigation ledger this run reads (and the stub payload run is seeded with)."""
+    return Path(os.environ.get("FLY_MITIGATION_LEDGER") or DEFAULT_LEDGER)
+
+
+def _today() -> dt.date:
+    """UTC today, or the ``FLY_MITIGATION_TODAY`` override (hermetic tests)."""
+    raw = os.environ.get("FLY_MITIGATION_TODAY")
+    if raw is None or not raw.strip():
+        return dt.datetime.now(dt.UTC).date()
+    return dt.date.fromisoformat(raw.strip())
+
+
+def read_mitigation_ledger(
+    path: Path, declared: dict[str, str], today: dt.date
+) -> dict[str, Mitigation]:
+    """Parse the ledger, refusing every entry the mechanism could not honour.
+
+    A MISSING ledger is an OSError, i.e. exit 2 — the same class as a missing
+    manifest. The file is tracked, so its absence means the mechanism is gone and
+    every entry somebody believed in is silently unenforced; reading that as "no
+    mitigations" is the fail-open shape this whole issue is about.
+
+    Every rejection here is exit-2 (unreadable state), never a bypassable
+    violation, and the reason is the same in each case: an entry that reads as a
+    decision while the deploy does the opposite is worse than no entry at all.
+    """
+    entries: dict[str, Mitigation] = {}
+    for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _LEDGER_RE.match(line)
+        if not match:
+            raise ValueError(
+                f"{path.name}:{lineno}: expected '<NAME> owner=<owner> "
+                f"expires=<YYYY-MM-DD> reason=<why>', got {raw!r}"
+            )
+        name, owner, reason = (
+            match.group("name"),
+            match.group("owner"),
+            match.group("reason"),
+        )
+        try:
+            expires = dt.date.fromisoformat(match.group("expires"))
+        except ValueError as exc:
+            raise ValueError(
+                f"{path.name}:{lineno}: expires={match.group('expires')!r} is not a "
+                "YYYY-MM-DD date"
+            ) from exc
+        if name in entries:
+            raise ValueError(f"{path.name}:{lineno}: duplicate ledger entry for {name}")
+        source = declared.get(name)
+        if source is None:
+            raise ValueError(
+                f"{path.name}:{lineno}: {name} is not declared in the managed-secrets "
+                "manifest, so there is no managing source for the ledger to suppress "
+                "(declare it gh-secret:<GH_NAME> first, or drop the entry)"
+            )
+        kind, _, gh_name = source.partition(":")
+        if kind != "gh-secret":
+            raise ValueError(
+                f"{path.name}:{lineno}: {name} is declared {kind}, and the ledger only "
+                "suppresses a MANAGED Fly secret (gh-secret:<GH_NAME>) — a `workflow` "
+                "value is set from non-secret context, a `fly-toml-env` value is "
+                "versioned config, and a `fly-only:` secret is already out-of-band "
+                "under its own recorded decision, so none of them is this deploy's "
+                "to withhold"
+            )
+        if name in MANDATORY_FLY_SECRETS:
+            raise ValueError(
+                f"{path.name}:{lineno}: {name} is one of the app's MANDATORY secrets "
+                "(the deploy hard-fails without it and the API cannot boot) — removing "
+                "it is an outage, not a mitigation, so the ledger cannot record it"
+            )
+        entries[name] = Mitigation(
+            name=name,
+            owner=owner,
+            expires=expires,
+            reason=reason,
+        )
+    return entries
+
+
 def read_fly_secret_names(app: str) -> list[str]:
     """The live secret names. A ``FLY_SECRETS_FILE`` fixture short-circuits it."""
     fixture = os.environ.get("FLY_SECRETS_FILE")
@@ -674,6 +850,17 @@ def main() -> int:
         _err(f"cannot determine secret provenance: manifest unusable ({exc})")
         return 2
 
+    # #11122: the mitigation ledger — names an operator removed ON PURPOSE. Read
+    # before the Fly call so a ledger this gate cannot honour blocks the deploy
+    # before anything is read from (or written to) Fly.
+    ledger_file = ledger_path()
+    try:
+        today = _today()
+        ledger = read_mitigation_ledger(ledger_file, declared, today)
+    except (OSError, ValueError) as exc:
+        _err(f"cannot determine secret provenance: mitigation ledger unusable ({exc})")
+        return 2
+
     try:
         app = resolve_app(toml_path)
         fly_names = read_fly_secret_names(app)
@@ -714,11 +901,53 @@ def main() -> int:
 
     print(
         f"check-fly-secret-drift: Fly app {app} vs {manifest_path.name} "
-        f"({len(fly_names)} secret(s) live, {len(declared)} declared)"
+        f"({len(fly_names)} secret(s) live, {len(declared)} declared, "
+        f"{len(ledger)} mitigated by {ledger_file.name})"
     )
 
     violations: list[str] = []
     conditional: list[str] = []
+    mitigated = set(ledger)
+
+    # (0) #11122 — the ledger is honoured at SYNC time by the workflow's payload
+    # filter, not here, so this gate's job is the reverse half: prove the filter
+    # actually suppressed the name. Without this, deleting the filter re-arms
+    # every mitigation and the ledger keeps reading as a decision — the same
+    # "declaration the deploy no longer honours" rot the manifest half already
+    # refuses. BOTH synthetic samples: a `-z`-guarded assignment shows up only in
+    # the no-secret run, and it would re-arm the name just as well.
+    for name in sorted(mitigated & (assigned | unconditional)):
+        violations.append(
+            f"LEDGER NOT HONOURED — {name!r} is recorded as deliberately absent in "
+            f"{ledger_file.name} but deploy-hosted.yml still stages it (the payload "
+            "carries the assignment), so the next deploy would re-arm the mitigation. "
+            "The `Set all app secrets on Fly.io` step must filter ledger names out of "
+            "ARGS before `flyctl secrets set`"
+        )
+
+    # (0b) A ledgered name that is still LIVE on Fly is a false record: the removal
+    # the entry describes is not in effect, the secret is armed, and the filter
+    # freezes it — a GitHub rotation of that value would silently never propagate.
+    for name in sorted(mitigated & set(fly_names)):
+        violations.append(
+            f"MITIGATION NOT IN EFFECT — {name!r} is recorded as deliberately absent in "
+            f"{ledger_file.name} but exists on Fly. Unset it "
+            f"(`flyctl secrets unset {name} --app {app}`), or delete the ledger entry so "
+            "the deploy resumes managing it (while both are true the value is frozen: a "
+            "rotation in GitHub would not reach the app)"
+        )
+
+    # (0c) An EXPIRED entry keeps suppressing on purpose: silently re-arming on a
+    # date is the same unannounced overwrite with extra steps. The deploy goes RED
+    # instead, and the remedy is one line either way — re-affirm or delete.
+    for name, entry in sorted(ledger.items()):
+        if entry.lapsed(today):
+            violations.append(
+                f"MITIGATION LAPSED — the ledger entry for {name} expired on "
+                f"{entry.expires.isoformat()} (owner {entry.owner}, reason: "
+                f"{entry.reason}). Re-affirm the decision with a new expiry, or delete "
+                "the entry so the deploy resumes managing the secret from GitHub"
+            )
 
     # (1) An undeclared name is NEW drift — from either side of the contract.
     # Towards Fly: a var that exists only on Fly. Towards the workflow: a Fly
@@ -754,6 +983,12 @@ def main() -> int:
                     f"STALE DECLARATION — {name!r} is declared gh-secret:{gh_name} but "
                     "deploy-hosted.yml never references it"
                 )
+            elif name in mitigated:
+                # #11122: the ledger records this name as DELIBERATELY ABSENT, so the
+                # payload not carrying it is the contract, not stale intent. Check (0)
+                # proved the suppression actually happens; the ledger README states the
+                # rules a restored name must satisfy.
+                pass
             elif name not in assigned:
                 violations.append(
                     f"STALE DECLARATION — {name!r} is declared gh-secret:{gh_name} but "
@@ -879,6 +1114,9 @@ def main() -> int:
         kind, _, gh_name = source.partition(":")
         if kind not in ("gh-secret", "workflow") or name not in fly_names:
             continue
+        if name in mitigated:
+            # Reported precisely by (0b), which owns the state.
+            continue
         if name in assigned and name not in live:
             if kind == "gh-secret" and gh_name not in gh_present:
                 reason = f"its declared GitHub secret {gh_name} is not present in this run"
@@ -889,6 +1127,39 @@ def main() -> int:
                 f"({reason}), so the Fly value is hand-managed. Assign it unconditionally "
                 "from version control, or drop the Fly secret"
             )
+
+    # #11122 — THE BELT. Option (b) of the issue, at the one moment it is
+    # determinable: this deploy is about to CREATE a secret that is currently
+    # ABSENT from the app. "Absent and unledgered" reads as "never configured",
+    # and it is also exactly what a firefighting operator's `secrets unset` looks
+    # like — the case the ledger cannot cover, because the entry exists only for
+    # the removals somebody remembered to write down. So say it out loud, BEFORE
+    # the mutation, and name where the entry goes.
+    #
+    # A `gh-secret:` whose GitHub secret does not exist cannot reach `live`, so the
+    # names the manifest declares ahead of their value do not fire this on every
+    # deploy — the warning is about a restore, never about a first-time absence
+    # nobody can act on. Restricted to `gh-secret:` for the same reason: those are
+    # the only names a ledger entry can record (the validator refuses the rest), so
+    # every name this line prints is one the reader can act on by writing an entry.
+    # One aggregated line, because N annotations is how a warning becomes
+    # wallpaper.
+    would_create = sorted(
+        n
+        for n in live
+        if n not in set(fly_names)
+        and n not in mitigated
+        and declared.get(n, "").startswith("gh-secret:")
+    )
+    if would_create:
+        print(
+            f"::warning::#11122 — this deploy will CREATE {len(would_create)} Fly "
+            f"secret(s) that are currently ABSENT on {app}: {', '.join(would_create)}. "
+            "If an operator removed any of these ON PURPOSE (an incident mitigation), "
+            f"record it in {ledger_file.name} — that ledger is what stops the deploy "
+            "re-arming it. Absent-from-Fly and absent-from-the-ledger reads as "
+            "'never configured', which is what this deploy is about to fix."
+        )
 
     fly_conditional = [n for n in fly_names if n in set(conditional)]
     if fly_conditional:
@@ -924,10 +1195,24 @@ def main() -> int:
     # line proves none survives on Fly.
     fly_only = [n for n in fly_names if declared.get(n, "").startswith("fly-only:")]
     managed = [n for n in fly_names if n not in set(conditional) and n not in set(fly_only)]
+    if ledger:
+        print(
+            f"MITIGATED — {len(ledger)} secret(s) are recorded as DELIBERATELY ABSENT in "
+            f"{ledger_file.name} and are NOT staged by this deploy:"
+        )
+        for name, entry in sorted(ledger.items()):
+            print(
+                f"  - {name} (owner {entry.owner}, expires {entry.expires.isoformat()}): "
+                f"{entry.reason}"
+            )
+        print(
+            "  Each name above must be ABSENT on Fly (a live one fails), and must be "
+            "restored by deleting its entry — never by re-running the deploy."
+        )
     print(
         f"OK: all {len(fly_names)} Fly secret(s) are declared "
         f"({len(managed)} managed, {len(fly_conditional)} conditionally propagated, "
-        f"{len(fly_only)} decision-backed fly-only)"
+        f"{len(fly_only)} decision-backed fly-only, {len(ledger)} deliberately absent)"
     )
     return 0
 

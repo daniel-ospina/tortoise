@@ -2640,3 +2640,293 @@ def test_workflow_names_whose_staging_is_conditional_are_not_called_unconditiona
             "operator would read a Fly-only value for it as reverted when the "
             "deploy actually leaves it as-is (#8614 review)"
         )
+
+
+# ── #11122 — the mitigation ledger ────────────────────────────────────────────
+#
+# `fly-managed-secrets.txt` declares what the deploy MANAGES. The ledger declares
+# what it must NOT manage, on purpose: a secret an operator removed as a live
+# mitigation, which two consecutive deploys put back on 2026-11-05/06 because the
+# sync step asserts a desired state and cannot tell "unconfigured" from
+# "deliberately removed 40 minutes ago".
+#
+# The exception is enforced at SYNC time in `deploy-hosted.yml` (a ledgered name
+# is dropped from the payload argv). These tests pin BOTH halves: the filter
+# really suppresses the name, and the gate refuses every ledger state the
+# machinery cannot honour — so the filter cannot be dropped from the workflow
+# while the ledger keeps reading as a decision.
+
+_LEDGER_MANIFEST = """\
+# fixture manifest for #11122
+FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY
+SENTRY_DSN            gh-secret:SENTRY_DSN
+OPT_SECRET            gh-secret:OPT_SECRET
+ENV_ONLY_KEY          fly-toml-env
+GIT_SHA               workflow
+"""
+
+# The filter, copied in shape from the real step (bash BUILTINS only — the gate
+# classifies the payload by executing it on a PATH that holds only fly/flyctl, so
+# a `grep`/`awk` here would abort the classification with `command not found`).
+_LEDGER_FILTER = """\
+          MITIGATED=" "
+          LEDGER="${FLY_MITIGATION_LEDGER:-.github/scripts/fly-secret-mitigations.txt}"
+          if [ -r "$LEDGER" ]; then
+            while IFS= read -r LINE || [ -n "$LINE" ]; do
+              case "$LINE" in ''|'#'*) continue ;; esac
+              NAME="${LINE%%[[:space:]]*}"
+              case "$NAME" in ''|'#'*) continue ;; esac
+              MITIGATED="$MITIGATED$NAME "
+            done < "$LEDGER"
+          fi
+          PAID_ARGS=()
+          for ARG in "${ARGS[@]}"; do
+            ARG_NAME="${ARG%%=*}"
+            case "$MITIGATED" in
+              *" $ARG_NAME "*) continue ;;
+            esac
+            PAID_ARGS+=("$ARG")
+          done
+          ARGS=("${PAID_ARGS[@]}")
+"""
+
+_LEDGER_WORKFLOW = f"""\
+name: Deploy Hosted API
+jobs:
+  deploy:
+    steps:
+      - name: Set all app secrets on Fly.io
+        run: |
+          ARGS=(FASTAPI_INTERNAL_KEY="${{{{ secrets.FASTAPI_INTERNAL_KEY }}}}")
+          ARGS+=(GIT_SHA="${{GITHUB_SHA}}")
+          [ -n "${{{{ secrets.SENTRY_DSN }}}}" ] && ARGS+=(SENTRY_DSN="${{{{ secrets.SENTRY_DSN }}}}")
+          [ -n "${{{{ secrets.OPT_SECRET }}}}" ] && ARGS+=(OPT_SECRET="${{{{ secrets.OPT_SECRET }}}}")
+{_LEDGER_FILTER}\
+          flyctl secrets set --stage "${{ARGS[@]}}"
+"""
+
+# The same payload with NO filter — the state a future edit would produce, and the
+# one the gate must refuse rather than certify.
+_LEDGER_WORKFLOW_UNFILTERED = _LEDGER_WORKFLOW.replace(_LEDGER_FILTER, "")
+
+LEDGER_MANIFEST = _fixture("ledger-manifest.txt", _LEDGER_MANIFEST)
+LEDGER_WORKFLOW = _fixture("ledger-workflow.yml", _LEDGER_WORKFLOW)
+LEDGER_WORKFLOW_UNFILTERED = _fixture(
+    "ledger-workflow-unfiltered.yml", _LEDGER_WORKFLOW_UNFILTERED
+)
+REAL_LEDGER = REPO_ROOT / ".github" / "scripts" / "fly-secret-mitigations.txt"
+
+#: The entry's `expires` is the LAST authorised day (UTC), so "today" is a seam.
+_TOMORROW = "2099-01-01"
+_EXPIRES = "2026-11-20"
+
+
+def _ledger(text: str, name: str = "ledger.txt") -> Path:
+    return _fixture(name, text)
+
+
+def _ledger_run(
+    ledger: Path,
+    *,
+    workflow: Path = LEDGER_WORKFLOW,
+    fly_names: list[str] | None = None,
+    today: str = "2026-11-07",
+    present: set[str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the gate over the ledger fixtures (Fly list + ledger + workflow)."""
+    secrets = _secrets_file(
+        fly_names if fly_names is not None else ["FASTAPI_INTERNAL_KEY", "GIT_SHA"],
+        "ledger-secrets.json",
+    )
+    return _run(
+        secrets,
+        manifest=LEDGER_MANIFEST,
+        workflow=workflow,
+        present=present,
+        extra_env={
+            "FLY_MITIGATION_LEDGER": str(ledger),
+            "FLY_MITIGATION_TODAY": today,
+        },
+    )
+
+
+def _entry(name: str = "SENTRY_DSN", expires: str = _EXPIRES, reason: str = "#11092 storm") -> str:
+    return f"{name} owner=daniel expires={expires} reason={reason}\n"
+
+
+class TestTheMitigationLedger:
+    """#11122 — a deliberate absence is a RECORDED state, enforced at sync time."""
+
+    def test_a_ledgered_name_is_suppressed_at_sync_time(self):
+        """The load-bearing property: the payload does not carry the name.
+
+        Asserted through the gate's own EXECUTION of the payload (the stub argv),
+        not by reading the YAML — a filter that is present but ineffective (wrong
+        variable, wrong loop, filtered after the call) must fail HERE.
+        """
+        proc = _ledger_run(_ledger(_entry()))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "MITIGATED — 1 secret(s)" in proc.stdout
+        assert "SENTRY_DSN (owner daniel, expires 2026-11-20)" in proc.stdout
+        assert "LEDGER NOT HONOURED" not in proc.stdout
+
+    def test_the_same_payload_without_the_ledger_stages_the_name(self):
+        """The suppression is the LEDGER's doing, not an accident of the fixture."""
+        proc = _ledger_run(_ledger("# empty\n"))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "MITIGATED —" not in proc.stdout
+        # …and the deploy is about to CREATE it, which the belt says out loud.
+        assert "SENTRY_DSN" in proc.stdout
+        assert "will CREATE" in proc.stdout
+
+    def test_a_ledgered_name_the_payload_still_stages_fails_the_deploy(self):
+        """Dropping the filter from the workflow must not be a silent re-arm.
+
+        Without this the ledger keeps reading as a decision while the deploy does
+        the opposite — the "declaration the deploy no longer honours" rot the
+        manifest half already refuses.
+        """
+        proc = _ledger_run(
+            _ledger(_entry()), workflow=LEDGER_WORKFLOW_UNFILTERED
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "LEDGER NOT HONOURED" in proc.stdout
+        assert "re-arm the mitigation" in proc.stdout
+
+    def test_a_ledgered_name_live_on_fly_fails(self):
+        """The entry would be a false record, and it freezes that secret's rotation."""
+        proc = _ledger_run(
+            _ledger(_entry()),
+            fly_names=["FASTAPI_INTERNAL_KEY", "GIT_SHA", "SENTRY_DSN"],
+        )
+        assert proc.returncode == 1, proc.stdout + proc.stderr
+        assert "MITIGATION NOT IN EFFECT" in proc.stdout
+        assert "flyctl secrets unset SENTRY_DSN" in proc.stdout
+
+    def test_the_expiry_is_inclusive_and_a_lapsed_entry_keeps_suppressing(self):
+        """`expires` is the LAST authorised day; past it the deploy is RED, not re-armed.
+
+        A lapsed entry must STILL suppress (the alternative — silently restoring on
+        a date — is the same unannounced overwrite with extra steps), so the RED
+        state and the continuing suppression are asserted together.
+        """
+        ledger = _ledger(_entry())
+        on_last_day = _ledger_run(ledger, today=_EXPIRES)
+        assert on_last_day.returncode == 0, on_last_day.stdout + on_last_day.stderr
+        assert "MITIGATION LAPSED" not in on_last_day.stdout
+
+        lapsed = _ledger_run(ledger, today="2026-11-21")
+        assert lapsed.returncode == 1, lapsed.stdout + lapsed.stderr
+        assert "MITIGATION LAPSED" in lapsed.stdout
+        assert "expired on 2026-11-20" in lapsed.stdout
+        assert "LEDGER NOT HONOURED" not in lapsed.stdout, (
+            "a lapsed entry must KEEP suppressing — re-arming it on the expiry date "
+            "is the same unannounced overwrite this ledger exists to stop"
+        )
+
+    def test_the_reason_may_cite_an_issue(self):
+        """`#` inside an entry is DATA — the reason names the incident (#11092).
+
+        Comment-stripping at the first `#` (the manifest's rule, which this file
+        deliberately does not inherit) would truncate the field that makes an entry
+        reviewable.
+        """
+        proc = _ledger_run(_ledger(_entry(reason="#11092 storm; see #11122")))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "SENTRY_DSN (owner daniel, expires 2026-11-20): #11092 storm; see #11122" in proc.stdout
+
+    def test_a_mandatory_secret_cannot_be_ledgered(self):
+        """Removing it is an outage, not a mitigation — exit 2, never bypassable."""
+        proc = _ledger_run(_ledger(_entry("FASTAPI_INTERNAL_KEY")))
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "MANDATORY" in proc.stderr
+        assert "outage, not a mitigation" in proc.stderr
+
+    def test_an_undeclared_name_cannot_be_ledgered(self):
+        proc = _ledger_run(_ledger(_entry("NOT_IN_THE_MANIFEST")))
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "not declared in the managed-secrets manifest" in proc.stderr
+
+    def test_a_non_gh_secret_source_cannot_be_ledgered(self):
+        """`fly-toml-env` / `workflow` / `fly-only:` are not this deploy's to withhold."""
+        proc = _ledger_run(_ledger(_entry("ENV_ONLY_KEY")))
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "gh-secret:" in proc.stderr
+
+    @pytest.mark.parametrize(
+        "line,expected",
+        [
+            ("SENTRY_DSN expires=2026-11-20 reason=x\n", "expected '<NAME> owner="),
+            ("SENTRY_DSN owner=daniel reason=x\n", "expected '<NAME> owner="),
+            ("SENTRY_DSN owner=daniel expires=2026-11-20\n", "expected '<NAME> owner="),
+            ("SENTRY_DSN owner=daniel expires=20-11-2026 reason=x\n", "YYYY-MM-DD"),
+            ("SENTRY_DSN owner=daniel expires=20261120 reason=x\n", "YYYY-MM-DD"),
+        ],
+    )
+    def test_a_malformed_entry_is_unreadable_state(self, line, expected):
+        """Exit 2 (fail-closed), never exit 1 (bypassable): an entry the machinery
+        cannot parse reads as a decision while the deploy does the opposite."""
+        proc = _ledger_run(_ledger(line))
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert expected in proc.stderr
+
+    def test_a_duplicate_entry_is_unreadable_state(self):
+        proc = _ledger_run(_ledger(_entry() + _entry(expires=_TOMORROW)))
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "duplicate ledger entry" in proc.stderr
+
+    def test_a_missing_ledger_is_exit_2_not_no_mitigations(self):
+        """The file is tracked; its absence means every entry is unenforced.
+
+        Reading a missing ledger as "nothing is mitigated" is the fail-open shape
+        this whole issue is about, so it is exit 2 (never bypassable) — and it
+        runs BEFORE the Fly call, so a blocked deploy has touched nothing.
+        """
+        proc = _ledger_run(_TMP / "does-not-exist.txt")
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "mitigation ledger unusable" in proc.stderr
+
+    def test_a_comment_only_ledger_suppresses_nothing(self):
+        proc = _ledger_run(_ledger("# nothing here\n\n   \n# SENTRY_DSN owner=x expires=2026-11-20 reason=y\n"))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "0 mitigated" in proc.stdout
+
+    def test_the_belt_warns_only_about_names_the_ledger_could_record(self):
+        """The fallback warning must be ACTIONABLE: one aggregated line, and only
+        `gh-secret:` names — a `workflow` name cannot be ledgered (the validator
+        refuses it), so telling the reader to record it would be wrong advice."""
+        proc = _ledger_run(_ledger("# empty\n"))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        warning = [l for l in proc.stdout.splitlines() if "will CREATE" in l]
+        assert len(warning) == 1, "exactly one aggregated warning line, not N annotations"
+        assert "SENTRY_DSN" in warning[0]
+        assert "GIT_SHA" not in warning[0], "a `workflow` name is not the ledger's to record"
+
+        # A ledgered name is not "about to be created" — it is deliberately absent.
+        suppressed = _ledger_run(_ledger(_entry()))
+        assert "will CREATE" in suppressed.stdout  # OPT_SECRET is still absent
+        for line in suppressed.stdout.splitlines():
+            if "will CREATE" in line:
+                assert "SENTRY_DSN" not in line
+
+    def test_the_shipped_ledger_exists_and_parses(self):
+        """The tracked contract: a missing/rotted file hard-blocks every deploy."""
+        sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("check_fly_secret_drift_ledger", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        assert REAL_LEDGER.is_file(), (
+            "#11122: .github/scripts/fly-secret-mitigations.txt is the ledger the "
+            "deploy filters ARGS by and the gate reads — a missing one is exit 2"
+        )
+        entries = module.read_mitigation_ledger(
+            REAL_LEDGER, module.read_manifest(REAL_MANIFEST), module._today()
+        )
+        for name in entries:
+            assert name in module.read_manifest(REAL_MANIFEST), (
+                f"the shipped ledger names {name}, which the manifest does not declare"
+            )

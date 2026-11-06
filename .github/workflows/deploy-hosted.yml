@@ -1190,6 +1190,60 @@ jobs:
           # fails open (signup works, warning logged), matching the optional
           # env-gated feature pattern.
           [ -n "$TURNSTILE_SECRET_KEY" ] && ARGS+=(TURNSTILE_SECRET_KEY="$TURNSTILE_SECRET_KEY")
+          # ⛔ #11122 — THE MITIGATION LEDGER, AND WHY IT IS *HERE*.
+          #
+          # Every `ARGS+=` above asserts a DESIRED STATE ("if the GitHub secret
+          # exists, the Fly secret must too"), which cannot tell "nobody
+          # configured this" from "an operator removed it 40 minutes ago as the
+          # only thing keeping production healthy". Measured 2026-11-05/06: with
+          # SENTRY_DSN unset as the live mitigation for #11092's serialization
+          # storm, deploys 42117073101 and 42139810077 each PUT IT BACK, on builds
+          # that provably did not contain the fix.
+          #
+          # So this step reads the ledger and drops every recorded name from the
+          # payload. THE EXCEPTION MUST BE ENFORCED AT SYNC TIME, NOT ONLY AT
+          # COMPARISON TIME — the measured Argo CD trap: `ignoreDifferences`
+          # quiets the drift report while the sync still applies the desired
+          # value, so the exception lives only in the report. A gate that merely
+          # warns would be that trap, and the deploy would re-arm the mitigation
+          # anyway. `.github/scripts/check-fly-secret-drift.py` proves this filter
+          # actually suppressed the name (a ledger entry the payload still carries
+          # FAILS the deploy), so the two halves cannot rot apart.
+          #
+          # BUILTINS ONLY: the provenance gate classifies this payload by EXECUTING
+          # it with a PATH holding only fly/flyctl stubs, where `grep`/`awk`/`sed`
+          # do not exist — a fork would abort the classification (`command not
+          # found` → exit 2 → a blocked deploy for every run). `read`, `case`,
+          # parameter expansion and arrays all run in-process.
+          #
+          # `$FLY_MITIGATION_LEDGER` is a seam for that same harness; a real deploy
+          # takes the default, resolved from the run's cwd (the workspace root).
+          MITIGATED=" "
+          MITIGATION_LEDGER="${FLY_MITIGATION_LEDGER:-${GITHUB_WORKSPACE:-.}/.github/scripts/fly-secret-mitigations.txt}"
+          if [ -r "$MITIGATION_LEDGER" ]; then
+            while IFS= read -r LEDGER_LINE || [ -n "$LEDGER_LINE" ]; do
+              case "$LEDGER_LINE" in ''|'#'*) continue ;; esac
+              LEDGER_NAME="${LEDGER_LINE%%[[:space:]]*}"
+              case "$LEDGER_NAME" in ''|'#'*) continue ;; esac
+              MITIGATED="$MITIGATED$LEDGER_NAME "
+            done < "$MITIGATION_LEDGER"
+          fi
+          # An absent ledger is NOT read as "no mitigations" by this step — the
+          # gate above has already refused the deploy for it (exit 2), so reaching
+          # here means the file exists. The `-r` test exists only so the harness's
+          # stub run cannot abort on a missing file before the gate reports why.
+          STAGED_ARGS=()
+          for ARG in "${ARGS[@]}"; do
+            ARG_NAME="${ARG%%=*}"
+            case "$MITIGATED" in
+              *" $ARG_NAME "*)
+                echo "::notice::#11122 — $ARG_NAME is recorded as DELIBERATELY ABSENT in ${MITIGATION_LEDGER}; this deploy stages nothing for it (delete the entry to resume managing it)"
+                continue
+                ;;
+            esac
+            STAGED_ARGS+=("$ARG")
+          done
+          ARGS=("${STAGED_ARGS[@]}")
           flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq
       - name: Deploy (retry through Fly lease/API races)
         id: deploy

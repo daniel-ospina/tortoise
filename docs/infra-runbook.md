@@ -169,6 +169,15 @@ and a rotation that updates only Fly is silently reverted by the next deploy** �
 including a routine push to `main`. Update the GitHub secret first; the Fly
 commands below then apply that same value without waiting for a deploy.
 
+⛔ **Except a name recorded in the mitigation ledger (#11122)** —
+`.github/scripts/fly-secret-mitigations.txt`, which declares secrets that are
+**deliberately ABSENT**. The sync step drops those names from the payload, so the
+deploy neither re-stages nor rotates them, and `flyctl secrets set` on Fly is the
+only thing that changes them. That is the point (a mitigation an operator removed
+must survive the next deploy) and it is also the hazard: **while an entry is in
+force, a GitHub rotation of that name does NOT reach the app.** §8.1's ledger
+subsection is the contract; to restore one, delete the entry.
+
 The scope is the `gh-secret:` token, not "every declared name". The manifest's
 other source tokens are deliberate, not gaps, and a rotation must **not**
 "tidy" one of them into GitHub (the manifest header defines each token; §8.3 is
@@ -2734,6 +2743,68 @@ bypassed** and always blocks the deploy. A `gh-secret:X` declaration also needs
 its matching probe line in the workflow's `GH_SECRETS_PRESENT` block: no CI
 token can list repository secrets, so the run states which ones it carries, and
 a forgotten line FAILS the deploy for that name rather than passing it.
+
+#### The mitigation ledger — a deliberate ABSENCE (#11122)
+
+The manifest says what the deploy **manages**. `.github/scripts/fly-secret-mitigations.txt`
+says what it must **not** manage, for now, on purpose: a secret an operator
+removed as the live mitigation for an incident must survive the next deploy.
+
+Why it exists, measured: on 2026-11-05/06 `SENTRY_DSN` was unset on
+`tortoise-y4mjjq` as the mitigation for #11092's source-context serialization
+storm (with it absent `/health` answered in 0.25–1.07 s; with it present three
+`py-spy dump`s showed the MainThread parked inside `sentry_sdk`). Deploys
+`42117073101` (23:13) and `42139810077` (01:04) **each put it back**, on builds
+(`46ea687dc`, `c3af2d0188`) that provably did not contain the fix — because the
+sync step asserts a desired state and cannot distinguish *unconfigured* from
+*deliberately removed 40 minutes ago*. It is the stale-flag pattern: a record of
+a past state applied as a measurement of the present, and it **inverts** the
+mitigation's logic — the more often we deploy, the faster the mitigation is
+undone.
+
+- **Declared inventory:** `.github/scripts/fly-secret-mitigations.txt`
+  (`<NAME> owner=<owner> expires=<YYYY-MM-DD> reason=<why>`) — its header is the
+  authoritative grammar; this is orientation.
+- **Enforced at SYNC time, in the workflow.** The `Set all app secrets on Fly.io`
+  step filters ledger names out of the `flyctl secrets set` argv. **This is the
+  load-bearing half**, and it is deliberately *not* the gate: an exception that
+  only quiets a gate is a **false exception** — the measured Argo CD trap, where
+  `spec.ignoreDifferences` suppresses the difference during comparison while the
+  sync still applies the desired value, so `RespectIgnoreDifferences=true` is
+  required for the exception to exist at all. Here the write is `flyctl secrets
+  set`, so that is where the filter lives.
+- **The gate's half is the reverse check**, so the two cannot rot apart: a ledger
+  entry the payload still carries is `LEDGER NOT HONOURED` (dropping the filter
+  would otherwise re-arm every mitigation while the ledger kept reading as a
+  decision). It also fails an entry whose name is **live on Fly** (`MITIGATION
+  NOT IN EFFECT` — the entry is a false record *and* it freezes that secret's
+  rotation) and an **expired** entry (`MITIGATION LAPSED`).
+- **Exit classes.** Exit 2 (never bypassable): the ledger is missing, malformed,
+  duplicates a name, names a name the manifest does not declare, names a
+  non-`gh-secret:` source, or names one of the app's **mandatory** secrets
+  (`FASTAPI_INTERNAL_KEY`, `TORTOISE_SECRET_PEPPER`, `FALKORDB_CLOUD_URI`,
+  `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` — removing one of those is an
+  outage, not a mitigation). Exit 1 (incident-bypassable): expired, or not in
+  effect because the name is on Fly.
+- **A lapsed entry KEEPS suppressing on purpose.** Silently re-arming on a date
+  is the same unannounced overwrite with extra steps; the deploy goes RED and the
+  remedy is one line either way — re-affirm with a new `expires`, or delete the
+  entry so the deploy resumes managing the name from GitHub.
+- **The belt, for the entry nobody wrote.** Independently of the ledger, the gate
+  emits ONE aggregated `::warning::` naming every `gh-secret:` this deploy is
+  about to **CREATE** because it is currently absent from the app, and points at
+  the ledger. `absent-from-Fly` + `absent-from-the-ledger` reads as *never
+  configured* — which is also exactly what a firefighting operator's `secrets
+  unset` looks like, so the warning is the only thing covering the normal case:
+  the removal happens at 01:20 and the paperwork does not.
+- **Tests:** `tests/test_fly_secret_drift.py::TestTheMitigationLedger` (both
+  halves, every refusal) and `tests/test_deploy_workflow.py`
+  (`test_the_sync_step_honours_the_mitigation_ledger` pins the filter and that it
+  uses **bash builtins only** — the gate classifies the payload by executing it
+  on a stub `PATH` holding only `fly`/`flyctl`, where a `grep` aborts the run;
+  `test_the_ledger_mandatory_set_matches_the_verify_gate` pins the mandatory set
+  against the workflow's own `exit 1` branches, so the hardcoded copy cannot
+  rot).
 
 ### 8.2 The `SKIP_*` bypass convention
 
