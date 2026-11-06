@@ -7306,8 +7306,9 @@ def tortoise_session_capture(conversation: list[dict],
     not part of the pre-write gate order above. Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
     honest error dict on failure. Per-harness last-error bookkeeping (same on
-    the REST path): the key is SET on a non-2xx EXCEPT the #3060 capacity 429
-    and the #3129 in-flight 409 (both server conditions), and is not written
+    the REST path): the key is SET on a non-2xx EXCEPT the 429s (the #3060
+    capacity 429 and the #4051 §3.1 per-org ingest throttle) and the #3129
+    in-flight 409 (all server conditions), and is not written
     for the payload-boundary 422 above, which returns before the capture
     pipeline just as REST's Pydantic 422 does; on 2xx the shared pipeline
     clears the key for a fully processed capture and SETS it when extraction

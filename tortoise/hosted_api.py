@@ -17330,8 +17330,9 @@ async def capture_session(body: SessionRequest, request: Request, org: dict = De
     keys are per LANE (#3681): an AGENT credential's 2xx records
     ``session_capture_receipt_{capture_harness}``, and its non-2xx records
     ``session_capture_last_error_{capture_harness}`` (the dashboard failure
-    sub-line reads this, NOT client state) — except the #3060 capacity 429 and
-    the #3129 in-flight 409, which are server conditions. A session-JWT
+    sub-line reads this, NOT client state) — except the 429s (the #3060
+    capacity 429 and the #4051 §3.1 per-org ingest throttle) and the #3129
+    in-flight 409, which are server conditions. A session-JWT
     (dashboard/browser) caller observes no harness: it records NO per-harness
     last-error, and only the BARE ``session_capture_receipt`` — the same bare
     member legacy no-harness hooks write.
