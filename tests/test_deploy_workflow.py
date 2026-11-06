@@ -5074,3 +5074,40 @@ def test_the_runbook_field_row_documents_the_positive_pair():
     # with the REAL head cells, neither name is missing.
     assert not _record_keys_missing_a_row(heads, {"record_writes_applied",
                                                 "record_last_write_at"})
+
+
+def test_any_ci_surfaces_line_citation_here_resolves_to_this_files_own_row():
+    """#11064 review (P3), executed: a line citation into the manifest must RESOLVE.
+
+    The sentence establishing WHERE this file's `tier1` registration lives cited
+    `config/ci-surfaces.yml` by LINE NUMBER, and the number had rotted onto another
+    test's row — on `main` it was `- test_cli_serve.py`; on this branch it was
+    `- test_s2_decision_record_5087.py`. It is now cited by mechanism, which the manifest
+    itself requires ("Named by mechanism, not by line number"). A mechanism citation
+    cannot decay; a line citation decays on the next edit to a 7,600-line file, which is
+    precisely how the wrong one got there.
+
+    So this pin does not ban a line citation, it CHECKS one: every
+    `config/ci-surfaces.yml:<line>` pointer in THIS file must resolve to a row naming
+    this file. ⚠️ If a later lane needs to QUOTE a rotten pointer as history, quote it
+    without the `:<n>` suffix (the surviving row's own name), or this pin will treat the
+    quotation as a live claim — the distinction the rest of this file draws between a
+    live instruction and a `SUPERSEDED` record.
+
+    Falsified on the pre-fix text: the pointer resolved to another test's row.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    manifest = (_REPO_ROOT / "config" / "ci-surfaces.yml").read_text(encoding="utf-8").splitlines()
+    stale = []
+    for match in re.finditer(r"config/ci-surfaces\.yml:(\d+)", source):
+        number = int(match.group(1))
+        row = manifest[number - 1].strip() if 0 < number <= len(manifest) else "<beyond the file>"
+        if "test_deploy_workflow.py" not in row:
+            stale.append(f"{match.group(0)} -> {row!r}")
+    assert not stale, (
+        "a `config/ci-surfaces.yml:<line>` citation in this file resolves to a row that is "
+        "not this file's registration:\n  " + "\n  ".join(stale) + "\n"
+        "Cite the entry by mechanism (`its `- test_deploy_workflow.py` entry under "
+        "`tier1:` in `config/ci-surfaces.yml``) — a line number here has already rotted "
+        "onto a sibling test's row (#11064 review P3)"
+    )
