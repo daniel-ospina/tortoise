@@ -189,7 +189,8 @@ Expanded from `03-scope.md` §4. Each names its layer.
 | **D4** | **guard** | a duplicated key in the register | export **raises** — a duplicate declaration cannot silently win | S2 |
 | **D5** | unit | fake graph returning a catalogue with **no** gap | the serves/indexes pair is **reported** (today: silence) | S4 |
 | **D6** | unit | fake graph returning a catalogue **with** a gap | the pair is reported **and** the gap warning still fires | S4 |
-| **D7** | unit | `db.indexes()` raising / malformed | `Projection.__init__` stays healthy; the attribute is `None`; DEBUG logged | S4 |
+| **D7** | unit | `db.indexes()` **raising**, or **answering `None`** | `Projection.__init__` stays healthy; the attribute is `None`; DEBUG logged | S4 |
+| **D7′** | unit | a catalogue that is **returned** but wholly **unparseable** | the pair is reported at INFO with an empty indexed half and the gap warning still fires — the *pre-existing* per-row-skip semantics (`#4997`), unchanged by `#11087` | S4 |
 | **D8** | unit | fake graph | the emitted pairing is `ENTITY_TYPE_LABELS` (served) against the measured catalogue — **one declaration, not a second** | S4 |
 | **D9** | live (skip-if-unavailable) | a lane container with `Point` indexed | `Point` reports indexed; `Event`/`Object`/`Source`/`Subject` report unindexed; **the census writes nothing** | S3 |
 | **D10** | unit | a census over a label with N vectors | reports N and its bytes; states the affected `entity_type` values; **issues no write** | S3 |
