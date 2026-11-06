@@ -209,13 +209,15 @@ to have none.
 **A declared narrowing** of the field set — one of TWO — in the opposite
 direction from the TWO widening exceptions the module declares
 (`DERIVED_FROM_RECORD`, `EVENT_STREAM_FOLDS`). ⛔ `FOLD_ON_CREATE_DEFAULTS` is
-NOT a third widening: its members are `P` columns the record HAS, so it supplies
-a VALUE where the row is silent rather than adding a field (§17.2 and
-`cache_projection`'s point 3 state the full census by direction — one
-value-filling, two widening, two narrowing; the fold class is the value-filling
-one). The other narrowing is `cache_projection.CACHE_FORBIDDEN_COLUMNS`
-(`#10394`), which is **per TABLE rather than per row** and is stated at the end
-of this section (`:source`/`:event` `story_arc`):
+NOT a third widening: it fills a VALUE into a column the record already has
+(`subjectKind`/`objectKind`/`Object.title` are all in `projected_columns`), so
+the plan's FIELD SET is unchanged by it. §17.2 of `STORAGE-ARCHITECTURE.md` and
+`cache_projection`'s module-docstring point 3 state the full census BY DIRECTION
+— one value-filling, two widening, two narrowing — and this line previously
+contradicted it (#10394 review). The other narrowing is
+`cache_projection.CACHE_FORBIDDEN_COLUMNS` (`#10394`), which is **per TABLE
+rather than per row** and is stated at the end of this section
+(`:source`/`:event` `story_arc`):
 `public.source.summary` and `public.source._search_text` are §9.1/D1 turn prose
 when the Source is a captured session **and the row holds the pre-#10000
 derivation**, so `cache_projection._EPISODIC_SOURCE_PROSE_COLUMNS` declines to
