@@ -12204,6 +12204,7 @@ def test_the_save_arm_rounds_the_sum_up_before_it_divides():
 
 def _carve_matrix() -> dict:
     """W37: the carve-out matrix the workflow ACTUALLY expands.
+
     Derived from `push_legs`, not rebuilt from `carve_out`: the point of every
     assertion below is to inspect the object `test-carve-out` receives. A
     helper that re-packed the set independently would happily agree with itself

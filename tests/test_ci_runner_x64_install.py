@@ -3772,10 +3772,10 @@ _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 #: The numbers those three carried before this round — the non-vacuity population. Each has moved to a
-#: DIFFERENT step since: they were ALREADY stale on `main` (the workflow went 4071 -> 4789 lines at
-#: the pre-rebase head, of which #6744's own three inserts are ~97 — it is 4833 after the #11032
-#: rebase merged main's five further commits), which is why nothing read them. The pin catches drift
-#: from ANY insert above the cited step, not from this branch's.
+#: DIFFERENT step since: they were ALREADY stale on `main` (the workflow has grown by thousands of
+#: lines since — measured 4071 the week #6744 opened — so no count belongs in this note), which is why
+#: nothing read them. The pin catches drift from ANY insert above the cited step, not from this
+#: branch's.
 _WALL_CLOCK_STALE_CITATIONS = ("python-ci.yml:3635", "python-ci.yml:2268-2273", "python-ci.yml:3624-3631")
 
 #: The sentence such a citation must land on — the FIRST line of the `test-slow` header's cost
