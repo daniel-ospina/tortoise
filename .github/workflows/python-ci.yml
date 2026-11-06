@@ -4012,9 +4012,10 @@ jobs:
           # job while a few legitimate removals do not.
           # ⛔ THE FLOOR MUST BE RE-CUT WHEN THE BASELINE GROWS — this is the rule
           # that had silently stopped holding. The floor was 30, calibrated
-          # against a 25-PASS baseline; #10962 marked six further `embedded_only`
+          # against a 25-PASS baseline; `origin/main` then added one more mark to
+          # that same file (25→26), and #10962 marked six further `embedded_only`
           # legs inside `test_hosted_api.py` — a BASELINE file — taking that file
-          # 5→12 passing and the baseline to 32, i.e. ABOVE the 30 floor, so the
+          # 6→12 passing and the baseline 26→32, i.e. ABOVE the 30 floor, so the
           # arm this comment exists for could no longer fire while the step stayed
           # green. The `#4207` manifest arm below does NOT cover it:
           # `skip-guard.py --manifest-only` accepts a nodeid appearing as passed
@@ -4526,11 +4527,9 @@ jobs:
     # fixture XMLs) take the collection to 70 — measured 2026-10-23 on a fresh
     # container: 70 passed / 0 skipped in ~194s, migrations included.
     #
-    # ⛔ 50, NOT 20, and the WORK is not why. `20m is a runaway bound, not a
-    # measurement-thin one` was the reasoning here and the post-step falsified it:
-    # the bound was never measured against the SUM of this job's steps, and the
-    # `actions/cache` save POST-step (#10182) is charged against it like any other
-    # step. MEASURED (run 41975408278, job 127110027242, head 9e32e81a3):
+    # ⛔ 20, NOT 50 — and the reason changed AFTER the incident this block records.
+    # MEASURED (run 41975408278, job 127110027242, head 9e32e81a3): the WORK was
+    # green and never at risk, and the job still reddened.
     #
     #   07:40:25  job starts (cap 20m)
     #   07:42:36  pytest starts        07:44:46  pytest ends — 130s, 0 failed
@@ -4541,35 +4540,26 @@ jobs:
     #
     # `python-ci-gate` reads `cancelled` as red BY DESIGN (#5219: a cancelled leg
     # certifies nothing), so a green leg reddened a REQUIRED check on a diff that
-    # never touched this job — the #5219 / #10327 class, on the one job
-    # `docs/ops/ci-wall-clock.md` had already flagged as arm-2 and left for a
-    # measurement. This is that measurement.
+    # never touched this job — the #5219 / #10327 class. The first response here
+    # was to raise the cap to 50 over the SUM including that save.
     #
-    # Derived per that document's arm-2 rule (`cap = SUM x 1.5, rounded UP to the
-    # next 10m`), from THIS run rather than from the estimate the document
-    # pre-computed, because the estimate is the term the run falsified:
+    # ⛔ THAT ARM IS NO LONGER AVAILABLE, because #11063 removed the save. This
+    # job is RESTORE-ONLY (`actions/cache/restore@v4`, no post step — see the
+    # cache step below), so no save is charged against this cap and the
+    # 12 + ~1 + ~20 = ~33m SUM the raise was derived from cannot occur here.
+    # Holding the raised cap would pin a per-PR concurrency slot at 50m (#3239)
+    # against a SUM that no longer exists.
     #
-    #   12m in-step pytest watchdog + ~1m setup/provision + 15.9m observed save
-    #   = 28.9m  ->  x1.5 = 43.4  ->  50
+    # Re-derived on the steps this job actually has (arm-2: SUM x 1.5, rounded
+    # UP to the next 10m):
     #
-    # The 15.9m is 953 s (07:44:53 -> 08:00:46) and it is a CENSORED lower bound:
-    # killed at 79.8%, so the save never finished. Applied the way every other row
-    # in docs/ops/ci-wall-clock.md is, with the COMPLETED save rather than the
-    # censored one: a 3.6 GB save STEP (tar + transfer; the transfer alone is 977 s
-    # at the ~3.7 MB/s the log reports) is ~20m, so 12 + ~1 + ~20 = ~33m and
-    # 33 x 1.5 = 49.5 -> 50. The censored 15.9m is the floor under that and alone
-    # gives 28.9 x 1.5 = 43.4 -> 50 as well, so both brackets agree. That is
-    # `x 1.5, round up to the next 10` — the document's rule, not an override.
-    # The document's pre-computed `20 -> 40` came from an ESTIMATED 9m save, so it
-    # is the INPUT that moved, not the rule.
+    #   12m in-step pytest watchdog + ~1m setup/provision = ~13m
+    #   ->  x1.5 = 19.5  ->  20
     #
-    # Raising the cap is the right arm HERE — and restore-only (#10327) is the
-    # right arm for `test-carve-out` — because this cap has room to hold the SUM
-    # while that one is pinned to 3x its measured pytest step. It is not free:
-    # the cap IS the stale-head exposure (#3239), so 50m is the most this job may
-    # hold a per-PR concurrency slot when it genuinely wedges (p50 1.62m, p95
-    # 14.61m — `docs/ops/ci-wall-clock.md`).
-    timeout-minutes: 50
+    # — which is `main`'s own value, derived here rather than inherited. The WORK
+    # is ~194s for the 70-test collection (above), so this bounds a runaway, not a
+    # measurement-thin step, and the post step that used to justify more is gone.
+    timeout-minutes: 20
     env:
       # The record's database is POSTGRES, not a tortoise graph: this job exports
       # no `TORTOISE_DB_URI`, so `tests/conftest.py`'s epic #1647 P4 gate needs

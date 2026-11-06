@@ -3771,9 +3771,9 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: `test-concurrency-falkor` install step) so a reader has a grep-able handle that outlives any
 #: number — the number is the checkable claim, the construct name is the map.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4623", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:4613", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2941-2946", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4615-4617", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:4605-4607", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
     ("python-ci.yml:3222", ("cache: pip",)),
 )
 
