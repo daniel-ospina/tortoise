@@ -637,6 +637,24 @@ def test_env_uri_assignment_uses_live_uri_helper(fname):
 # ── raw falkordb-client census (cycle-6 P1-3 / cycle-8 P2-2) ────────────────
 
 
+def _journal_calls(code: str) -> int:
+    """How many CALLS to `_journal_append(` the masked block contains.
+
+    A `def _journal_append(...)` is a local SHADOW, not the record: it defines
+    the symbol and journals nothing, so counting it as a call lets a block go
+    clean while the graph stays UNOWNED (measured: a block whose only occurrence
+    was `def _journal_append(n): pass` read CLEAN). Named `_journal_calls` rather
+    than inlined so the exclusion is testable on its own.
+    """
+    calls = 0
+    for m in re.finditer(r"_journal_append\(", code):
+        line_start = code.rfind("\n", 0, m.start()) + 1
+        if re.fullmatch(r"\s*(?:async\s+)?def\s+", code[line_start:m.start()]):
+            continue  # a definition of the symbol, not a use of it
+        calls += 1
+    return calls
+
+
 def _raw_detach_violations(root=None):
     """Every raw-client bulk-DETACH site that lacks a per-test-unique
     handle + journal in its own block, over `root` (default: the tests
@@ -664,7 +682,18 @@ def _raw_detach_violations(root=None):
             block = _enclosing_block(src, m.start())
             if not block or "DETACH DELETE" not in block:
                 continue
-            if "os.urandom" not in block or "_journal_append" not in block:
+            # `DETACH DELETE` and the uniqueness half are matched on the RAW
+            # block: both legitimately live inside string MATERIAL (`os.urandom`
+            # is normally inside the f-string that BUILDS the name, so masking
+            # would erase it). The OWNERSHIP half must be a CALL — matched on the
+            # MASKED block and with its paren, so a comment that NAMES it, a bare
+            # IMPORT of it, or a local `def` SHADOW of it cannot satisfy the
+            # guard. Same defect #10170 fixed for `from_uri` (`_sites_in_file`
+            # masks before matching), still open here — each shape below was
+            # measured GREEN before the corresponding tightening (#11182):
+            # comment-only, import-with-no-call, and `def _journal_append`.
+            code = _mask_strings_and_comments(block)
+            if "os.urandom" not in block or not _journal_calls(code):
                 violations.append(
                     f"{f.name}: raw FalkorDB( client + bulk DETACH at "
                     f"L{src.count(chr(10), 0, m.start()) + 1} without a "
@@ -691,6 +720,68 @@ def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
     """
     violations = _raw_detach_violations()
     assert not violations, "\n".join(violations)
+
+
+def test_a_comment_NAMING_the_journal_does_not_satisfy_the_raw_detach_census(tmp_path):
+    """#11182: the guard is satisfied by PROSE (or by a bare IMPORT) otherwise.
+
+    Measured on the real site: with the fix's comment in place, deleting both
+    `from tests._embedded import _journal_append` AND the
+    `_journal_append(...)` call left the census GREEN — the check matched the
+    raw block text, and the comment names the symbol. After masking comments but
+    matching the bare token, an import with NO call was still GREEN (a fresh
+    review measured it). All three arms are pinned here, so neither fix can go
+    vacuous by only satisfying the shape it was written against.
+    """
+    prose_only = (
+        "def test_unowned():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    name = f\"g_{os.urandom(4).hex()}\""
+        "\n    # the record: _journal_append(name) is what a peer sweep needs"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n"
+    )
+    site = tmp_path / "test_prose_only.py"
+    site.write_text(prose_only)
+    assert _raw_detach_violations(root=tmp_path), \
+        "a comment naming _journal_append satisfied the guard"
+
+    # A bare IMPORT is not the record: the sweep reads the JOURNAL, so an
+    # imported-but-never-called symbol leaves the graph UNOWNED.
+    site.write_text(
+        prose_only.replace(
+            "\n    c = FalkorDB",
+            "\n    from tests._embedded import _journal_append"
+            "\n    c = FalkorDB",
+        )
+    )
+    assert _raw_detach_violations(root=tmp_path), \
+        "an IMPORT of _journal_append was accepted as the record"
+
+    site.write_text(
+        prose_only.replace(
+            "\n    c = FalkorDB",
+            "\n    _journal_append(name)"
+            "\n    c = FalkorDB",
+        )
+    )
+    assert not _raw_detach_violations(root=tmp_path), \
+        "the same site WITH the call must be clean"
+
+    # A local `def _journal_append` SHADOWS the symbol and journals nothing. It
+    # was measured CLEAN under the bare `_journal_append(` token.
+    site.write_text(
+        prose_only.replace(
+            "\n    c = FalkorDB",
+            "\n    def _journal_append(name):"
+            "\n        pass"
+            "\n    c = FalkorDB",
+        )
+    )
+    assert _raw_detach_violations(root=tmp_path), \
+        "a local DEF of _journal_append was accepted as the record"
 
 
 def _block_end(masked: str, start: int, indent: int) -> int:
