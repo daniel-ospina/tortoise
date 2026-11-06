@@ -1265,17 +1265,56 @@ def test_a_transport_failure_is_NOT_reported_as_a_permission_refusal(
 
 
 def test_the_permission_predicate_is_the_ACL_layer_s_own():
-    """⛔ ONE rule, not a second spelling.
+    """⛔ ONE rule, not a second spelling — pinned STRUCTURALLY.
 
     `tortoise/acl_graph_users.py` mints the per-graph user AND owns the predicate
     that recognises its refusal; a copy here would drift from the module that
     defines the grant (`_quote_identifier`, `_bounded_server_socket_kwargs` are
     the repo's same move in the sibling censuses).
+
+    ⛔ `not hasattr(tpc, "_is_permission_refusal")` ALONE IS VACUOUS — MEASURED
+    (#11113 review P2): replacing the import with an INLINE respelling inside
+    `_refuse_unless_graph_present`
+
+        refused_by_credential = (isinstance(exc, NoPermissionError)
+                                 or "noperm" in str(exc).lower()
+                                 or "no permissions" in str(exc).lower())
+
+    left this suite fully green (145 passed), i.e. the property the test names
+    could be violated while every pin still passed — the same false-PASS class
+    the `_RECORD_TURNS_SQL` pin above was written with `ast` to close. So the
+    structural half is the pin: the handler that CLASSIFIES the listing failure
+    must import the ACL layer's predicate by name.
     """
     assert not hasattr(tpc, "_is_permission_refusal"), (
         "import tortoise.acl_graph_users._is_permission_refusal instead of "
         "respelling it — a second spelling drifts from the rule that defines "
         "the grant")
+
+    source = (Path(__file__).resolve().parent.parent
+              / "tools" / "turn_parity_census.py").read_text(encoding="utf-8")
+    handlers = [
+        node
+        for fn in ast.walk(ast.parse(source))
+        if isinstance(fn, ast.FunctionDef)
+        and fn.name == "_refuse_unless_graph_present"
+        for node in ast.walk(fn)
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    imports = [
+        alias.name
+        for handler in handlers
+        for node in ast.walk(handler)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "tortoise.acl_graph_users"
+        for alias in node.names
+    ]
+    assert "_is_permission_refusal" in imports, (
+        "`_refuse_unless_graph_present` must IMPORT "
+        "tortoise.acl_graph_users._is_permission_refusal to classify a refused "
+        "listing; no such import was found in its exception handlers, so the "
+        "rule is being respelled here (found imports: "
+        f"{imports or 'none'})")
 
 
 def test_the_uri_leg_binds_without_WRITING_either(monkeypatch):
