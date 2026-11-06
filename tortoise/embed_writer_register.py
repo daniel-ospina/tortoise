@@ -74,7 +74,15 @@ for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a who
 `cypher += f", n.{prop} = {form}"`) stores a vector and has no key in the census. A writer is also
 excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
 *named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module) or when its
-module will not parse.
+module will not parse. ⛔ **The `gated` escape is not hypothetical, and it is the widest one:**
+`tortoise.sdk::create_point` and `tortoise.sdk::update_point` reach `encode_for_row` on the normal
+path, so discovery classes them `gated` and owes them no declaration — yet **a caller-supplied
+`embedding` is stored VERBATIM by a recorded decision** (`tortoise/sdk.py:6457-6460`;
+`_create_map["embedding"] = "$embedding"` assigned AFTER the props loop, `:14049-14057`; PR `#3018`
+review P2), i.e. the gate does not decide that path. Both are reachable from the MCP surface
+(`tortoise_create_point`, `tortoise_update_point`), so the sentence this register can keep is
+**"no writer discovery finds OUTSIDE the gate is undeclared"** — never "no caller can supply a
+vector the gate never saw". Closing the second is `#11086`'s seam, not this file's claim.
 ⛔ So this register is a **product declaration for a population discovery decides**, and `#11086`
 must not read it as a closure proof. The residual shapes are pinned (not merely described) by
 `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented`, and widening discovery further is
@@ -345,8 +353,13 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`#5004` carrier contract, not a producer: the key stays PRESENT so an explicit "
             "`None` means 'this id has no vector', and a foreign vector is restored verbatim "
             "with NO attestation. The server vector is stamped by `tortoise.api::_point` (its "
-            "own entry); the SDK surface refuses a caller-supplied `embedding` outright, so "
-            "this is reachable only from a direct `EventAPI` caller",
+            "own entry). ⛔ The caller vector is NOT refused by the SDK — `create_point`/"
+            "`update_point` store one VERBATIM by a recorded decision "
+            "(`tortoise/sdk.py:6457-6460`; `_create_map[\"embedding\"] = \"$embedding\"` is "
+            "assigned AFTER the props loop, `:14049-14057`; PR `#3018` review P2), so this door "
+            "is tenant-reachable through the MCP tools and this row is its JOURNAL-side half. "
+            "The gate-side half is a `gated` classification and therefore OUTSIDE this "
+            "register's population — see the closure-claim caveat below",
             "#5004",
         ),
     ),
