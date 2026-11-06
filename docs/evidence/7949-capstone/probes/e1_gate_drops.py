@@ -73,6 +73,12 @@ discard whose Object is still REFERENCED by a statement, and every audited Objec
 in the frozen corpus is wired to the statement it was minted from — so this
 driver measures the PREDICATE, not the pass's net effect (the control that
 separates the two is `e1_e2_probe.discriminating_control`, `E1-E2.md` limit 6).
+It also does not separate MINTED points: `extractor_v2._mint_endpoint` writes an
+unresolved operator endpoint as a `pointKind: statement` Point carrying the
+model's own reference text, with no distinguishing property, so an
+identifier-only minted ref appears in the `points` population as a drop the pass
+never made. That is an OVER-count (it can block the flip, never falsely pass
+it), and it cannot be removed post hoc.
 """
 from __future__ import annotations
 
@@ -131,15 +137,23 @@ DEFAULT_SECTIONS: tuple[str, ...] = tuple(PASS_SECTION_OF)
 
 
 def _text_of(label: str, name: object, content: object) -> str:
-    """The text the pass would judge for this node, mirroring `_item_text`.
+    """The CANDIDATE text of one graph node — a mirror rule, stated per class.
 
-    `vet_gate._item_text` is ``name or content`` for every section; a graph
-    `:Object` carries its identity in ``name`` and an `:Event`/`:Point` carries
-    its claim in ``content``, so the ORDER differs by node class while
-    the authority (the pass's own rule) does not. An empty answer is skipped, as
-    the pass skips it.
+    This is NOT `vet_gate._item_text` (which is ``name or content`` for every
+    section, because it reads the pre-write embed item). On a GRAPH the class
+    decides where the candidate text lives: an `:Object` carries its identity in
+    ``name``, an `:Event`/`:Point` carries its claim in ``content``. A nameless
+    `:Object` therefore contributes NOTHING here rather than leaking claim text
+    into ``object_names``, which downstream (`e1_e2_scores.py`) reads as a census
+    of NAMES. Pinned by `tests/test_9889_capstone_probes.py::
+    test_the_probe_reads_the_candidate_text_per_node_class`.
+
+    ⚠️ Consequence, stated so it is not a silent difference: an entity item that
+    carried only ``content`` and no ``name`` is judged by the pass and NOT
+    counted here. Extraction names its entities in practice, so this is a
+    disclosed residual rather than a measured class.
     """
-    first, second = ((name, content) if label == "Object" else (content, name))
+    first, second = ((name, None) if label == "Object" else (content, None))
     return str(first or second or "").strip()
 
 
@@ -208,7 +222,11 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
     # producer shape, so "objects not requested" must not manufacture one.
     names = list(population.get("objects") or [])
     bare = [name for name in names if is_bare_definite_description(name)]
-    drops = verdicts(names) if "objects" in sections else {}
+    # UNCONDITIONAL: `names` is already read for the legacy keys, so a
+    # `--sections points,events` run must not publish `drops_total: 0` over an
+    # Objects population it never measured — `e1_e2_scores.py` reads these keys
+    # and would report "0 of N Objects" as a measurement.
+    drops = verdicts(names)
     controls = {name: value_gate.mechanical_verdict(name) for name in CONTROLS}
     alive = (controls["#4118"] is not None
              and controls["a/b/c.py"] is not None
@@ -250,8 +268,12 @@ def measure(graph: str, sections: tuple[str, ...] = DEFAULT_SECTIONS) -> dict:
 def _sections_line(record: dict) -> str:
     parts = []
     for section, block in record["sections"].items():
-        flag = "" if block["measured"] else "/UNMEASURED"
-        parts.append(f"{section}={block['candidates']}{flag}"
+        if not block["measured"]:
+            # No count at all: a `drops=0` beside `UNMEASURED` is still a zero a
+            # reader can pick up, and stopping that is this instrument's job.
+            parts.append(f"{section}=0/UNMEASURED")
+            continue
+        parts.append(f"{section}={block['candidates']}"
                      f"(drops={block['drops_total']})")
     return "sections: " + " ".join(parts)
 

@@ -303,48 +303,84 @@ def test_e1_gate_drops_point_drops_come_from_the_predicate_not_a_constant(
         "the point counter did not follow the predicate — it is a constant")
 
 
-def test_the_mechanical_predicate_drops_a_claim_and_its_entity_together(monkeypatch):
-    """THE BLIND SPOT, reproduced: an identifier-only CLAIM takes its shield with it.
-
-    `apply_vet` Rule 2 keeps a discarded entity only while a SURVIVING candidate
-    names it (`vet_gate._referenced_entity_names`). So once the mechanical
-    predicate discards an identifier-only *claim*, the entity that claim alone
-    named loses its shield and is removed too — one discard, two nodes gone.
-    The 9889 artifact censuses `:Object` names only, so this direction is
-    invisible to it; `#11201` is that gap, not the Objects number.
-    """
+def _vet_and_apply(embed: dict) -> tuple[dict, dict, dict, list[str]]:
+    """Run the real S2.2 pass and apply its verdicts; DB-free, model-free."""
     from tortoise import vet_gate
 
-    embed = {
-        "entities": [{"name": "#4118"}],
-        "points": [{"content": "closes #4118"}, {"content": "the lease fix"}],
-        "events": [],
-    }
+    armed = vet_gate.vet_candidates(embed)
+    kept, warnings = vet_gate.apply_vet(embed, armed["decisions"])
+    return armed, kept, armed["stats"]["mechanical"], warnings
 
+
+def test_the_mechanical_predicate_drops_a_claim_and_its_entity_together(monkeypatch):
+    """THE BLIND SPOT, reproduced — and its counterfactual, so the shield is real.
+
+    `apply_vet` Rule 2 keeps a discarded entity only while a SURVIVING candidate
+    references it, and the reference surfaces are `about_entities`/`slots` — NOT
+    the claim's `content` (`vet_gate._referenced_entity_names`). So when the only
+    candidate that references an entity is an identifier-only *claim*, that claim
+    is discarded, nothing surviving references the entity, and the entity goes
+    with it. Two nodes leave the payload for one session; an Objects-only census
+    counts one of them, which is `#11201`'s gap.
+
+    The second half is the CONTROL, and it is what makes the first half a
+    mechanism rather than a coincidence: swap in a claim that survives and still
+    references the entity and Rule 2 keeps it (`referential integrity`). Without
+    that pair, a fixture whose claim referenced nothing would assert the same
+    "entity gone" for the wrong reason — the defect this test shipped with, caught
+    in review.
+    """
     # PINNED, not ambient: `TORTOISE_VALUE_GATE=0` is a documented value a lane
     # may have exported, and this test exists BECAUSE the default arms the gate.
     monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
-    armed = vet_gate.vet_candidates(embed)
-    # BOTH halves fire: the claim `closes #4118` and the entity it names. That
-    # composition is the point — the claim that would have shielded the entity
-    # is itself identifier-only, so no survivor is left to reference it and
-    # Rule 2 has nothing to protect.
-    assert armed["stats"]["mechanical"]["fired"] == 2, armed["stats"]["mechanical"]
-    discarded = sorted(d["text"] for d in armed["decisions"].values()
-                       if d["outcome"] == vet_gate.DISCARD)
-    assert discarded == ["#4118", "closes #4118"]
-    assert {d["rule_id"] for d in armed["decisions"].values()
-            if d["outcome"] == vet_gate.DISCARD} == {"value.identifier_only.reference"}
 
-    kept, warnings = vet_gate.apply_vet(embed, armed["decisions"])
-    gone = [e["name"] for e in kept["entities"]]
-    assert gone == [], (
-        "the claim's discard must cost the entity it alone named — that is the "
-        "memory-loss direction the point/event rate measures")
+    # A — the ONLY referrer is an identifier-only claim, which the predicate drops.
+    armed, kept, mechanical, warnings = _vet_and_apply({
+        "entities": [{"name": "#4118"}],
+        "points": [{"content": "closes #4118", "about_entities": ["#4118"]},
+                   {"content": "the lease fix"}],
+        "events": [],
+    })
+    assert mechanical["fired"] == 2, mechanical
+    assert sorted(d["text"] for d in armed["decisions"].values()
+                  if d["outcome"] == "DISCARD") == ["#4118", "closes #4118"]
+    assert [e["name"] for e in kept["entities"]] == [], (
+        "the entity the discarded claim alone referenced must be gone — that is "
+        "the memory-loss direction the point/event rate measures")
     assert [p["content"] for p in kept["points"]] == ["the lease fix"]
     assert not any("referential integrity" in w for w in warnings), (
-        "Rule 2 did not fire, so the entity went with the claim — the shield "
-        "was the discarded claim, and nothing else named it")
+        "Rule 2 must NOT fire: the only referrer was discarded with it")
+
+    # B — the control: a SURVIVING referrer shields the same entity.
+    _, kept_b, mechanical_b, warnings_b = _vet_and_apply({
+        "entities": [{"name": "#4118"}],
+        "points": [{"content": "the lease-batch fix", "about_entities": ["#4118"]}],
+        "events": [],
+    })
+    assert mechanical_b["fired"] == 1, mechanical_b
+    assert [e["name"] for e in kept_b["entities"]] == ["#4118"], (
+        "Rule 2 keeps a discarded entity that a surviving candidate references")
+    assert any("referential integrity" in w for w in warnings_b), (
+        "the downgrade must be recorded, not silent")
+
+
+def test_the_probe_reads_the_candidate_text_per_node_class():
+    """`_text_of` is the probe's own MIRROR rule, and it had no pin at all.
+
+    `:Object` carries its identity in `name` (the census reads `n.name` and an
+    empty name is skipped), while `:Point`/`:Event` carry the claim in `content`.
+    The order differs by node class; that is a graph fact, not the pass's
+    `_item_text` rule, and this test exists so the difference is stated rather
+    than claimed in a docstring.
+    """
+    text_of = e1_gate_drops._text_of
+
+    assert text_of("Object", "the deploy rail", None) == "the deploy rail"
+    assert text_of("Object", None, "the lease fix") == "", (
+        "a nameless Object must not put claim text into `object_names`")
+    assert text_of("Point", "ignored", "the lease fix") == "the lease fix"
+    assert text_of("Event", None, "the retro landed") == "the retro landed"
+    assert text_of("Point", None, None) == ""
 
 
 # ── e1_paired_arm: a mislabelled arm must be worse than no arm ──────────────
