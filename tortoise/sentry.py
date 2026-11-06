@@ -121,7 +121,7 @@ def init() -> bool:
             # this head, 0 events and 0 source reads. Read the earlier "2 events
             # per abort" figure as two CAPTURE attempts — `DedupeIntegration`
             # collapses them to one delivered envelope.)
-            # reviewed round 3/4): `ignore_errors` carries ONLY the
+            # (Reviewed rounds 3/4): `ignore_errors` carries ONLY the
             # direction-unambiguous names — `ClientDisconnect` (only a caller can
             # produce it) and `BrokenResourceError`. The reset/pipe names are
             # handled at the request layer instead (see
