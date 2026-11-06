@@ -445,11 +445,12 @@ Suites run at `80c912244`, through `tools/test_lane.py run` (private lane contai
   record is reproducible instead: §5 re-derives every line.
 - **It does not adjudicate `#4889`.** §3 offers the reading that reconciles the two measurements and says
   plainly it is a reading; `#10987` owns the adjudication.
-- **It does not re-open `#5333`.** The **design** decision (a pass may not remove a committed row) is
-  recorded in `#10069` and in `EXTRACTOR-V4-ARCHITECTURE.md` §*G5's destructive half*, and is quoted,
-  not challenged. `#5333` is **OPEN** because that records the design half only — the **authorisation**
-  (task 1) is still the owner's, so no reading here treats it as given. That is why A2's remaining path
-  must be non-destructive.
+- **It does not re-open `#5333`.** The **design** decision is recorded in `#10069` and in
+  `EXTRACTOR-V4-ARCHITECTURE.md` §*G5's destructive half*, and this record does not challenge it: no
+  pass may remove, archive or withdraw a committed row except through the one journaled lifecycle fold,
+  or through the D7 `ObjectSuperseded` arm. `#5333` is **OPEN** because that records the design half
+  only — the **authorisation** (task 1) is still the owner's, so no reading here treats it as given.
+  That is why A2's remaining path must be non-destructive.
 
 ## 7. The transferable lesson (why §0 exists)
 
