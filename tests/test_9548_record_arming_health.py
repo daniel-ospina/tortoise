@@ -39,10 +39,8 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import socket
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -53,11 +51,6 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 import tortoise.hosted_api as hosted_api
 from tortoise import monitoring, record_writer
 from tortoise.record_writer import RecordWriteError, dsn_fingerprint
-
-#: The runbook section this module's (a)-(f),(i) map is documented in — read by the
-#: name-drift pin below, which is the only place the /health key names are checked
-#: against the prose that claims them.
-_RUNBOOK = Path(__file__).resolve().parent.parent / "docs" / "infra-runbook.md"
 
 #: A realistic pooler DSN: the shape `docs/infra-runbook.md` §"Arming the Postgres
 #: record" mandates (R6's app role, URL-encoded password). Its PASSWORD is the one
@@ -668,13 +661,12 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
     half. Asserted against the real `metrics()` dict, key-set form, so the test
     cannot pass vacuously on a substring of some other key.
 
-    ⛔ It also pins the TWO SURFACES THAT MAKE THE CLAIM — `_record_health`'s own
-    docstring ("under the SAME names ``metrics()`` publishes") and the runbook's
-    field row — because neither is reachable from a literal assertion: a COHERENT
-    rename (block + `metrics()` + the literals here) left both prose surfaces
-    false with every test in the repo green (#9548 review P3). `config/
-    ci-surfaces.yml` states that this suite reds such a rename; that sentence is
-    only true because of the two assertions below.
+    ⛔ It also pins the docstring that makes the claim ("under the SAME names
+    ``metrics()`` publishes"), because that surface is unreachable from a literal
+    assertion: a COHERENT rename (block + `metrics()` + the literals here) left the
+    docstring false with every test in the repo green (#9548 review P3). The
+    runbook's field row is pinned next, in `tests/test_deploy_workflow.py`, and for
+    a stated reason: it runs on a docs-only diff and this file does not.
     """
     published = monitoring.metrics()
 
@@ -682,27 +674,22 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
         "the /health block documents these as `metrics()`'s own names, and "
         f"metrics() publishes {sorted(published)}"
     )
-    # …and the same two names must appear where the claim is MADE, not only in
-    # the code that makes it true: `_record_health`'s own docstring, and the
-    # runbook's FIELD ROW. ⛔ The runbook leg pins the ROW, not the file: a bare
-    # `name in runbook` stayed green when the row was renamed to keys the payload
-    # never publishes (`record_applied_total` / `record_last_commit_at`), because
-    # each name occurs elsewhere in the 3,800-line file — measured (#9548 review
-    # P3). The row is the artifact an operator reads; that is what is pinned.
+    # …and the name must appear where the claim is MADE, not only in the code that
+    # makes it true: `_record_health`'s own docstring ("under the SAME names
+    # ``metrics()`` publishes"). Without it, renaming the pair here AND in
+    # `metrics()` left the docstring false with every leg above green — they pin
+    # the literals only (#9548 review P3).
+    # ⛔ The RUNBOOK half of this claim is pinned in `tests/test_deploy_workflow.py::
+    # test_the_runbook_field_row_documents_the_positive_pair`, deliberately and not
+    # here: a runbook-only diff selects no surface and runs `tier1` only, and this
+    # file is on `api`/`core` — so a row pin in THIS file is asleep on the one diff
+    # that can re-break it (measured via `tools/ci_selection.py`).
     contract = hosted_api._record_health.__doc__ or ""
-    runbook = _RUNBOOK.read_text(encoding="utf-8")
     for name in ("record_writes_applied", "record_last_write_at"):
         assert name in contract, (
             f"`_record_health`'s docstring no longer names {name!r} — the field is "
             "published but undocumented, which is the paper-only claim inverted"
         )
-    assert re.search(
-        r"\|\s*`record_writes_applied`\s*/\s*`record_last_write_at`\s*\|", runbook
-    ), (
-        "docs/infra-runbook.md's field row no longer documents the pair under the "
-        "published names — the operator has no reading to take, however correct "
-        "the payload is"
-    )
 
 
 def test_an_unread_applied_counter_publishes_none_never_a_zero(monkeypatch):
