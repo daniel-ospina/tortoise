@@ -3990,7 +3990,7 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # the falkor/torch install row, the save-arm note, the arm-1 cache-key row — all four in §2;
     # named by row rather than by section, see the note on `_WALL_CLOCK_CITATION_ANCHORS`). ⛔ NOT ONE
     # of the four was correct in the commit that wrote it, so "they drifted" is the wrong diagnosis:
-    # in `cd2835e59` the postgres row's `:4312` was 21 lines above the install (`:4355`), the falkor
+    # in `cd2835e59` the postgres row's `:4312` was 43 lines above the install (`:4355`), the falkor
     # row's `:2734-2739` 21 above `install-cpu-torch` (`:2755`), and the arm-1 row's `:4304-4306`
     # pointed at the `test-record-postgres:` JOB HEADER, 43 lines above its cache step (`:4347`); in
     # `fea87bf88e` the save-arm note's `:3015` was 21 above `cache: pip` (`:3036`). All four were
