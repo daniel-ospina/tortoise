@@ -288,7 +288,10 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
   record's own docs PR `#11265`**, which builds nothing. `tools/who-is-on.sh 10984 --repo .` therefore
   returns four signals (a local branch, a worktree, the open PR, a remote branch) and every one of them
   is this record — the same self-matching hazard this document warns about for its own `git grep`, in the
-  tracker surface. The sequence is: census leg (§1(b)) → rollup query + ground truth
+  tracker surface. ⛔ **But that command exits 2 and reports the holder surface UNQUERIED** (the fleet
+  board could not be read), so it does **not** certify that no lane holds `#10984` — an unmeasured
+  surface is not a free one, which is the read-vs-verdict rule §0/§7 exist for. Treat `#10984` as
+  dispatchable **subject to a clean `collision_preflight.py 10984` run** at dispatch time. The sequence is: census leg (§1(b)) → rollup query + ground truth
   (§1(c)) → re-run (d). ⛔ **Its `config/v4-mechanisms.yml` row does not exist today** — the file carries
   **13** mechanism ids (`vet`, `source_dedup`, `exact_dedup`, `near_dup_detect`, `near_dup_merge`,
   `against_priors_consolidation`, `span_link`, `embed_gate`, `sufficiency_router`, `fanout_cap`,
@@ -325,6 +328,8 @@ git grep -n apply_hierarchy_edges                          # 9 in the test file 
 git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
 grep -c -E 'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py   # 0
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
+tools/who-is-on.sh 10984 --repo .                           # exit 2 — holder surface UNQUERIED, NOT "nobody"
+uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time gate (exit 0 = clear)
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
