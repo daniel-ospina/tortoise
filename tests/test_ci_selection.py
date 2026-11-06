@@ -274,6 +274,29 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
         "(#10980 review P2, the #4309 silent-drop class)"
     )
 
+    # PR #11023 review (P1, MEASURED FALSE — pinned here so it is not
+    # re-derived): the claim was that the CHANGELOG half of the pin "cannot run
+    # on the only change class that breaks it", because the module is allegedly
+    # not in `tier1`. It IS — `tier1:` is at `config/ci-surfaces.yml:7536` (75
+    # rows at this head), and the reviewer read the range `:6387-:6717`, which
+    # is inside `surfaces:`, where no `tier1` key exists at all. Selected now:
+    # `surfaces=[]` (the docs-only early return) with the module in
+    # `test_files`. The coverage is ALSO already pinned transitively: the
+    # STORAGE assertion directly above passes only through the SAME `tier1`
+    # row, since `onboarding` does not carry the module and `api`/`core` need a
+    # Python path — so removing that row reds this test rather than silently
+    # un-covering the CHANGELOG. Asserted explicitly below so the second file
+    # is a measurement of its own, not an inference from the first.
+    changelog = _sel(["docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md"])
+    assert changelog["surfaces"] == [], changelog["surfaces"]
+    assert changelog["full"] is False
+    assert "test_9555_narrative_carrier.py" in changelog["test_files"], (
+        "a `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`-only diff no "
+        "longer selects `test_9555_narrative_carrier.py` — then the "
+        "`#10852`-landed CHANGELOG leg is asleep on exactly the diff class "
+        "that can re-introduce the retracted sentence it pins (#11023 review)"
+    )
+
 
 def test_7949_e5_section10_writeback_runs_on_a_docs_only_diff():
     """#10108 review (P1): pin the SELECTION, not just the manifest string.
@@ -2957,6 +2980,28 @@ def test_inbound_relay_sweep_tool_change_selects_core_not_tier1():
     r = _sel(["tools/inbound_relay_sweep.py"])
     assert "core" in r["surfaces"], r
     assert "test_inbound_relay_sweep.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_ci_cancel_guard_tool_change_selects_core_not_tier1():
+    """A change to the cancel guard must run the rules it pins (#10936 round-3 review).
+
+    `tests/test_ci_cancel_guard.py` is registered on the `core` surface and owns the
+    guard's fail-closed guarantees — a CURRENT-HEAD cancel is refused, a started job
+    blocks the act, an unreadable or ambiguous surface cancels nothing. That
+    registration is INERT for a tool-only diff: `tools/` is a flat
+    NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/ci_cancel_guard.py`, so `select()` returns NO surface, takes the docs-only
+    early return and falls back to the tier-1 smoke set, which does not contain the
+    file. The diff that DELETES the CURRENT-HEAD arm would then be the one diff that
+    never ran the case refusing it.
+
+    Mutation check: removing the CORE_ALSO entry fails the FIRST assert
+    (`"core" in r["surfaces"]`).
+    """
+    r = _sel(["tools/ci_cancel_guard.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_ci_cancel_guard.py" in r["test_files"], r
     assert r["full"] is False, r
 
 
@@ -15355,3 +15400,40 @@ def test_pin_reference_scan_sees_the_colon_then_newline_citation_shape():
     )
     assert refs_bare == 1, refs_bare
     assert violations_bare, "a bare `file::` citation is silently skipped"
+
+
+def test_gh_read_cache_guard_runs_on_a_tools_only_change():
+    # #11047: `tests/test_gh_read_cache.py` (registered `core`) pins
+    # `tools/gh_read_cache.py`'s FAIL-CLOSED contract — scope in the filename AND
+    # the envelope, `0 <= age < ttl` as ONE comparison, the projection in the
+    # cache identity, `decode_pages`, and a failed cache WRITE never failing a
+    # successful read. `tools/` is a flat NON_PYTHON_PREFIXES entry and
+    # `tools/gh_read_cache.py` matches no SOURCE_PATTERNS row, so before the
+    # CORE_ALSO entry a tool-only diff was filtered out BEFORE the
+    # "not matched -> core" fallback: a maintenance edit to a `_project_*`
+    # helper (which the module's own `-v2` id-bump rule says must be paired with
+    # a bump) would have run `python-ci-gate` GREEN with none of the fail-closed
+    # pins executing (the #1349/#3332/#3616 silent-drop class, the same shape as
+    # the `rail_detach.py` arm above). Mutation check: removing the CORE_ALSO
+    # entry fails the arms below (surfaces == [] and the guard absent).
+    r = _sel(["tools/gh_read_cache.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_gh_read_cache.py" in r["test_files"], r
+
+
+def test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it():
+    # #11047: the surface row is what `--integrity` reads. Without it the file was
+    # in NO surface, so the REQUIRED `manifest-integrity` leg redded on every run
+    # (measured at 695c2277f: `manifest drift: ['test_gh_read_cache.py']`) AND no
+    # leg selected the suite — the two harms have one root and one fix.
+    m = load_manifest()
+    assert "test_gh_read_cache.py" in m["surfaces"]["core"], (
+        "the file must be a `core` member or `--integrity` reds the required gate"
+    )
+    assert integrity(m) == [], integrity(m)
+    # A PR-added fast-pool file needs a `durations` row at all (the #3400/#4348
+    # trap); the VALUE is the flat default only until junit measures it.
+    assert "test_gh_read_cache.py" in m.get("durations", {}), (
+        "an absent row packs the file at the flat default AND trips the coverage floor"
+    )
