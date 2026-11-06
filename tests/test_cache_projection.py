@@ -230,6 +230,45 @@ def test_a_primary_property_round_trips_through_a_record_row():
         "guarding a name while the real column projected freely")
 
 
+def test_the_props_tail_filters_a_not_projectable_column_in_PROPERTY_space(
+        monkeypatch):
+    """The tail is keyed by GRAPH PROPERTY names; the deny set is COLUMN names.
+
+    ⛔ WHY THIS IS PINNED WITH A SYNTHETIC ENTRY. `_props_from_row`'s tail filter
+    widens `forbidden` through `placement_spellings()`, because five columns are
+    AMBIGUOUS (`ambiguities()`: `event.session_id` → `sessionId`/`session_id`, …)
+    and filtering on the column name alone would let a forbidden AMBIGUOUS column
+    walk through the open-set door while the column door stayed shut. But
+    `story_arc` — the one column `CACHE_FORBIDDEN_COLUMNS` declares today — spells
+    IDENTICALLY in both spaces, so `tail_denied == forbidden` on every declared
+    entry and deleting the widening changes no test outcome: the same
+    cannot-red shape the column door one screen up documents. Rather than assume
+    the widening works, this arm makes a forbidden column AMBIGUOUS and asserts
+    the GRAPH spelling is what the tail drops.
+
+    Nothing here states a policy: the column is borrowed from the placement
+    table's own ambiguity list and the declaration is monkeypatched, so the real
+    `CACHE_FORBIDDEN_COLUMNS` is untouched.
+    """
+    column = "session_id"
+    spellings = cp.placement_spellings()["event"][column]
+    property_name = next(s for s in spellings if s != column)
+    assert property_name != column, "the column no longer spells itself the graph's way"
+
+    monkeypatch.setitem(cp.CACHE_FORBIDDEN_COLUMNS, "event",
+                        frozenset({column}))
+    row = {"props": {property_name: "the S1 narrative",
+                     "openSetProp": "kept"}}
+    got = _node("Event", row)
+    assert property_name not in got.props, (
+        f"`event.{column}` is declared not-projectable but its GRAPH spelling "
+        f"{property_name!r} reached the node through the `props` tail — the "
+        "tail filter is keyed in COLUMN space and cannot deny an ambiguous "
+        "column")
+    assert got.props.get("openSetProp") == "kept", (
+        "the tail deny dropped the whole tail instead of the one property")
+
+
 def test_no_derived_property_has_a_record_column():
     """DERIVED/VOLATILE ⇒ no column — the schema is the first line, stated.
 

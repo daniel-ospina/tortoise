@@ -1053,6 +1053,13 @@ class ParityDiff:
     ``invented``             record fields the cache does not have, and that no
                              declared ``ON CREATE`` default explains — i.e. a
                              field the record path made up. Non-empty = RED.
+                             ⚠️ The not-projectable columns
+                             (``cache_projection.CACHE_FORBIDDEN_COLUMNS``) are
+                             EXCLUDED here, because a declared asymmetry runs in
+                             BOTH directions (#10394): the record holding a
+                             column the projection must not materialise is the
+                             state the deny exists to create, and calling it an
+                             invention would make the rule forbid its own fix.
     ``changed``              fields both stores answer, with different values.
                              Non-empty = RED.
     ``explained_missing``    a DECLARED asymmetry at work. Every member comes
@@ -1130,20 +1137,31 @@ def parity_difference(cache_props: Mapping[str, Any],
       identity, never by the label alone: a transcript DOCUMENT Source keeps its
       own ``summary``, and there the same absence IS a projection gap (leg
       ``test_parity_reddens_on_the_same_names_for_a_document_source``).
-    * **a NOT-PROJECTABLE column (#10394)** — a field the RECORD legitimately
-      holds and the projection must not materialise
-      (``cache_projection.CACHE_FORBIDDEN_COLUMNS``: §9.1/D1's narrative on
-      ``source``/``event``). ⛔ Without this arm a legacy cache node that still
-      carries the pre-purge prose is reported as a **projection gap**, whose
-      only sanctioned repair is a re-projection — i.e. this rule would instruct
-      the operator to re-open the door the projection exists to keep shut. The
-      cache-only field is ``explained``, not ``unexplained_missing``.
+    * **a NOT-PROJECTABLE column** — a field the RECORD legitimately holds and
+      the projection must not materialise (``cache_projection.
+      CACHE_FORBIDDEN_COLUMNS``: §9.1/D1's narrative on ``source``/``event``,
+      ``#10394``). It is DECLARED IN BOTH DIRECTIONS, because the asymmetry is
+      the projection's, not a difference between the two stores:
+      - a LEGACY cache node that still carries the pre-purge prose is
+        ``explained``, not ``unexplained_missing``. ⛔ Without this arm it is
+        reported as a **projection gap**, whose only sanctioned repair is a
+        re-projection — i.e. this rule would instruct the operator to re-open
+        the door the projection exists to keep shut.
+      - and a RECORD row that carries the column the cache rightly lacks is
+        ``explained``, not ``invented``. ⛔ Without THAT arm the raw-record
+        direction reads ``invented: {story_arc}`` — *"the record path made up a
+        field"* — whose only sanctioned repair is likewise a re-projection, on
+        the very pair this deny exists to separate.
     * **nothing else.** A field the cache answers and the record does not, with no
       explanation, is a projection gap — and it reddens. A field the record
-      answers and the cache does not is an invention — and it reddens too. The
-      carve-out, the decline above and the not-projectable set are the ONLY
-      sanctioned asymmetries, and because all three are enumerated they cannot
-      be used to hide a gap.
+      answers and the cache does not is an invention — and it reddens too, UNLESS
+      it is a not-projectable column (above) or a fold default. The carve-out,
+      the decline above and the not-projectable set are the ONLY sanctioned
+      asymmetries, and because all three are enumerated they cannot be used to
+      hide a gap. ⚠️ The not-projectable set is mirrored into the ``invented``
+      direction (above); the CARVE-OUT is not yet, so a raw record row still
+      reports its own ``content_hash`` as invented — a pre-existing gap of that
+      arm, filed as ``#11192`` rather than absorbed here.
 
     ⚠️ The decline explains an ABSENCE FROM THE RECORD'S ANSWER, never a VALUE:
     the record's answer here is the projection's own map
@@ -1213,6 +1231,22 @@ def parity_difference(cache_props: Mapping[str, Any],
     invented: dict[str, Any] = {}
     for field_name, value in record_props.items():
         if field_name in cache_props:
+            continue
+        # ⛔ THE DECLARED ASYMMETRY IS SYMMETRIC (#10394 review, P2). The arm
+        # above explains a NOT-PROJECTABLE column the CACHE still holds; the
+        # record holding the same column is the state the projection exists to
+        # create (text authority in Postgres, never in the graph), so its
+        # absence from the cache is DECLARED, not an invention. Left out, this
+        # loop reddens `clean: False, invented: ['story_arc']` on a raw record
+        # row — the direction an audit of a production pair is handed — and
+        # `invented`'s only sanctioned repair is a re-projection, i.e. re-opening
+        # the door. Measured red-first in
+        # `tests/test_record_serve.py::test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention`.
+        # ⚠️ The same mirror for the SCHEMA-REFUSED names (`_refused`) is a
+        # pre-existing gap of this arm, filed as #11192 and deliberately NOT
+        # fixed here: that class is not the one this change introduces.
+        if field_name in not_projectable:
+            explained[field_name] = value
             continue
         # A fold `ON CREATE` default fills a field the record row is SILENT
         # about (#9634): a cache-side constant, not an invention.

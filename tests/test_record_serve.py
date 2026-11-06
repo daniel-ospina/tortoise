@@ -620,6 +620,43 @@ def test_a_not_projectable_column_is_EXPLAINED_and_not_a_projection_gap():
     assert set(gap.unexplained_missing) == {"unexplained_prop"}, gap.as_dict()
 
 
+def test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention():
+    """#10394 door 2, the MIRROR: a declared asymmetry has TWO directions.
+
+    ⛔ WHY THE ARM ABOVE DOES NOT COVER THIS. It hands the RAW row to
+    ``cache_props`` and the projector's map to ``record_props`` — the direction a
+    legacy cache node produces. The INVERSION is what an audit of a production
+    pair is actually handed (the record read its own row; the cache answer is the
+    projector's map), and the ``invented`` loop said *"a record field the cache
+    lacks ⇒ the record path made up a field"* without asking either declaration.
+    Measured before this arm existed: ``invented: ['story_arc']``,
+    ``clean: False`` — i.e. this rule reported the exact state the projection
+    exists to create as a RED, and the only sanctioned repair for ``invented`` is
+    a re-projection, which re-opens the door. A declaration that explains one
+    direction has to explain both, or it is a rule that forbids the fix.
+
+    The control arm is the other half: a genuinely made-up name still reddens, so
+    this is one declared class and not a blanket amnesty on the record side.
+    """
+    from tortoise.cache_projection import cache_forbidden_columns, node_from_row
+
+    prose = "the S1 narrative"
+    row = {"url": "docs/door-2.md", "title": "door 2", "story_arc": prose}
+    served = dict(node_from_row("Source", row).props)
+
+    diff = rs.parity_difference(served, dict(row), label="Source")
+    assert diff.clean, diff.as_dict()
+    assert set(diff.explained_missing) == {"story_arc"}, diff.as_dict()
+    # The explanation is the DECLARATION's, not a list curated here.
+    assert set(diff.explained_missing) <= cache_forbidden_columns("source")
+
+    # …and the amnesty is that class only, in this direction too.
+    invented = rs.parity_difference(served,
+                                   {**row, "aFieldTheRecordMadeUp": 1},
+                                   label="Source")
+    assert set(invented.invented) == {"aFieldTheRecordMadeUp"}, invented.as_dict()
+
+
 def test_a_record_served_read_carries_no_derived_name():
     conn = _FakeConn(rows=[_row(content_hash="abc", ep_dirty=True)])
     props = rs.read_point(conn, org_id="org_t", graph_id="g_t", point_id="p-1")

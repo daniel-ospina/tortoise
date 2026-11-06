@@ -599,7 +599,16 @@ def log_result(result: RecordReconcileResult,
         # number it did report reads as covering everything it saw.
         names = ", ".join(name for name, _ in result.graph_only[:4])
         more = ", …" if len(result.graph_only) > 4 else ""
-        line += (f" [graph_only={result.graph_only_total} cache-owned "
+        # ⚠️ "cache-HELD", not "cache-OWNED" (#10394 review, P3). All three
+        # omission classes are properties the CACHE holds — that is what
+        # `graph_only` counts — but "owned" is the §17.5 partition's term for
+        # ONE of them (the EP/derived scalars the record schema refuses, which
+        # only the cache has). The other two are record-owned: the §9.1/D1 pair
+        # the narrowing DECLINES (the record holds it, its repair is a
+        # re-projection) and the not-projectable column (the record holds it and
+        # the graph must NOT — its repair is #10017's purge). Calling them all
+        # "owned" sends the operator to the wrong repair.
+        line += (f" [graph_only={result.graph_only_total} cache-held "
                  f"property occurrence(s) not compared ({names}{more})]")
     verdict = result.verdict()
     line = f"{line} verdict={verdict}"
