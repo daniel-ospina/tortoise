@@ -1847,10 +1847,12 @@ def main(argv: list[str] | None = None) -> int:
                     and not args.expect_empty):
                 sys.stderr.write(
                     "purge_legacy_turns: the graph holds ZERO is_episodic "
-                    "nodes — an absence is NOT established (a wrong "
-                    "--graph-name/--db-path is indistinguishable from a "
-                    "drained graph). Pass --expect-empty if the graph is known "
-                    "to hold no turn nodes.\n")
+                    "nodes — an absence is NOT established. The graph DOES "
+                    "exist (presence is checked first, #11112), so what is "
+                    "unproven is its emptiness, not its identity: a wrong "
+                    "--graph-name/--db-path is refused earlier, by name. Pass "
+                    "--expect-empty if this is the drained graph you "
+                    "purged.\n")
                 return 3
             report = census_mod.census(
                 graph, record, sample=args.sample,

@@ -846,16 +846,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # process and asserts a REFUSAL, never a measurement.
     "test_7949_capstone_measure.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:@127\.0\.0\.1:1/'],
-    # #11112/#11113 `turn_parity_census`: the ONE site is the helper that builds
-    # a REAL embedded store and seeds one turn node into it, so the presence
-    # pre-check can be measured against a real `GRAPH.LIST` (a fake cannot show
-    # that a typo'd `--graph-name` mints `tortise`) — the embedded lane is the
-    # test's SUBJECT, not a fallback, and the ambient URI has to be out of the
-    # way or the epic-#1647 redirect would retarget an explicit `--db-path` run
-    # onto the docker lane. DELIBERATE_EMBEDDED_LANE: nothing here claims a
-    # docker-half green — the embedded store IS the measurement and no server is
-    # ever dialled. Function-scoped `monkeypatch`, auto-undone at teardown, so no
-    # lane flip reaches a later test.
+    # #11112/#11113 `turn_parity_census`: the TWO sites are the helpers that
+    # build a REAL embedded store (`_embedded_store_with_tortoise` and its
+    # EMPTY twin, which seeds one turn node and then drains it), so the presence
+    # pre-check and the write-freedom pins can be measured against a real
+    # `GRAPH.LIST` (a fake cannot show that a typo'd `--graph-name` mints
+    # `tortise`, nor that `ensure_indexes=False` alone still does) — the embedded
+    # lane is the test's SUBJECT, not a fallback, and the ambient URI has to be
+    # out of the way or the epic-#1647 redirect would retarget an explicit
+    # `--db-path` run onto the docker lane. DELIBERATE_EMBEDDED_LANE: nothing
+    # here claims a docker-half green — the embedded store IS the measurement and
+    # no server is ever dialled. Function-scoped `monkeypatch`, auto-undone at
+    # teardown, so no lane flip reaches a later test.
     "test_10017_turn_parity_census.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
