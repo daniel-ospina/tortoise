@@ -56,7 +56,7 @@ by construction):
 | `stored` | nodes whose `embedding` is not null |
 | `indexed` | `CALL db.indexes()` holds a **VECTOR** index on that label's `embedding` (an index on another field does not count) |
 | `unindexed` | the stored remainder — `UNMEASURED(...)` when the coverage cannot be proved (`#4280` dimension disagreement, unreadable width) |
-| `payload.derived_payload_B` | `stored × width × 4 B`. The width is **probed from a stored vector**; when a covering index exists its `dimension` must agree, and a disagreement refuses. **No covering index at all** → the figure is derived from the probed width alone and `how` says the width was not cross-checked; a **covering index whose `dimension` is unreadable** → `UNMEASURED`, because the row reports `indexed: true` and must not also claim coverage |
+| `payload.derived_payload_B` | `stored × width × 4 B`. The width is **probed from a stored vector**; when a covering index exists its `dimension` must agree, and a disagreement refuses. **No covering index at all** → the figure is derived from the probed width alone and `how` says the width was not cross-checked; a **covering index whose `dimension` is unreadable** → `UNMEASURED`, because the row reports `indexed: true` and must not also claim coverage; an **unreadable catalogue row** → `UNMEASURED` as well, because `not covering` cannot tell "no index" from "an index we could not see" |
 | `affected_entity_types` | the `entity_type` values the product translates onto this label |
 | `removal_changes_query_results` | `true` iff the label stores unindexed vectors **and** some `entity_type` reaches it; `false` when it does not; **`UNMEASURED(...)`** when either input is unmeasured (a consequence is never claimed from a hole) |
 
@@ -140,13 +140,27 @@ AFTER removing them  : fts=2, vector=0 (reason=no_embeddings)         → 2 rows
 ```
 
 `classify_query` turns **every** leg on for a text query (`{"fts": True, "vector": True,
-"structural": True}`), `run_fts_query` serves `Object`/`Event`/`Subject` by `entity_type.capitalize()`
-and `document` → `:Source`, and those labels carry fulltext indexes. So after removal:
+"structural": True}`), and `run_fts_query` serves `Object`/`Event`/`Subject` by
+`entity_type.capitalize()` and `document` → `:Source`. The FTS leg therefore answers whenever the label
+carries a fulltext index — and the DDL declares one on **all five** labels
+(`projection._FULLTEXT_INDEX_LABEL_FIELDS`: `Point` `content`,`search_keys` · `Event` `subject`,`name` ·
+`Subject` `name` · `Object` `name` · `Source` `_searchText` per `#3518`).
+
+⚠️ **Two of §12.1b's rows disagree with that DDL, and the discrepancy is stated rather than smoothed
+over.** §12.1b's 2026-09-24 inventory records `Source` FULLTEXT as **`—`** (and lists a `:Document`
+label, which the D10 fold retired); the `Source → _searchText` declaration landed *after* that reading.
+So for `:Object` / `:Event` / `:Subject` the lexical leg is corroborated by both, the measurement above
+exercised `:Object`, and **for `:Source` / `document` the two disagree** — on a graph where §12.1b's
+inventory still holds, those two types DO lose everything and the "zero rows" framing would be right for
+them. That is a measurement to take on the graph a removal is actually proposed for, not an assumption;
+the census reports per-label counts and the graph's own catalogue, so the same run settles it.
+
+So after removal:
 
 - a query that matched **only by meaning** — the semantic case the dense leg exists for — returns
   **zero** rows: that is the real loss;
 - a query with **lexical** matches keeps answering from the FTS leg and RRF fusion, with the dense
-  contribution gone;
+  contribution gone — on every label the graph's own catalogue shows a fulltext index for;
 - the structural leg is unaffected.
 
 **The surface consequence is therefore: five `entity_type` values lose semantic recall** — including the
@@ -248,11 +262,13 @@ assertion measures.
 
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
-113 passed, 1 skipped in 19.95s
+114 passed, 1 skipped in 21.98s
 ```
 
 **Row 2 — an unreadable catalogue exits non-zero and does not report an empty population.**
-Three routes, all `2`, none reporting a population:
+Three routes, all `2`, none reporting a population. ⚠️ These are **excerpts**, not full transcripts:
+each line quotes the `census` object (or the stderr line) that carries the refusal, not the whole JSON
+report `--census --json` emits:
 
 ```text
 $ uv run python tools/dod_5090_probe.py --census --json            # no URI
@@ -303,8 +319,11 @@ unindexed labels (`:Event`, `:Object`, `:Source`, `:Subject`). The affected surf
 `tortoise_search` / `tortoise_query` / `GET /v1/search` for `entity_type ∈ {event, object, document,
 source, subject}`, and what they lose is **semantic recall**: a query that matched only by meaning
 returns zero rows afterwards, while a lexically-matching query keeps answering from the FTS leg (§3.1
-is the measurement, and the reason it is stated this way rather than as "zero rows"). That is an
-MCP/SDK surface change, and no lane may take it.
+is the measurement, and the reason it is stated this way rather than as "zero rows"). ⚠️ §3.1 also
+records where the record DISAGREES: on a graph whose `:Source` fulltext index matches §12.1b's dated
+inventory rather than the DDL declaration, `document`/`source` would lose everything — so the decision
+should be taken on a census of the graph it applies to. That is an MCP/SDK surface change, and no lane
+may take it.
 
 **⚠️ The cost argument is GONE, in both directions — do not resurrect it.** The 2026-10-08 billing
 ruling makes tiers capped and priced per feature with **retained bytes as revenue**, so removing these
@@ -314,7 +333,7 @@ was withdrawn. **No recorded decision authorises this removal, and none forbids 
 
 **Not done, deliberately:**
 
-- no vector index is created for any label — that **is** decision V1 (§12.1c / §14.3, `#4333`);
+- no vector index is created for any label **on any product graph** — that **is** decision V1 (§12.1c / §14.3, `#4333`). (The live test creates one on its own throwaway lane graph and deletes the graph in a `finally`; that is a test fixture, not a graph anyone queries.)
 - no vector is removed, and this tool has no flag that could;
 - no MCP tool and no public SDK method is added, removed or renamed;
 - no cost model is re-derived (§16.1 / §17.4 record it), no placement is re-decided (§14.3), no

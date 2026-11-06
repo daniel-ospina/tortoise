@@ -1986,12 +1986,17 @@ def vector_leg_surface() -> list[dict]:
     claim about a surface that no longer exists.
 
     The binding is `sdk_method`, not the tool NAME: `tortoise_search` and
-    `tortoise_query` are two MCP tools over one SDK method, and matching on
-    names would miss the second.
+    `tortoise_query` are two MCP tools, and neither a name match nor a
+    `sdk_method`-only filter names both (see the ⛔ paragraph below).
 
     `takes_entity_type` is read from the SDK method's SIGNATURE — a fact, not a
-    prose sniff on a description — so a tool that stopped forwarding the
-    argument cannot keep reading as affected.
+    prose sniff on a description. ⛔ It is a fact about the METHOD, not about a
+    given handler: the SDK signature has `entity_type`, so this field reads
+    `True` for every entry bound to it whether or not that handler forwards the
+    argument. What pins a handler's FORWARDING is `named_by` — `handler forwards
+    entity_type into the hybrid engine` appears only for a handler whose body
+    does (review round 2, P3: the earlier wording claimed this field catches a
+    stopped-forwarding handler, which it does not and cannot).
 
     ⛔ A `sdk_method` filter ALONE IS INCOMPLETE, and incompleteness here is a
     false claim rather than an omission: `tortoise_query`'s registry binding is
@@ -2052,6 +2057,16 @@ def vector_leg_surface() -> list[dict]:
         })
     if handler_error:
         out.append({"tools": handler_error})
+    # ⛔ An UNRESOLVABLE `VECTOR_LEG_SDK_METHOD` empties BOTH sets, so `out` was
+    # `[]` — and `takes`, which is computed to be `UNMEASURED(...)` in exactly
+    # that case, had no entry to ride on. The surface then read as a MEASURED
+    # "no tool can pass entity_type" beside `entity_types_whose_query_results_
+    # change` naming real types: the under-reporting direction, produced by the
+    # very drift the resolution pin exists to catch — a pin protects the repo,
+    # not the instrument as shipped (review round 2, P2).
+    if not out or isinstance(takes, str):
+        out.append({"tools": f"UNMEASURED(the surface could not be derived: "
+                             f"{takes if isinstance(takes, str) else 'no tool resolves'})"})
     return out
 
 
@@ -2065,15 +2080,14 @@ def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
     first would miss `tortoise_search`, the tool the claim is primarily about.
 
     ⚠️ **DECLARED BOUND: this names handlers that call it DIRECTLY.** A handler
-    that delegates to a sibling helper which forwards the argument is NOT named
-    (`_hybrid` would be, and it is not a registry tool, so it surfaces as an
+    that delegates to a helper which forwards the argument is NOT named — the
+    HELPER's name is, and since it is not a registry tool it lands in the
     `UNMEASURED(handler not in TOOL_REGISTRY …)` entry beside the real tools
-    rather than disappearing). `**{…}` keyword unpacking is likewise unmatched.
-    At this head neither shape exists — the two module-level handlers are the
-    whole population — and a new one is REPORTED, not silently dropped, because
-    the unmatched name lands in that `UNMEASURED` entry. Stated rather than
-    claimed complete: this scan's promise is over what a walk of the tree can
-    see (review round 1, P3).
+    rather than vanishing. `**{…}` keyword unpacking is likewise unmatched. At
+    this head neither shape exists — the two module-level handlers are the whole
+    population — and a new one is REPORTED, not silently dropped, because the
+    unmatched name lands in that `UNMEASURED` entry. Stated rather than claimed
+    complete: this scan's promise is over what a walk of the tree can see.
 
     Returns `(names, error)`; `error` is the reason when the scan could not be
     taken, so the caller reports it instead of reading an empty set as "no tool
@@ -2379,12 +2393,17 @@ def vector_census(graph, graph_name: str, at: str | None = None,
         # gone the dense leg has nothing to answer
         # (`CALL db.idx.vector.queryNodes` on an unindexed label raises today,
         # so `run_vector_query` degrades to a brute-force scan), but
-        # `classify_query` turns the FTS leg on for every text query and these
-        # labels carry fulltext indexes — so a lexically-matching query keeps
-        # answering, and only a query that matched ONLY by meaning goes to zero
-        # rows. Measured, §3.1 of `docs/epics/2026-11-04-5090-vector-layer/`
-        # `S3-VECTOR-CENSUS.md` (review round 1: this comment said "returns zero
-        # rows", which the measurement refuted). A label with no `entity_type`
+        # `classify_query` turns the FTS leg on for every text query, and
+        # `_FULLTEXT_INDEX_LABEL_FIELDS` declares a fulltext index on all five
+        # served labels — so a lexically-matching query keeps answering, and
+        # only a query that matched ONLY by meaning goes to zero rows. Measured
+        # for `:Object`; §3.1 of `docs/epics/2026-11-04-5090-vector-layer/`
+        # `S3-VECTOR-CENSUS.md` also records where `STORAGE-ARCHITECTURE.md`
+        # §12.1b's 2026-09-24 inventory DISAGREES (`:Source` FULLTEXT `—`, a
+        # reading taken before that DDL), so the answer for `document`/`source`
+        # is a census on the target graph and not an assumption. (Review round
+        # 1: this comment said "returns zero rows", which the measurement
+        # refuted.) A label with no `entity_type`
         # at all is the worst class: stored, unindexed AND unqueryable — so it
         # is reported as affected-for-nobody, not omitted.
         ets = affected_entity_types(label)

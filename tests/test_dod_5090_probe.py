@@ -46,8 +46,11 @@ claims:
 | `test_the_census_reports_BYTES_for_an_UNINDEXED_label` | `#11088`'s Indicator — *"vector count **and bytes** per label"* — on the labels it is about | the byte figure is derived from the covering index's `dimension`, so the four UNINDEXED labels (the removable payload, and the whole reason the issue exists) report `UNMEASURED(no VECTOR index)` while the stored width sits already-probed one branch above |
 | `test_every_affected_entity_type_is_derived_from_the_ONE_mapping` | the surface question is a SET of `entity_type` values, not a label count | `document`+`source` → `:Source` and `point`+`operator` → `:Point` collapse to one name each (or a label no type reaches starts claiming one), so the consequence is stated for the wrong population. ⚠️ It pins the VALUES, so a second table with identical content would pass — the regression it can see is a mapping collapse, which is the likely one |
 | `test_the_census_states_the_consequence_of_removing_each_label` | the row's `affected_entity_types` / `removal_changes_query_results`, and `surface_consequence.requested_not_performed` | a census reads as an authorisation (`requested_not_performed` absent or `false`), a no-query-path label is listed as a surface consequence, or the whole thing goes through the write-capable verb |
+| `test_an_unreadable_catalogue_row_is_not_an_unindexed_label` | `#11088` round-1 P1/P2: a row's three consequence cells must AGREE | `removal_changes_query_results` is derived from pre-override locals, so a row whose `indexed`/`unindexed` read `UNMEASURED` publishes a `True` consequence (and enters `surface_consequence`), and its payload says "NO covering index" for a catalogue it could not read |
+| `test_an_UNMEASURED_consequence_is_CARRIED_not_dropped` | the under-reporting channel, `surface_consequence.unmeasured_labels` | a label whose consequence is `UNMEASURED` is skipped like a `False`, so `entity_types_whose_query_results_change` reads as the whole population while it is only the measured part |
+| `test_an_unresolvable_leg_method_reports_UNMEASURED_not_an_EMPTY_surface` | round-2 P2: a rename must not read as "no tool is affected" | `VECTOR_LEG_SDK_METHOD` stops resolving, both sets empty, and the surface reports `[]` — a measured-looking "no MCP tool can pass `entity_type`" — with no `UNMEASURED` channel |
 | `test_the_surface_named_is_the_one_that_can_pass_entity_type` | the CALLERS, derived from the registry **and** the handler AST | the `sdk_method` binding alone is used, so `tortoise_query` (bound to `paginated_query`, yet forwarding a `text=` argument to `tortoise_fts_query(entity_type=…)`) is missing — the direction that UNDERSTATES a surface change |
-| `test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING` | E2E D9 (`04-plan.md` §7) on a real engine: `Point` indexed, the four served labels unindexed **with bytes**, and a byte-identical graph across the call | the census mutates the graph it measures (labels / node counts / edges / the index catalogue / per-label embedding counts), or an unindexed label loses its `entity_type` set |
+| `test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING` | E2E D9 (`04-plan.md` §7) on a real engine: `Point` indexed, the four served labels unindexed **with bytes**, and the graph's visible shape unchanged across the call (⚠️ a corroborating observation — the READ-ONLY verb is what forbids the write) | the census mutates the graph it measures (labels / node counts / edges / the index catalogue / per-label embedding counts), or an unindexed label loses its `entity_type` set |
 | `test_the_census_guard_has_teeth_on_an_INJECTED_map` | the same guard's teeth, without pinning this head | the guard goes vacuous when #5090's remainder lands and this tree holds no unresolved writer |
 | `test_a_duplicate_identity_paints_no_census_note` | #10541's census population | a `duplicate` identity is counted as a census member, so a census is painted over a population that cannot hold a key for it |
 | `test_the_census_note_names_only_the_unresolved_producers` | the same population, in the other direction | a classed unresolved producer stops being named, or a duplicate is counted alongside it |
@@ -2998,6 +3001,25 @@ def test_every_name_the_census_hardcodes_still_RESOLVES(dotted):
     assert hasattr(module, attr), (
         f"the census prints `{dotted}` as the vector leg path, and it does not "
         "resolve — a rename landed without updating the instrument")
+
+
+def test_an_unresolvable_leg_method_reports_UNMEASURED_not_an_EMPTY_surface(
+        monkeypatch):
+    """A broken name must not read as "no tool is affected" (review round 2, P2).
+
+    An unresolvable `VECTOR_LEG_SDK_METHOD` empties BOTH the binding set and the
+    handler set, so `out` was `[]` — while `takes`, correctly computed to
+    `UNMEASURED(...)` in that case, had no entry to ride on and was discarded.
+    The surface then read as a measured "no MCP tool can pass `entity_type`"
+    beside a non-empty `entity_types_whose_query_results_change`: the
+    under-reporting direction, produced by the very drift the resolution pin
+    above exists to catch (a pin protects the repo, not the tool as shipped).
+    """
+    monkeypatch.setattr(probe, "VECTOR_LEG_SDK_METHOD", "no_such_sdk_method")
+    surface = probe.vector_leg_surface()
+    assert surface, "a broken leg method produced an EMPTY surface (unmeasured reads as empty)"
+    assert any("tool" not in entry and str(entry.get("tools", "")).startswith(
+        "UNMEASURED") for entry in surface), surface
 
 
 def test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING():
