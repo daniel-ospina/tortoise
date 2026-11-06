@@ -288,6 +288,42 @@ def test_the_conventions_own_word_order_is_still_a_decline(body, why):
     assert L.classify_pr(body + "\n", 1) == [], why
 
 
+def test_a_decline_that_names_a_list_clears_every_reference_in_it():
+    """Measured at `049548f2c` (review, P2): the object capture held ONE `#N`, so a written-out
+    list contributed only its first ref and then returned — discarding the proximity target too.
+
+    `Refs #100, #200 — deliberately not closing #100, #200.` declined `#100` and flagged `#200`,
+    and `Part of #100 — deliberately not closing #200, #100.` (rc 0 at `e7dd41058`) became rc 3:
+    a single-claim body whose decline explicitly names that claim was flagged. The object zone now
+    takes every ref the clause names, and STOPS at a conjunction that starts a new sentence
+    (`... Closes and #200 is deliberately not Closes.`) rather than continuing the list.
+    """
+    for body in ("Refs #100, #200 — deliberately not closing #100, #200.\n",
+                 "Refs #100, #200 — deliberately not closing #100 and #200.\n"):
+        assert sorted(L.claims(body, 1)["declined"]) == [100, 200], body
+        assert L.classify_pr(body, 1) == [], body
+    # a single claim whose decline names it, behind a ref that is NOT the decline's subject
+    assert L.classify_pr("Part of #100 — deliberately not closing #200, #100.\n", 1) == []
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Part of #11000 — deliberately not closing `#11078`.", "the object inside inline code"),
+    ("Part of #11000 — deliberately not closing <!-- #11078 -->.", "the object inside an HTML comment"),
+])
+def test_an_object_the_scan_cannot_read_is_not_evidence_for_the_claim_before_it(body, why):
+    """Measured at `049548f2c` (review, P3): `strip_code` blanks an inline-code span or an HTML
+    comment to WHITESPACE, so the decline reached the target logic with its object GONE — and then
+    fell through to proximity and cleared the ref BEFORE the sentence. Both bodies read
+    `NOTHING FLAGGED`, rc 0, while the same sentence with a readable object flags.
+
+    An unreadable object is no evidence at all: the decline gets no target and `#11000` stays
+    flagged. The clause-terminal convention (`deliberately not Closes.`, `deliberately not
+    closing.`) is unaffected — it has no object to lose, which is why it is pinned separately.
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body + "\n", 1)] == [[11000]], why
+
+
 def test_a_plural_decline_clears_the_whole_list_it_names():
     """`them` was added as an object in round 13 but resolved by proximity, so a PLURAL sentence
     cleared one ref and flagged the other (measured at `e7dd41058`, review P3).
