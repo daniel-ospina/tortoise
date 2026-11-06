@@ -3827,6 +3827,42 @@ def test_an_emitter_recorded_with_its_full_path_still_attributes_the_absence() -
     assert "DEFERRED(merge-time)" in gates.raw, gates.raw
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [
+        # The exact JSON slip `_fixture_merge_emit_files` exists for. Iterated as
+        # CHARACTERS by the basename comparison, it matched nothing → DEFERRED (PASS).
+        "python-ci.yml",
+        # A bare mapping becomes its KEYS, none of which is a workflow file name.
+        {"workflow": "python-ci.yml"},
+        # A non-`str` element escaped as an AttributeError, not a verdict.
+        ("python-ci.yml", None),
+    ],
+)
+def test_a_type_confused_emitter_on_a_hand_built_probe_is_unattributable(shape: Any) -> None:
+    """★ The projection's SHAPE is checked where the verdict is decided, not just at a door.
+
+    `Probe.merge_emit_files` is an ANNOTATION, and this module documents a hand-built
+    `Probe` as supported, so a projection that is not a sequence of file names is an input
+    the verdict code must survive. Measured at `980e5131e` with only the `--fixture` door
+    guarded:
+
+        "python-ci.yml"                 -> PASS (iterated as characters, matched nothing)
+        ("python-ci.yml", None)        -> AttributeError out of `check_gates`
+
+    The bare string is a REGRESSION the basename normalisation introduced: pre-fix,
+    `"python-ci.yml" in "python-ci.yml"` was `True`, so the arm said MISSING (a FAIL).
+    Both now land on UNATTRIBUTABLE — a verdict, and never a deferral.
+    """
+    probe = dataclasses.replace(
+        rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": []})),
+        merge_emit_files={MERGE_TIME_REQUIRED[0]: shape},
+    )
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, (shape, gates.raw)
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
+
+
 def test_an_explicit_empty_head_runs_still_defers() -> None:
     """The counterpart: a fixture that DOES state "read it, zero runs" keeps DEFERRED.
 

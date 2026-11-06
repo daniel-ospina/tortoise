@@ -1398,6 +1398,34 @@ def _merge_time_absence(probe: Probe, context: str) -> tuple[str, str]:
             "absence cannot be read as DEFERRED; re-cut with "
             "`tools/mergify_config_guard.py --recut`)"
         )
+    # ⛔ A PROJECTION THAT IS NOT A SEQUENCE OF FILE NAMES CANNOT ATTRIBUTE ANYTHING, and
+    # reading "no run of the emitter exists" out of it is the same conflation the
+    # `head_runs` shape guard closes on the listing side. `Probe.merge_emit_files` is an
+    # ANNOTATION, not an enforced type, and this module documents a hand-built `Probe` as
+    # supported — so the shape is checked HERE, at the one place that turns the projection
+    # into a verdict.
+    #
+    # Measured at `980e5131e` before this guard existed: a BARE STRING
+    # (`"python-ci.yml"`, the exact JSON slip `_fixture_merge_emit_files` was added for)
+    # was iterated as CHARACTERS by the basename comparison in `_run_emits`, matched
+    # nothing, and answered DEFERRED — a PASS while the aggregate was absent and its
+    # workflow had run on the head. That was a REGRESSION the basename normalisation
+    # introduced (pre-fix, `"python-ci.yml" in "python-ci.yml"` matched, so the arm said
+    # MISSING); and a non-`str` element (`None`, `17`) escaped as an `AttributeError`
+    # instead of a verdict. One shape rule closes both.
+    if isinstance(files, (str, Mapping)):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the recorded emitter projection is a "
+            f"{type(files).__name__}, not a sequence of workflow FILE names, so 'no run of "
+            "the emitter' is not a measurement; re-cut with "
+            "`tools/mergify_config_guard.py --recut`)"
+        )
+    if not all(isinstance(f, str) and f for f in files):
+        return "unattributable", (
+            f"{context}=UNATTRIBUTABLE(the recorded emitter projection carries an entry "
+            "that is not a workflow FILE name, so its absence cannot be attributed; "
+            "re-cut with `tools/mergify_config_guard.py --recut`)"
+        )
     if probe.head_runs is None:
         return "unattributable", (
             f"{context}=UNATTRIBUTABLE(the head's workflow runs could not be read, so "
@@ -1477,7 +1505,7 @@ def _run_emits(run: Mapping[str, Any], files: tuple[str, ...]) -> bool:
     # where the emitting workflow really ran. That is the record-side twin of the
     # `_readable_run` `path` guard: an emitter value that cannot match is not evidence that
     # nothing emitted it. Normalising at the comparison keeps it fail-closed for every door.
-    if _run_file(run) not in {f.rsplit("/", 1)[-1] for f in files}:
+    if _run_file(run) not in {f.rsplit("/", 1)[-1] for f in files if isinstance(f, str) and f}:
         return False
     event = run.get("event")
     return not isinstance(event, str) or event in PR_TRIGGERS
