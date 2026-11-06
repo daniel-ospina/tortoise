@@ -775,6 +775,33 @@ def _item_dedented(line: str, item: _ListItem) -> bool:
     return residual < item.rest_col
 
 
+def _content_column(rest: str) -> int | None:
+    """The list item's CONTENT column in `rest` space, or None if this line starts no item.
+
+    ⛔ ONE COMPUTATION, TWO CALLERS (round 30 review, P2). CommonMark §5.2 measures the item's
+    content column from the MARKER, and collapses a gap wider than four spaces to ONE column
+    (a wider gap starts an indented code block, not a wider item). `_fence_candidate` implemented
+    that; the item PUSH kept using `len(marker.group(0))`, which is marker + the WHOLE gap, so the
+    two disagreed by up to four columns for exactly the lines the difference can be observed on.
+    That was harmless while only the fence path read it — and became a class-A FALSE PASS the
+    moment arm 2's `indented_code` threshold was read from the push:
+
+        `-     item` + `        - [ ] x`   renderer `<pre><code>` -> the checklist must be hidden
+        item-push column 6 -> 8 > 6+3 is FALSE -> the quoted box CLEARED a criteria-less heading
+        CommonMark column 2 -> 8 > 2+3 is TRUE  -> hidden, as the renderer says
+
+    Two computations of one column is how the next reader re-derives it and re-introduces the
+    double count, so this is the single definition both call sites use.
+    """
+    marker = _LIST_MARKER_RE.match(rest)
+    if marker is None:
+        return None
+    m_indent = len(marker.group("indent"))
+    gap = len(marker.group("gap"))
+    marker_w = len(marker.group(0)) - m_indent - gap
+    return m_indent + marker_w + (gap if gap <= 4 else 1)
+
+
 def _fence_candidate(prefix: str, rest: str,
                      list_items: list[_ListItem]) -> _Fence | None:
     """The fence `(prefix, rest)` opens, or None if the line is prose.
@@ -803,10 +830,7 @@ def _fence_candidate(prefix: str, rest: str,
     # fence, blanking a real claim (#10634 review).
     item = _LIST_MARKER_RE.match(rest) if rest.strip() else None
     if item:
-        m_indent = len(item.group("indent"))
-        gap = len(item.group("gap"))
-        marker_w = len(item.group(0)) - m_indent - gap
-        base = m_indent + marker_w + (gap if gap <= 4 else 1)
+        base = _content_column(rest)
         opener = _fence_open(rest[base:])
         if opener is None:
             return None
@@ -1011,9 +1035,8 @@ def strip_code(body: str, strict: bool = False, *, stats: dict[str, int] | None 
             # it had just opened (#11078 round 29 review, P2: the fix did nothing for the
             # shape that motivated it).
             container = list_items[-1] if list_items else None
-            marker = _LIST_MARKER_RE.match(rest)
-            if marker:
-                rest_col = len(marker.group(0))
+            rest_col = _content_column(rest)
+            if rest_col is not None:
                 list_items.append(
                     _ListItem(_quote_depth(prefix), rest_col,
                               len(prefix) + rest_col))
@@ -1042,6 +1065,14 @@ def strip_code(body: str, strict: bool = False, *, stats: dict[str, int] | None 
         # NESTED LIST — prose, and a real criterion. Blanking on the width alone (the
         # `strict` rule) drops that real criterion; not blanking at all reads the
         # quoted example as one. Neither default is safe, so the caller chooses.
+        # ⚠️ DECLARED RESIDUAL (round 30 review, P3) — this is the block grammar's
+        # INDENTATION test, not all of §4.4: an indented code block cannot interrupt a
+        # PARAGRAPH, and this rule blanks one that does (`text\n    - [ ] a` renders as
+        # prose here and is hidden). That is the false-positive / silent-miss direction,
+        # and it is at PARITY with the parent head rather than a regression, so it is
+        # declared rather than fixed: teaching the rule about paragraph interruption
+        # needs the block state the fence pass does not keep, and guessing it the other
+        # way re-opens the class-A false PASS this mode exists to close.
         if rest_indent > _MAX_FENCE_INDENT:
             if strict:
                 out.append("")

@@ -1743,6 +1743,37 @@ def test_a_code_block_on_a_marker_line_cannot_buy_a_lands_on_the_default_base():
     assert cl.classify(pr, _by_head(pr), DEFAULT) == []
 
 
+def test_the_item_content_column_collapses_a_wide_gap_to_one():
+    """Round 30 review, P2 — ONE definition of CommonMark's item CONTENT column.
+
+    `_fence_candidate` collapsed a gap wider than four spaces to one column (§5.2: such a line
+    starts an INDENTED code block, not a wider item); the item PUSH used
+    `len(marker.group(0))`, i.e. marker + the WHOLE gap. Harmless while only the fence path read
+    it — and a class-A false PASS once arm 2's `indented_code` threshold was read from the push,
+    because the blanking threshold then sat up to four columns too far out:
+
+        `-     item` + `        - [ ] x`   renderer `<pre><code>`  ->  must be hidden, was CLEARED
+
+    These expected columns were checked against `MarkdownIt("commonmark")` (the renderer puts
+    `item` itself in `<pre><code>` at a 5-space gap, which is the tell that the content column is
+    2 and not 6).
+    """
+    assert cl._content_column("- item") == 2
+    assert cl._content_column("-     item") == 2          # gap > 4 collapses to ONE column
+    assert cl._content_column("1. Criteria") == 3
+    assert cl._content_column("10. Criteria") == 4
+    assert cl._content_column("    - item") == 6           # 4 columns of indent + `- `
+    assert cl._content_column("plain prose") is None
+    # …and the two call sites agree, which is the point: the fence path and the item push read
+    # the same column for the same line (a marker line that OPENS a fence carries its content
+    # column as `close_base`; a gap > 4 opens no fence at all, so it is asserted above).
+    for rest in ("- item", "1. Criteria", "10. Criteria", "    - item"):
+        marker = cl._LIST_MARKER_RE.match(rest).group(0)
+        fence = cl._fence_candidate("", marker + "```", [])
+        assert cl._content_column(rest) == fence.close_base, rest
+    assert cl._fence_candidate("", "-     ```", []) is None, "gap > 4 opens no fence"
+
+
 # ── cycle 10: containers by DEPTH, the ending line is fresh, list items end ──
 
 @pytest.mark.parametrize("body,expected,why", [
