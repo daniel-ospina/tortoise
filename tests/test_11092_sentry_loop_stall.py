@@ -1,11 +1,14 @@
 """#11092 — a client hang-up must not build a Sentry event.
 
-The 2026-11-04 outage: every aborted request (a health probe timing out, a closed
-tab, a dropped fetch) reached ``_unhandled_exception_handler`` as an "unhandled"
-exception, was logged at ERROR and captured to Sentry. Building that event reads
-and decodes the source file of EVERY frame (``sentry_sdk``'s
-``get_source_context``) in the logging thread — on the hosted API, the asyncio
-event loop, GIL held. Under a probe storm the loop never returned to serving:
+The 2026-11-04 outage: a client hanging up mid-request (a closed tab, a dropped
+fetch, a probe abandoned mid-flight) arrived at ``_unhandled_exception_handler``
+as ``ClientDisconnect`` — an "unhandled" exception — was logged at ERROR and
+captured to Sentry. (An aborted RESPONSE reaches no handler at all: uvicorn's
+``send`` returns early once the client is gone, so it is the mid-request
+hang-up that is the storm's fuel.) Building that event reads and decodes the
+source file of EVERY frame (``sentry_sdk``'s ``get_source_context``) in the
+logging thread — on the hosted API, the asyncio event loop, GIL held. Under a
+probe storm the loop never returned to serving:
 measured on ``tortoise-y4mjjq``, three ``py-spy`` dumps in a row parked the
 MainThread in that stack, ``loop_age_ms`` reached 43 444, every request hung, and
 the machine exited 1 and restarted.
@@ -371,8 +374,10 @@ def test_unhandled_handler_treats_an_inbound_reset_as_a_disconnect(
     # classified benign here but is NOT in `ignore_errors`, so one event still
     # goes out through the `ServerErrorMiddleware` re-raise. The true cost of the
     # misclassification is this record's ERROR level being lost (round 11), not
-    # silence and not the tags — `logger.exception` fires first, so
-    # `DedupeIntegration` drops the handler's TAGGED capture in EITHER branch.
+    # silence and not the tags: on the BENIGN path (this test) the handler never
+    # calls the tagged capture at all, and on the NON-benign path
+    # `logger.exception` fires first so `DedupeIntegration` drops it — the tags
+    # reach Sentry in neither branch, by two different mechanisms.
     assert any(
         r.levelno < logging.ERROR and "client disconnected" in r.getMessage()
         for r in caplog.records

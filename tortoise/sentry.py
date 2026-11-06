@@ -73,12 +73,13 @@ BENIGN_EXCEPTION_NAMES = frozenset({"ClientDisconnect", "BrokenResourceError"})
 #: record: the handler's own ERROR line on `tortoise.api`, because the benign
 #: branch writes only the sub-ERROR DEBUG line and the hosted deployment drops
 #: that (see `hosted_api`). It does NOT cost the `method`/`path` tags (review
-#: round 11, measured): the logging-integration event for the exception is
-#: delivered first, and `DedupeIntegration` drops the handler's own TAGGED
-#: `capture_exception` for the same exception instance — so those tags reach
-#: Sentry in neither classification. Attribution is not lost either: the
-#: delivered event carries the `request` interface (`transaction`,
-#: `request.url`). The EVENT itself still goes out through the Starlette
+#: rounds 11/15, measured) — for a reason that differs by branch: on the BENIGN
+#: path `_sentry_capture` is never called at all, so there are no tags to lose;
+#: on the NON-benign path `logger.exception(...)` runs first and
+#: `DedupeIntegration` drops the handler's tagged capture for the same exception
+#: instance. So those tags reach Sentry in neither classification. Attribution
+#: is not lost either: the delivered event carries the `request` interface
+#: (`transaction`, `request.url`). The EVENT itself still goes out through the Starlette
 #: re-raise, so the misclassification is a lost ERROR record, not a blind spot.
 #:
 #: That cost is ACCEPTED rather than reversing round 4's decision (keep these
