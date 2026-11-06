@@ -74,11 +74,13 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   disagreement. ⚠️ The mint exists only for a STRING the label's status door
   ACCEPTS — any string on an ``:Object``, but on a ``:Subject`` only
   ``_SUBJECT_STATUS_VALUES``, so a ``:Subject`` value outside that set has NO
-  mint and keeps only the clear below (`#11296`). A NON-STRING status (which
-  the ``:Object`` door accepts, it validates nothing) has no USABLE mint either
-  — the state-op reader reads ``payload -> 'state' ->> 'status'``, so a minted ``5``
-  comes back as the TEXT ``'5'`` — the bucket empties, but the pair reds as a
-  ``field_mismatches`` entry instead of reading clean.
+  mint and keeps only the clear below (`#11296`). A NON-STRING status (which the
+  ``:Object`` door accepts, it validates nothing) has no USABLE mint either: the
+  state-op leg keeps only a row whose ``payload -> 'state' -> 'status'`` is
+  ``jsonb_typeof`` ``'string'``, so a minted ``5`` is DROPPED — the fold derives
+  nothing, the name STAYS in ``graph_only``, and the pair still reads ``clean``.
+  A non-string mint is a NO-OP for this comparison (R4's declared bound,
+  `#9974`), not a red, so the value remains cache-only.
   ⛔ A CLEAR is the route only where the value is not trustworthy, and it is
   LABEL-DEPENDENT: on an ``:Object`` ``update_entity(…, status=None)`` is applied
   as ``SET n += {status: null}``, a REMOVAL; on a ``:Subject`` the SAME call is
@@ -89,9 +91,10 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   (``live._terminal_excluded`` reads an absent ``status`` as live). ⛔ Neither is
   a record-sourced re-projection, which is ADDITIVE (``MERGE … SET n += $props``,
   no REMOVE pass) and would leave the value in place — and a clear writes
-  ``state.status = null`` into the record, which the state-op reader collapses
-  to "no status write" (``cache_projection``'s stated R4 bound, recorded on
-  `#9974`), so the record cannot re-derive the ABSENCE today.
+  ``state.status = null`` into the record, and the state-op leg's
+  ``jsonb_typeof(…) = 'string'`` filter DROPS that row as it drops any
+  non-string, so the record cannot re-derive the ABSENCE today (R4's declared
+  bound, `#9974`).
   (b) any property a SECOND WRITER put on a placed node, OR on a node the
   record does not own at all (``scan_cache_view`` fills ``placed`` for every
   cache node it reads, so such a node's out-of-placement names are bucketed
@@ -582,9 +585,10 @@ def reconcile_record_and_cache(
     mint exists only for a STRING the label's status door ACCEPTS, so on a
     ``:Subject`` it is limited to ``SUBJECT_STATUS_VALUES`` and a value outside
     that set has no USABLE mint (`#11296`); a NON-STRING status has none either
-    — the state-op reader reads ``->> 'status'``, so a mint comes back as the
-    TEXT spelling (``5`` -> ``'5'``): the bucket EMPTIES and the pair reds as a
-    ``field_mismatches`` entry rather than reading clean. A CLEAR is only for an
+    — the state-op leg keeps only a row whose ``payload -> 'state' ->
+    'status'`` is a JSON string, so a minted ``5`` is DROPPED, the fold derives
+    nothing, and the name STAYS in ``graph_only`` with the pair still reading
+    ``clean``. A CLEAR is only for an
     untrustworthy value
     and is LABEL-DEPENDENT: ``update_entity(…, status=None)``, ``SET n +=
     {status: null}``, a REMOVAL, on an ``:Object``; on a ``:Subject`` that call
