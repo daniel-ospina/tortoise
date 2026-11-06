@@ -452,6 +452,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                             r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_cli_serve.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
+    # ⛔ ONE `test_cli_config_show.py` row only. The #10726 fold carried the
+    # #10655 row AND this lane's own row for the same module; both values were
+    # byte-identical, so Python's last-key-wins discarded nothing — but ruff
+    # reds the duplicate as `F601`, and the fold's `agent-infra-ci / lint` was
+    # red at head because of it. The two rows are folded into the single entry
+    # further down (same file, same value); deleting this one changes no
+    # exemption.
     "test_extractor_v2.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
     "test_mcp_server.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
     "test_pipeline_cli.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
@@ -796,6 +803,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_s3_prior_ablation.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #10726: `tortoise config show` is a REPORTER — it resolves the URI and
+    # prints what it found, so every case here sets TORTOISE_DB_URI purely as
+    # the report's INPUT and nothing connects (DELIBERATE_URI in the
+    # "deliberately-unreachable URI probe" sense: a `docker://…:16379` that is
+    # never dialled, a scheme-less DSN the resolver REJECTS, `""`/`"   "` for the
+    # unset/whitespace branches, and one masked-password case). The module
+    # landed inside the #10726 fold without its entry, which red'd the required
+    # `test (h)` leg. Every site is the fixture-param monkeypatch, so pytest
+    # auto-undoes at teardown — no lane leak into a later docker-lane test.
     # #10655 `tortoise config show`: the URI VALUE is the input under test — a
     # scheme-less DSN, an empty string, white space, a docker DSN with
     # user:password, a query-string credential — because the verb's whole job is
