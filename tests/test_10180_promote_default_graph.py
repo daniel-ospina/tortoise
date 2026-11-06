@@ -768,7 +768,7 @@ def test_a_legacy_team_namespace_graph_is_promotable_and_followed(monkeypatch):
 
     # …and the lanes actually built from it open THAT graph, not graph 0.
     _fake_org_row(monkeypatch, legacy_ns)
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
     ha._org_sdk(TEAM)
     assert _gate_builds(calls) == [{"graph_name": legacy_ns}], (
         "an org-wide lane must open the promoted legacy graph")
@@ -921,16 +921,19 @@ def test_the_sql_guard_accepts_exactly_what_the_gate_follows():
 _GATE_WINDOW_NON_GATE_BUILDERS = frozenset({"_probe_sdk", "_data_plane_db"})
 
 
-def _capture_make_sdk(monkeypatch, *, with_callers: bool = False):
-    """Record every `_make_sdk` build.
+def _capture_make_sdk(monkeypatch):
+    """Record every `_make_sdk` build as ONE list of `(caller_name, kwargs)`.
 
-    `with_callers=True` returns ONE list of `(caller_name, kwargs)` records —
-    deliberately NOT two parallel lists, because the caller and its payload must
-    be recorded by the same operation (see the note above). The default keeps
-    the historical single-list-of-kwargs return so the other call sites are
-    untouched.
+    ⛔ There is deliberately NO unattributed mode. An earlier revision kept a
+    `with_callers=False` default "so the other call sites are untouched", but
+    every call site wants attribution and a default is exactly how the next test
+    gets the old single-list-of-kwargs return back — the unattributed shape that
+    produced the shard-(h) false red this file exists to prevent. One return
+    shape, one record per build.
+
+    The pair is appended in a SINGLE operation, not as two parallel lists: the
+    caller and its payload must be recorded together (see the note above).
     """
-    opened: list[dict] = []
     calls: list[tuple[str, dict]] = []
 
     class _Sdk:
@@ -941,15 +944,12 @@ def _capture_make_sdk(monkeypatch, *, with_callers: bool = False):
             return None
 
     def _capture(**kw):
-        if with_callers:
-            # ONE record, one append: this pair cannot be interleaved.
-            calls.append((sys._getframe(1).f_code.co_name, kw))
-        else:
-            opened.append(kw)
+        # ONE record, one append: this pair cannot be interleaved.
+        calls.append((sys._getframe(1).f_code.co_name, kw))
         return _Sdk()
 
     monkeypatch.setattr(ha, "_make_sdk", _capture)
-    return calls if with_callers else opened
+    return calls
 
 
 def _gate_builds(calls: list[tuple[str, dict]]) -> list[dict]:
@@ -982,7 +982,7 @@ def test_org_sdk_is_byte_identical_for_an_unpromoted_org(monkeypatch):
     `sdk._namespace` None and change the fallback-snapshot identity key."""
     _hosted(monkeypatch)
     _fake_org_row(monkeypatch, f"org_{TEAM}")
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
     ha._org_sdk(TEAM)
     assert _gate_builds(calls) == [{"namespace": TEAM}]
 
@@ -994,7 +994,7 @@ def test_org_sdk_follows_a_promoted_default(monkeypatch):
     new one, and the points cap counts the wrong graph (money gate)."""
     _hosted(monkeypatch)
     _fake_org_row(monkeypatch, f"org_{TEAM}_{NEW_ID}")
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
     ha._org_sdk(TEAM)
     assert _gate_builds(calls) == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
 
@@ -1004,7 +1004,7 @@ def test_org_sdk_takes_the_namespace_it_is_given_without_a_read(monkeypatch):
     (the authenticated org dict carries `graph_name`) — and it goes through the
     SAME gate, so it cannot bypass it."""
     _hosted(monkeypatch)
-    records = _capture_make_sdk(monkeypatch, with_callers=True)
+    records = _capture_make_sdk(monkeypatch)
     calls: list[str] = []
     monkeypatch.setattr(ha, "_org_default_namespace",
                         lambda oid: calls.append(oid) or "SHOULD-NOT-BE-USED")
@@ -1028,7 +1028,7 @@ def test_org_sdk_falls_back_to_the_historical_open_when_the_read_fails(monkeypat
     monkeypatch.setattr(ha, "get_control_plane", lambda: _Broken(), raising=False)
     monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                         lambda: _Broken())
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
     ha._org_sdk(TEAM)
     assert _gate_builds(calls) == [{"namespace": TEAM}]
 
@@ -1108,7 +1108,7 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
         ha, "_org_default_namespace",
         lambda oid: pytest.fail("the quota gate must not read the control plane"))
 
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
     ha._check_org_limit(_credential(), "points")
     assert _gate_builds(calls) == [], (
         "the gate must not BUILD the SDK eagerly — #4051 hands the counter a "
@@ -1145,7 +1145,7 @@ def test_the_gate_assertion_measures_the_gate_and_not_the_process(monkeypatch):
     above becomes vacuous. An eager `_gate_sdk_for` must still be attributed to
     the gate.
     """
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
 
     # Half 1 — the probe's build. Same kwargs AND the same caller frame name as
     # the real `hosted_api._probe_sdk()`, so this stands in for the production
@@ -1258,7 +1258,7 @@ def test_a_record_interleaved_by_a_concurrent_builder_cannot_mis_pair(
     independent of record order. That is asserted here, and the pre-fix shape
     cannot satisfy it — it has no per-record caller to read at all.
     """
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
 
     def _probe_sdk():
         return ha._make_sdk(namespace=None)
@@ -1306,7 +1306,7 @@ def test_a_graph_bound_credential_counts_the_graph_it_writes_to(monkeypatch):
         quota, "enforce_org_limit",
         lambda limits, resource, sdk_factory=None, **kw: seen.update(
             {"sdk_factory": sdk_factory}))
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
     credential = _credential(graph_id=NEW_ID,
                              graph_namespace=f"org_{TEAM}_{NEW_ID}")
     ha._check_org_limit(credential, "points")
@@ -2281,7 +2281,7 @@ def test_the_org_id_only_lanes_reuse_the_requests_own_answer(monkeypatch):
 
     monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                         lambda: _Unreadable())
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
 
     # The auth seam publishes; the lane consumes — no read, promoted graph.
     token = ha._resolved_default_namespace.set(None)
@@ -2312,7 +2312,7 @@ def test_a_graph_bound_credential_publishes_no_default_namespace(monkeypatch):
     the graph-bound capture path (`POST /v1/sessions` admits those keys, and
     `_maybe_apply_completion` runs on every capture)."""
     _hosted(monkeypatch)
-    calls = _capture_make_sdk(monkeypatch, with_callers=True)
+    calls = _capture_make_sdk(monkeypatch)
     fake = _fake_org_row(monkeypatch, f"org_{TEAM}")   # NEVER promoted
 
     token = ha._resolved_default_namespace.set(None)
