@@ -5425,6 +5425,49 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             clause, clause_end = _clause_containing(norm, phrase.start())
             own = _occurrence_span(norm, phrase, clause, clause_end)
 
+            def _third_sha_in_clause(_clause: str) -> bool:
+                """True when `_clause` ASSERTS a sha that is neither the true tree nor the arming
+                commit.
+
+                The arming-sha exemption's premise is that the ONLY other sha in the clause is
+                `785bb2b59`, an ANCESTOR of the true tree and therefore never the tree the
+                phrase refers to. A third sha breaks that premise — `c5cbcbb4f` is the doc's
+                own stale pre-#9548 attribution — so its presence withholds the exemption
+                (#11191 review r12, P1 — MEASURED: without this, `…and the tree before #9548
+                is `c5cbcbb4f`.` was ACCEPTED and the pin went GREEN on the real §A8 cell).
+
+                ⛔ ASSERTED, NOT MENTIONED (#11191 review r13, P1 — MEASURED false RED).
+                Counting every third sha refused the plausible repair — name the arming commit
+                inline AND deny the stale tree — which `origin/main` accepts, i.e. the
+                false-RED class #11187 names verbatim:
+                  "`047c91f7a` is the arming commit `785bb2b59`'s parent and the tree before
+                   #9548 reads 10 lines, not `c5cbcbb4f`."              -> must ACCEPT
+
+                ⛔ …AND THE CUE MUST BE IMMEDIATELY ADJACENT (#11191 review r14, P1 —
+                MEASURED fail-open). A trailing window let a denial of the FIGURE or the
+                CENSUS be BORROWED by an assertion of a third tree in the same clause, and
+                the real cell is dense with `not` ("not empty, and not one", "**NOT** the
+                tree"). Only whitespace, a backtick or a quote may separate cue and sha:
+                  "…reads 10 lines, not `c5cbcbb4f`."                -> denied, ACCEPT
+                  "…the census is not 5, the tree before #9548 is `c5cbcbb4f`." -> REFUSE
+                """
+                for _m in _SHA_LIKE_RE.finditer(_clause):
+                    _tok = _m.group(0).lower()
+                    if _TRUE_TREE.startswith(_tok) or _tok.startswith(_TRUE_TREE):
+                        continue
+                    if "785bb2b59".startswith(_tok) or _tok.startswith("785bb2b59"):
+                        continue
+                    _lead = _clause[max(0, _m.start() - 44) : _m.start()]
+                    if re.search(
+                        r"\b(?:not|never|rather\s+than|instead\s+of|unlike"
+                        r"|as\s+opposed\s+to|cannot\s+be|isn['\u2019]t)\s*[`\"']?$",
+                        _lead,
+                        re.I,
+                    ):
+                        continue
+                    return True
+                return False
+
             def _copulated_to_phrase(_clause: str) -> bool:
                 """True when a NON-true sha-shaped token in `_clause` is copulated to the phrase.
 
@@ -5574,8 +5617,30 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 _span = _hit.group(0)
                 if _TRUE_TREE not in _span[: _span.lower().index(_FALSE_TREE)]:
                     return False
-            if _INVERTED_TRUE.search(clause):
-                return True  # "the tree before #9548 IS `047c91f7a`"
+            _inv_true = _INVERTED_TRUE.search(clause)
+            if _inv_true:
+                # ⛔ THE TRUE TREE MUST BE THE FIRST SHA AFTER THE COPULA (#11191 review
+                # r15, P1 — MEASURED false PASS on the real §A8 cell, and PRE-EXISTING:
+                # the base and `origin/main` accept it too). `_INVERTED_TRUE` searched
+                # "…(is|was|means) … <TRUE_TREE> within 40 chars", so a THIRD tree
+                # predicated of the phrase was exempted by the true tree merely FOLLOWING
+                # it — even when the true tree was the thing being DENIED:
+                #   "The tree immediately before #9548 is `c5cbcbb4f`, not `047c91f7a`."
+                #                                        -> ACCEPTED (pin GREEN)
+                #   "The tree immediately before #9548 is `c5cbcbb4f`, the reading at
+                #    `047c91f7a` is later."               -> ACCEPTED (pin GREEN)
+                # §A8 asserting the doc's own stale pre-#9548 attribution AND denying the
+                # true tree, with the pin GREEN. This arm also runs BEFORE the referent
+                # cascade, so any third-sha guard down there is never consulted. The true
+                # tree is therefore admitted only when no OTHER sha sits between the copula
+                # and it; a leading sha means the phrase was predicated of something else,
+                # which the referent rule decides.
+                _inv_between = _inv_true.group(0)[
+                    : _inv_true.group(0).lower().rfind(_TRUE_TREE)
+                ]
+                _inv_between = re.sub(_PHRASE_RE, " ", _inv_between, flags=re.I)
+                if not _SHA_LIKE_RE.search(_inv_between):
+                    return True  # "the tree before #9548 IS `047c91f7a`"
             # 4. A REFERENT. The phrase refers to the nearest sha written before it — that
             #    is what apposition and attribution mean in prose, with no distance
             #    cutoff (a truthful attribution is not disqualified by being long).
@@ -5860,6 +5925,14 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                         "785bb2b59".startswith(_ref)
                         and _TRUE_TREE in norm.lower()
                         and _FALSE_TREE not in norm.lower()
+                        # ⛔ …AND NO THIRD SHA MAY BE ASSERTED IN THE PHRASE'S CLAUSE
+                        # (#11191 review r12, P1 — MEASURED fail-open). The guard was
+                        # `_FALSE_TREE not in norm` alone, which is blind to the INVERTED
+                        # word order (`the tree before #9548 IS <sha>`) because
+                        # `_copulated_to_phrase` reads `<sha> is the tree`. A THIRD tree
+                        # therefore passed — "…and the tree before #9548 is `c5cbcbb4f`."
+                        # — and took the pin GREEN on the real §A8 cell.
+                        and not _third_sha_in_clause(clause)
                     )
                     # ⛔ AN ANCESTRY RELATION NAMING THE TRUE TREE IS A DIFFERENT, TRUE
                     # PROPOSITION (#11191 review r11, P1 — MEASURED false RED and a
@@ -7277,6 +7350,63 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "true tree in the sentence, or it exempts a referent it cannot check "
         "(#11191 review r11, P1)"
     )
+    # ⛔ CONTROLS FOR THE r12–r15 THIRD-TREE CLOSURES. Three separate arms were each
+    # MEASURED to accept a THIRD tree as the pre-#9548 tree on the real §A8 cell; every one
+    # of these reddened once its guard was neutered, so each is load-bearing.
+    for _third_tree_failopen in (
+        # the inverted-true arm was reached ~350 lines before the referent cascade
+        "The tree immediately before #9548 is `c5cbcbb4f`, not `047c91f7a`.",
+        "The tree immediately before #9548 is `c5cbcbb4f`, the reading at `047c91f7a` "
+        "is later.",
+        # the arming-sha exemption's `_FALSE_TREE not in norm` guard is blind to the
+        # inverted word order
+        "`047c91f7a` is the arming commit `785bb2b59`'s parent, and the tree before #9548 "
+        "is `c5cbcbb4f`.",
+        "For the arming commit `785bb2b59`'s parent, the tree before #9548 is "
+        "`c5cbcbb4f`; `047c91f7a` is a later reading.",
+        # …and the denial cue may not be BORROWED from a denial of the figure or the census
+        "`047c91f7a` is the arming commit `785bb2b59`'s parent, the census is not 5, the "
+        "tree before #9548 is `c5cbcbb4f`.",
+        "`047c91f7a` is the arming commit `785bb2b59`'s parent and the census is not 5, so "
+        "the tree before #9548 is `c5cbcbb4f`.",
+        "`047c91f7a` is the arming commit `785bb2b59`'s parent, and unlike 5, the tree "
+        "before #9548 is `c5cbcbb4f`.",
+    ):
+        assert _refuses_before_9548(_third_tree_failopen), (
+            f"ACCEPTED: {_third_tree_failopen!r}\n"
+            "a THIRD tree is asserted as the pre-#9548 tree and the pin goes GREEN on the "
+            "real §A8 cell — `c5cbcbb4f` is the doc's own stale attribution, so this is the "
+            "exact decay the pin exists to catch (#11191 review r12/r14/r15, P1)"
+        )
+    # …and the DENIAL direction must stay green, or the guards above are bought with the
+    # false-RED class #11187 names verbatim ("it would steer a later fixer to delete the
+    # arm rather than refine it").
+    for _denied_third in (
+        "`047c91f7a` is the arming commit `785bb2b59`'s parent and the tree before #9548 "
+        "reads 10 lines, not `c5cbcbb4f`.",
+        "`047c91f7a` is the arming commit `785bb2b59`'s parent, and the tree before "
+        "#9548 is not `c5cbcbb4f`.",
+        "The arming commit `785bb2b59`'s parent, `047c91f7a`, is the tree immediately "
+        "before #9548, not `c5cbcbb4f`.",
+    ):
+        assert not _refuses_before_9548(_denied_third), (
+            f"REFUSED: {_denied_third!r}\n"
+            "denying the doc's stale `c5cbcbb4f` attribution is the CORRECTION, and "
+            "refusing it is the false-RED class this pin must never produce "
+            "(#11191 review r13, P1)"
+        )
+    # …and the TRUE copula the inverted-true arm exists for must stay green in every
+    # spelling, or its guard reds the correction.
+    for _true_copula in (
+        "The tree immediately before #9548 is `047c91f7a`.",
+        "The tree immediately before #9548 is `047c91f7a`, where the same path set returns 10.",
+        "The tree before #9548 means `047c91f7a`.",
+    ):
+        assert not _refuses_before_9548(_true_copula), (
+            f"REFUSED: {_true_copula!r}\n"
+            "the TRUE copula is the correction the pin exists to accept "
+            "(#11191 review r15, P1)"
+        )
     # ⛔ THE ANAPHORA RESIDUAL, PINNED AS A CHARACTERISATION — NOT AS CORRECT BEHAVIOUR
     # (#11191 review r11, P3 — the PR body states this residual but the CODE did not, and
     # an unpinned residual cannot red when a future fix moves it). A sentence that names
