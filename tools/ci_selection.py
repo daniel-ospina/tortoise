@@ -1678,7 +1678,6 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # MEASURED before this entry: `select(["tools/gh_write_preflight.py"],
              # "pull_request", load_manifest())` -> surfaces=[], full=False, test file ABSENT;
              # after -> surfaces=['core'], present. Same #1349/#3332/#3616 class as above.
-             # ⚠️ n is a SNAPSHOT — re-measure, do not trust a count.
              # Pinned by TWO cases, and they do not cover the same thing:
              # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1
              # (the entry EXISTS; green under either the exact path or the prefix) and

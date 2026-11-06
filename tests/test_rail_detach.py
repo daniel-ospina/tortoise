@@ -1676,6 +1676,59 @@ def test_torn_exit_line_does_not_crash_collect(tmp_path):
     assert st.state == rd.REFUSED and st.exit_code is None   # fail closed, no crash
 
 
+def test_a_torn_LOG_header_does_not_crash_collect(tmp_path):
+    """⛔ A HEADER CUT AT `LOG=` RESOLVES TO `Path(".")`, WHICH *EXISTS*.
+
+    `_read_snapshot` reads `LOG=` out of the artifact and then `read_text()`s it. A
+    header write cut at `LOG=` yields the EMPTY value, and `Path("")` is `Path(".")`
+    — a DIRECTORY, for which `.exists()` answers True — so the read raises
+    `IsADirectoryError` out of `collect`. That is a traceback on a read-only verb,
+    and under `--assert-merged` it exits 1: the code this tool reserves for "the
+    state is NOT merged". A crash must not wear the machine gate's verdict, which is
+    the whole reason the guard is `.is_file()` and not `.exists()`.
+
+    ⛔ THIS IS THE `.is_file()` GUARD'S ONLY REGRESSION DETECTOR. Reverting it to
+    `.exists()` leaves every other case in this file green (measured: 98 passed
+    either way), because no other test constructs the torn-`LOG=` shape.
+    """
+    sd = tmp_path / "state"
+    sd.mkdir()
+    art = rd.artifact_path(sd, "o/r", 91)
+    real_log = rd.log_path(sd, "o/r", 91)
+    art.write_text(
+        f"PR=91\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\nLOG=\n"
+        f"SPAWNING=1\nATTEMPT_ID=a91\nPID={_reaped_pid()}\n",
+        encoding="utf-8",
+    )
+    # The real log DOES carry a success line, so a guard that fell back to
+    # "read everything" would answer MERGED on evidence this attempt cannot name.
+    real_log.write_text(
+        f"\n{rd.ATTEMPT_MARK} x attempt=a91 (detached) =====\n"
+        "admin-merge: ✅ merged PR #91 at deadbeefcafe1234 "
+        "(state=MERGED confirmed via the API)\n",
+        encoding="utf-8",
+    )
+
+    st = rd.collect(sd, "o/r", 91)                     # pre-fix: IsADirectoryError
+    assert st is not None, "a torn header is a state, never an absent record"
+    assert st.state != rd.MERGED, st.as_dict()
+    assert rd.main(["collect", "91", "--repo", "o/r", "--state-dir", str(sd),
+                    "--assert-merged"]) == 1
+
+    # ARM 2 — `LOG=` naming a real DIRECTORY is the same read by another route.
+    (tmp_path / "a-dir").mkdir()
+    art.write_text(
+        f"PR=91\nREPO=o/r\nSTARTED_AT={rd._iso_now()}\n"
+        f"LOG={tmp_path / 'a-dir'}\n"
+        f"SPAWNING=1\nATTEMPT_ID=a91\nPID={_reaped_pid()}\n",
+        encoding="utf-8",
+    )
+    st = rd.collect(sd, "o/r", 91)
+    assert st is not None and st.state != rd.MERGED, st.as_dict()
+    assert rd.main(["collect", "91", "--repo", "o/r", "--state-dir", str(sd),
+                    "--assert-merged"]) == 1
+
+
 def test_a_named_rail_under_spawning_is_not_no_rail(tmp_path):
     """⛔ `SPAWNING=1` WITH NO `PID=` IS NOT "NO RAIL EVER STARTED".
 
