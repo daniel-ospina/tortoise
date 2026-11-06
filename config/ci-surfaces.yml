@@ -6208,6 +6208,16 @@ surfaces:
   # deliberately NOT carve_out-registered: it belongs on the fast pool, at the flat
   # `DEFAULT_FAST_WEIGHT` row below until a push-to-main sweep measures it.
   - test_cache_eviction_census.py
+  # #10976: the egress EXECUTOR and its two pin suites. ⛔ Without these rows the
+  # three files are in NO surface and `ci_selection.py --integrity` lists them as
+  # manifest drift, redding the REQUIRED `manifest-integrity` leg — the same trap the
+  # paragraph above records for the sibling census file. It matters more here: these
+  # are the DELETE gates (the licence, the per-node record probe, the id+key bind, the
+  # exit-code vocabulary), and a regression in any of them would otherwise merge on a
+  # green PR with no executor test executed at all.
+  - test_cache_evict_cli.py
+  - test_cache_eviction_evictor.py
+  - test_cache_eviction_evictor_pins.py
   # #11047 REPLACES a #11052 file that had already been MERGED — not a branch that superseded one.
   # `#11052` merged as `bc5a26436e`, an ancestor of this PR's merge base (`30c961a43f`), so `main`
   # carried its own `core` membership, `durations` row and `CORE_ALSO` entry for THIS path; the
@@ -8607,6 +8617,12 @@ carve_out:
 # give rc=1/3, not this rc=5 shape) is the attribution half of #6884 and is
 # tracked on the issue, not here.
 uri_requiring:
+# #10976: `tests/test_cache_eviction_evictor.py` module-skips with
+# `allow_module_level=True` unless `TORTOISE_DB_URI` is set and docker is reachable
+# (it seeds real `:Point` nodes and evicts them). Registering it `core` WITHOUT this
+# declaration reintroduces the #6884 collect-nothing leg: the file collects 0 items on
+# the URI-less pool and the leg passes green having run nothing.
+- test_cache_eviction_evictor.py
 - test_capabilities_endpoint.py
 - test_eval_ingest_cache.py
 - test_invite_fusion_docker.py
