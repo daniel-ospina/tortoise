@@ -353,13 +353,21 @@ def _mutating_steps_with_job() -> list[tuple[str, dict, dict]]:
     """`(job name, job, step)` for each step that RUNS a consent-gated hosted CLI command.
 
     The subject is the CONSENT GATE, not mutation: `_MUTATING_ROOTS + _CONSENT_GATED_ROOTS`, because
-    v3 asks before a hosted READ too. The job set is still `_applier_jobs()` (mutation only) — a
-    read-only step inside the applier job is swept, and cannot create a second "applier" (#11135).
+    v3 asks before a hosted READ too.
+
+    ⛔ EVERY job, not `_applier_jobs()` (#11135, second review). Sweeping only the mutating job left
+    the union's read-only half INERT: a consent-gated read in a SECOND job was guarded by nothing.
+    It used to red there by accident — the old tuple made that job a second "applier" — so narrowing
+    the selector silently traded one defect (a false RED naming the wrong cause) for another (a
+    `supabase db pull --linked || true` drift job that pulls nothing reading green). Measured on the
+    real workflow, sweeping all jobs yields the same four steps as sweeping only the applier, so
+    there is no false RED; on a synthetic third job it re-catches the step AND names the swallow
+    operator. Job SELECTION stays narrow: `_applier_jobs()` reads `_MUTATING_ROOTS` alone.
     """
     swept = _MUTATING_ROOTS + _CONSENT_GATED_ROOTS
     return [
         (name, job, step)
-        for name, job in _applier_jobs()
+        for name, job in (_workflow_doc().get("jobs") or {}).items()
         for step in (job.get("steps") or [])
         if any(c.startswith(swept) for c in _commands_in(step))
     ]
@@ -473,6 +481,12 @@ def _remedy_command(banner: str, anchor: re.Pattern[str]) -> str:
     `--yes` and the sentence "… and note that --yes is required on CLI v3" appended in the same
     banner: the quoted form reds, and the run-to-end form passed, because the prose's flag was the
     one the matcher found (#11135). A clause cut keeps prose out of the command either way.
+
+    Declared residual, and it is narrow: the cut runs only on the two fallbacks. A banner whose PROSE
+    carries an apostrophe before the anchor takes the delimited path instead (the quote looks like an
+    opening delimiter), so an undelimited command with an apostrophe earlier in the sentence still
+    slices to the end. No banner this repo prints has that shape — measured against all four sites —
+    and the new test pins the shape that does occur. Stated, not implied.
     """
 
     def _clause(tail: str) -> str:
