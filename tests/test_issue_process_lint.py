@@ -2242,3 +2242,43 @@ def test_the_pull_request_is_not_the_object_of_a_decline():
     for body in ("Refs #100 — not closing this issue.\n", "Refs #100 — does not close #100.\n"):
         assert L.claims(body, 1)["declined"] == [100], body
         assert L.classify_pr(body, 1) == [], body
+
+
+def test_a_list_does_not_continue_across_a_blank_line():
+    """Measured at `53646f1f6fd0` (review round 22, P3-1) — the FALSE POSITIVE direction.
+
+    The continuation's separator was `\\s`, which includes `\\n`, so a conjunction or a comma in a
+    FOLLOWING PARAGRAPH continued the list and a legitimate MENTION was claimed and flagged:
+
+        Closes #100\\n\\nand #200 is tracked separately.   -> closing=[100], weak=[200]  -> rc 3
+        Refs #100,\\n\\n#200                               -> weak=[100, 200]            -> rc 3
+
+    The mirror grammar already refuses that gap (`_REF_RUN_GAP_RE`/`_LIST_SEP`: "bare whitespace is
+    excluded because `#100 #200` is not an English list … the conservative reading of an ambiguous
+    gap is to END the run"), so this was the two-populations-one-grammar inconsistency again. ONE
+    newline is still admitted — the wrapped list below is legitimate and stays claimed — but a blank
+    line ends it, the same `\\n?`-never-`\\n\\n` rule `closes_landing` states for its own separator.
+    """
+    for body in ("Part of #100\n\nand #300 is tracked separately.\n",
+                 "Part of #100\n\nor #300 for the follow-up.\n",
+                 "Refs #100,\n\n#200\n"):
+        assert L.claims(body, 1)["weak"] == [100], body
+        # `Part of`/`Refs` close nothing, so #100 is correctly flagged — and #300/#200 is NOT.
+        assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]], body
+    # …and the closing spelling, whose first ref resolves rather than linking: no finding at all.
+    closing = "Closes #100\n\nand #200 is tracked separately.\n"
+    assert L.claims(closing, 1)["closing"] == [100]
+    assert L.claims(closing, 1)["weak"] == []
+    assert L.classify_pr(closing, 1) == []
+
+
+def test_a_wrapped_list_is_still_one_list():
+    """The other half: a single SOFT line break is a wrapped list, not a paragraph break — so the
+    narrowing above cannot be made green by ending every list at the first newline.
+
+    The CONJUNCTION form is the deliberate exception: `and` at end of line with its reference on the
+    next one is genuinely ambiguous (it reads as prose continuing the sentence), so it does not
+    continue the list. Pinned so the asymmetry is a decision, not an oversight.
+    """
+    assert L.claims("Part of #10085,\n#10063\n", 1)["weak"] == [10063, 10085]
+    assert L.claims("Part of #100 and\n#300\n", 1)["weak"] == [100]
