@@ -49,6 +49,11 @@ module is built from those two declarations and the legs below pin both.
 
 from __future__ import annotations
 
+import importlib.util as _ilu
+import json
+import sys
+from pathlib import Path
+
 import pytest
 
 from tortoise.session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
@@ -696,3 +701,216 @@ def test_a_reader_that_takes_one_argument_is_tolerated_and_SAID_SO():
     assert report["repaired"] == ["session:s-11070"]
     assert "turn_max_index" in report["notes"]["session:s-11070"], (
         "a one-argument reader silently drops the tail witness")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The operator CLI's SCOPE contract (#11152 review: presence is not proof, and
+# the requirement belongs on the arm that can destroy something)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Two independent defects, both only observable at argv level:
+#
+# 1. The scope guard was keyed on `record_dsn` ALONE, so on the box this repair
+#    targets — `TORTOISE_RECORD_DSN` exported, no scope flags typed, which the
+#    script's own comment calls "most of them" — the runbook's step 1
+#    (`--dry-run`) and step 3 (`--dry-run --assert-clean`) exited 2 before
+#    opening the graph. A verification step that cannot run is a verification
+#    that cannot fail, and the only escape the error offered was
+#    `--clear-without-record` — the flag that authorises clearing.
+# 2. Non-empty `--org-id`/`--graph-id` prove PRESENCE, never that the scope
+#    ANSWERED. Row-level security returns zero rows (never an error) for a scope
+#    that does not match, so a typo'd `--graph-id` reads exactly like "the record
+#    did not answer" for every session. One session cannot tell the two apart;
+#    the population can, and the run must say which failure it saw.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_CLI_PATH = _REPO_ROOT / "graph-scripts" / "11070_repair_session_source_prose.py"
+_spec = _ilu.spec_from_file_location("repair_session_source_prose_11070",
+                                     str(_CLI_PATH))
+_cli = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_cli)
+
+_DSN = "postgresql://u@h/db"
+
+
+class _Reached(Exception):
+    """Raised where the run got PAST the argument guards."""
+
+
+class _FakeRecordConn:
+    def close(self):
+        pass
+
+
+class _NotAnswered:
+    answered = False
+    turns: tuple = ()
+
+
+class _OneTurn:
+    """A session whose record DOES answer — the proof the scope works."""
+
+    answered = True
+    turns = (type("_T", (), {"line": "User: friday rebuild plan"})(),)
+
+
+def _no_account(conn, *, org_id, graph_id, session_id, turn_max_index=None):
+    """The record as a WRONG SCOPE presents it: silence for every session."""
+    return _NotAnswered()
+
+
+class _Proj:
+    """The projection the CLI opens — just the graph handle it needs."""
+
+    def __init__(self, graph):
+        self.g = graph
+
+    def close(self):
+        pass
+
+
+def _export_a_record_dsn(monkeypatch):
+    """The box this repair targets: a DSN exported, no scope flag typed."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:x@127.0.0.1:1/none")
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", _DSN)
+    monkeypatch.delenv("TORTOISE_ORG_ID", raising=False)
+
+
+def _install_cli(monkeypatch, graph, argv):
+    monkeypatch.setattr(_cli, "open_projection", lambda uri, name: _Proj(graph))
+    monkeypatch.setattr("tortoise.record_serve.open_record",
+                        lambda dsn: _FakeRecordConn())
+    monkeypatch.setattr("tortoise.record_read.session_turns", _no_account)
+    monkeypatch.setattr(sys, "argv", [_CLI_PATH.name, *argv])
+
+
+def test_a_census_runs_on_a_box_that_exports_a_record_dsn(monkeypatch, capsys):
+    """Finding (1): steps 1 and 3 must be runnable where they are needed.
+
+    (1) FAILS on the pre-fix code: the guard was keyed on `record_dsn`, so this
+        argv exited 2 before `open_projection` was reached — proving the census
+        refused to run and hiding the reason behind the clearing flag.
+    (2) REACHABLE: the same argv now reaches the cache read, and the run SAYS
+        the record was not consulted instead of silently reporting silence.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_session_node(),)])
+
+    def _boom(uri, name):
+        raise _Reached
+
+    monkeypatch.setattr(_cli, "open_projection", _boom)
+    monkeypatch.setattr(sys, "argv", [_CLI_PATH.name, "--dry-run"])
+
+    with pytest.raises(_Reached):
+        _cli.main()
+    # …and with a real projection the census completes, exit 0, no scope asked.
+    monkeypatch.setattr(_cli, "open_projection", lambda uri, name: _Proj(graph))
+    assert _cli.main() == 0
+    captured = capsys.readouterr()
+    assert "census BEFORE: 1" in captured.out
+    assert "NOT consulted" in captured.err
+
+
+def test_the_writing_arm_still_refuses_a_missing_record_scope(monkeypatch,
+                                                              capsys):
+    """The guard is not relaxed where it protects a destructive write."""
+    _export_a_record_dsn(monkeypatch)
+    monkeypatch.setattr(_cli, "open_projection", lambda uri, name: _Reached)
+    monkeypatch.setattr(sys, "argv", [_CLI_PATH.name, "--repair"])
+
+    assert _cli.main() == 2
+    err = capsys.readouterr().err
+    assert "WRITING arm" in err
+    assert "NOTE:" not in err, (
+        "the census path's note fired on a writing arm — the two arms are "
+        "being conflated")
+
+
+def test_the_writing_arm_names_an_UNPROVEN_scope(monkeypatch, capsys):
+    """Finding (2): a typed-but-wrong scope exits 3 and destroys nothing.
+
+    (1) FAILS on the pre-fix code: the run reported `census_after != 0` and
+        exited 1 with "re-run --dry-run and read the report" — the same exit a
+        half-finished repair produces, so a wrong scope sent the operator to
+        re-read a census instead of checking the scope it typed.
+    (2) REACHABLE: a record that answers for NOBODY while the operator supplied a
+        scope — exactly what row-level security does for a scope that does not
+        match.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([
+        (_session_node(sessionId="s-a", url="session:s-a"),),
+        (_session_node(sessionId="s-b", url="session:s-b"),),
+    ])
+    _install_cli(monkeypatch, graph, [
+        "--repair", "--org-id", "org_x", "--graph-id", "WRONG"])
+
+    assert _cli.main() == 3
+    assert graph.writes == []
+    err = capsys.readouterr().err
+    assert "UNPROVEN" in err
+    assert "--clear-without-record" in err, (
+        "the refusal names no escape hatch for the deliberate clear-only arm")
+
+
+def test_a_json_run_cannot_report_success_over_the_unproven_scope(monkeypatch,
+                                                                  capsys):
+    """`--json` must not defeat the refusal (the earlier fix-7 defect class)."""
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_session_node(),)])
+    _install_cli(monkeypatch, graph, [
+        "--repair", "--org-id", "org_x", "--graph-id", "WRONG", "--json"])
+
+    assert _cli.main() == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["scope_unproven"] is True
+    assert graph.writes == []
+
+
+def test_ONE_answered_session_clears_the_scope(monkeypatch, capsys):
+    """The proof is population-level, so a real repair is never refused.
+
+    (1) FAILS if the refusal keys on any `no_record` at all — the ordinary case,
+        where older sessions have aged out of the record: the operator would be
+        told their scope is wrong on a scope that works.
+    (2) REACHABLE: one session answers, one does not.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([
+        (_session_node(sessionId="s-a", url="session:s-a"),),
+        (_session_node(sessionId="s-b", url="session:s-b"),),
+    ])
+
+    def answer_one(conn, *, org_id, graph_id, session_id, turn_max_index=None):
+        return _OneTurn() if session_id == "s-a" else _NotAnswered()
+
+    _install_cli(monkeypatch, graph, [
+        "--repair", "--org-id", "org_x", "--graph-id", "gx"])
+    monkeypatch.setattr("tortoise.record_read.session_turns", answer_one)
+
+    code = _cli.main()
+    assert code != 3
+    assert len(graph.writes) == 1, "the answered session must be re-derived"
+    assert "UNPROVEN" not in capsys.readouterr().err
+
+
+def test_the_clear_without_record_arm_is_never_second_guessed(monkeypatch,
+                                                              capsys):
+    """The operator asked for the destructive arm BY NAME — run it.
+
+    (1) FAILS if the scope diagnosis also fires on this arm: `no_record` is empty
+        here (the record is never opened), so a naive key on `left_alone` or on
+        "no candidate was repaired" would refuse the one arm the flag exists for.
+    (2) REACHABLE: `--repair --clear-without-record` with a DSN exported.
+    """
+    _export_a_record_dsn(monkeypatch)
+    graph = _RecordingGraph([(_session_node(),)])
+    _install_cli(monkeypatch, graph, ["--repair", "--clear-without-record"])
+
+    code = _cli.main()
+    assert code != 3
+    assert len(graph.writes) == 1, "the by-name clear arm did not write"
+    err = capsys.readouterr().err
+    assert "UNPROVEN" not in err
+    assert "NOT written" not in err
