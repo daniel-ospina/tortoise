@@ -8,7 +8,7 @@ import tempfile
 import traceback
 from pathlib import Path
 
-import pytest  # noqa: F401
+import pytest
 from tortoise.backup import _bgsave, backup, restore
 
 
