@@ -32,7 +32,7 @@ _service = "tortoise-hosted-api"
 # is one silent drift away from re-opening the storm — shrink this and the SDK
 # delivers an event the helper already called benign; grow only the SDK list and
 # the helper captures one the SDK drops. `test_init_turns_source_context_off`
-# pins the DK/list equality; `test_direction_ambiguous_names_are_benign_only_on_
+# pins the SDK/list equality; `test_direction_ambiguous_names_are_benign_only_on_
 # the_inbound_layer` pins this set as a SUBSET of `REQUEST_LAYER_DISCONNECT_NAMES`
 # so the request-layer set can never fall behind it (round 5, P3: the comment
 # credited the subset pin to the wrong test).
@@ -222,12 +222,16 @@ def is_benign_exception(exc: BaseException, *, inbound_request: bool = False) ->
     at all. The way these names DO arrive here is an app/upstream failure — e.g. a
     bare reset escaping `session_verify._api`, which catches only
     `HTTPError`/`URLError` and `URLError` is a SIBLING of `ConnectionResetError`
-    under `OSError`. The ambiguity is therefore bounded, not eliminated: neither
-    name is in the client-global `ignore_errors`, so the `ServerErrorMiddleware`
-    re-raise still delivers ONE event per abort. What a misclassification costs is
-    THIS handler's sub-ERROR line — dropped in the hosted deployment, see
-    `hosted_api` — and the `method`/`path` tags on the capture; the full statement
-    and the alternative are in `REQUEST_LAYER_DISCONNECT_NAMES`' note.
+    under `OSError`. The residual is bounded: neither name is in the client-global
+    `ignore_errors`, so a reset misclassified here still delivers ONE event — for
+    the ABORTED UPSTREAM CALL — via the `ServerErrorMiddleware` re-raise (that
+    capture carries no `method`/`path`). A caller HANG-UP is different: it arrives
+    as `ClientDisconnect`, which IS in `ignore_errors`, so it delivers ZERO events
+    — `init`'s note records exactly that ("at this head, 0 events and 0 source
+    reads"). What a misclassification costs is THIS handler's sub-ERROR line —
+    dropped in the hosted deployment, see `hosted_api` — plus those missing tags;
+    the full statement and the alternative are in
+    `REQUEST_LAYER_DISCONNECT_NAMES`' note.
 
     ⛔ The name match is EXACT on purpose (review round 3, P3). Walking the MRO
     makes this helper broader than the SDK's own `ignore_errors` — and broader is
