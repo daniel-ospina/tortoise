@@ -51,6 +51,7 @@ Coverage:
 """
 from __future__ import annotations
 
+import builtins
 import hashlib
 import io
 import json
@@ -64,7 +65,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
@@ -10280,8 +10281,114 @@ exec {real} "$@"
         self.assertIn("VERDICT: COLLISION", out)
         self.assertNotIn("own sub-agent(s) exempted", out)
 
+    # ── review cycle 3: the fail-OPEN quadrant, and the isdigit() class ──────
 
-#: The parent's tests must not be collected twice (this subclass adds FOUR
+    def test_an_UNEXAMINABLE_lane_queue_root_is_incomplete_never_clean(self):
+        """A queue root that cannot be STATted must never read as ABSENT.
+
+        `os.path.isdir`/`os.path.exists` answer `False` both for "nothing is
+        there" and for "I was refused", so an unreadable ancestor used to take
+        the `absent` arm and the row printed *queried and absent — this host runs
+        no background lane queue* while a LIVE `.pid` sat inside the root. That
+        is fail-OPEN on the one surface that decides whether a harness lane holds
+        the issue.
+
+        A symlink loop is used as the refusal because it fails the `stat` for
+        EVERY uid (a `chmod 000` refusal is covered by the test below, which has
+        to skip where the suite runs as root) — the point is the branch, and the
+        branch must not depend on who the test runs as.
+        """
+        loop = self.tmp / "loop"
+        os.symlink("loop", loop)                     # loop -> loop -> …
+        queue = loop / "bg"
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("lane-queue-unreadable", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+        self.assertNotIn("NOT PRESENT", out)
+
+    def test_an_EACCES_lane_queue_root_is_incomplete_never_clean(self):
+        """The realistic refusal: another uid's queue under a non-traversable parent.
+
+        A lane that runs as a different user than the queue's owner, an NFS or
+        `hidepid` lookup refusal, a `$HOME` whose parent is not `+x` — in every
+        case `stat` raises `PermissionError` while `isdir` merely says `False`.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root ignores mode bits, so EACCES cannot be simulated")
+        hidden = self.tmp / "blk"
+        queue = hidden / "bg"
+        queue.mkdir(parents=True)
+        (queue / "prd-test-owner-test-repo-3061.pid").write_text(
+            str(self._live_non_ancestor_pid()))
+        os.chmod(hidden, 0o000)
+
+        def _restore() -> None:
+            # The temp tree is torn down before cleanups run, so a bare
+            # `os.chmod` cleanup would fail the TEST on a teardown artefact.
+            with suppress(OSError):
+                os.chmod(hidden, 0o700)
+
+        self.addCleanup(_restore)
+        rc, out = self.run_tool(env_extra={
+            "COLLISION_PREFLIGHT_LANE_QUEUE": str(queue)})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("VERDICT: INCOMPLETE", out)
+        self.assertIn("lane-queue-unreadable", out)
+        self.assertNotIn("VERDICT: CLEAN", out)
+
+    def test_a_unicode_digit_ppid_from_ps_cannot_crash_into_a_collision(self):
+        """`isdigit()` is not a promise that `int()` succeeds — the `ps` leg too.
+
+        The queue-filename parse was taught `isascii() and isdigit()`; the macOS
+        `_ancestor_pids` fallback kept the bare `isdigit()`, so a `ps` answering a
+        non-ASCII *Digit* (`'²'`, which `int()` refuses) escaped as an uncaught
+        `ValueError` — a traceback standing in for a verdict, on exit 1 = the code
+        this tool reserves for COLLISION (#8881's class). `--ps` is a
+        user-settable binary, so the input is reachable.
+        """
+        cp = _tool_module()
+        # Force the non-procfs leg (`/proc` must be unreadable AND `isdir("/proc")`
+        # must answer False) and a `ps` that answers a Unicode *Digit* for the
+        # parent pid. Without the `/proc` refusal the Linux branch returns first
+        # and this test would silently exercise nothing.
+        real_open = builtins.open
+
+        def _no_procfs(path, *args, **kwargs):
+            if str(path).startswith("/proc/"):
+                raise OSError("no procfs on this host")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", _no_procfs), \
+                mock.patch.object(cp.os.path, "isdir", return_value=False), \
+                mock.patch.object(cp, "_run", return_value=(0, "\u00b2", "", False)):
+            pids = cp._ancestor_pids("ps", 5.0)
+        self.assertIn(os.getpid(), pids)
+        # The walk stops at the unparseable link: no invented ancestor is added.
+        self.assertEqual({os.getpid()}, set(pids))
+
+    def test_a_claim_lease_of_unicode_digits_never_crashes_the_verdict(self):
+        """The third `isdigit()` site: a claim's `lease_until` token.
+
+        `'²²'.isdigit()` is True, `len <= 18` and it is not `"0"`, so the guard
+        passed and `int(lease)` raised — no VERDICT line, exit 1 = COLLISION. The
+        polarity for an unparseable lease is already defined ("LIVE, NOT
+        demoted"), so the fix is to route this input into it rather than invent
+        a new one.
+        """
+        self.gh_fixtures(closed_prs=[])
+        self.abandoned_branch(f"feat/{ISSUE}-unicodelease")
+        self.live_claim(None, message="claim owner=box-a lease_until=\u00b2\u00b2 nonce=9806")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertNotIn("ADVISORY", self.hit(out, f"origin/feat/{ISSUE}-unicodelease"))
+        self.assertIn("lease this reader cannot parse", self.row(out, "remote branches"))
+
+
+#: The parent's tests must not be collected twice (this subclass adds the
 #: DEFECT ARMS, not a second copy of the 300-test suite). `unittest` collects
 #: inherited methods, so the parent's are removed from the subclass namespace —
 #: explicitly, and by NAME, so a new parent test cannot be silently skipped here.

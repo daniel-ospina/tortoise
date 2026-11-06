@@ -579,6 +579,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import time
 from collections.abc import Mapping
@@ -3826,7 +3827,11 @@ class StaleHolder:
         # non-digit (a negative collapses to `0`) and a 19+-digit value (the `[`
         # 18-digit bound exists so a full-width lease cannot wrap) are all "a claim
         # EXISTS whose lease this reader cannot parse" — i.e. LIVE, never free.
-        if not lease or not lease.isdigit() or len(lease) > 18 or lease == "0":
+        # `isascii() and isdigit()`, not `isdigit()`: `int()` requires *Decimal*
+        # digits and raises on a Unicode *Digit* such as `'²'`, which would escape
+        # as an uncaught ValueError — a crash standing in for a verdict.
+        if (not lease or not (lease.isascii() and lease.isdigit())
+                or len(lease) > 18 or lease == "0"):
             self._claim = (True, (f"`{ref}` is held with a lease this reader cannot "
                                  f"parse (lease_until={lease or 'absent'}) — treated as "
                                  "LIVE, NOT demoted"), True)
@@ -7380,7 +7385,12 @@ def _ancestor_pids(ps_bin: str, timeout: float) -> frozenset[int]:
             [ps_bin, "-o", "ppid=", "-p", str(cur)], os.getcwd(), timeout
         )
         value = out.strip() if rc == 0 else ""
-        if not value.isdigit():
+        # ⛔ `str.isdigit()` IS NOT A PROMISE THAT `int()` SUCCEEDS (review cycle 3,
+        # P2): `'²'.isdigit()` is True while `int('²')` raises. The gate below is
+        # `isascii() and isdigit()` — the same predicate the queue-filename parse
+        # uses — so a non-ASCII digit breaks the walk instead of escaping as an
+        # uncaught ValueError (which would read as exit 1 = COLLISION).
+        if not (value.isascii() and value.isdigit()):
             break
         ppid = int(value)
         if ppid <= 1 or ppid in pids:
@@ -7482,9 +7492,33 @@ def _lane_queue_entries(slug: str | None
     `-<N>.pid` file starts an entry; `<N>` is the PR the lane was dispatched for.
     """
     candidates = _lane_queue_candidates()
-    existing_roots = [c for c in candidates if os.path.isdir(c)]
+    # ⛔ `os.path.isdir` / `os.path.exists` ANSWER False FOR EACCES — the same
+    # answer they give for "nothing is there" (review cycle 3, HIGH). So a queue
+    # root whose own stat is refused (a lane running under another uid, an NFS or
+    # `hidepid` lookup refusal, a `$HOME` whose parent is not `+x`) took the
+    # `absent` arm and printed "queried and absent — this host runs no queue"
+    # while a LIVE entry sat inside it: fail-OPEN on the one surface that decides
+    # whether a harness lane holds the issue. `os.stat` is used instead, because
+    # only it can tell "not there" (FileNotFoundError/NotADirectoryError) apart
+    # from "cannot look" (any other OSError), and the latter is INCOMPLETE.
+    existing_roots: list[str] = []
+    not_dirs: list[str] = []
+    unreadable: list[str] = []
+    for cand in candidates:
+        try:
+            mode = os.stat(cand).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            continue          # a MEASURED absence of this candidate
+        except OSError as exc:
+            unreadable.append(f"{cand} could not be examined ({exc})")
+            continue
+        (existing_roots if stat.S_ISDIR(mode) else not_dirs).append(cand)
+    if unreadable:
+        # Any candidate we could not examine could be hiding the holder, so the
+        # whole surface is undecidable — never CLEAN, even if another candidate
+        # was read successfully.
+        return None, False, "; ".join(unreadable)
     if not existing_roots:
-        not_dirs = [c for c in candidates if os.path.exists(c)]
         if not_dirs:
             return None, False, f"{not_dirs[0]} exists but is not a directory"
         return [], True, "checked " + ", ".join(candidates)
