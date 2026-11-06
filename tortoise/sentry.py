@@ -141,10 +141,11 @@ def init() -> bool:
             # this head, 0 events and 0 source reads. Read the earlier "2 events
             # per abort" figure as two CAPTURE attempts — `DedupeIntegration`
             # collapses them to one delivered envelope.)
-            # (Reviewed rounds 3/4): `ignore_errors` carries ONLY the
-            # direction-unambiguous names — `ClientDisconnect` (only a caller can
-            # produce it) and `BrokenResourceError`. The reset/pipe names are
-            # handled at the request layer instead (see
+            # (Reviewed rounds 3/4): `ignore_errors` carries ONLY the names
+            # admitted PROCESS-WIDE — `ClientDisconnect`, which only a caller can
+            # produce, plus `BrokenResourceError` (see the note on it below, which
+            # is the one entry whose direction is not self-evident). The
+            # reset/pipe names are handled at the request layer instead (see
             # `REQUEST_LAYER_DISCONNECT_NAMES`), because this list is
             # CLIENT-GLOBAL: `Client._should_capture` applies it to every event
             # from every path, so a direction-ambiguous entry here would silence

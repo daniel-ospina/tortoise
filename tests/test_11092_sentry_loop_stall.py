@@ -359,16 +359,24 @@ def test_unhandled_handler_treats_an_inbound_reset_as_a_disconnect(
         "logging integration"
     )
     # Positive half of the same pin (review round 6, P3): the inbound-reset
-    # branch keeps the same single sub-ERROR signal, so its removal must red HERE
+    # branch keeps the same single sub-ERROR record, so its removal must red HERE
     # too — the two benign branches are reached by different exceptions. Same
-    # `levelno < ERROR` rationale as the block above (review round 7, P2): the
-    # property is "no event", not the literal token DEBUG.
+    # `levelno < ERROR` rationale as the block above (review round 7, P2): what is
+    # pinned is this handler's own sub-ERROR record, not the literal token DEBUG.
+    # ⛔ It is NOT the property "no event" for THIS exception: a reset is
+    # classified benign here but is NOT in `ignore_errors`, so one event still
+    # goes out through the `ServerErrorMiddleware` re-raise. The true cost of the
+    # misclassification is this record's ERROR level being lost (round 11), not
+    # silence and not the tags — `logger.exception` fires first, so
+    # `DedupeIntegration` drops the handler's TAGGED capture in EITHER branch.
     assert any(
         r.levelno < logging.ERROR and "client disconnected" in r.getMessage()
         for r in caplog.records
     ), (
-        "an inbound reset is still a disconnect — it must log below ERROR, "
-        "which is what keeps it out of Sentry's event stream"
+        "an exact-named reset at the request layer must log below ERROR and "
+        "not be captured BY THIS HANDLER — it is not in `ignore_errors` though, "
+        "so the re-raise still delivers one event; this record is the "
+        "attribution signal that survives, not a guarantee of silence"
     )
     assert response.status_code == 500
 
