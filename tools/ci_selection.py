@@ -2099,6 +2099,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # be present; the pair's #7968 comment above names both paths and is
              # false without this entry.
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+             # #10663 review (P2): the GENERATOR half of the same coupling.
+             # `tools/gen_placement_table.py` derives the package-data carrier
+             # (`tortoise/_placement_table.json`) from the placement doc, and
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry that matches no
+             # SOURCE_PATTERNS row — so a generator-ONLY diff filtered to
+             # `changed == []`, took the docs-only early return, and selected NO
+             # surface (measured: `surfaces=[]`, the carrier pin NOT selected).
+             # The edit that class permits — bumping `GENERATOR` or changing the
+             # emitted shape without regenerating the carrier — then merges green
+             # with `_generated_by` in the shipped carrier silently claiming the
+             # old version, and the only detector (`--check`, or the
+             # byte-for-byte pin) asleep on the one diff that moved it.
+             "tools/gen_placement_table.py",
              # #9555 / #9638 review P3: the SECOND document the same pin now
              # reads. `test_record_schema_placement.py::
              # test_the_prerequisites_a1_census_matches_the_record_migrations`

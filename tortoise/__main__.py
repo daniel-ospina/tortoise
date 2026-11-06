@@ -651,7 +651,10 @@ def _cmd_record_reconcile(args):
     """
     import json as _json
 
-    from tortoise.cache_projection import read_record_view
+    from tortoise.cache_projection import (
+        PlacementTableUnavailable,
+        read_record_view,
+    )
     from tortoise.reconciliation import ReconciliationUnavailable
     from tortoise.record_reconcile import (
         CACHE_READ_TIMEOUT_MS,
@@ -730,6 +733,11 @@ def _cmd_record_reconcile(args):
                 options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
             )
             view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+        except PlacementTableUnavailable:
+            # A fault in the INSTALL, not in the record (#10663). Collapsing it
+            # into "record is unreadable" sent an operator to Postgres
+            # credentials for a file the image never shipped.
+            raise
         except Exception as e:
             raise ReconciliationUnavailable(
                 f"record is unreadable ({type(e).__name__}) — divergence is "
@@ -757,6 +765,13 @@ def _cmd_record_reconcile(args):
         )
     except ReconciliationUnavailable as e:
         print(f"Record↔cache reconciliation UNAVAILABLE: {e}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    except PlacementTableUnavailable as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("  Nothing was compared, so divergence is UNKNOWN, not zero. Fix "
+              "the INSTALL (ship/regenerate the table) — this is not a record "
+              "fault, so no DSN or credential change will clear it.",
+              file=sys.stderr)
         return EXIT_UNAVAILABLE
     finally:
         if proj is not None:
@@ -1113,7 +1128,10 @@ def _cmd_record_restore(args):
     """
     import json as _json
 
-    from tortoise.cache_projection import read_record_view
+    from tortoise.cache_projection import (
+        PlacementTableUnavailable,
+        read_record_view,
+    )
     from tortoise.record_reconcile import (
         RECORD_CONNECT_TIMEOUT_S,
         RECORD_STATEMENT_TIMEOUT_MS,
@@ -1188,6 +1206,10 @@ def _cmd_record_restore(args):
                 options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
             )
             view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+        except PlacementTableUnavailable:
+            # As in `record-reconcile` (#10663): a packaging fault, not a
+            # record fault — never collapsed into "the record is unreadable".
+            raise
         except Exception as e:
             raise RestoreUnavailable(
                 f"the record is unreadable ({type(e).__name__}) — nothing was "
@@ -1235,6 +1257,13 @@ def _cmd_record_restore(args):
         return EXIT_REFUSED
     except RestoreUnavailable as e:
         print(f"Restore UNAVAILABLE: {e}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    except PlacementTableUnavailable as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("  Nothing was restored and the cache's state is UNCHANGED. Fix "
+              "the INSTALL (ship/regenerate the table) — this is not a record "
+              "fault, so no DSN or credential change will clear it.",
+              file=sys.stderr)
         return EXIT_UNAVAILABLE
     finally:
         # The verb OWNS both handles (the `record-reconcile` rule): an operator

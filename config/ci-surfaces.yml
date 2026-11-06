@@ -239,6 +239,18 @@ surfaces:
   # `__main__.py`-only diff (the #1349/#2938/#3154 silent-drop class). The file
   # is NOT in `carve_out:` — it rides in `test_files`.
   - test_9556_record_restore_verb.py
+  # #10663 review (P2): DUAL-REGISTERED with `core` for the #9556 reason exactly
+  # — two of its tests pin `tortoise/__main__.py` (the `PlacementTableUnavailable`
+  # branches in `_cmd_record_reconcile` and `_cmd_record_restore`), and
+  # `tortoise/__main__.py` is an EXACT `api` SOURCE_PATTERN whose match REPLACES
+  # the `core` fallback. Measured with only the `core` row in place:
+  # `select(['tortoise/__main__.py'])` → `surfaces=['api']`, this file ABSENT —
+  # so a follow-up that deletes the `except PlacementTableUnavailable: raise`
+  # re-wraps the packaging fault as "the record is unreadable" and merges green,
+  # unguarded on the only diff that can cause it (the #1349/#2938/#3154 class
+  # this PR fixed for the generator one row further down). The other tests pin
+  # `cache_projection.py`/the carrier, which select `core`.
+  - test_10663_placement_table_packaged.py
   # #9555 (R7): §9.1's narrative CARRIER and §9.4's verbatim fetch. DUAL-
   # REGISTERED with `core` for the #9556 reason exactly: `record_text.py` (the
   # fetch composition, its exit codes, its scope proof) and its reader
@@ -2706,6 +2718,19 @@ surfaces:
   # the script's own query building (which raised `KeyError: 'id'` before it
   # wrote anything) was never executed by a test.
   - test_backfill_references_5141.py
+  # #10663: the placement table's PACKAGE-DATA carrier. `cache_projection.py`
+  # is the subject (it reads the table at runtime), so this rides the same
+  # surface as the two cache-projection suites below.
+  # ⚠️ The drift it guards is introduced by a placement-DOC-only edit, and NO
+  # `tier1` row is needed for that: `tools/ci_selection.py::CORE_ALSO` already
+  # names `docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md`,
+  # so such a diff measures `surfaces=['core']` instead of taking the docs-only
+  # early return — measured. (`tier1` is for a doc that selects NO surface;
+  # adding this file there would run it on every unrelated docs-only PR.)
+  # Pinned by tests/test_ci_selection.py::
+  # test_the_placement_table_drift_pin_runs_on_a_placement_doc_only_diff, which
+  # reds if that CORE_ALSO entry ever disappears.
+  - test_10663_placement_table_packaged.py
   - test_cache_projection.py
   - test_cache_projection_live.py
   # #10853: the §9.1/D1 narrowing at the RECORD->CACHE door
@@ -10994,6 +11019,7 @@ durations:
   test_record_projection.py: 3.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (2.9s) is a LOWER bound; kept 3.2
   test_record_reconcile_trigger.py: 2.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 2.0
   test_record_schema_placement.py: 0.2
+  test_10663_placement_table_packaged.py: 0.5  # new in #10663 — PR-added file: the header's flat DEFAULT_FAST_WEIGHT, not a local reading
   test_11075_record_declared_type_contract.py: 2.0  # PR-added file: the header's flat DEFAULT_FAST_WEIGHT, NOT a local reading (this map forbids a local reading as a shard input, #2818/#3419)
   test_record_writer_seam.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.4
   test_references_boundary_5213.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
