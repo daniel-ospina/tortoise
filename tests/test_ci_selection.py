@@ -3098,29 +3098,6 @@ def test_worktree_report_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
-def test_issue_process_lint_tool_change_selects_core_not_tier1():
-    """A change to the issue-process lint must run the cases that pin its false-positive bound
-    (#11077 review P1).
-
-    `tests/test_issue_process_lint.py` is registered on the `core` surface and owns the whole
-    claim-vs-mention boundary — the measured 68 % false-positive population (criterion ids, a cited
-    precedent, a PR's own number, inline code, HTML comments) and the quoted-example shapes — plus
-    the pin that keeps the lint OUT of every required check. That registration is INERT for a
-    tool-only diff: `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
-    `tools/issue_process_lint.py`, so `select()` returns NO surface, takes the docs-only early
-    return and falls back to the tier-1 smoke set, which does not contain the file. Widening the
-    claiming-word window would then be the one PR that never ran the negatives it must not break.
-
-    Mutation check: removing the CORE_ALSO entry fails the SECOND assert
-    (`test_issue_process_lint.py in r["test_files"]`), because the docs-only early return yields
-    `full: False` with no pin.
-    """
-    r = _sel(["tools/issue_process_lint.py"])
-    assert "core" in r["surfaces"], r
-    assert "test_issue_process_lint.py" in r["test_files"], r
-    assert r["full"] is False, r
-
-
 def test_gh_read_cache_tool_change_selects_core_not_tier1():
     """A change to the read cache must run the invariants it pins (#11052 review P0).
 
@@ -3148,6 +3125,33 @@ def test_gh_read_cache_tool_change_selects_core_not_tier1():
     r = _sel(["tools/gh_read_cache.py"])
     assert "core" in r["surfaces"], r
     assert "test_gh_read_cache.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_issue_process_lint_tool_change_selects_core_not_tier1():
+    """A change to the issue-process lint must run the cases that pin its false-positive bound
+    (#11077 review P1).
+
+    `tests/test_issue_process_lint.py` is registered on the `core` surface and owns the whole
+    claim-vs-mention boundary — the measured 68 % false-positive population (criterion ids, a cited
+    precedent, a PR's own number, inline code, HTML comments) and the quoted-example shapes — plus
+    the pin that keeps the lint OUT of every required check. That registration is INERT for a
+    tool-only diff: `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+    `tools/issue_process_lint.py`, so `select()` returns NO surface, takes the docs-only early
+    return and falls back to the tier-1 smoke set, which does not contain the file. Widening the
+    claiming-word window would then be the one PR that never ran the negatives it must not break.
+
+    Mutation check: removing the CORE_ALSO entry fails the first TWO asserts
+    (`"core" in r["surfaces"]` and `test_issue_process_lint.py in r["test_files"]`); the third
+    (`r["full"] is False`) survives, unexercised, because the docs-only early return also yields
+    `full: False`. Measured with the entry removed: `surfaces=[]`, `full=False`, file ABSENT —
+    so the first assert fails FIRST and the second fails too. Stated as the pair because the
+    sibling `test_gh_read_cache_tool_change_selects_core_not_tier1` says the same thing, and a
+    reader re-deriving this pin by hand should not get a different answer from each test.
+    """
+    r = _sel(["tools/issue_process_lint.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_issue_process_lint.py" in r["test_files"], r
     assert r["full"] is False, r
 
 
