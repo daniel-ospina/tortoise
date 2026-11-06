@@ -459,8 +459,14 @@ def test_a_store_with_no_gap_reports_the_serves_indexes_pair(caplog):
     )
     assert pairs[0].levelno == logging.INFO
     msg = pairs[0].getMessage()
-    assert f"serves={SERVED}" in msg, msg
-    assert f"indexes={SERVED}" in msg, msg
+    # Plan §7 "Brittleness avoided": "No test asserts a log *string* where a
+    # warning-vs-info LEVEL is the contract." So the record is held to the
+    # level and to the markers that identify its two halves; the CONTENT is
+    # asserted on the attributes below, never on `repr()` of a Python list — a
+    # reformat that still reports the pair must not red this test.
+    assert "serves=" in msg and "indexes=" in msg, msg
+    for label in SERVED:
+        assert label in msg, msg
     assert not [r for r in caplog.records
                 if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
     assert proj._vector_index_served_labels == set(SERVED)
@@ -476,9 +482,14 @@ def test_a_gap_reports_the_pair_and_still_warns(caplog):
 
     pairs = _pair_records(caplog)
     assert len(pairs) == 1
+    assert pairs[0].levelno == logging.INFO
     msg = pairs[0].getMessage()
-    assert f"serves={SERVED}" in msg, msg
-    assert "indexes=['Point']" in msg, msg
+    assert "serves=" in msg and "indexes=" in msg, msg
+    for label in SERVED:
+        assert label in msg, msg  # the SERVED half is every declared label
+    # The INDEXED half is the measured subset. Asserted on the attribute (plan
+    # §7: the level is the record's contract, not its formatting).
+    assert proj._vector_indexed_labels == {"Point"}
     warnings = [r for r in caplog.records
                 if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
     assert len(warnings) == 1, "the gap must still WARN — #11087 adds a report only"
@@ -503,7 +514,10 @@ def test_the_reported_served_set_is_the_one_declaration(caplog):
         assert proj._vector_index_served_labels == {"WidgetLabel"}, (
             "the served set must be READ from the declaration, not re-derived"
         )
-        assert "serves=['WidgetLabel']" in _pair_records(caplog)[0].getMessage()
+        # Provenance is a claim about what was EMITTED, so this stays on the
+        # record — the sentinel reaches it only through the declaration — but
+        # it names the label rather than pinning `repr()` (plan §7).
+        assert "WidgetLabel" in _pair_records(caplog)[0].getMessage()
         assert proj._vector_indexed_labels == {"WidgetLabel"}
     finally:
         projection_mod.ENTITY_TYPE_LABELS = original
@@ -521,19 +535,30 @@ def test_unmeasured_pair_is_none_in_both_halves(caplog):
         assert not _pair_records(caplog), (
             "a FAILED read must not be reported as a pair"
         )
+        # ⛔ The lane must have RUN. On a VIRGIN projection (`_bare()` leaves
+        # both halves None) "is None afterwards" is ALSO satisfied by a read
+        # that never entered — so without this the test passes even on the
+        # pre-#11087 module and is no guard at all. The branch's own evidence
+        # is what makes it able to fail (same shape as
+        # `test_raising_inventory_read_is_fail_open`).
+        assert "inventory read failed" in caplog.text
 
     proj2 = _bare()
     proj2.g = _NoneCatalogueGraph()
-    # ⛔ The INFO capture must WRAP the call and the negative assertion must
-    # follow it: the not-measured lane is exactly where a regression would
-    # report `serves=[] indexes=[]` (the misreading warned of above), and an
-    # assertion taken before the call cannot see that record at all.
-    with caplog.at_level(logging.INFO):
+    # ⛔ The capture must WRAP the call and the negative assertion must follow
+    # it: the not-measured lane is exactly where a regression would report
+    # `serves=[] indexes=[]` (the misreading warned of above), and an assertion
+    # taken before the call cannot see that record at all. DEBUG (not INFO) so
+    # the branch's own evidence below is captured too.
+    with caplog.at_level(logging.DEBUG):
         proj2._ensure_indexes()
         assert proj2._vector_indexed_labels is None
         assert proj2._vector_index_served_labels is None
         assert not _pair_records(caplog), (
             "an unmeasured pair must not be reported"
+        )
+        assert "inventory unavailable (empty response)" in caplog.text, (
+            "this must be the answered-None lane, not a read that never ran"
         )
 
 
