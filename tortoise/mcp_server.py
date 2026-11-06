@@ -7282,6 +7282,16 @@ def _maybe_onboarding_auto_complete(*,
 # hosted mode" error —
 # there is deliberately NO local fallback that bypasses the capture pipeline
 # (a prompt-injection exfiltration surface must not exist).
+#
+# ⛔ THE LAST-ERROR EXEMPTION IS EVERY 429, and the tool docstring below still
+# names only the #3060 capacity one — kept that way on purpose, because a
+# docstring edit is a FROZEN-SURFACE change (see the note above). The predicate
+# it describes reads `if (status >= 400 and status != 429 and detail !=
+# _CAPTURE_SESSION_IN_FLIGHT_DETAIL)` — modelled on `hosted_api.py`'s REST
+# wrapper, which carries the same `!= 429` — so since #4051 §3.1 the per-org
+# ingest throttle (#11214) is a THIRD exempt class: a transient server
+# condition that must not paint a harness failure on the dashboard. Recorded
+# here as a comment rather than in the docstring, for the reason above.
 
 
 def tortoise_session_capture(conversation: list[dict],
@@ -7306,9 +7316,8 @@ def tortoise_session_capture(conversation: list[dict],
     not part of the pre-write gate order above. Returns the
     capture result (a memory_write_v1 envelope, #2104) on success, or an
     honest error dict on failure. Per-harness last-error bookkeeping (same on
-    the REST path): the key is SET on a non-2xx EXCEPT the 429s (the #3060
-    capacity 429 and the #4051 §3.1 per-org ingest throttle) and the #3129
-    in-flight 409 (all server conditions), and is not written
+    the REST path): the key is SET on a non-2xx EXCEPT the #3060 capacity 429
+    and the #3129 in-flight 409 (both server conditions), and is not written
     for the payload-boundary 422 above, which returns before the capture
     pipeline just as REST's Pydantic 422 does; on 2xx the shared pipeline
     clears the key for a fully processed capture and SETS it when extraction
