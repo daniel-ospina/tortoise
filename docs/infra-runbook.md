@@ -3545,9 +3545,9 @@ So the bar has **two parts, and BOTH are required**:
 
 1. **Something must have APPEARED.** ⛔ **An all-empty reading is NOT a pass.**
    When the seam is unarmed, `write_live_record` returns *before counting
-   anything* — nothing on either counter, nothing in the WARN log — which is
-   **byte-identical** to a healthy zero. So **read both counters BEFORE the
-   capture and again after**: presence and growth are the *difference* between
+   anything* — nothing on any record counter, nothing in the WARN log — which is
+   **byte-identical** to a healthy zero. So **read every record counter BEFORE
+   the capture and again after**: presence and growth are the *difference* between
    the two reads, never an absolute count (a `write_failed` left from earlier in
    the process's life is not this capture's reading). After the capture, require
    at least one reading **before** you interpret anything: a **delta on
