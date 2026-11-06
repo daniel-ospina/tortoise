@@ -1454,7 +1454,7 @@ def _row_identity_view(row: Mapping[str, Any],
     A predicate that read the COLUMNS alone therefore answered "document" for a
     node the reconciler classifies as a captured session: the prose reached the
     node through the column door (which never fired) — R1 ("from any row shape")
-    failing OPEN, and the same hazard the `tail_keys` filter exists for,
+    failing OPEN, and the same hazard the declined-name tail filter exists for,
     defeated from the other side.
 
     ⛔ AND NOTHING DOWNSTREAM REDACTS IT, which is why the failure was SILENT and
@@ -1804,7 +1804,7 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
         out.update(dict(tail))
         # ⛔ THE TAIL'S DECLINED NAMES ARE POPPED **BEFORE** THE COLUMN LOOP.
         # Popping them AFTER it removed the coordinate the COLUMN had just
-        # legitimately written (#10962 review, P3): a post-#10000 row whose
+        # legitimately written (#10962 review, P2): a post-#10000 row whose
         # caller-controlled tail also carries the canonical `_searchText` lost
         # the lexicon, i.e. the restored session was left un-indexed — the
         # un-indexing this whole narrowing exists to prevent. Measured at the
@@ -1826,8 +1826,8 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
         # datum and must go too.
         # ⛔ AND IT UNDOES ONLY WHAT THE TAIL ADDED, now literally: it is scoped
         # to the tail's own keys and runs before anything else touches `out`, so
-        # it cannot subsume the column-loop guard above (deleting that guard
-        # must still red — measured, it does).
+        # it cannot subsume the column-loop guard BELOW it (deleting that guard
+        # still reds — measured, 14 legs; deleting THIS pop reds 3).
         if episodic_source:
             for name in set(tail) & episodic_source_declined_properties():
                 out.pop(name, None)

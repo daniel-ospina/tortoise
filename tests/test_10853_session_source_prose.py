@@ -1440,10 +1440,22 @@ def test_the_10852_obligation_quotes_the_authority_AS_IT_NOW_READS():
                 "this leg's own block is gone from its file, so the excision "
                 "below is unsafe — re-point it rather than deleting the marker")
             text = text[:text.index(marker)]
-        assert not re.search(r"§4\.4\s+metadata", text, re.IGNORECASE), (
-            f"{rel} still calls the pair \u00a74.4 metadata; the authority "
-            "(#10978) now says \u00a74.6 — the section number is part of the "
-            "citation, and a stale one sends the reader to the wrong section")
+        # ⛔ THE ABSENCE ARM COVERS BOTH PHRASINGS. `§4.4\s+metadata` alone could
+        # not catch a regression of this file's own line 858, which states the
+        # ruling as "the §4.6 display DESCRIPTOR" — and the PRESENCE arm below is
+        # satisfied by ANY `§4.6` in the scanned prefix, so a stale line 858 would
+        # ship silently as soon as one other §4.6 mention preceded it (measured:
+        # revert line 858 + add one unrelated §4.6 earlier → this leg PASSED).
+        # `git grep "display DESCRIPTOR"` shows the phrase only in its corrected
+        # form, so widening adds no false-red risk.
+        stale = re.search(
+            r"§4\.4\s+metadata|§4\.4\s+display\s+DESCRIPTOR",
+            text, re.IGNORECASE)
+        assert not stale, (
+            f"{rel} still cites \u00a74.4 for the pair ({stale.group(0)!r}); "
+            "the authority (#10978) now says \u00a74.6 — the section number is "
+            "part of the citation, and a stale one sends the reader to the "
+            "wrong section")
         # ⚠️ PRESENCE IS `§4.6`, NOT `§4.6 metadata`: this file states the ruling
         # as "the §4.6 display DESCRIPTOR", which cites the section without
         # repeating the claim's noun. The ABSENCE arm above stays on the phrase,
