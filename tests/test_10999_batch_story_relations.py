@@ -289,6 +289,31 @@ def test_a_discarded_entity_named_only_by_a_relation_is_kept():
                    for e in kept_c["entities"])
 
 
+def test_a_ghost_relation_endpoint_never_prescribes_a_mint():
+    """#10999 review cycle 4 P2: a relation endpoint naming an entity no pass
+    produced is DROPPED by `_assemble_relations` (never minted), so the VET
+    referent scan must not report it as a missing referent — that warning says
+    "the payload will fail Layer-1 unless the extractor emits it", which is
+    both false (relations never enter the payload) and a prescription to mint.
+    """
+    from tortoise import vet_gate
+
+    emission = copy.deepcopy(EMISSION)
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Ghost Rule",
+                              "predicate": "IMPL"}]
+    item_id = vet_gate._item_id("entities", 1, emission["entities"][1])
+    kept, warnings = vet_gate.apply_vet(
+        emission, {item_id: {"outcome": "DISCARD"}})
+    assert not any("Ghost Rule" in w or "ghost rule" in w for w in warnings), (
+        warnings)
+    assert not any("Layer-1" in w for w in warnings), warnings
+    # the ghost shields nothing: the DISCARDed entity is still removed
+    assert not any(e.get("name") == "Deadline Rule" for e in kept["entities"])
+    # ...and S5 independently drops the ghost relation (it is not an endpoint
+    # of anything the emission produced).
+    assert _run(emission)["stats"]["relations_dropped"] == 1
+
+
 def test_ambiguous_case_fold_resolves_to_nothing():
     """Two entities differing only in case: guessing which one the story
     meant would attribute the edge to the WRONG node."""
@@ -343,11 +368,14 @@ def test_intra_emission_duplicate_triples_collapse_first_wins():
 def test_a_mistyped_section_is_counted_as_dropped():
     """A mapping instead of a list loses EVERY relation, so it must reach the
     `connections_incomplete` report — not only a shape warning."""
+    # TWO entries, so the assertion can distinguish `len(raw)` from a
+    # hardcoded 1 — a one-key fixture leaves `n = 1` mutation-green.
     emission = copy.deepcopy(EMISSION)
-    emission["relations"] = {"src": "Retry Storm"}
+    emission["relations"] = {"a": {"src": "Retry Storm"},
+                             "b": {"src": "Deadline Rule"}}
     result = _run(emission)
     assert result["relations"] == []
-    assert result["stats"]["relations_dropped"] == 1
+    assert result["stats"]["relations_dropped"] == 2
     assert any("connections_incomplete" in w for w in result["warnings"])
 
 

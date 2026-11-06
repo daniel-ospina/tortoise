@@ -688,6 +688,17 @@ def _referenced_entity_names(embed_list: object,
     # escapes `apply_vet` and abandons the ENTIRE S2.2 pass (every candidate
     # kept, no discards), which is not the "contributes nothing" this guard
     # documents.
+    #
+    # ⛔ EMITTED only. A relation endpoint naming an entity no pass produced is
+    # exactly the case `_assemble_relations` DROPS (never mints), so counting it
+    # here would push that name into Rule 4's `to_restore` and emit a factually
+    # false "the payload will fail Layer-1 unless the extractor emits it" — a
+    # prescription to MINT, which #10999 forbids and which cannot fail Layer-1
+    # in any case, because relations never enter the payload.
+    emitted_names = {
+        _norm(e.get("name")) for e in _as_items(
+            embed_list.get("entities") if isinstance(embed_list, Mapping) else None)
+        if isinstance(e, Mapping) and e.get("name")}
     if isinstance(embed_list, Mapping):
         for rel in _as_items(embed_list.get("relations")):
             if not isinstance(rel, Mapping):
@@ -695,7 +706,9 @@ def _referenced_entity_names(embed_list: object,
             for side in ("src", "dst"):
                 ref = rel.get(side)
                 if isinstance(ref, str) and ref.strip():
-                    names.add(_norm(ref))
+                    _ref = _norm(ref)
+                    if _ref in emitted_names:
+                        names.add(_ref)
     return names
 
 
