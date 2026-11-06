@@ -10,14 +10,16 @@ half on, per session, exactly:
 a statement about the STORE's graph list: the graph leg refuses a graph the
 store does not already hold, instead of creating it (#11112 — a typo'd
 `--graph-name` used to leave a stub graph behind). It is NOT a claim that
-opening the store is free of side effects: on the EMBEDDED leg the redislite
-open itself rewrites the RDB file (measured: 1,402,361 → 1,402,370 B on one
-read), which is why the byte census must be taken around a run, not from a
-copy the run itself touched. A `--db-path` that does NOT exist is CREATED by
-that open before the presence check can refuse (measured: a refusal on a typo'd
-`--db-path` leaves an empty `typo.db` + its `-construct.lock` — no GRAPH is
-created, which is the claim, but the FILE is, so a mistyped path leaves a
-stray file to explain). On the URI leg the bind issues no graph write
+opening the store is free of side effects. On the EMBEDDED leg the redislite
+open writes SIDECARS beside the store — measured at this head: a read from an
+existing `<db>` leaves `<db>.settings` and `<db>.<graph>-construct.lock` — and a
+`--db-path` that does not exist gets those two files but NO store file, so a
+typo'd path leaves residue to explain even though no GRAPH and no RDB is
+created (measured; an earlier reading on a 1.4 MB store recorded the RDB itself
+moving 1,402,361 → 1,402,370 B on one read, and that does NOT reproduce here —
+two reads left the RDB byte-identical, sha-pinned — so the durable fact is the
+SIDECARS, and the byte census is still taken around a run rather than from a
+copy the run itself touched). On the URI leg the bind issues no graph write
 (measured: `GRAPH.LIST` unchanged), but it IS a connection, and "no graph
 write" is not "no server-side effect" — the census never claims the latter.
 
@@ -28,6 +30,16 @@ ACL docs grant it separately, and `-@all +GRAPH.QUERY` does not imply it
 (`docs.falkordb.com/commands/acl`). So a credential that cannot list graphs is
 a REFUSAL on this leg (exit 3, "nothing was created"), never a pass, and the
 message names the credential rather than blaming the store.
+
+⚠️ …AND A CREDENTIAL THAT MAY RUN `INFO` AT THE HANDSHAKE (measured). The
+refusal the tenant user actually hits is NOT at the presence check: the pinned
+client's constructor issues `INFO` (`falkordb/sentinel.py` → `conn.info(…)`),
+`-@all +GRAPH.QUERY +GRAPH.RO_QUERY +PING` denies it, and the run dies in the
+BIND with `NoPermissionError: … no permissions to run the 'info' command`.
+That arm is diagnosed as the credential too — same predicate, same remedy —
+because "the graph could not be read" sent the operator after the store. So
+the requirement is the pair (`INFO` + `GRAPH.LIST`), and a per-graph tenant
+user fails on the first one.
 
 ⛔ Do NOT answer that refusal by granting `GRAPH.LIST` to a per-graph tenant
 user. That user is minted with `+GRAPH.QUERY +GRAPH.RO_QUERY +PING` over `-@all`
@@ -974,6 +986,32 @@ def read_graph_turns(uri: str | None, db_path: str | None,
                     db_path, graph_name=graph_name or "tortoise",
                     skip_health_check=True, ensure_indexes=False)
         except Exception as exc:
+            # ⛔ A REFUSED BIND IS DIAGNOSED AS THE CREDENTIAL, LIKE A REFUSED
+            # `GRAPH.LIST` (#11113 review, P3). Measured: the per-graph tenant
+            # user this docstring names is denied `INFO`, which the pinned
+            # client's constructor issues BEFORE any graph command — so the run
+            # never reaches the presence check and used to report "the graph
+            # could not be read", sending the operator after a healthy store.
+            # Same predicate as the listing arm, imported (not respelled) for
+            # the same reason: one rule, one spelling.
+            try:
+                from tortoise.acl_graph_users import _is_permission_refusal
+                refused_by_credential = _is_permission_refusal(exc)
+            except Exception:  # pragma: no cover - import env problem
+                refused_by_credential = False
+            if refused_by_credential:
+                raise CensusError(
+                    f"this credential was REFUSED while opening the graph "
+                    f"({type(exc).__name__}: {exc}) — an absence is NOT "
+                    "established and nothing was created. A per-graph tenant "
+                    "user is denied the commands the client issues BEFORE any "
+                    "graph command (INFO at the handshake, then the GRAPH.LIST "
+                    "this gate uses to prove presence), so it fails here rather "
+                    "than at the presence check: run this gate with a "
+                    "credential that may run INFO and GRAPH.LIST. Do NOT widen "
+                    "the tenant user's grant — it is deliberately kept off "
+                    "every unkeyed enumeration command (#2113/#8617, "
+                    "tortoise/acl_graph_users.py).") from exc
             raise CensusError(
                 f"the graph could not be read ({type(exc).__name__}: {exc}) — "
                 "an absence is NOT established") from exc
@@ -2208,8 +2246,9 @@ def main(argv: list[str] | None = None) -> int:
     src.add_argument("--uri", help="FalkorDB URI of the target graph; the graph "
                                    "leg proves the graph already exists with "
                                    "GRAPH.LIST, so this credential must be "
-                                   "allowed to run it (a per-graph tenant user "
-                                   "is not, by design)")
+                                   "allowed to run it AND the handshake's INFO "
+                                   "(a per-graph tenant user is allowed "
+                                   "neither, by design)")
     src.add_argument("--db-path", help="embedded graph path instead of a URI")
     # ⛔ THE HELP MUST NOT CLAIM A SCOPE THE CODE DOES NOT HAVE (review P3).
     # This read "applies to BOTH legs" while `--graph-name` is passed to
