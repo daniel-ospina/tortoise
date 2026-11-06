@@ -432,6 +432,32 @@ def test_a_relation_survives_entity_resolution():
     assert result["stats"]["relations_dropped"] == 0
 
 
+def test_a_whitespace_variant_endpoint_survives_a_firing_resolution():
+    """#10999 review cycle 5 P2: the merge keyed the rename on BOTH folds
+    (`_endpoint_fold_keys`: `_norm` collapses a whitespace RUN, `.casefold()`
+    folds ß/İ — neither is a superset of the other). That hunk was load-bearing
+    and unpinned: a casefold-only key left a whitespace-variant endpoint behind
+    while resolution fired, and S5 dropped the relation.
+
+    Measured: emission entity "Retry  Storm" (two spaces), endpoint
+    "Retry Storm", map renames it — HEAD carries the edge, the casefold-only
+    key drops it.
+    """
+    emission = copy.deepcopy(EMISSION)
+    emission["entities"] = [
+        {"name": "Retry  Storm", "kind": "core:event"},
+        {"name": "Deadline Rule", "kind": "core:rule"},
+    ]
+    emission["relations"] = [{"src": "Retry Storm", "dst": "Deadline Rule",
+                              "predicate": "IMPL"}]
+    resolved = v2._apply_entity_resolution(
+        emission, {"Retry  Storm": {"name": "Retry Storm (2024)"}})
+    assert resolved["relations"][0]["src"] == "Retry Storm (2024)"
+    result = _run(resolved)
+    assert result["stats"]["relations_dropped"] == 0
+    assert result["relations"][0]["src"] == "Retry Storm (2024)"
+
+
 def test_a_case_variant_endpoint_survives_entity_resolution():
     """#10999 review cycle 2 P2: the rename mirrors the resolver — exact first,
     then a UNIQUE case-insensitive hit.

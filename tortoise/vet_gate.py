@@ -694,8 +694,10 @@ def _referenced_entity_names(embed_list: object,
     # relation as unresolvable, one stage after this guard authorised it.
     #
     # ⚠️ `_norm(ref)` ALONE leaves this arm half-closed. S5 resolves the
-    # endpoint by ``.casefold()`` (``extractor_v2._resolve_relation_endpoint``)
-    # while this module normalises by ``.lower()`` — the very pair the
+    # endpoint on EITHER fold (``extractor_v2._endpoint_fold_keys`` — `_norm`,
+    # which collapses a whitespace RUN, and `.casefold()`, which folds ß/İ;
+    # neither is a superset of the other), while this module's key is in
+    # ``_norm`` space and its probe adds ``.casefold()`` — the very pair the
     # ``_norm`` docstring above names as DIVERGENT on ('Straße', 'İ'). For a
     # spelling variant the two folds disagree on, S5 resolves "STRASSE" →
     # "Straße" and ``_norm("STRASSE")`` is "strasse" ≠ "straße", so the
