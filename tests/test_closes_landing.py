@@ -5377,9 +5377,10 @@ def test_a_type_6_block_on_a_LAZY_line_belongs_to_the_item_it_is_still_inside():
         `- a` + `x` + `  </ul>` + `> > 2.     Closes #100`
             renderer: the `<li>` holds the paragraph AND an `html_block` whose raw text is `</ul>`;
             that block ends WITH THE ITEM, so the last line is a NEW blockquote whose wide-gap
-            content is `<pre><code>` -> CODE. `[]` at the branch point `origin/main` `80c912244`;
-            `[100]` at `1177c6708`/tip and at the pre-fix head, i.e. a fail-open current `main` in
-            `lenient`, `strict=True` (the `issue_process_lint` PASS arm) AND `indented_code=True`.
+            content is `<pre><code>` -> CODE. `[]` at the branch point `origin/main` `80c912244`
+            (closing-tag spelling; the opening-tag spellings give `[100]` there) and `[100]` at the
+            pre-fix head `1bbc16ce5^` — `([100], [100], blanked)`, a false PASS in the
+            `issue_process_lint` arm.
 
     The same root is why the `<div>` spelling has always leaked on `origin/main`
     (50 of 244 renderer-CODE bodies in the round-50 targeted grid): the binding was the container

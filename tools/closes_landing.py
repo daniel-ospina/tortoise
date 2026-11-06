@@ -1625,6 +1625,10 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     # Stored as the last EMITTED line's own container, because `out` keeps no columns.
     prev_prose = False
     prev_quote_depth = 0
+    #: The depth of the container the OPEN PARAGRAPH lives in — NOT the last line's own depth
+    #: (`prev_quote_depth`, which a `pushed` lazy continuation resets below the paragraph's real
+    #: depth). The type-7 leaf veto is asked against this one (round-54 review, P1).
+    prev_para_depth = 0
     prev_container: _ListItem | None = None
     # The item that HELD the still-open paragraph when the pop loop dropped it (see
     # `_is_lazy_marker`'s `container is None` note). `prev_container` cannot carry this: it is also
@@ -2095,7 +2099,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 _opened = _html_block_leaf(
                     _html_rest,
                     (prev_prose or _blanked_still_open)
-                    and _quote_depth(prefix) <= prev_quote_depth)
+                    and _quote_depth(prefix) <= prev_para_depth)
             if _opened is not None:
                 _html_opened_here = True
                 html_item = container
@@ -2635,6 +2639,19 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                             if (_paragraph_was_open and prev_prose and not pushed
                                 and not _OWN_BLOCK_START_RE.match(rest))
                             else _own_depth)
+        # ⛔ THE PARAGRAPH'S OWN CONTAINER DEPTH IS NOT THE LAST LINE'S (round-54 review, P1).
+        # `prev_quote_depth` is reset by a `pushed` line, and a LAZY continuation that the model
+        # records as an item (`> Notes` + `     - x`) resets it BELOW the paragraph it continues —
+        # so the next line at the paragraph's own depth then read as "a new container" and the
+        # type-7 veto was dropped although the renderer needs it:
+        #     `> Notes` + `     - x` + `> <br />` + `     -     Closes #100`
+        #         renderer ONE `<p>` in the blockquote -> PROSE; `c83cd2803` credited it, the
+        #         depth-checked head blanked it (4 bodies in a 200k sweep)
+        # The carry is the same `max()` the line-depth rule uses, WITHOUT the `pushed` / own-block
+        # resets — those describe the LINE, and this variable describes the PARAGRAPH.
+        prev_para_depth = (max(_own_depth, prev_para_depth)
+                           if (_paragraph_was_open and prev_prose)
+                           else _own_depth)
         # The paragraph lives in the item this line OPENED when it opened one (`- Notes` puts its
         # text inside the `<li>`), not in the item it sat in before. ⛔ AND WHEN THIS LINE'S PUSH WAS
         # UNDONE BY THE INDENT RULE, THE ITEM IT OPENED IS THE ONE THAT HOLDS IT (round-51 review,
