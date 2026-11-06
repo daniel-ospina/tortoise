@@ -762,11 +762,16 @@ class RecordStatementError(RecordProjectionError):
     multi-line NON-driver cause keeps its first line and drops the rest —
     measured, on a `Statement` cause: ``ValueError("line one\\nline two")``
     reported ``ValueError: line one`` where the pre-fix arm carried both. It is
-    the same narrowing the message arm has always applied (:func:`replay` at
-    ``record_projection.py:5779-5782``), so the two arms are now consistent
+    the same narrowing the message arm has always applied (:func:`replay` composes
+    ``_failure_line(_statement_attribution(...), _driver_fault(exc))`` in its
+    ``raise``), so the two arms are now consistent
     rather than newly wrong. Stated because ``_bounded_cause`` escapes newlines
-    rather than dropping them (`record_writer.py:1297`), i.e. pre-fix those
+    rather than dropping them (`record_writer._bounded_text`), i.e. pre-fix those
     lines DID reach the log stream.
+    ⚠️ Cited by SYMBOL, not by line: two review cycles in a row found this
+    paragraph's line numbers dead, because every prose insertion above the call
+    site moves it (the second correction was measured against the pre-edit file).
+    A name survives an insertion; a number does not.
 
     ⚠️ THE COST IS BOUNDED TO A MULTI-LINE **NON-DRIVER** CAUSE, and that
     qualifier is load-bearing rather than decorative (#11124 review cycle 2):

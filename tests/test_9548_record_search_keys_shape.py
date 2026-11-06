@@ -774,8 +774,9 @@ def test_the_cause_form_withholds_the_drivers_detail_and_context():
     docstring one page above states, in as many words, that ``str(exc)`` IS NOT
     CARRIED because on a driver error it is the protocol's fields CONCATENATED:
     ``DETAIL``/``CONTEXT`` quote the refused row or a prefix of its values. The
-    message arm learned this first (#10648 review P2, `record_projection.py:5782`
-    passes `_driver_fault`); the cause arm kept interpolating, so the withhold
+    message arm learned this first (#10648 review P2: `replay()` composes
+    `_failure_line(…, _driver_fault(exc))`); the cause arm kept interpolating, so
+    the withhold
     documented for the line was true of one arm and false of the other.
 
     ⛔ AND NOTHING DOWNSTREAM REPAIRS IT. `record_writer._bounded_cause` narrows
@@ -792,7 +793,7 @@ def test_the_cause_form_withholds_the_drivers_detail_and_context():
     pins, which is why the qualifier matters: an unqualified "no in-tree caller"
     is refuted by its own assertions (#11124 review P3).
 
-    Non-vacuous: restore ``type(cause).__name__}: {cause}`` and this test reds on
+    Non-vacuous: restore ``{type(cause).__name__}: {cause}`` and this test reds on
     the first assertion — the DETAIL token is the SAME string the attribution
     half withholds, so one value proves both halves of the line at once.
     """
