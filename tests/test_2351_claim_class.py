@@ -1692,9 +1692,14 @@ def test_the_repoint_door_carries_no_door_local_direction_filter():
     (measured on this branch: filter restored, that pin -> 1 passed). What
     #10520 asks for is a property of the CODE SHAPE — "the door-local filter can
     be deleted (it should be, so the two cannot drift)" — so it is pinned on the
-    shape: the pre-flight assigns ``_eff_dir`` exactly ONCE, and that assignment
-    IS the canonicalizer call. A reintroduced ``isinstance``/``else
-    "bidirectional"`` branch adds a second assignment and reds this test.
+    shape: the pre-flight assigns ``_eff_dir`` exactly ONCE, that assignment IS
+    the canonicalizer call, and the call's ARGUMENTS are the two plain reads
+    (``_rtype``, ``_raw_dir``) with no keyword. All three clauses are measured
+    to be load-bearing: a filter that writes ``_eff_dir`` itself reds the count,
+    and a copy smuggled into a SIBLING local or into the argument position
+    (``_raw_dir if isinstance(...) else "bidirectional"``) reds the argument
+    check — the last one is behaviour-identical and invisible to every
+    verdict-level pin, which is exactly the regression this test exists for.
 
     ⛔ AST, not a text search: the comment above the assignment NAMES the deleted
     branch (``⛔ Do NOT reintroduce a per-value branch here``, with its
@@ -1728,6 +1733,17 @@ def test_the_repoint_door_carries_no_door_local_direction_filter():
     assert _value.func.attr == _REPOINT_DIRECTION_READ, (
         "`_eff_dir` must come from "
         f"`self.{_REPOINT_DIRECTION_READ}(...)`, got `{_value.func.attr}`")
+    # ⛔ The ARGUMENTS matter as much as the call: a door-local copy can be
+    # smuggled into a sibling local or into the argument position
+    # (``_raw_dir if isinstance(...) else "bidirectional"``) and is then
+    # behaviour-INVISIBLE, so no verdict-level pin can see it (measured).
+    assert not _value.keywords, ast.dump(_value)
+    assert [ast.unparse(_arg) for _arg in _value.args] == [
+        "_rtype", "_raw_dir"], (
+        "the pre-flight must hand the canonicalizer the TWO PLAIN READS "
+        f"(`_rtype`, `_raw_dir`); it passes {ast.unparse(_value)} — a computed "
+        "argument IS the door-local copy of the direction policy #10520 A4 "
+        "deleted")
 
 
 def test_supersede_repoint_reads_a_non_string_id_endpoints_own_marker(lane):
