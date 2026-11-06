@@ -905,8 +905,31 @@ _HTML_BLOCK_INTERRUPT_RE = re.compile(
     rf" {{0,3}}(?:<!--|<\?|<![A-Za-z\[]|<(?:{_HTML_TYPE6_TAGS})(?:[ \t]|/?>|$))", re.IGNORECASE)
 
 
+def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
+                    prev_quote_depth: int) -> bool:
+    """Is this ordered marker ≥ 2 a LAZY CONTINUATION of the open paragraph?
+
+    ⛔ §5.2's "an ordered marker ≥ 2 cannot interrupt a paragraph" IS CONDITIONAL ON THERE BEING A
+    PARAGRAPH TO INTERRUPT (round 39 review, P2 — class B, both arms). A line that starts a NEW
+    CONTAINER interrupts one (§5.1: a blockquote can), so the marker inside it is a real item:
+
+        `Notes` + `> 2. x` + `> 3.      Closes #100`
+            renderer `<p>Notes</p><blockquote><ol start="2">…</ol></blockquote>` — a real `<ol>`,
+            whose wide-gap content is `<pre><code>`; applying the rule anyway left the item unpushed
+            and CREDITED the quotation in both arms.
+
+    The depth comparison is the only term added. Both callers — the item push and the leaf-block
+    question — now ask THIS function, because two answers to one question is how round 37's fix
+    re-opened round 36's hole.
+    """
+    return (prev_prose
+            and _ordered_marker_at_least_two(rest)
+            and _quote_depth(prefix) <= prev_quote_depth)
+
+
 def _leaves_no_paragraph(rest: str, rest_indent: int,
-                        container: _ListItem | None, prev_prose: bool) -> bool:
+                        container: _ListItem | None, prev_prose: bool,
+                        lazy_marker: bool) -> bool:
     """Does this PROSE-EMITTED line leave NO PARAGRAPH OPEN behind it?
 
     ⛔ "THE PREVIOUS LINE WAS EMITTED AS PROSE" IS NOT "a paragraph is open" (round 34 review, P2 —
@@ -947,13 +970,21 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # push, so this is a THIRD reader of one definition rather than a fourth definition.
     col = _content_column(rest)
     body = rest[col:] if col is not None else rest
+    # ⛔ AN EMPTY CONTENT OPENS NO PARAGRAPH (round 39 review, P2 — class B, both arms). `- ` on its
+    # own renders `<ul><li></li></ul>`: there is no paragraph to continue, so the next wide-gap
+    # marker opens its own list and its content is CODE. Every leaf test below reads "no ender
+    # matched" as "a paragraph is open", which is right for text and wrong for nothing-at-all:
+    #     `- ` + `  2.      Closes #100`   renderer `<li><ol start="2"><li><pre><code>`   CODE
+    # …and the same for `* `, `> - `, and for a quote line whose content is only `>`.
+    if not body.strip():
+        return True
     # ⛔ A MARKER LINE THAT OPENS NO ITEM HAS NO CONTENT COLUMN TO INSPECT (round 37 review, P2). An
-    # ordered marker ≥ 2 under an open paragraph is a lazy continuation, so its `# H` / `***` is
-    # INLINE TEXT, not a leaf block — reading it as one ended the paragraph and blanked the real
+    # ordered marker ≥ 2 that CONTINUES an open paragraph is a lazy continuation, so its `# H` / `***`
+    # is INLINE TEXT, not a leaf block — reading it as one ended the paragraph and blanked the real
     # close below (`Notes` + `2. # H` + `3.     Closes #100` renders as ONE `<p>`; `origin/main`
-    # credits it). The same question `_ordered_marker_at_least_two` exists for, asked before the
-    # content-column test rather than after it.
-    if col is not None and prev_prose and _ordered_marker_at_least_two(rest):
+    # credits it). The answer is the CALLER's now (`lazy_marker`), because it is the same question the
+    # item push asks — and asking it in two places is how the two answers drifted apart (round 39).
+    if lazy_marker:
         return False
     if _NO_PARAGRAPH_RE.match(body) or _HTML_BLOCK_INTERRUPT_RE.match(body):
         return True
@@ -1244,6 +1275,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             pushed = False
             container = None
             own_gap = 0
+            _lazy_push = False
         if line.strip():
             while list_items and _item_dedented(line, list_items[-1]):
                 list_items.pop()
@@ -1260,8 +1292,8 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             # against a content column the renderer never created, which blanked a real close even
             # once the leaf predicate was fixed: `Notes` + `2. # H` + `3.     Closes #100` needs both
             # changes, and the reviewer measured the pair (predicate only: `[]`; both: `[100]`).
-            pushed = rest_col is not None and not (
-                prev_prose and _ordered_marker_at_least_two(rest))
+            _lazy_push = _is_lazy_marker(rest, prefix, prev_prose, prev_quote_depth)
+            pushed = rest_col is not None and not _lazy_push
             own_gap = _marker_gap(rest)
             if pushed:
                 list_items.append(
@@ -1410,7 +1442,8 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # the paragraph, so the next line cannot lazily continue it (`_leaves_no_paragraph`). Four
         # families of credited quotations came from reading only `raw.strip()` here.
         prev_prose = bool(raw.strip()) and not _leaves_no_paragraph(
-            rest, rest_indent, container, prev_prose)
+            rest, rest_indent, container, prev_prose,
+            _lazy_push if line.strip() else False)
         # ⛔ THE PARAGRAPH'S CONTAINER DEPTH, WHICH IS NOT THE LINE'S OWN PREFIX DEPTH (round 38
         # review, P2 — a false PASS). Two shapes put a paragraph at a depth its line's prefix does
         # not show, and both made `_lazy_marker`'s depth term answer "same container" when the
@@ -1421,9 +1454,24 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         #                                        lost the open quote -> CODE
         # So: a marker line contributes the depth of its own CONTENT, and a line shallower than the
         # paragraph it continues keeps the paragraph's depth (that is what "lazy" means).
+        # ⛔ A LINE THAT OPENS A CONTAINER OR AN ITEM ENDS THE OLD ONE'S PARAGRAPH (round 39 review,
+        # P2 — class A, both arms). Carrying the depth on `prev_prose` alone kept a blockquote's
+        # depth past the line that CLOSED it, so `- > q` + `- x` + `    2.      Closes #100` measured
+        # the claim at depth 0 against a remembered depth 1, failed the "same container" term and
+        # blanked a line the renderer keeps as plain inline text (`[100]` on `origin/main`).
+        # A LAZY line still keeps the paragraph's depth — that is what lazy means — so the carry is
+        # gated on the line NOT having started something of its own.
+        # ⛔ AND THE CONTENT'S `>` IS ONLY A CONTAINER WHEN THE LINE OPENED AN ITEM (round 39 review,
+        # P2). `Notes` + `2. > q` is ONE paragraph (`2.` cannot interrupt), so the `>` there is
+        # INLINE TEXT: counting it made the claim line below look shallower than the "container" and
+        # blanked it (`[100]` at `2a76c68888` and on `origin/main`), while the sibling that really does
+        # open a quote — `Notes` + `2. > q` + `> 2.      Closes #100` — must stay CODE.
         _inner = rest[_content_column(rest):] if _content_column(rest) is not None else ""
-        _own_depth = _quote_depth(prefix) + _quote_depth(_split_prefix(_inner)[0])
-        prev_quote_depth = max(_own_depth, prev_quote_depth) if prev_prose else _own_depth
+        _own_depth = _quote_depth(prefix)
+        if pushed:
+            _own_depth += _quote_depth(_split_prefix(_inner)[0])
+        prev_quote_depth = (max(_own_depth, prev_quote_depth)
+                            if (prev_prose and not pushed) else _own_depth)
         # The paragraph lives in the item this line OPENED when it opened one (`- Notes` puts its
         # text inside the `<li>`), not in the item it sat in before.
         prev_container = (list_items[-1] if pushed else container)

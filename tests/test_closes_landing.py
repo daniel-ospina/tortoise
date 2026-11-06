@@ -3505,3 +3505,110 @@ def test_a_paragraph_one_container_deeper_than_its_line_is_STILL_another_contain
     body = "> Notes\n> 2.     Closes #100\n"
     assert token_type(body) == "inline", body
     assert cl.parse_closing_refs(body) == [100], body
+
+
+def test_the_CONTAINER_a_paragraph_lives_in_is_not_the_depth_a_line_REMEMBERS():
+    """Round 39 review, 2 × P2 — the round-38 container-depth fix carried state across the lines that
+    END the container, and separately counted a `>` that the renderer renders as inline TEXT.
+
+    Both are delta-measured against `MarkdownIt("commonmark")` at HEAD (`23d7a77abd`) and at the head
+    the behaviour last agreed with (`origin/main` for the first, `2a76c68888` for the second).
+
+    (1) class A, BOTH arms — a real claim blanked. `- > q` puts a paragraph at depth 1; the next line
+        `- x` opens a NEW item at depth 0 and ends that blockquote, but the depth was carried forward
+        because the line was prose. The claim below then failed the "same container" term:
+
+            `- > q` + `- x` + `    2.      Closes #100`
+                renderer `<ul><li><blockquote><p>q</p></blockquote></li><li>x2.      Closes #100</li></ul>`
+                — plain INLINE text; HEAD `[]` in both arms, `origin/main` `[100]`
+
+    (2) class A **and** class B from one line — `_own_depth` counted the `>` of a marker line's CONTENT
+        even when that line opened no item, so the `>` of a lazy continuation was read as a container:
+
+            `Notes` + `2. > q` + `3.      Closes #100`     renderer: ONE `<p>` (prose)  HEAD `[]` BOTH arms
+            `Notes` + `2. > q` + `> 2.      Closes #100`   renderer: `<blockquote><ol …><pre><code>`
+                                                           HEAD `[100]` in BOTH arms
+
+        The pair differs by one `>` on the third line, so both directions are pinned here together.
+    """
+    md = MarkdownIt("commonmark")
+    text = "Closes #100"
+
+    def in_code(body: str) -> bool:
+        def walk(tokens):
+            for token in tokens:
+                if token.type in ("code_block", "html_block", "fence") and text in token.content:
+                    return True
+                if walk(token.children or []):
+                    return True
+            return False
+        return walk(md.parse(body))
+
+    # (1) the closed container must not be remembered past the line that closed it.
+    for body in ("- > q\n- x\n    2.      Closes #100\n",
+                 "> Notes\n- x\n    2.      Closes #100\n",
+                 "> - item\n- x\n  2.      Closes #100\n"):
+        assert not in_code(body), body
+        assert cl.parse_closing_refs(body) == [100], body
+    # (2A) the `>` of a lazy continuation is TEXT, not a container — both arms.
+    for body in ("Notes\n2. > q\n3.      Closes #100\n",
+                 "Notes\n2. > q\n3.     Closes #100\n"):
+        assert not in_code(body), body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+    # (2B) …but a `>` that really opens a quote is code — the one-character sibling of (2A).
+    for body in ("Notes\n2. > q\n> 2.      Closes #100\n",):
+        assert in_code(body), body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+
+def test_a_NEW_CONTAINER_can_interrupt_a_paragraph_and_an_EMPTY_content_opens_none():
+    """Round 39 review, 2 × P2 — two places where "no paragraph is open" was got wrong.
+
+    (1) §5.2's "an ordered marker >= 2 cannot interrupt a paragraph" was applied WITHOUT checking that
+        there is a paragraph to interrupt. `> 2. x` raises the quote depth 0 -> 1, and §5.1 says a
+        blockquote CAN interrupt a paragraph, so that marker opens a real item — whose wide-gap next
+        line is code. Regressed at `2a76c68888`, still present at HEAD:
+
+            `Notes` + `> 2. x` + `> 3.      Closes #100`
+                renderer `<p>Notes</p><blockquote><ol start="2"><li>x</li><li><pre><code>`
+                HEAD `[100]` in both arms; `32a1d4f4fd` `[]`
+
+    (2) a line whose CONTENT is empty opens NO paragraph (`- ` renders `<ul><li></li></ul>`), so the
+        next wide-gap marker is a fresh list with code content. Every leaf test read "no ender
+        matched" as "a paragraph is open", which is right for text and wrong for nothing-at-all:
+
+            `- ` + `  2.      Closes #100`  renderer `<li><ol start="2"><li><pre><code>`
+                HEAD `[100]` in both arms; `32a1d4f4fd` `[]`
+
+        The same missing test shows up on a quote line whose content is only `>` — `> Notes` + `>` +
+        `> 2.     Closes #100` — where it is at parity with `origin/main` rather than a regression.
+    """
+    md = MarkdownIt("commonmark")
+    text = "Closes #100"
+
+    def in_code(body: str) -> bool:
+        def walk(tokens):
+            for token in tokens:
+                if token.type in ("code_block", "html_block", "fence") and text in token.content:
+                    return True
+                if walk(token.children or []):
+                    return True
+            return False
+        return walk(md.parse(body))
+
+    for body in ("Notes\n> 2. x\n> 3.      Closes #100\n",
+                 "Notes\n> 2. x\n> 3.     Closes #100\n",
+                 "- \n  2.      Closes #100\n",
+                 "* \n  2.      Closes #100\n",
+                 "> Notes\n>\n> 2.     Closes #100\n"):
+        assert in_code(body), body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    # Controls: the same second line under an open paragraph is still a lazy continuation…
+    for body in ("Notes\n2.     Closes #100\n", "- Notes\n  2.     Closes #100\n"):
+        assert not in_code(body), body
+        assert cl.parse_closing_refs(body) == [100], body
+    # …and a bullet CAN interrupt (§5.2), so `- ` opening an item leaves no paragraph open either way.
+    assert cl.parse_closing_refs("- Closes #100\n") == [100]
