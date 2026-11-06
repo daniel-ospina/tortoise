@@ -663,6 +663,75 @@ def test_the_record_schema_placement_pins_run_on_a_doc_only_diff():
         )
 
 
+def test_the_placement_table_drift_pin_runs_on_a_placement_doc_only_diff():
+    """#10663: the carrier's drift pin must run on the DOC that can invalidate it.
+
+    `tests/test_10663_placement_table_packaged.py` proves the package-data carrier
+    (``tortoise/_placement_table.json``) still declares exactly what
+    ``docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md``
+    declares. The edit that breaks it is a **placement-table-only doc diff** —
+    change a field's class or spelling and forget to regenerate — which is
+    exactly the diff that leaves every deployed image reading a stale property
+    namespace (the #10663 class).
+
+    The doc IS in `CORE_ALSO`, so such a diff selects `core` rather than taking
+    the docs-only early return, and the `core` registration therefore reaches
+    this file. That is the load-bearing fact, and it is ONE edit away from being
+    false: drop the `CORE_ALSO` entry and the doc filters to `changed == []`, the
+    docs-only return emits `tier1` only, and this pin is asleep on the only diff
+    that can break it (#4309 silent-drop class, #11064's shape one doc over).
+    Measured (`tools.ci_selection.select`): `surfaces=['core']`, pin selected.
+    """
+    doc = ("docs/epics/2026-10-10-7879-postgres-record/"
+           "02-identity-and-placement.md")
+    r = _sel([doc])
+    assert r["full"] is False
+    assert r["surfaces"] == ["core"], (
+        f"{doc} is expected to select `core` through CORE_ALSO — if it now "
+        "selects nothing it takes the docs-only early return and the carrier's "
+        "drift pin is asleep on the one diff that can invalidate it"
+    )
+    assert "test_10663_placement_table_packaged.py" in r["test_files"], (
+        "a placement-doc-only diff must select the carrier drift pin "
+        "(`test_10663_placement_table_packaged.py`) — otherwise editing the "
+        "table without regenerating the package-data carrier merges green and "
+        "ships a stale property namespace to every image (#10663, #4309 class)"
+    )
+    # ⛔ THE GENERATOR HALF (#10663 review, P2). `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry matching no SOURCE_PATTERNS row, so a
+    # generator-ONLY diff filtered to `changed == []` and selected NO surface —
+    # measured `surfaces=[]`, this pin NOT selected — which left the one edit
+    # that can desynchronise the carrier (change `GENERATOR` or the emitted
+    # shape, forget to regenerate) merging green. Registered in `CORE_ALSO`.
+    gen = _sel(["tools/gen_placement_table.py"])
+    assert gen["full"] is False
+    assert gen["surfaces"] == ["core"], (
+        "tools/gen_placement_table.py must select `core` through CORE_ALSO — "
+        f"otherwise a generator-only diff takes the docs-only early return: "
+        f"{gen['surfaces']}"
+    )
+    assert "test_10663_placement_table_packaged.py" in gen["test_files"], (
+        "a generator-only diff must select the carrier pin — it is the only "
+        "detector of a carrier that no longer matches its generator (#10663)"
+    )
+    # ⛔ THE CLI HALF (#10663 review, P3). `tortoise/__main__.py` carries the
+    # `api` registration that keeps the carrier pin selected for a change to the
+    # verbs that READ the table. The registration landed but nothing pinned it,
+    # so it could be deleted back to a silent drop and every gate would stay
+    # green — the same silent-drop shape as the two legs above (#4309).
+    cli = _sel(["tortoise/__main__.py"])
+    assert cli["full"] is False
+    assert cli["surfaces"] == ["api"], (
+        "tortoise/__main__.py must select `api` through its ci-surfaces "
+        f"registration — if it selects nothing the pin is asleep on the verbs "
+        f"that read the table: {cli['surfaces']}"
+    )
+    assert "test_10663_placement_table_packaged.py" in cli["test_files"], (
+        "a tortoise/__main__.py diff must run the carrier pin — the two record "
+        "verbs resolve the namespace through it (#10663)"
+    )
+
+
 def test_the_supabase_applier_guard_runs_on_a_readme_only_diff():
     """#11104 review (P1): the applier's own guard must run on the applier's docs.
 
