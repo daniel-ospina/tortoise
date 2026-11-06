@@ -226,13 +226,19 @@ _GLOSS = rf"(?:{_SOFT_EMPH}\([^)\n#]{{0,80}}\))?"
 # fixed-width look-behind is not expressible across a variable-length body).
 _AUX_TAIL = (r"(?:is|was|are|were|does|do|did|has|have|had|will|would|should|must|could|can"
              r"|may|might)")
-_GLOSS_BRIDGE = (rf"(?:{_SOFT_EMPH}\((?![^)\n#]*\b{_AUX_TAIL}[\s*_`.,;:!?\[\]—–-]*\))"
+_GLOSS_BRIDGE = (rf"(?:{_SOFT_EMPH}\((?![^)\n#]*\b{_AUX_TAIL}[\W_]*\))"
                  rf"[^)\n#]{{0,80}}\))?")
-# ⛔ THE TAIL AFTER THE AUXILIARY IS NOT JUST WHITESPACE (review round 23, P3). `is)` was refused, so
-# `is,)`, `*is*`, `_is_`, `` `is` ``, `is;` and `is.` — the same subject with one character of
-# emphasis or punctuation after it — all read as glosses and the reference was CLEANED, one character
-# away from the shape this guard exists to refuse. The tail is the module's own punctuation/emphasis
-# set, which only widens REFUSALS, so it cannot cost a claim.
+# ⛔ THE TAIL AFTER THE AUXILIARY IS NOT JUST WHITESPACE (review rounds 23 and 24, P3). `is)` was
+# refused, so `is,)`, `*is*`, `_is_`, `` `is` ``, `is;` and `is.` — the same subject with one
+# character after it — read as glosses and the reference was CLEANED. Enumerating those characters
+# only moved the boundary: `is…`, `is"`, `is>`, `is'`, `is%`, `is|` and fourteen more still bypassed
+# (measured, 20 of 20 outside the enumerated set). An ENUMERATED class cannot answer "one character
+# after the auxiliary is not a discriminator", so the tail is INVERTED: `[\W_]` — every non-word
+# character plus `_` (`_` is a word character in regex, and it is exactly the emphasis this repo
+# writes). Measured after the inversion: 0 of 35 characters bypass, and the honest glosses that end
+# in punctuation after a NOUN (`(the parent.)`, `(P3.)`, `(2026-11-05.)`) still decline, because the
+# lookahead is anchored on the auxiliary, not on the punctuation. Widening this only widens
+# REFUSALS, so it cannot cost a claim.
 # ⚠️ DECLARED RESIDUAL, not fixed: an auxiliary in mid-clause (`(the outage is, as far as i can
 # tell)`) still declines. That content does not END on an auxiliary, so it sits outside this
 # discriminator; closing it needs a different mechanism and belongs in its own round, not a patch
