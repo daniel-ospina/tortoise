@@ -11966,9 +11966,11 @@ def test_the_overrides_arm_is_anchored_to_the_block_it_governs():
     # on "this block" and a pin on "whatever marker came first".
     real_marker = next(i for i, ln in enumerate(wf_lines) if "⛔ OVERRIDES:" in ln)
     jobs_at = next(i for i, ln in enumerate(wf_lines) if ln.rstrip() == "jobs:")
-    dropped = [*wf_lines[:real_marker],
-               wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)"),
-               *wf_lines[real_marker + 1:]]
+    dropped = [
+        *wf_lines[:real_marker],
+        wf_lines[real_marker].replace("⛔ OVERRIDES:", "(marker removed here)"),
+        *wf_lines[real_marker + 1:],
+    ]
     detached = dropped[:jobs_at] + decoy + dropped[jobs_at:]
     with pytest.raises(AssertionError, match="different block"):
         _test_job_cache_overrides_block(detached, prune_name)
