@@ -3760,8 +3760,10 @@ _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("python-ci.yml:4304-4306", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
 )
 
-#: The numbers those three carried before this round — the non-vacuity population. Each resolved to
-#: a DIFFERENT step after #6744's inserts, which is the drift the pin above exists to catch.
+#: The numbers those three carried before this round — the non-vacuity population. Each has moved to a
+#: DIFFERENT step since: they were ALREADY stale on `main` (the workflow went 4071 -> 4789 lines, of
+#: which #6744's own three inserts are ~97), which is why nothing read them. The pin catches drift
+#: from ANY insert above the cited step, not from this branch's.
 _WALL_CLOCK_STALE_CITATIONS = ("python-ci.yml:3635", "python-ci.yml:2268-2273", "python-ci.yml:3624-3631")
 
 #: The sentence such a citation must land on — the opener of the `test-slow` header's cost paragraph

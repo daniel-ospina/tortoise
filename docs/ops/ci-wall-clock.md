@@ -489,12 +489,16 @@ matrix-band delta above (+17.9 m p50 / +23.2 m max). This is recorded as a KNOWN
 as a decision that a fold run should be capped — the cap's justification ("no single PR may hold the
 pool") is a fairness bound between concurrent PRs, and a fold is not competing with them that way.
 Exempting one would need an expression-valued `max-parallel` — the key is JOB-level, not per-row
-data like `runs-on`, so a per-row exemption is impossible — and it takes a LITERAL: GitHub's
-context-availability table lists only the coarse `jobs.<job_id>.strategy`, and an expression in
-`max-parallel` is rejected at evaluation time (`Error when evaluating 'strategy' for job …
-Unexpected value`, reported against `max-parallel: ${{ needs.<job>.outputs.count }}`,
-github/orgs/community#75886), so no expression-valued exemption is achievable. The exemption is not
-taken here, and this paragraph exists so a silent one cannot be introduced as a "tidy-up".
+data like `runs-on`, so a per-row exemption is impossible — and the one expression form this repo has
+evidence about is rejected: a `needs` output is a STRING, and `max-parallel` refuses a string result
+at evaluation time (`Error when evaluating 'strategy' for job … Unexpected value`, reported against
+`max-parallel: ${{ needs.<job>.outputs.count }}`, github/orgs/community#75886). ⛔ That is narrower
+than "no expression can ever work": a numeric-valued expression is reported to be accepted elsewhere
+and has NOT been measured here, so the coarse `jobs.<job_id>.strategy` context row is not evidence
+either way. The exemption is therefore **not taken as a decision** — this run's fold cost is booked as
+a known cost of #6744, and the cap is a fairness bound between concurrent PRs — not because the
+platform is proven to forbid it. This paragraph exists so a silent exemption cannot be introduced as
+a "tidy-up" without saying so.
 
 ⛔ **Why it cannot false-red a shard.** `max-parallel` limits start order only. Every bound in
 these jobs is measured from runner pickup — the in-step watchdog is started INSIDE the job — so a
