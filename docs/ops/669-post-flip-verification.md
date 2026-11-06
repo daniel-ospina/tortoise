@@ -286,9 +286,18 @@ SELECT id, org_id, email, role, status, accepted_at FROM invitations ORDER BY cr
 ### 5.1 Run the sweep (or wait for the hourly cron)
 
 ```bash
-curl -s --max-time 600 -X POST https://api.premiselabs.co/v1/internal/backups/sweep \
+curl -s --max-time 1800 -X POST https://api.premiselabs.co/v1/internal/backups/sweep \
   -H "Authorization: Bearer $FASTAPI_INTERNAL_KEY"
 ```
+
+> **Why 1800 s and not 600 s (#10234).** The sweep takes 19-34 minutes. A 600 s
+> client gave up long before the work finished, and the DR runbook's own hourly
+> driver did exactly that for 12 days while the sweep completed behind it. A
+> client that gives up does **not** stop the sweep — the route has no
+> server-side ceiling — so on `curl` rc=28 (or no JSON) do not conclude the
+> sweep failed: poll `/v1/internal/backups/status` (§10, the only status read in
+> this runbook) and read `last_sweep.last_sweep_at`, which is
+> written only when the roll-up reaches its end.
 
 ✅ **Expect:** one of:
 
