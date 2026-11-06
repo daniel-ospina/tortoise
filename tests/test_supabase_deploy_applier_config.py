@@ -513,6 +513,38 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
                 f"{_PRODUCTION_PROJECT_REF!r}: `db push --linked` would apply production DDL to "
                 f"that project while this run reports success (#10896)"
             )
+        # …and the value that reference RESOLVES to must not be re-pointed one level down. A GitHub
+        # Actions step-level `env:` takes precedence over job `env:`, so the three assertions above
+        # were all satisfied while `env: SUPABASE_PROJECT_REF: someoneelsesproject01` on the Link
+        # step sent `db push --linked` to another project — measured GREEN (review cycle 12). Every
+        # `--project-ref VALUE` anywhere in the applier job must resolve to production too, which
+        # also covers `functions deploy --project-ref …` (a hosted mutation the flag sweep missed).
+        for step in job.get("steps") or []:
+            override = (step.get("env") or {}).get("SUPABASE_PROJECT_REF")
+            assert override is None or str(override).strip() in (
+                "${{ env.SUPABASE_PROJECT_REF }}",
+                _PRODUCTION_PROJECT_REF,
+            ), (
+                f"step {step.get('name')!r} in job {job_name!r} overrides `SUPABASE_PROJECT_REF` "
+                f"with {override!r}: a step-level `env:` SHADOWS the job's value, so the link and "
+                f"every hosted mutation in that step would target that project while the guard "
+                f"reads the job env and stays green (#10896)"
+            )
+            for argv in (_argv(command) for command in _commands_in(step)):
+                for index, token in enumerate(argv):
+                    if token == "--project-ref" and index + 1 < len(argv):
+                        value = argv[index + 1]
+                    elif token.startswith("--project-ref="):
+                        value = token.split("=", 1)[1]
+                    else:
+                        continue
+                    assert value in ("$SUPABASE_PROJECT_REF", _PRODUCTION_PROJECT_REF), (
+                        f"step {step.get('name')!r} in job {job_name!r} passes "
+                        f"`--project-ref {value}`: every hosted mutation in the applier job must "
+                        f"target the pinned production project (or resolve the job's own "
+                        f"`$SUPABASE_PROJECT_REF`), or a green run mutates a different project "
+                        f"(#10896)"
+                    )
     fn_deploys = [c for c in commands if c.startswith("supabase functions deploy")]
     assert fn_deploys, "the edge-function deploy steps must still exist (#3627 co-move)"
     for cmd in fn_deploys:
@@ -570,6 +602,25 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         # so the most natural note on this very step ("# NOTE: v3 consent-gates this; keep --yes")
         # must not be read as shell and red a correct step (measured, review cycle 9).
         body = "\n".join(_strip_shell_comment(line) for line in _run_body(step).splitlines())
+        # A MUTATING STEP MUST BE ITS INVOCATION. `exit 0`, `exec true`, `return 1` and a bare
+        # `:` are unconditional no-ops with no control operator, no trap and no `set +…` for any
+        # of the checks below to see: the step exits 0 having applied nothing and the co-move
+        # dispatch (#3627) fires over an unapplied schema — measured GREEN (review cycle 12), the
+        # same effect as `set -n` but one sentence shorter. The body may hold its CLI invocation(s)
+        # and errexit statements; anything else is a second statement, which is what this refuses.
+        for raw_line in _run_body(step).splitlines():
+            line = _command_text(raw_line)
+            if not line:
+                continue
+            assert line.startswith("supabase ") or re.fullmatch(
+                r"set\s+-[A-Za-z]+(?:\s+pipefail)?", line
+            ), (
+                f"{where} contains a command line that is not its CLI invocation ({line!r}): a "
+                f"mutating step must BE its invocation. An unconditional `exit 0` / `exec true` / "
+                f"`return 1` (or any other second statement) makes the step exit 0 having applied "
+                f"nothing, with no control operator for the scan below to catch — the #3627 "
+                f"inversion, measured green (#10896)"
+            )
         noexec = _disables_execution(body)
         assert noexec is None, (
             f"{where} puts the body in noexec (`set -n` / `set -o noexec`): bash parses and executes "
