@@ -839,8 +839,8 @@ def _fence_candidate(prefix: str, rest: str,
                   enclosing.depth)
 
 
-def strip_code(body: str, strict: bool = False, *,
-               stats: dict[str, int] | None = None) -> str:
+def strip_code(body: str, strict: bool = False, *, stats: dict[str, int] | None = None,
+               indented_code: bool = False) -> str:
     """Blank out the parts of a PR body that are CODE, not prose.
 
     ONLY fenced blocks are stripped. An INDENTED block is deliberately NOT: where
@@ -898,10 +898,20 @@ def strip_code(body: str, strict: bool = False, *,
     own closer so a well-formed body never reports a hidden line. This is the
     seam `tools/issue_process_lint.py` reads; it is deliberately NOT a return
     type change, so the existing single-value callers are untouched.
+
+    `indented_code` (keyword-only, additive) opts into the OTHER half of the same
+    question: blank a line only where the CommonMark block grammar says it is an
+    indented CODE block — past 3 columns AND past the enclosing list item's content
+    column plus 4. `strict` (above, positional, unchanged) blanks every indented
+    line instead. The two exist together because the callers fail in opposite
+    directions; see the branch at the end of the loop.
     """
     out: list[str] = []
     fence: _Fence | None = None
     list_items: list[_ListItem] = []
+    # The list item the CURRENT line sits inside (None at top level). Set per line, before the
+    # line can push its own item — see the `indented_code` branch at the end of the loop.
+    container: _ListItem | None = None
     # Lines the CURRENTLY OPEN block has hidden from the scan. Reset when a block
     # opens or closes, so the value at the end is the unterminated block's tail.
     hidden_lines = 0
@@ -994,6 +1004,13 @@ def strip_code(body: str, strict: bool = False, *,
         if line.strip():
             while list_items and _item_dedented(line, list_items[-1]):
                 list_items.pop()
+            # The container THIS line sits in, captured BEFORE the line can push its own
+            # item: an indented code block's first line is very often itself a list marker
+            # (`    - [ ] x`), and reading the stack after the push measures that line
+            # against ITSELF — so the quoted example looked like a continuation of an item
+            # it had just opened (#11078 round 29 review, P2: the fix did nothing for the
+            # shape that motivated it).
+            container = list_items[-1] if list_items else None
             marker = _LIST_MARKER_RE.match(rest)
             if marker:
                 rest_col = len(marker.group(0))
@@ -1010,9 +1027,29 @@ def strip_code(body: str, strict: bool = False, *,
         # `rest.startswith("\t")` this clause used to carry was unreachable and
         # read as a live guard (#10634 review P3, twice). A tab-indented line is
         # already a `rest_indent >= 4` line by the time it gets here.
-        if strict and rest_indent > _MAX_FENCE_INDENT:
-            out.append("")
-            continue
+        #
+        # ⛔ TWO STRICTNESSES, BECAUSE THE TWO CALLERS FAIL IN OPPOSITE DIRECTIONS.
+        # `strict` blanks EVERY line indented past the allowance. That is the right
+        # answer for a PASS arm (`issue_process_lint`'s arm 1): a claim may only rest
+        # on a shape that survives as prose at a content column, and an indented
+        # `Closes #N` under a `Refs #N` must not resolve it.
+        # `indented_code` blanks only what the CommonMark BLOCK grammar calls an
+        # indented CODE block — past 3 columns AND past the enclosing list item's
+        # content column + 4 (§5.2: a continuation line is measured from the content
+        # column, not from the margin). A WIP arm needs exactly this and nothing more:
+        # a checklist QUOTED in an indented code block is an example and must not
+        # clear the heading it sits under, while `1. Criteria` + `    - [ ] a` is a
+        # NESTED LIST — prose, and a real criterion. Blanking on the width alone (the
+        # `strict` rule) drops that real criterion; not blanking at all reads the
+        # quoted example as one. Neither default is safe, so the caller chooses.
+        if rest_indent > _MAX_FENCE_INDENT:
+            if strict:
+                out.append("")
+                continue
+            if indented_code and (container is None
+                                  or rest_indent > container.rest_col + _MAX_FENCE_INDENT):
+                out.append("")
+                continue
         out.append(raw)   # prose: keep it, keywords and all
     if stats is not None:
         stats["hidden_lines"] = hidden_lines if fence is not None else 0
