@@ -25,8 +25,10 @@ journal closes the session-end leak).
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
+import warnings
 from pathlib import Path
 
 import pytest
@@ -673,13 +675,16 @@ def _raw_detach_violations(root=None):
         if _is_exempt(f):
             continue
         src = f.read_text(encoding="utf-8")
+        # Once per file: the handles every `_journal_append(…)` call RECEIVES, as
+        # (line, static prefix) — see `_journal_prefixes`.
+        journaled = _journal_prefixes(src)
         # every raw-client CONSTRUCTION site (from falkordb import /
         # import falkordb / falkordb.FalkorDB( form) whose enclosing block
         # bulk-DETACHes must carry per-test-unique + journal in the SAME block
         for m in re.finditer(
                 r"from falkordb import FalkorDB|import falkordb|"
                 r"falkordb\.FalkorDB", src):
-            block = _enclosing_block(src, m.start())
+            block, block_start, block_end = _enclosing_block_span(src, m.start())
             if not block or "DETACH DELETE" not in block:
                 continue
             # `DETACH DELETE` and the uniqueness half are matched on the RAW
@@ -702,8 +707,14 @@ def _raw_detach_violations(root=None):
                     f"block (cycle-6 P1-3 / cycle-8 P2-2)")
                 continue
             # The journal is an ownership RECORD only for a name the sweep's
-            # vocabulary accepts — see `_non_owned_handles`.
-            non_owned = _non_owned_handles(block)
+            # vocabulary accepts — see `_non_owned_handles`. Resolved over the
+            # whole file (the AST needs whole-file context) and restricted to the
+            # journal calls THIS block contains.
+            first_line = src.count(chr(10), 0, block_start) + 1
+            last_line = src.count(chr(10), 0, max(block_end - 1, block_start)) + 1
+            non_owned = _non_owned_handles(
+                [prefix for line, prefix in journaled
+                 if first_line <= line <= last_line])
             if non_owned:
                 violations.append(
                     f"{f.name}: raw FalkorDB( client + bulk DETACH at "
@@ -715,73 +726,23 @@ def _raw_detach_violations(root=None):
     return violations
 
 
-def _non_owned_handles(block: str) -> list[str]:
-    """The literal prefixes of per-test handles BUILT with `os.urandom` in
-    `block` that the sweep's ownership vocabulary does NOT recognise.
+def _non_owned_handles(prefixes: list[str]) -> list[str]:
+    """Which of the `prefixes` a block JOURNALED fall outside the sweep's
+    ownership vocabulary.
 
     `_journal_append` is the third half of the raw-client contract because the
     session-end sweep reads the journal through `owns_by_ownership_record`
     (`tests/_embedded.py::_SWEEP_OWNED_PREFIXES`). A journaled name OUTSIDE that
     vocabulary makes the append INERT: `_sweep_drop` classifies the name as
-    `preserved`, drops nothing, and removes the journal anyway (`failed` is
-    empty), so the graph can never be reclaimed and `_owned_survivors` will not
-    report it either. Measured on `tests/test_cache_eviction_evictor.py`, whose
+    `preserved`, drops nothing, and removes the journal anyway, so the graph can
+    never be reclaimed. Measured on `tests/test_cache_eviction_evictor.py`, whose
     `lane` fixture journaled `evict_<12hex>` — the census above was GREEN while
     the leak the journal exists to close was still open (#11217 review P1).
-
-    Matched on the RAW block (the prefix lives inside string material, which
-    masking would erase) and only where the literal is read from code: an
-    assignment or a journal call that sits in a COMMENT is prose, and prose must
-    neither satisfy this census nor red it (#11182), so every match is validated
-    against the MASKED block at the same offset.
-
-    TWO shapes carried that f-string, and the second one had no assignment line
-    for the first to read (#11217 re-review, measured at `c84c3d68`): a site can
-    hand the f-string STRAIGHT to the journal —
-
-        _journal_append(f"evict_{os.urandom(6).hex()}")   # read NO violation
-
-    which journals the same inert record and stays GREEN, i.e. the exact false
-    PASS this arm exists to close, in the shape that skips its matcher.
-
-    IT READS THE NAME THE JOURNAL RECEIVES, NOT A SHAPE OF ASSIGNMENT. Both
-    earlier revisions enumerated construction shapes, and each enumeration left
-    the next equivalent form GREEN — measured at `ede858414` on this module's own
-    helpers, `name = "evict_" + os.urandom(6).hex()`, `name = (f"evict_…")`,
-    `name: str = f"evict_…"`, a multi-line continuation, `str(f"evict_…")`,
-    `_mk(f"evict_…")` and `"evict_%s" % …` all read NO violation while
-    `os.urandom` + `_journal_calls` still satisfied the outer half (a shape
-    enumeration cannot converge: every fix moves the bypass one form over). This
-    arm therefore resolves the HEAD of the expression the journal is CALLED with
-    — the literal it starts with, the first element's head in a `"".join([…])`,
-    or a named handle rebound (plain, annotated, tuple-target or walrus) at most
-    twice BEFORE the call — so parenthesised, annotated, multi-line,
-    concatenated, `%`-formatted, `str.format`-ed, wrapper-called and
-    variable-prefix constructions all classify identically. Reading the head — and
-    only the binding LIVE at the call — is also what keeps it from reding
-    unrelated material: a `tok = f"n{…}"` elsewhere in the block, the `"-"` step
-    of a `X + "-" + …` concatenation, a keyword argument (`build(kind="x", …)`)
-    and an apostrophe in a comment are none of them the name's head.
-
-    DECLARED fail-opens, each because the prefix is not decidable from the
-    literal alone:
-
-    * a prefix that could still COMPLETE into an owned one (`te` → `test_`): the
-      built name starts with the prefix, so the arm must not violate on a site it
-      cannot judge (it did once — `c84c3d68`);
-    * an EMPTY prefix (`f"{name}"`, or a `"".join([…])` whose FIRST element is
-      not a literal): the name begins in a value, not in the literal;
-    * an expression whose head is neither a literal nor a name (`pick()`): there
-      is no prefix to classify, and inventing one is a false block.
-
-    The ambiguity boundary is exact — `te_` is NOT ambiguous, because
-    `"test_".startswith("te_")` is false, so it is still reported.
     """
     from tests._embedded import _SWEEP_OWNED_PREFIXES
 
-    masked = _mask_strings_and_comments(block)
     out: list[str] = []
-    for prefix in _journaled_prefixes(block, masked):
+    for prefix in prefixes:
         if not prefix:
             continue  # declared fail-open: nothing readable to classify
         if prefix.startswith(_SWEEP_OWNED_PREFIXES):
@@ -793,186 +754,389 @@ def _non_owned_handles(block: str) -> list[str]:
     return out
 
 
-def _journaled_prefixes(block: str, masked: str) -> list[str]:
-    """The static prefix of every handle `_journal_append` is CALLED with in
-    `block` — the name that becomes an ownership record, whichever shape builds
-    it. A `def _journal_append(...)` and a comment naming the symbol are not
-    calls (#11182), so both are skipped.
+# ── the ownership arm reads the JOURNALED VALUE, from the AST (#11243) ──────
+#
+# Three revisions of this arm walked the block as TEXT: masking literals,
+# matching construction shapes, then chasing `^name =` bindings by offset. Each
+# closed the shape its reviewer named and left an equivalent form open, and two
+# of its heuristics were false BLOCKS. Measured, in aggregate:
+#
+#   false PASS — `"evict_" + …`, `"evict_%s" % …`, `str(f"evict_…")`,
+#     `_mk(f"evict_…")`, `"".join(["evict_", …])` (a `\s*` past the `[` ate the
+#     first element, so the SECOND element's literal was read), a
+#     `.replace`/slice/`.format` transform whose leading literal is owned while
+#     the VALUE is not, an `Attribute` target (`t.name = …`), and a rebinding in
+#     a nested scope;
+#   false BLOCK — an apostrophe in a COMMENT became "the literal opener", and a
+#     DEAD earlier binding was reported when the binding live at the call was
+#     the declared fail-open.
+#
+# A text matcher has no notion of a binding, a scope, a call or a literal — so
+# it cannot converge on "which name does the journal receive?", and enumerating
+# shapes is the wrong instrument. The arm therefore parses the block's file
+# once and resolves the journal argument from the tree: constant folds where the
+# value is decidable, the head otherwise, and a `Name`/`t.name` to the binding
+# LIVE at the call.
 
-    The call's OFFSET is threaded into the resolution because a name can be
-    REBOUND later in the same block: only the binding live at the call is the one
-    journaled, so `name = f"evict_…"`, `_journal_append(name)`, then
-    `name = f"test_evict_…"` must still red (measured at `549e297f1`: reading the
-    last binding in the block instead read it CLEAN).
+_SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_NESTED_SCOPES = _SCOPE_NODES + (
+    ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+# `str` methods whose result depends on nothing but their receiver and their
+# arguments — so a call on a CONSTANT receiver has a constant result, evaluated
+# below by the interpreter's own implementation. A method not listed here (or a
+# non-constant receiver) is a declared fail-open: this arm does not try to reason
+# about what arbitrary code returns.
+_PURE_STR_METHODS = frozenset({
+    "capitalize", "casefold", "center", "expandtabs", "format", "join",
+    "ljust", "lower", "lstrip", "removeprefix", "removesuffix", "replace",
+    "rjust", "rstrip", "strip", "swapcase", "title", "upper", "zfill",
+})
+
+
+def _pos(node) -> tuple[int, int]:
+    """Source order for a node, as (line, column): what "BEFORE the call" and
+    "the LAST binding" are decided on."""
+    return (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+
+
+def _dotted(node) -> str | None:
+    """The key a binding target, or a use, names: `name`, `t.name`,
+    `self.graph`. An `Attribute` target journals exactly like a plain name
+    (#11243: `t.name = f"evict_…"` then `_journal_append(t.name)`)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        head = _dotted(node.value)
+        return f"{head}.{node.attr}" if head else None
+    return None
+
+
+def _target_keys(node) -> list[str]:
+    """Every key a target binds: one name, a dotted attribute, or each element of
+    a tuple/list target (`name, other = …`, `for name, other in …`, `*rest`).
+
+    Anything else binds no KEY this arm can read — a subscript target
+    (`d[name] = …`) mutates a container and binds nothing named here."""
+    key = _dotted(node)
+    if key:
+        return [key]
+    if isinstance(node, ast.Starred):
+        return _target_keys(node.value)
+    keys: list[str] = []
+    if isinstance(node, (ast.Tuple, ast.List)):
+        for element in node.elts:
+            keys.extend(_target_keys(element))
+    return keys
+
+
+def _target_values(target, value) -> list[tuple[str, object]]:
+    """`(key, expression)` for every key `target` binds, pairing a tuple/list
+    target with its value POSITIONALLY — `name, other = f"evict_…", 1` binds
+    `name` to the f-string, never to the tuple that holds it.
+
+    A STARRED target pairs nothing (declared fail-open, see
+    `_journal_prefixes`): a star captures a slice, so every key after it sits at a
+    different index than its mirror in `value`, and a positional read would name
+    the wrong element (#11217 review round 4).
     """
-    out: list[str] = []
-    for call in re.finditer(r"_journal_append\(", masked):
-        line_start = masked.rfind("\n", 0, call.start()) + 1
-        if re.fullmatch(r"\s*(?:async\s+)?def\s+", masked[line_start:call.start()]):
-            continue  # a definition of the symbol, not a use of it
-        # The argument SPAN bounds the read: a multi-line call (arguments on
-        # their own lines, a comment after one of them) is otherwise bounded by
-        # the next newline, which cuts the argument to nothing.
-        depth, i = 1, call.end()
-        while i < len(masked) and depth:
-            if masked[i] == "(":
-                depth += 1
-            elif masked[i] == ")":
-                depth -= 1
-            i += 1
-        out.append(_handle_prefix(block, masked, call.end(), call.start(),
-                                  limit=i - 1))
+    if isinstance(target, ast.Starred):
+        return []
+    key = _dotted(target)
+    if key:
+        return [(key, value)]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        elements = value.elts if isinstance(value, (ast.Tuple, ast.List)) else ()
+        if any(isinstance(element, ast.Starred) for element in target.elts) \
+                or len(elements) != len(target.elts):
+            return []
+        pairs: list[tuple[str, object]] = []
+        for index, element in enumerate(target.elts):
+            pairs.extend(_target_values(element, elements[index]))
+        return pairs
+    return []  # a subscript target binds no key this arm can read
+
+
+def _own_statements(scope) -> list:
+    """Every node in `scope`'s OWN statement tree: nested defs, classes, lambdas
+    and comprehensions are NOT entered (neither their bodies nor their decorators
+    and defaults), because a binding there lives in another scope and is not live
+    at a call here (#11217 review round 3, ISSUE 2 — measured: a nested
+    `name = f"test_ok_…"` LAUNDERED an unowned outer handle, and its mirror red a
+    compliant site)."""
+    body = getattr(scope, "body", [])
+    # An `ast.Lambda` carries an EXPRESSION as `body`, not a statement list, and
+    # it reaches here whenever a lambda is on the scope chain of a journal call.
+    pending = list(body) if isinstance(body, list) else []
+    out: list = []
+    while pending:
+        node = pending.pop()
+        out.append(node)
+        if isinstance(node, _NESTED_SCOPES):
+            continue  # a nested def/class/lambda/comprehension IS another scope
+        for child in ast.iter_child_nodes(node):
+            pending.append(child)
     return out
 
 
-def _handle_prefix(block: str, masked: str, start: int, at: int,
-                   limit: int | None = None, _hops: int = 3) -> str:
-    """The static prefix of the name the expression beginning at `start` builds,
-    resolved from the HEAD of that expression: the literal it STARTS with, the
-    first element's head of a `"".join([…])`, or a named handle rebound at most
-    `_hops` times strictly BEFORE the journal call at `at` (three resolutions =
-    the journal's own argument plus TWO rebindings, `name = q` then `q = p`).
-
-    `""` means "not decidable from a literal" (a declared fail-open). Only the
-    head is read: a literal that is not the head (`build(kind="x", …)`, the `"-"`
-    step of `X + "-" + …`) is not the name's prefix, which is why this arm cannot
-    fabricate a prefix out of unrelated text or out of a comment."""
-    if limit is None:  # a binding: bounded by its own statement
-        limit = _statement_end(masked, start)
-    i = _head_pos(block, masked, start, limit)
-    if i >= limit:
-        return ""
-    if block[i] in "\"'":
-        body = block[i + 1:]
-        cut = len(body)
-        for sep in ("{", block[i], "%", "\n"):
-            k = body.find(sep)
-            if k != -1:
-                cut = min(cut, k)
-        prefix = body[:cut]
-        if prefix:
-            return prefix
-        # `"".join([…])`: the name's head is the FIRST element's head, never a
-        # later element's — a suffix literal there is not the head, and reading it
-        # would both miss a dynamic head and false-block an owned one.
-        join = re.match(r"\s*\.\s*join\s*\(\s*\[\s*", masked[i + 1:limit])
-        if join:
-            return _handle_prefix(block, masked, i + 1 + join.end(), at,
-                                  limit=limit, _hops=_hops)
-        return ""
-    ident = re.match(r"[A-Za-z_]\w*", block[i:])
-    if not ident:
-        return ""
-    j = _skip_ws(masked, block, i + ident.end(), limit)
-    tail = masked[j] if j < limit else ""
-    if tail == "=":
-        return ""  # `kind="x"`: a keyword argument, not a name
-    if tail not in ("", "+", "%", ",", ")", "]", "}", "\n"):
-        return ""  # `_GRAPH.upper()`, a subscript, an operator we cannot read
-    if not _hops:
-        return ""
-    for assigned_start, _assigned in reversed(
-            _assigned_exprs(block, masked, ident.group(0), at)):
-        prefix = _handle_prefix(block, masked, assigned_start, at,
-                                _hops=_hops - 1)
-        if prefix:
-            return prefix
-    return ""
-
-
-def _head_pos(block: str, masked: str, start: int, limit: int) -> int:
-    """The index of the first token of the expression at `start`, with leading
-    whitespace, `(` and a wrapper call (`str(…`, `_mk(…`) skipped and any string
-    prefix (`f`, `rb`) consumed — so the caller sees a QUOTE or an identifier.
-
-    Structure is read from `masked` (string material blanked, SAME LENGTH); the
-    quote test is read from `block`, where the literal still exists. Bounded, so a
-    pathological expression cannot spin.
-    """
-    i = start
-    for _ in range(8):
-        if i >= limit:
-            return limit
-        i = _skip_ws(masked, block, i, limit)
-        if i < limit and masked[i] == "(":
-            i += 1
-            continue
-        wrap = re.match(r"[A-Za-z_][\w.]*\s*\(\s*", masked[i:limit])
-        if wrap:
-            i += wrap.end()
-            continue
-        lit = re.match(r"[rRbBfFuU]{0,2}[\"']", block[i:limit])
-        if lit:
-            return i + lit.end() - 1
-        return i
-    return i
-
-
-def _skip_ws(masked: str, block: str, i: int, limit: int) -> int:
-    """The next non-whitespace index (line continuations and blanked comments
-    included), stopping at a LITERAL'S OPENING QUOTE.
-
-    Masking blanks string material to spaces, so a plain whitespace skip walks
-    straight THROUGH `"evict_" + …` and lands on the `+` — every literal-headed
-    expression then read as an operator. `masked` still supplies the structure
-    (comments are blanked there), `block` supplies the quote test."""
-    while i < limit and masked[i] in " \t\r\n\\":
-        if block[i] in "\"'":
-            break
-        i += 1
-    return i
-
-
-def _assigned_exprs(block: str, masked: str, name: str,
-                    before: int) -> list[tuple[int, str]]:
-    """`(expression_start, raw_expression)` for every BINDING of `name` whose
-    statement starts strictly before `before` — plain (`name = …`), annotated
-    (`name: str = …`), tuple-target (`name, other = …`) and walrus
-    (`name := …`).
-
-    Position-aware on purpose: the caller reads the binding LIVE at the journal
-    call (the last one before it), not whichever binding happens to be last in the
-    block. Statement-bounded, so a parenthesised continuation is read WHOLE.
-    """
-    pat = re.compile(
-        rf"(?m)^[ \t]*(?P<n>{re.escape(name)})\s*(?:,\s*\w+\s*)*\s*(?::[^=\n]*)?=(?!=)"
-    )
-    walrus = re.compile(rf"(?<![\w.]){re.escape(name)}\s*:=(?!=)")
-    found: list[tuple[int, str]] = []
-    for m in list(pat.finditer(masked)) + list(walrus.finditer(masked)):
-        if m.start() >= before:
-            continue  # a LATER rebinding is not the name this call journals
-        name_pos = m.start("n") if "n" in m.groupdict() else m.start()
-        if masked[name_pos] == " ":
-            continue  # prose, not code
-        start = _skip_ws(masked, block, m.end(), len(masked))
-        found.append((start, block[start:_statement_end(masked, start)]))
-    found.sort()
+def _bindings_in(scope, key: str) -> list[tuple[tuple[int, int], object]]:
+    """`(position, value)` for every binding of `key` in `scope`'s OWN body, in
+    source order. `value` is None where the value is not an expression this arm
+    can read (a `for` / `with … as` / `except … as` target)."""
+    found: list[tuple[tuple[int, int], object]] = []
+    for node in _own_statements(scope):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                for bound, bound_value in _target_values(target, node.value):
+                    if bound == key:
+                        found.append((_pos(node), bound_value))
+        elif isinstance(node, ast.AnnAssign):
+            if node.value is not None and key in _target_keys(node.target):
+                found.append((_pos(node), node.value))
+        elif isinstance(node, ast.NamedExpr):
+            if key in _target_keys(node.target):
+                found.append((_pos(node), node.value))
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            if key in _target_keys(node.target):
+                found.append((_pos(node), None))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                target = item.optional_vars
+                if target is not None and key in _target_keys(target):
+                    found.append((_pos(node), None))
+        elif isinstance(node, ast.ExceptHandler) and node.name == key:
+            found.append((_pos(node), None))
+    found.sort(key=lambda binding: binding[0])
     return found
 
 
-def _statement_end(masked: str, start: int) -> int:
-    """Index where the statement whose expression starts at `start` ends: the
-    matching close of a leading bracketed expression, else the next newline.
-    Computed on the MASKED block, so a bracket inside a literal cannot unbalance
-    it."""
-    i, n = start, len(masked)
-    while i < n and masked[i] in " \t":
-        i += 1
-    pairs = {"(": ")", "[": "]", "{": "}"}
-    if i < n and masked[i] in pairs:
-        stack = [pairs[masked[i]]]
-        i += 1
-        while i < n and stack:
-            ch = masked[i]
-            if ch in pairs:
-                stack.append(pairs[ch])
-            elif ch == stack[-1]:
-                stack.pop()
-            i += 1
-        return i
-    nl = masked.find("\n", i)
-    return nl if nl != -1 else n
+def _const_int(node) -> int | None:
+    """The integer `node` evaluates to, else None."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, int) \
+            and not isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        value = _const_int(node.operand)
+        return None if value is None else -value
+    return None
+
+
+def _const_str(node) -> str | None:
+    """The string `node` evaluates to when that is decidable WITHOUT running any
+    code of the module under test, else None.
+
+    Folding is what makes a TRANSFORM's value readable, which is the whole of
+    #11243: `"test_g"[:0] + "evict_"`, `"{}".format("evict_")` and
+    `"test_log".replace("test_log", "evict")` are all `"evict_"`, although their
+    leading literal is owned or unrelated. Reading the first literal in the text
+    is what classified them OWNED and left the leak open.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+                return None  # a field depends on a value: not constant
+            parts.append(value.value)
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _const_str(node.left)
+        if left is None:
+            return None
+        right = _const_str(node.right)
+        return left + right if right is not None else left
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        template, right = _const_str(node.left), _const_str(node.right)
+        if template is None or right is None:
+            return None
+        try:
+            return template % right
+        except (TypeError, ValueError, KeyError):
+            return None
+    if isinstance(node, ast.Subscript):
+        base = _const_str(node.value)
+        if base is None:
+            return None
+        if isinstance(node.slice, ast.Slice):
+            if node.slice.step is not None:
+                return None
+            low = None if node.slice.lower is None else _const_int(node.slice.lower)
+            high = None if node.slice.upper is None else _const_int(node.slice.upper)
+            return base[low:high]
+        index = _const_int(node.slice)
+        if index is None:
+            return None
+        try:
+            return base[index]
+        except IndexError:
+            return None  # `"test_"[99]`: not decidable, not a crash
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            receiver = _const_str(func.value)
+            if receiver is not None and not node.keywords \
+                    and func.attr in _PURE_STR_METHODS:
+                # Evaluated by the interpreter's OWN `str` implementation, not by
+                # a table of shapes: a pure method on constant arguments has a
+                # constant result, so `.upper()`, `.removeprefix(…)`, `.zfill(…)`
+                # and `.replace(…)` are all decidable. An IMPURE or unknown
+                # method stays None (declared fail-open, see `_journal_prefixes`).
+                args = [_const_str(arg) if _const_str(arg) is not None
+                        else _const_int(arg) for arg in node.args]
+                if any(arg is None for arg in args):
+                    return None
+                try:
+                    folded = getattr(receiver, func.attr)(*args)
+                except (TypeError, ValueError):
+                    return None
+                return folded if isinstance(folded, str) else None
+        if isinstance(func, ast.Name) and func.id == "str" and len(node.args) == 1:
+            return _const_str(node.args[0])
+    return None
+
+
+def _head_literal(value: str) -> str:
+    """The static prefix of a literal read AS THE HEAD: everything before the
+    first substitution point. `%` is the one that matters — `"evict_%s" % x`
+    parses as a `BinOp` whose LEFT is the whole template."""
+    cut = len(value)
+    for marker in ("%", "{"):
+        found = value.find(marker)
+        if found != -1:
+            cut = min(cut, found)
+    return value[:cut]
+
+
+def _bound_prefix(key: str, scopes: list, before: tuple[int, int],
+                  hops: int) -> str:
+    """The prefix of the binding of `key` LIVE at `before` — the LAST binding of
+    that name before the call, in the innermost scope that binds it at all.
+
+    Only the live binding is read: a DEAD earlier one must not be reported when
+    the live one is undecidable (round 3, ISSUE 3), and a LATER rebinding must
+    not launder the one the call actually journals (round 2)."""
+    if hops < 0:
+        return ""
+    for depth, scope in enumerate(scopes):
+        candidates = [b for b in _bindings_in(scope, key) if b[0] < before]
+        if not candidates:
+            continue
+        position, value = candidates[-1]
+        if value is None:
+            return ""  # a loop/with/except target: nothing readable
+        # The chain starts at the scope the value lives in, so a closure read
+        # still resolves outward and an inner scope cannot be reached inward.
+        return _prefix_of(value, scopes[depth:], position, hops)
+    return ""
+
+
+def _prefix_of(node, scopes: list, before: tuple[int, int],
+               hops: int = 6) -> str:
+    """The static prefix of the handle `node` builds — its VALUE where that is
+    constant, else its HEAD (`"evict_" + …`, `f"evict_{…}"`, the FIRST element of
+    a `"".join([…])`, a wrapper call's first argument).
+
+    `""` means "not decidable from a literal" (a declared fail-open, listed on
+    `_journal_prefixes`). Only the head is read, so unrelated material in the
+    same expression — the `"-"` step of an owned concatenation, a keyword
+    argument's literal — is not mistaken for the name's prefix, and a comment is
+    not text at all here."""
+    if node is None or hops < 0:
+        return ""
+    constant = _const_str(node)
+    if constant is not None:
+        return _head_literal(constant)
+    if isinstance(node, ast.NamedExpr):
+        # `_journal_append(n := f"evict_…")`: the walrus's VALUE is the argument.
+        return _prefix_of(node.value, scopes, before, hops)
+    if isinstance(node, ast.JoinedStr):
+        first = node.values[0] if node.values else None
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            return _head_literal(first.value)
+        return ""  # `f"{p}{hex}"`: the name begins in a value, not a literal
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+        return _prefix_of(node.left, scopes, before, hops)
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "join":
+            sequence = node.args[0] if node.args else None
+            if isinstance(sequence, (ast.List, ast.Tuple)) and sequence.elts:
+                return _prefix_of(sequence.elts[0], scopes, before, hops)
+            return ""
+        if isinstance(func, ast.Attribute) and func.attr == "format":
+            return _prefix_of(func.value, scopes, before, hops)
+        if node.args:
+            return _prefix_of(node.args[0], scopes, before, hops)
+        return ""  # `pick()`: no literal head to read
+    key = _dotted(node)
+    if key:
+        return _bound_prefix(key, scopes, before, hops - 1)
+    return ""
+
+
+def _nodes_with_scopes(node, scopes: list):
+    """Every node, paired with its ENCLOSING SCOPE CHAIN (innermost first), so a
+    `Name` resolves in the scope it actually lives in."""
+    yield scopes, node
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _NESTED_SCOPES):
+            yield from _nodes_with_scopes(child, [child] + scopes)
+        else:
+            yield from _nodes_with_scopes(child, scopes)
+
+
+def _journal_prefixes(source: str) -> list[tuple[int, str]]:
+    """`(line, static prefix)` for every handle `_journal_append` is CALLED with
+    in `source`, in source order.
+
+    A `def _journal_append(…)`, a comment naming the symbol and a bare import are
+    excluded by CONSTRUCTION — a `FunctionDef` is not a `Call`, a comment is not
+    in the tree, and an import is not a call — rather than by the three separate
+    regex exclusions #11182 had to pin one at a time.
+
+    DECLARED fail-opens, each because the prefix is not decidable from the
+    literal alone:
+
+    * an EMPTY prefix (`f"{name}"`, or a `"".join([…])` whose FIRST element is
+      not a literal): the name begins in a value, not in the literal;
+    * an expression with no literal head at all (`pick()`, a handle bound by a
+      `for`/`with` target or a STARRED tuple target, a call to a function or an
+      impure `str` method — the arm folds only the pure `str` methods in
+      `_PURE_STR_METHODS`, on constant arguments): there is no prefix to
+      classify, and inventing one is a false block;
+    * a file that does not PARSE: the census is about live test modules, and an
+      unparseable one cannot run, so pytest reports it and this arm stays silent.
+    """
+    try:
+        with warnings.catch_warnings():
+            # The census compiles OTHER test modules; a legacy invalid escape
+            # sequence in one of them is that module's business, not a signal
+            # here (and pytest prints it as if this test were at fault).
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    out: list[tuple[int, str]] = []
+    for scopes, node in _nodes_with_scopes(tree, [tree]):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        if name != "_journal_append":
+            continue
+        # The first positional argument, else the `name=` keyword — `_journal_append`
+        # has exactly one parameter, so the keyword form journals for real and must
+        # be read (#11217 review round 4: it contributed NO prefix, so the block
+        # passed the outer half and the arm reported nothing).
+        argument = node.args[0] if node.args else next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "name"),
+            None)
+        if argument is None:
+            continue
+        out.append((node.lineno, _prefix_of(argument, scopes, _pos(node))))
+    out.sort()  # source order
+    return out
 
 
 def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
@@ -1397,6 +1561,164 @@ def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
         f"{_raw_detach_violations(root=tmp_path)}")
 
 
+def _raw_client_site(*lines: str) -> str:
+    """A minimal raw-client block whose body is `lines`, so a case below states
+    only the shape under test."""
+    return ("def test_evictor_lane():"
+            "\n    import os"
+            "\n    from falkordb import FalkorDB"
+            + "".join("\n" + ln for ln in lines)
+            + "\n    c = FalkorDB(host=\"h\")"
+            "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+            "\n")
+
+
+def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_path):
+    """#11243 + review round 3: the arm classified TEXT, so every shape it did not
+    enumerate was a false PASS, and two of its text heuristics were false BLOCKS.
+
+    Each case below was measured GREEN (or wrongly RED) at `2f6af8b7` through the
+    census's own `_raw_detach_violations(root=tmp_path)`. They are pinned as
+    BEHAVIOUR rather than as helper introspection, because six rewrites each
+    satisfied the shape its own reviewer named and left the next form open: the
+    class is "classifies the journaled VALUE, or fails open", not "knows shape N".
+    """
+    site = tmp_path / "test_null_owned.py"
+
+    # ── fail OPEN (category A: the census passed while the journal was inert) ──
+    # `evict_`-journaling expressions whose LEADING literal is owned or whose
+    # head is not a plain literal, each of which read GREEN at `2f6af8b7`.
+    for journaled in (
+        # the join branch read the SECOND element (round 2's fix, inverted)
+        '"".join(["evict_", os.urandom(4).hex()])',
+        # a transform: the leading literal is owned, the VALUE is not
+        '"test_log".replace("test_log", "evict") + os.urandom(4).hex()',
+        '"test_g"[:0] + "evict_" + os.urandom(4).hex()',
+        '"{}".format("evict_") + os.urandom(4).hex()',
+        # …and the two directions a pure `str` method can take an owned literal:
+        # it can destroy the prefix (`removeprefix`) or change its case
+        # (`upper`, and the vocabulary is case-sensitive).
+        '"test_evict_".removeprefix("test_") + os.urandom(4).hex()',
+        '"evict_".upper() + os.urandom(4).hex()',
+    ):
+        site.write_text(_raw_client_site(
+            f'    _journal_append({journaled})'), encoding="utf-8")
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad and "OUTSIDE the ownership vocabulary" in bad[0], (
+            f"a handle journaled as `{journaled}` read NO violation: {bad}")
+
+    # An ATTRIBUTE target is a binding like any other: `t.name = f"evict_…"`
+    # then `_journal_append(t.name)` journals the unowned name.
+    site.write_text(_raw_client_site(
+        '    t.name = f"evict_{os.urandom(4).hex()}"',
+        "    _journal_append(t.name)",
+    ), encoding="utf-8")
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "'evict_'" in bad[0], (
+        f"an unowned handle journaled through an ATTRIBUTE target read clean: {bad}")
+
+    # A rebinding in a NESTED scope is not the binding live at the call: it
+    # laundered the outer unowned handle (false PASS)…
+    site.write_text(_raw_client_site(
+        '    name = f"evict_{os.urandom(4).hex()}"',
+        "    def helper():",
+        '        name = f"test_ok_{os.urandom(4).hex()}"',
+        "        return name",
+        "    helper()",
+        "    _journal_append(name)",
+    ), encoding="utf-8")
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "'evict_'" in bad[0], (
+        f"a NESTED-scope rebinding laundered the journaled handle: {bad}")
+
+    # ── false BLOCK (category B: a compliant site red for a reason it is not) ──
+    # …and the mirror reds a compliant site, which is the other half of the same
+    # scope defect.
+    site.write_text(_raw_client_site(
+        '    name = f"test_ok_{os.urandom(4).hex()}"',
+        "    def helper():",
+        '        name = f"evict_{os.urandom(4).hex()}"',
+        "        return name",
+        "    helper()",
+        "    _journal_append(name)",
+    ), encoding="utf-8")
+    assert not _raw_detach_violations(root=tmp_path), (
+        "an OWNED handle was red by a rebinding in a NESTED scope: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # A COMMENT's apostrophe is prose, never a literal opener (round 3 ISSUE 1):
+    # the arm read `'s fine'` as the prefix and red a compliant site.
+    site.write_text(_raw_client_site(
+        '    name = f"test_ok_{os.urandom(4).hex()}"',
+        "    _journal_append(",
+        "        # it's fine, the handle is owned",
+        "        name,",
+        "    )",
+    ), encoding="utf-8")
+    assert not _raw_detach_violations(root=tmp_path), (
+        "a COMMENT's apostrophe inside the call's arguments fabricated a prefix: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # Only the binding LIVE at the call is journaled, so a DEAD earlier binding
+    # must not be reported when the live one is the declared fail-open (round 3
+    # ISSUE 3).
+    site.write_text(_raw_client_site(
+        '    name = f"evict_{os.urandom(4).hex()}"',
+        "    name = pick()",
+        "    _journal_append(name)",
+    ), encoding="utf-8")
+    assert not _raw_detach_violations(root=tmp_path), (
+        "a DEAD binding's prefix was reported over the live undecidable one: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # ── round 4's five findings: the AST plumbing itself ──────────────────
+    # `_journal_append(name=…)` is a legal call — one parameter, named `name` —
+    # and it contributes NO positional argument, so the arm read no prefix at all
+    # while the block still passed the outer `_journal_calls` half.
+    for journaled in (
+        'name=f"evict_{os.urandom(4).hex()}"',
+        # a walrus in the ARGUMENT is the same binding form the two-step case
+        # above pins; its value begins in a literal like any other
+        'n := f"evict_{os.urandom(4).hex()}"',
+        '(p := "evict_") + os.urandom(4).hex()',
+    ):
+        site.write_text(_raw_client_site(
+            f"    _journal_append({journaled})"), encoding="utf-8")
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad and "'evict_'" in bad[0], (
+            f"a handle journaled as `{journaled}` read NO violation: {bad}")
+
+    # CRASHES: the census runs over the WHOLE tests root, so a shape it cannot
+    # handle must degrade to its declared fail-open, never raise — a traceback
+    # names no file and reports nothing about the site.
+    for body in (
+        # an `ast.Lambda` carries an EXPRESSION as `body`, not a statement list
+        '    cb = lambda n: _journal_append(n)',
+        # a constant subscript OUT of range is not decidable, and not fatal
+        '    _journal_append("test_"[99] + os.urandom(4).hex())',
+        # a STAR is a slice, so positional pairing would name the wrong element
+        '    name, *rest, other = (f"test_ok_1_{os.urandom(4).hex()}",'
+        ' f"test_ok_2_{os.urandom(4).hex()}", f"test_ok_3_{os.urandom(4).hex()}",'
+        ' f"evict_{os.urandom(4).hex()}")',
+        "    _journal_append(other)",
+    ):
+        site.write_text(_raw_client_site(body), encoding="utf-8")
+        _raw_detach_violations(root=tmp_path)  # must not raise
+
+    # …and the starred target is a DECLARED fail-open, pinned so it cannot become
+    # a silent wrong element: the arm must not read `test_ok_3_` for `other`.
+    site.write_text(_raw_client_site(
+        '    name, *rest, other = (f"test_ok_1_{os.urandom(4).hex()}",'
+        ' f"test_ok_2_{os.urandom(4).hex()}", f"test_ok_3_{os.urandom(4).hex()}",'
+        ' f"evict_{os.urandom(4).hex()}")',
+        "    _journal_append(other)",
+    ), encoding="utf-8")
+    starred = [prefix for _line, prefix in
+               _journal_prefixes(site.read_text(encoding="utf-8"))]
+    assert starred == [""], (
+        f"a STARRED target was paired positionally instead of failing open: {starred}")
+
+
 def _block_end(masked: str, start: int, indent: int) -> int:
     """Index where the block starting at `start` (indented `indent`) ends: the
     first following line whose indentation is <= `indent`. Computed on the MASKED
@@ -1409,34 +1731,41 @@ def _block_end(masked: str, start: int, indent: int) -> int:
     return len(masked)
 
 
-def _enclosing_block(src: str, pos: int) -> str:
-    """The block that CONTAINS `pos`: the innermost enclosing def, else the
-    enclosing indented suite (module-level try/if/with), else the statement run.
+def _enclosing_block_span(src: str, pos: int) -> tuple[str, int, int]:
+    """`(text, start, end)` for the block that CONTAINS `pos`: the innermost
+    enclosing def, else the enclosing indented suite (module-level try/if/with),
+    else the statement run.
 
     Resolved by INDENTATION and then VERIFIED BY CONTAINMENT — a preceding `def`
     at a smaller indent is only the answer if `pos` actually falls inside its
     span. Without that check a site in a module-level suite appearing after a
     def was attributed to that unrelated def's body, which cannot contain it, and
     the violation was silently skipped (#10170 review rounds 4-6).
+
+    The OFFSETS are returned as well as the text so the block's journal calls can
+    be selected by line from the file-wide AST pass (`_journal_prefixes`).
     """
     masked = _mask_strings_and_comments(src)
     line_start = masked.rfind("\n", 0, pos) + 1
     indent = len(masked[line_start:]) - len(masked[line_start:].lstrip(" "))
     if indent == 0:
         nxt = re.search(r"\n(?=(?:async )?(?:def |class |@))", masked[pos:])
-        return src[line_start:pos + nxt.start() if nxt else len(src)]
+        end = pos + nxt.start() if nxt else len(src)
+        return src[line_start:end], line_start, end
     # innermost enclosing def, verified to contain the site
     for m in reversed(list(re.finditer(r"(?m)^([ ]*)(?:async )?def ", masked[:line_start]))):
         ind = len(m.group(1))
         if ind < indent and m.start() <= pos < _block_end(masked, m.start(), ind):
-            return src[m.start():_block_end(masked, m.start(), ind)]
+            end = _block_end(masked, m.start(), ind)
+            return src[m.start():end], m.start(), end
     # no enclosing def: the nearest OUTER indented suite (module-level try/if/with,
     # or a class body), again verified to contain the site.
     for m in reversed(list(re.finditer(r"(?m)^([ ]*)\S", masked[:line_start]))):
         ind = len(m.group(1))
         if ind < indent and m.start() <= pos < _block_end(masked, m.start(), ind):
-            return src[m.start():_block_end(masked, m.start(), ind)]
-    return src[line_start:]
+            end = _block_end(masked, m.start(), ind)
+            return src[m.start():end], m.start(), end
+    return src[line_start:], line_start, len(src)
 
 
 def test_raw_client_journaled_graph_dropped_by_sweep(monkeypatch, tmp_path):
