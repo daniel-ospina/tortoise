@@ -144,7 +144,7 @@ def test_a_stated_relation_lands_between_the_two_emitted_entities():
     assert result["stats"]["relations"] == 1
     assert result["stats"]["relations_dropped"] == 0
     # the channel is RESULT-level: the Layer-1 commit payload does not grow
-    # for a channel no writer materialises yet (that is #11001's transport).
+    # for a channel no writer consumes yet (the write path is #11237).
     assert "relations" not in result["payload"]
     # and #10000's P0 is untouched — the story's PROSE pair is not written.
     assert "story_arc" not in result["payload"] or not result["payload"][
@@ -838,8 +838,12 @@ def test_the_declared_vocabulary_has_one_home():
     """#2766's defect is a vocabulary derived in several places and drifting.
 
     `pack_registry.declared_relation_predicates` is the ONE home; the write path
-    (`sdk.create_operator`) and S5's gate both read it. This pins the two
-    readers to the same set, so a vocabulary edit cannot land in one only.
+    (`sdk.create_operator`) and S5's gate both read it. THIS test is the OFFLINE
+    half — it pins S5's gate to the same call, and pins the helper's answer to
+    the sets the write path used to derive for itself. The write path's own
+    half is BEHAVIOURAL and lives where `create_operator` can actually be
+    driven: `test_operator_label_vocabulary.TestWritePathDeclaredness.
+    test_the_write_path_reads_the_ONE_declaration_home`.
     """
     from tortoise.domain_loader import _get_registry
     from tortoise.pack_registry import (

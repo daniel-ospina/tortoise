@@ -660,15 +660,18 @@ def _referenced_entity_names(embed_list: object,
     shape we do not recognise contributes nothing, which is safe because the
     guard's only failure mode is keeping too much.
 
-    ``relation_endpoints`` (#10999) decides which of the TWO questions the
-    entity↔entity channel's endpoints answer. For the DISCARD guard (default
-    ``True``) an endpoint is a reference and must protect its entity. For the
-    Rule-4 RESTORE leg it is not, because the channel is **result-level**: an
-    endpoint naming an entity no pass emitted leaves ``execute_embed``'s
-    ``relations`` unresolved — dropped and named, the declared fail-open — and
-    the Layer-1 payload never carries it, so it cannot 422. Counting it there
-    asserted the opposite ("the payload will fail Layer-1 unless the extractor
-    emits it") on the routine case.
+    ``relation_endpoints`` (#10999) decides WHICH WARNING is truthful about the
+    entity↔entity channel's endpoints — never whether an endpoint protects its
+    entity. Both the DISCARD guard and the Rule-4 RESTORE leg count relation
+    endpoints as references (the default ``True``); the channel is **result-level**
+    — an endpoint naming an entity no pass emitted leaves ``execute_embed``'s
+    ``relations`` unresolved, dropped and named (the declared fail-open), and the
+    Layer-1 payload never carries it, so it cannot 422. ``False`` therefore asks
+    the narrower question "is this entity referenced by something Layer-1 CAN
+    reject?", which only the DOWNGRADE message may answer with "Layer-1
+    referential integrity"; passing it into the restore computation is the
+    defect #10999 fixed — the entity stayed gone and S5 then dropped the edge
+    as unresolvable, with nothing in the record saying why.
     """
     names: set[str] = set()
     for section, index, item in _iter_items(embed_list):
@@ -1040,8 +1043,11 @@ def apply_vet(embed_list: Mapping[str, Any],
     # truthfully cite as "Layer-1 referential integrity". A relation endpoint
     # protects its entity (the edge is the story's assertion and would vanish
     # with it) but the channel is RESULT-level: no Layer-1 reference names the
-    # entity, so it cannot produce a 422 — the same reasoning that excludes it
-    # from the Rule-4 restore leg below (#10999).
+    # entity, so it cannot produce a 422 (#10999). ⛔ This narrower set is for
+    # the WORDING only — the Rule-4 restore below still counts relation
+    # endpoints, because that leg is the only one that can bring back an entity
+    # an earlier pass removed, and S4 supplies the narrative's conclusion
+    # between the two passes.
     layer1_referenced = _referenced_entity_names(
         base, discarded_ids, relation_endpoints=False)
     removed_entity_names: set[str] = set()

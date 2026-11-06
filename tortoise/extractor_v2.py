@@ -8704,9 +8704,18 @@ def _declared_relation_predicates() -> frozenset[str] | None:
     ``pack_registry`` records the defect a second derivation IS: "the declared
     registry, the writer, the validator and the discoverable API each derived
     the relation vocabulary independently" (#2766). ``sdk.create_operator``
-    reads the same helper, and ``test_10999_batch_story_relations.
-    test_the_declared_vocabulary_has_one_home`` pins the two callers together,
-    so a vocabulary edit cannot land in one of them only.
+    reads the same helper.
+
+    ⛔ The pin for that claim is BEHAVIOURAL and lives where the write path can
+    actually be driven: ``test_operator_label_vocabulary.
+    TestWritePathDeclaredness.test_the_write_path_reads_the_ONE_declaration_home``
+    monkeypatches ``declared_relation_predicates`` to a widened set and asserts
+    ``create_operator`` publishes the widened verb — a private re-derivation in
+    the write path would ignore the patch and keep warning, so it reds.
+    ``test_the_declared_vocabulary_has_one_home`` here is the OFFLINE half (S5's
+    gate answers from the same call); it never imports ``tortoise.sdk``, so it
+    alone does not pin the write path — an earlier version of this docstring
+    claimed it did.
     """
     try:
         from tortoise.pack_registry import declared_relation_predicates
@@ -8755,12 +8764,11 @@ def _endpoint_fold_index(names: set[str]) -> dict[str, list[str]]:
 def _endpoint_fold_hits(ref: str, folded: dict[str, list[str]]) -> list[str]:
     """Every indexed name sharing EITHER fold with ``ref``, deduped, in order.
 
-    A ``list`` (not a set) because both callers decide on its LENGTH: one hit
-    is an unambiguous resolution, two or more is an ambiguity neither stage may
-    guess through. A set would answer the same question here, but the ordered
-    form makes the "first wins" arm of each caller's policy explicit, and it
-    keeps the hit for a spelling indexed on both folds from being counted
-    twice.
+    A ``list`` (not a set) for ONE consumed property: the LENGTH. Both callers
+    decide on it — one hit is an unambiguous resolution, two or more is an
+    ambiguity neither stage may guess through — and no caller reads the ORDER
+    (each takes ``hits[0]`` only when ``len(hits) == 1``). The list also keeps
+    a spelling indexed on both folds from being counted twice.
     """
     hits: list[str] = []
     for key in _endpoint_fold_keys(ref):
@@ -8922,9 +8930,10 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
             semantics = semantics.strip()
             # #10999 review: `semantics` is a CLOSED vocabulary (ONTOLOGY §8)
             # exactly as the predicate is, and it is the one field on this
-            # channel that would otherwise carry free text into a record
-            # #11001 materialises as an edge property — the prose surface the
-            # channel exists to keep out. A retired spelling is canonicalised
+            # channel that would otherwise carry free text into a record the
+            # write path (#11237) carries as an edge property — the prose
+            # surface the channel exists to keep out. A retired spelling is
+            # canonicalised
             # (as `sdk.create_operator` does); an out-of-vocabulary token drops
             # the KEY and keeps the RELATION (the endpoints and the verb are
             # still the story's own assertion), and is named.
@@ -10172,10 +10181,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # THIS emission produced. RESULT-level, not payload-level — the Layer-1
     # commit payload does not grow for a channel no writer materialises yet
     # (the D8 record-level convention the retractions/merges/noops records
-    # already follow). Materialising these as Object→Object edges is #11001's
-    # job, which owns the operator-vs-structural verdict
-    # (`pack_registry.relation_write_paths`) — this issue supplies its
-    # transport, and nothing here re-derives that decision.
+    # already follow). Materialising these as Object→Object edges is **#11237**
+    # — nothing in this tree consumes `result["relations"]`, which is why
+    # #10999 is `Part of`, not closed. ⛔ Do NOT read #11001 as this channel's
+    # writer: it is CLOSED COMPLETED and owned the DIFFERENT population (the
+    # pack-declared hierarchy, consumed from
+    # `pack_registry.relation_write_paths`), so an earlier attribution to it
+    # left this leg with no open owner. Whatever #11237 decides, it CONSUMES
+    # that declared verdict and must not re-derive it.
     payload_relations, relations_dropped = _assemble_relations(
         embed_list, payload_entities, warnings)
 
