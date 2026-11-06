@@ -22,10 +22,24 @@ def _tool(name: str):
 
 class TestToolRegistration:
     def test_dream_health_tool_registered(self):
-        t = _tool("tortoise_dream_health")
-        assert t is not None, "tortoise_dream_health must be registered"
-        assert t.sdk_method == "dream_health_check"
-        assert t.http_policy is False  # #329-style: not tenant HTTP
+        # #4282: the door retired into `graph_overview(section="dream_health")`. The
+        # #329-style exclusion is NOT on the registry any more — it lives in the
+        # handler (`tortoise_dream_health` returns `_http_excluded_error()` when
+        # `_transport_mode == "http"`), and the container's arm calls that handler, so
+        # the exclusion still holds on the advertised path. Asserted both ways.
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+        t = _tool("tortoise_graph_overview")
+        assert t is not None, "graph_overview must be registered"
+        assert 'section="dream_health"' in RETIRED_USE_INSTEAD["tortoise_dream_health"]
+        import tortoise.mcp_server as ms
+        prev = ms._transport_mode.get()
+        try:
+            ms._transport_mode.set("http")
+            refused = ms.tortoise_graph_overview(section="dream_health")
+            assert isinstance(refused, dict) and "error" in refused, (
+                "dream_health must stay excluded from tenant HTTP through the container")
+        finally:
+            ms._transport_mode.set(prev)
 
     def test_dream_tool_registered_with_mode_and_budget(self):
         t = _tool("tortoise_dream")

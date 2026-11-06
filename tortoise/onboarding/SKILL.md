@@ -653,7 +653,7 @@ Never hand-edit inside markers you did not write; the next refresh discards it.
      click. The user still leaves that step with Continue/Skip; the server
      writes
      `harness-connected` itself on your first successful graph write. Verify
-     with the ADVERTISED `tortoise_overview(section="health")` — the legacy
+     with the ADVERTISED `tortoise_graph_overview(section="health")` — the legacy
      `tortoise_health` name is retired, so it is absent from `tools/list` and
      will not appear in this connector's tool grant (#3883). This
      document is your live path (#4836).
@@ -1006,7 +1006,7 @@ cannot reach the graph (never decide against a dead connection):
    are mutually exclusive (NAND).
 7. **Rank + sanity-check.** Run `tortoise_compute_confidence` (anchors = the
    decision/options) → present the ranked options with EP confidence AND the
-   *why*: the top edges that moved each option. Run `tortoise_check_structure`
+   *why*: the top edges that moved each option. Run `tortoise_graph_overview(section="structure_check")`
    to confirm no orphaned operators.
 
 ## 8. Capture-announcement COPY CONTRACT (W6 implements the trigger)

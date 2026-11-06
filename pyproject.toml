@@ -60,7 +60,7 @@ dependencies = [
 
 [project.scripts]
 tortoise = "tortoise.__main__:main"
-tortoise-ingest = "tortoise.ingest:main"
+tortoise-ingest = "tortoise.ingest:cli"
 tortoise-serve = "tortoise.deployment:serve"
 
 [project.optional-dependencies]
