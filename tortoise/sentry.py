@@ -133,22 +133,25 @@ def init() -> bool:
             # ⚠️ `BrokenResourceError` is the one entry whose direction is not
             # self-evident: anyio raises it from `SocketStream.send/receive`
             # wherever `transport.is_closing()`, outbound as well as inbound, and
-            # `mcp_server.py` records it from a broken INTERNAL stream. It stays
-            # global deliberately: nothing in `tortoise/` does raw anyio I/O, and
+            # `mcp_server.py:7394` documents a demonstrated raise from a broken
+            # INCOMING (client-fed) stream — a comment, not a handler; nothing in
+            # this tree captures or logs the type. So the inbound shape is the one
+            # this entry exists for. It stays global deliberately: nothing in
+            # `tortoise/` does raw anyio I/O, and
             # the one outbound stack that DOES map `anyio.BrokenResourceError` is
             # httpx→httpcore's anyio backend (`httpcore/_backends/anyio.py`), which
             # converts it to `ConnectError`/`WriteError`/`ReadError` — so that path
             # surfaces under a name not on this list. The stdlib `urllib.request`
-            # paths (54 `urlopen` call sites across 9 modules — `models.py`,
-            # `session_verify.py`, `hosted_backup.py`, …) cannot raise an anyio
-            # type at all: they raise `http.client.RemoteDisconnected`, a
-            # `ConnectionResetError` subclass that is NOT in the global set. Either
-            # way an upstream break is still captured, while an inbound abort costs
-            # zero events. It is checked, not assumed (round 5, P3; a later review
-            # falsified an earlier draft of THIS comment, which claimed every
-            # outbound path was httpx — the conclusion held, the stated reason did
-            # not, and that sentence is what a future editor would extend the set
-            # on).
+            # paths are the other half and cannot raise an anyio type AT ALL: they
+            # raise `http.client.RemoteDisconnected`, a `ConnectionResetError`
+            # subclass that is NOT in the global set. (`urlopen` is real here — 27
+            # call sites across `__main__.py`, `models.py`, `session_verify.py`,
+            # `hosted_backup.py`, …, AST-counted at this commit. An earlier draft of
+            # THIS comment claimed "every outbound HTTP path is httpx→httpcore" and a
+            # review falsified it: the conclusion held, the stated reason did not,
+            # and that sentence is what a future editor would widen the set on.)
+            # Either way an upstream break is still captured, while an inbound
+            # abort costs zero events. It is checked, not assumed (round 5, P3).
             #
             # ⚠️ The SDK matches these by EXACT type name (`Client._is_ignored_error`),
             # not by MRO, so a SUBCLASS of ClientDisconnect is benign here and not
@@ -197,8 +200,16 @@ def is_benign_exception(exc: BaseException, *, inbound_request: bool = False) ->
     safely use for the whole process. Only a caller that KNOWS the layer is an
     inbound request — `hosted_api._unhandled_exception_handler` — passes
     `inbound_request=True`, which admits `ConnectionResetError` and
-    `BrokenPipeError` as well: there the peer is the caller, so a reset means it
-    hung up. In an outbound call the same classes mean the UPSTREAM reset us.
+    `BrokenPipeError` as well. ⚠️ The LAYER says where the exception SURFACED,
+    never which end caused it (review finding, measured): a caller that sends RST
+    surfaces at the handler as a bare `ConnectionResetError`, and so does a
+    DEPENDENCY RST reached inside a route — `session_verify._api` catches only
+    `HTTPError`/`URLError`, and `URLError` is a SIBLING of `ConnectionResetError`
+    under `OSError`, so a bare reset escapes it. The ambiguity is therefore
+    bounded, not eliminated, and the bound is what makes this acceptable: neither
+    name is in the client-global `ignore_errors`, so the `ServerErrorMiddleware`
+    re-raise still delivers ONE event per abort, and the only thing an
+    misclassification costs is THIS handler's own sub-ERROR log line.
 
     ⛔ The name match is EXACT on purpose (review round 3, P3). Walking the MRO
     makes this helper broader than the SDK's own `ignore_errors` — and broader is

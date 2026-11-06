@@ -3153,11 +3153,14 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         from tortoise.sentry import is_benign_exception as _is_benign
 
         # `inbound_request=True` — this handler runs while serving an inbound
-        # request, so a reset/broken-pipe HERE means the CALLER hung up. That is
-        # the one place the direction-ambiguous names are safe to treat as
-        # benign; they are deliberately not in the client-global `ignore_errors`
-        # (review round 4, P2), where the same classes mean "the upstream we
-        # called reset us".
+        # request. ⚠️ That says WHERE the exception surfaced, not which end caused
+        # it (review finding, measured): a dependency RST reached inside a route
+        # arrives here as the same bare `ConnectionResetError` that a caller's own
+        # abort produces. The ambiguity is bounded, not eliminated — the names are
+        # deliberately NOT in the client-global `ignore_errors`, so the
+        # `ServerErrorMiddleware` re-raise still delivers one event per abort (the
+        # residual described above), and uvicorn still logs its own ERROR. The only
+        # thing a misclassification costs is this handler's own sub-ERROR line.
         _benign = _is_benign(exc, inbound_request=True)
     except Exception:  # noqa: BLE001, RUF100 — classification never breaks the 500 response
         _benign = False
