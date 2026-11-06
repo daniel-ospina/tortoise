@@ -977,6 +977,22 @@ mechanisms:
       callers
       (pinned by
       `test_an_over_long_side_is_not_judged_so_the_write_path_stays_bounded`).
+      (d2) AN IDENTIFIER-SHAPED value beside a unit word TOLERATES, AND IT DOES
+      SO BY INVENTING A SCALE — not by declining to judge (#10943, which records
+      this clause as `(q2)`; measured at this head): `the see was x4k ms` binds
+      `x4kms`, whose core is `4` with suffix `kms`, and `_composed_identity`
+      folds `k`+`ms` and multiplies it to `4000 ms` — so the pair IS judged, both
+      sides bind slots, and the identifier agrees with a quote it was never a
+      quantity to state. `_NUMERIC_HEAD` blocks only the TOKEN's own prefix peel
+      (`x4k` is not read as 4000 in place); it does not block the GLUED token,
+      which is why this is the composition arm's fail-open and not an identifier
+      exemption. That the digits ARE compared is measured: `x4k ms` against
+      `5000 ms` REFUSES. (d2) does NOT reopen (d)'s ADJACENCY result — the unit
+      word IS fused.
+      ⚠️ Residuals (c) (`4:32` read as a marathon time), (d) (`per <unit>` rates),
+      (d2) and the `20k-mile`/`20000 miles` agreement are PINNED as a battery by
+      `tests/test_state_value_verbatim_10360.py::test_the_registry_rows_measured_disclosures_are_pinned`
+      — a row claim with no pin is the drift this row exists to prevent.
       (i) A `k` SUFFIX IS NOT JUDGED AS A UNIT WORD, AND IS NOT SCALED. `k` is
       SI's x1000 prefix (`5k` IS `5000`) and it is also a unit identity in
       `_UNIT_EQUIV`, because it is a unit `_value_bindings` fuses; the single
