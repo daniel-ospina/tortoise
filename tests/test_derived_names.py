@@ -779,8 +779,9 @@ def _non_owned_handles(prefixes: list[str]) -> list[str]:
 # LIVE at the call.
 
 _SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-_NESTED_SCOPES = _SCOPE_NODES + (
-    ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_NESTED_SCOPES = (*_SCOPE_NODES,
+                   ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp,
+                   ast.GeneratorExp)
 
 # `str` methods whose result depends on nothing but their receiver and their
 # arguments — so a call on a CONSTANT receiver has a constant result, evaluated
@@ -794,6 +795,16 @@ _PURE_STR_METHODS = frozenset({
 })
 
 
+class _AugAdd:
+    """Marker for an augmented `+=` binding: the name's live value is the PRIOR
+    binding concatenated with `tail`."""
+
+    __slots__ = ("tail",)
+
+    def __init__(self, tail):
+        self.tail = tail
+
+
 def _pos(node) -> tuple[int, int]:
     """Source order for a node, as (line, column): what "BEFORE the call" and
     "the LAST binding" are decided on."""
@@ -802,13 +813,25 @@ def _pos(node) -> tuple[int, int]:
 
 def _dotted(node) -> str | None:
     """The key a binding target, or a use, names: `name`, `t.name`,
-    `self.graph`. An `Attribute` target journals exactly like a plain name
-    (#11243: `t.name = f"evict_…"` then `_journal_append(t.name)`)."""
+    `self.graph`, or a container ELEMENT with a constant key (`d["g"]`) — an
+    `Attribute` target journals exactly like a plain name (#11243:
+    `t.name = f"evict_…"` then `_journal_append(t.name)`), and so does a
+    constant-key element, which journalled `evict_…` while this arm read no
+    prefix at all (#11217 round 4 review).
+
+    A NON-constant key (`d[name] = …`) names nothing stable, so it stays
+    unreadable by design (declared fail-open, see `_journal_prefixes`)."""
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
         head = _dotted(node.value)
         return f"{head}.{node.attr}" if head else None
+    if isinstance(node, ast.Subscript):
+        head = _dotted(node.value)
+        key = _const_key(node.slice)
+        # The SAME rendering on both sides — a target and a later read must
+        # produce one key, or the binding is never found.
+        return f"{head}[{key!r}]" if head is not None and key is not None else None
     return None
 
 
@@ -816,8 +839,10 @@ def _target_keys(node) -> list[str]:
     """Every key a target binds: one name, a dotted attribute, or each element of
     a tuple/list target (`name, other = …`, `for name, other in …`, `*rest`).
 
-    Anything else binds no KEY this arm can read — a subscript target
-    (`d[name] = …`) mutates a container and binds nothing named here."""
+    Anything else binds no KEY this arm can read — a subscript target with a
+    NON-constant key (`d[name] = …`) names nothing stable. A constant-key
+    element (`d["g"] = …`) does bind a readable key and is resolved
+    (#11217 round 4 review: it journalled an inert handle and read clean)."""
     key = _dotted(node)
     if key:
         return [key]
@@ -854,7 +879,7 @@ def _target_values(target, value) -> list[tuple[str, object]]:
         for index, element in enumerate(target.elts):
             pairs.extend(_target_values(element, elements[index]))
         return pairs
-    return []  # a subscript target binds no key this arm can read
+    return []  # a dynamic-key subscript target binds no key this arm can read
 
 
 def _own_statements(scope) -> list:
@@ -896,6 +921,13 @@ def _bindings_in(scope, key: str) -> list[tuple[tuple[int, int], object]]:
         elif isinstance(node, ast.NamedExpr):
             if key in _target_keys(node.target):
                 found.append((_pos(node), node.value))
+        elif isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Add) \
+                and len(_target_keys(node.target)) == 1:
+            # `g = ""` then `g += f"evict_…"`: the live value is the OLD one
+            # CONCATENATED with this one, so the pair is resolved rather than
+            # ignoring the statement entirely (which read the unowned handle
+            # clean — #11217 round 5 review residual).
+            found.append((_pos(node), _AugAdd(node.value)))
         elif isinstance(node, (ast.For, ast.AsyncFor)):
             if key in _target_keys(node.target):
                 found.append((_pos(node), None))
@@ -996,6 +1028,141 @@ def _const_str(node) -> str | None:
     return None
 
 
+def _const_key(node):
+    """The hashable key a subscript denotes, when it is a CONSTANT: a `str`,
+    `int`, `bool`, `float`, `bytes` or `None`.
+
+    `_dotted` renders it identically for a TARGET and for a later READ, so one
+    constant key produces one key and the binding is actually found. A
+    non-constant key (`d[k]`) names nothing stable and stays unreadable (declared
+    fail-open)."""
+    if isinstance(node, ast.Constant) and isinstance(
+            node.value, (str, int, float, bytes, bool, type(None))):
+        return node.value
+    return None
+
+
+def _live_binding(key: str, scopes: list, before: tuple[int, int]):
+    """`(value_node, scope_depth)` for the binding of `key` LIVE at `before`, or
+    `(None, None)`. Deeper scopes are searched first, so a closure read resolves
+    outward and an inner scope is never reached from outside."""
+    for depth, scope in enumerate(scopes):
+        candidates = [b for b in _bindings_in(scope, key) if b[0] < before]
+        if candidates:
+            return candidates[-1][1], depth
+    return None, None
+
+
+def _literal_element(container, key_node):
+    """The expression stored at a CONSTANT key inside a container LITERAL —
+    `{"g": …}` by key, `(…)`/`[…]` by index — else None.
+
+    A container literal has no assignment TARGET for the element, so the
+    element binding the arm resolves for `d["g"] = …` does not exist here; the
+    unowned handle then lives only in the literal and the read fell into the
+    empty-prefix fail-open (#11217 round 5 review, ISSUE 2)."""
+    key = _const_key(key_node)
+    if key is None or container is None:
+        return None
+    if isinstance(container, ast.Dict):
+        for candidate, value in zip(container.keys, container.values,
+                                    strict=False):
+            if candidate is not None and _const_key(candidate) == key:
+                return value
+        return None
+    if isinstance(container, (ast.Tuple, ast.List)) and isinstance(key, int) \
+            and not isinstance(key, bool):
+        try:
+            return container.elts[key]
+        except IndexError:
+            return None
+    return None
+
+
+def _element_prefix(key_node, container, scopes: list,
+                    before: tuple[int, int], hops: int) -> str:
+    """The prefix of `container[key_node]` read from a container LITERAL bound in
+    scope (`o = {"g": f"evict_…"}; _journal_append(o["g"])`), else `""`."""
+    key = _dotted(container)
+    if key is None:
+        return ""
+    value, depth = _live_binding(key, scopes, before)
+    element = _literal_element(value, key_node)
+    if element is None:
+        return ""
+    return _prefix_of(element, scopes[depth:], before, hops - 1)
+
+
+def _partial_format(template: str, positional: list, keywords: dict,
+                   resolve) -> str:
+    """The literal prefix of `template.format(…)` when a LATER argument is not
+    constant: substitution walks the template left to right and stops at the
+    first placeholder whose ARGUMENT HEAD cannot be read, so
+    `"{}{}".format("evict_", os.urandom(6).hex())` reads `evict_` instead of the
+    empty prefix `"{}"` alone would give.
+
+    Substitution uses the argument's HEAD (`resolve`), not its constant VALUE:
+    `"{}".format(f"evict_{…}")` also begins with the unowned literal its first
+    argument contributes, and reading the whole value as constant let that shape
+    fall into the empty-prefix fail-open while its value visibly started with
+    `evict_` (#11217 round 5 review, ISSUE 1). Substituting a HEAD is sound in
+    both directions: everything appended after it can only extend the prefix, so
+    an owned head stays owned and an unowned head is still reported.
+
+    A `*[…]` / `*(…)` LITERAL is spliced into the positional list (its elements
+    are readable) and a keyword field (`{name}`) is looked up by name, so the
+    same value is not fail-open merely because it arrived by another call form.
+    `{{`/`}}` are honoured so the result stays a strict prefix of the value.
+    """
+    values: list = []
+    for argument in positional:
+        if isinstance(argument, ast.Starred) and isinstance(
+                argument.value, (ast.List, ast.Tuple)):
+            values.extend(argument.value.elts)
+        else:
+            values.append(argument)
+    out: list[str] = []
+    auto = 0
+    index = 0
+    while index < len(template):
+        char = template[index]
+        if char == "}" and template.startswith("}}", index):
+            out.append("}")
+            index += 2
+            continue
+        if char != "{":
+            out.append(char)
+            index += 1
+            continue
+        if template.startswith("{{", index):
+            out.append("{")
+            index += 2
+            continue
+        end = template.find("}", index)
+        if end == -1:
+            break
+        field = template[index + 1:end].strip()
+        field = field.split("!")[0].split(":")[0].split(".")[0].split("[")[0]
+        node = None
+        if field == "":
+            node = values[auto] if auto < len(values) else None
+            auto += 1
+        elif field.isdigit():
+            slot = int(field)
+            node = values[slot] if slot < len(values) else None
+            auto = slot + 1
+        else:
+            node = keywords.get(field)
+        if node is None:
+            break
+        head = resolve(node)
+        if not head:
+            break  # the name continues in a value: stop at the literal head
+        out.append(head)
+        index = end + 1
+    return "".join(out)
+
+
 def _head_literal(value: str) -> str:
     """The static prefix of a literal read AS THE HEAD: everything before the
     first substitution point. `%` is the one that matters — `"evict_%s" % x`
@@ -1023,6 +1190,12 @@ def _bound_prefix(key: str, scopes: list, before: tuple[int, int],
         if not candidates:
             continue
         position, value = candidates[-1]
+        if isinstance(value, _AugAdd):
+            # prefix(old + tail) is prefix(old) when the old head is readable,
+            # else prefix(tail): `g = ""` then `g += "evict_…"` is `evict_`.
+            head = _bound_prefix(key, scopes, position, hops)
+            return head or _prefix_of(value.tail, scopes[depth:], position,
+                                      hops)
         if value is None:
             return ""  # a loop/with/except target: nothing readable
         # The chain starts at the scope the value lives in, so a closure read
@@ -1065,10 +1238,37 @@ def _prefix_of(node, scopes: list, before: tuple[int, int],
                 return _prefix_of(sequence.elts[0], scopes, before, hops)
             return ""
         if isinstance(func, ast.Attribute) and func.attr == "format":
+            template = _const_str(func.value)
+            if template is not None and "{" in template:
+                head = _partial_format(
+                    template, node.args,
+                    {keyword.arg: keyword.value for keyword in node.keywords
+                     if keyword.arg is not None},
+                    lambda argument: _prefix_of(
+                        argument, scopes, before, hops - 1))
+                if head:
+                    return head
             return _prefix_of(func.value, scopes, before, hops)
+        if isinstance(func, ast.Attribute) and func.attr == "get" \
+                and len(node.args) == 1:
+            # `o.get("g")` reads the same element `o["g"]` does; without this it
+            # fell into the generic "first argument's head" rule and reported the
+            # KEY literal (`'g'`) — a false block on a compliant site
+            # (#11217 round 5 review, ISSUE 4).
+            return _element_prefix(node.args[0], func.value, scopes, before,
+                                   hops)
         if node.args:
             return _prefix_of(node.args[0], scopes, before, hops)
         return ""  # `pick()`: no literal head to read
+    if isinstance(node, ast.Subscript):
+        key = _dotted(node)
+        if key:
+            prefix = _bound_prefix(key, scopes, before, hops - 1)
+            if prefix:
+                return prefix
+        # No element ASSIGNMENT binds this key: the container may be a LITERAL
+        # bound in scope (`o = {"g": f"evict_…"}; _journal_append(o["g"])`).
+        return _element_prefix(node.slice, node.value, scopes, before, hops)
     key = _dotted(node)
     if key:
         return _bound_prefix(key, scopes, before, hops - 1)
@@ -1081,7 +1281,7 @@ def _nodes_with_scopes(node, scopes: list):
     yield scopes, node
     for child in ast.iter_child_nodes(node):
         if isinstance(child, _NESTED_SCOPES):
-            yield from _nodes_with_scopes(child, [child] + scopes)
+            yield from _nodes_with_scopes(child, [child, *scopes])
         else:
             yield from _nodes_with_scopes(child, scopes)
 
@@ -1101,10 +1301,12 @@ def _journal_prefixes(source: str) -> list[tuple[int, str]]:
     * an EMPTY prefix (`f"{name}"`, or a `"".join([…])` whose FIRST element is
       not a literal): the name begins in a value, not in the literal;
     * an expression with no literal head at all (`pick()`, a handle bound by a
-      `for`/`with` target or a STARRED tuple target, a call to a function or an
-      impure `str` method — the arm folds only the pure `str` methods in
-      `_PURE_STR_METHODS`, on constant arguments): there is no prefix to
-      classify, and inventing one is a false block;
+      `for`/`with`/`except … as` target, a STARRED tuple target, a subscript key
+      that is not a CONSTANT — `d[k]` names nothing stable, whereas `d["g"]`,
+      `d[0]` and `d[True]` ARE resolved — or a call to a function or to a `str`
+      method outside `_PURE_STR_METHODS`, which is folded only on constant
+      arguments): there is no prefix to classify, and inventing one is a false
+      block;
     * a file that does not PARSE: the census is about live test modules, and an
       unparseable one cannot run, so pytest reports it and this arm stays silent.
     """
@@ -1600,6 +1802,11 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
         # (`upper`, and the vocabulary is case-sensitive).
         '"test_evict_".removeprefix("test_") + os.urandom(4).hex()',
         '"evict_".upper() + os.urandom(4).hex()',
+        # …and the two the round-4 review MEASURED still open at `aa2e15c40`:
+        # a format template whose LATER argument is unknown (the empty prefix
+        # the template alone yields hid the unowned literal its first argument
+        # contributes), and a constant-key container element.
+        '"{}{}".format("evict_", os.urandom(4).hex())',
     ):
         site.write_text(_raw_client_site(
             f'    _journal_append({journaled})'), encoding="utf-8")
@@ -1616,6 +1823,77 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
     bad = _raw_detach_violations(root=tmp_path)
     assert bad and "'evict_'" in bad[0], (
         f"an unowned handle journaled through an ATTRIBUTE target read clean: {bad}")
+
+    # A constant-key ELEMENT is a binding like any other, in every form it takes:
+    # an assignment target (`d["g"] = …`), a container LITERAL (`o = {"g": …}`),
+    # and a `.get("g")` read — and in BOTH polarities, because this arm has red a
+    # compliant site in two of the last four rounds. A DYNAMIC key (`d[k] = …`)
+    # stays unreadable by design — it names nothing stable — and is pinned too, so
+    # the declared fail-open cannot silently become something else.
+    hexed = "os.urandom(4).hex()"
+    element_cases = (
+        ("    d = {}", '    d["g"] = f"evict_{H}"', '    _journal_append(d["g"])', True),
+        ("    d = {}", '    d[0] = f"evict_{H}"', "    _journal_append(d[0])", True),
+        ("    d = {}", '    d[True] = f"evict_{H}"', "    _journal_append(d[True])", True),
+        ("", '    o = {"g": f"evict_{H}"}', '    _journal_append(o["g"])', True),
+        ("", '    t = (f"evict_{H}",)', "    _journal_append(t[0])", True),
+        ("", '    t = [f"evict_{H}"]', "    _journal_append(t[0])", True),
+        ("", '    o = {"g": f"evict_{H}"}', '    _journal_append(o.get("g"))', True),
+        # compliant mirrors
+        ("", '    o = {"g": f"test_{H}"}', '    _journal_append(o["g"])', False),
+        ("", '    o = {"g": f"test_{H}"}', '    _journal_append(o.get("g"))', False),
+        # declared fail-open: a non-constant key
+        ("    d = {}", '    d[k] = f"evict_{H}"', '    _journal_append(d[k])', False),
+    )
+    for prefix, line, journal, must_red in element_cases:
+        lines = ([prefix] if prefix else []) + [line, journal]
+        lines = [ln.replace("{H}", "{" + hexed + "}") for ln in lines]
+        site.write_text(_raw_client_site(*lines), encoding="utf-8")
+        bad = _raw_detach_violations(root=tmp_path)
+        if must_red:
+            assert bad and "'evict_'" in bad[0], (
+                f"an unowned handle journaled as `{journal.strip()}` read clean: {bad}")
+        else:
+            assert not bad, (
+                f"a COMPLIANT/declared site `{journal.strip()}` was red: {bad}")
+
+    # `str.format` substitutes the ARGUMENT'S HEAD, so a value whose first
+    # component arrives as an f-string, a concatenation, a `*[…]` splice or a
+    # keyword field is reported — the empty prefix of the TEMPLATE alone used to
+    # hide it. An unreadable FIRST placeholder is still the declared fail-open.
+    format_cases = (
+        ('"{}".format(f"evict_{H}")', True),
+        ('"{0}".format(f"evict_{H}")', True),
+        ('"{}{}".format(*["evict_", {H}])', True),
+        ('"{a}{b}".format(a="evict_", b={H})', True),
+        ('"{}".format("evict_" + {H})', True),
+        # compliant mirrors (owned head, every form)
+        ('"{}".format(f"test_{H}")', False),
+        ('"{}".format("test_" + {H})', False),
+        # declared fail-open: the FIRST placeholder is unreadable
+        ('"{}".format(f"{{H}}")', False),
+    )
+    for journaled, must_red in format_cases:
+        expr = journaled.replace("{H}", "{" + hexed + "}")
+        site.write_text(_raw_client_site(
+            f"    _journal_append({expr})"), encoding="utf-8")
+        bad = _raw_detach_violations(root=tmp_path)
+        if must_red:
+            assert bad and "'evict" in bad[0].lower(), (
+                f"a handle journaled as `{journaled}` read clean: {bad}")
+        else:
+            assert not bad, (
+                f"a compliant/declared `{journaled}` was red: {bad}")
+
+    # `+=` is a binding form: `g = ""` then `g += f"evict_…"` is `evict_…`.
+    site.write_text(_raw_client_site(
+        '    g = ""',
+        '    g += f"evict_{os.urandom(4).hex()}"',
+        "    _journal_append(g)",
+    ), encoding="utf-8")
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "'evict_'" in bad[0], (
+        f"an augmented `+=` binding of an unowned handle read clean: {bad}")
 
     # A rebinding in a NESTED scope is not the binding live at the call: it
     # laundered the outer unowned handle (false PASS)…
