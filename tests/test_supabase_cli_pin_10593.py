@@ -124,8 +124,12 @@ def _setup_cli_step(workflow_text: str) -> dict:
 def _setup_cli_step_node(text: str) -> yaml.MappingNode:
     """The PARSED node for the `supabase/setup-cli` step — the one reader of *which step it is*.
 
-    `_setup_cli_step` (the comparison) and `_setup_cli_block` (the literal-line check) must resolve
-    the SAME step, or the guard can assert a pin read from a different place than CI installs from.
+    `_setup_cli_step` (the comparison) and `_literal_version_lines` (the literal-line check) must
+    resolve the SAME step, or the guard can assert a pin read from a different place than CI
+    installs from. Both reach it through this node, and neither has a second dialect for "which
+    step" to drift in. (`_setup_cli_block` slices the same span, but it is NOT on the guard path —
+    `_literal_version_lines` takes each line from the pin's own key node's mark, so editing the
+    block slicer cannot change a verdict. Its own docstring says so.)
     """
     doc = yaml.compose(text)
     found: list[yaml.MappingNode] = []
@@ -152,10 +156,20 @@ def _setup_cli_step_node(text: str) -> yaml.MappingNode:
     assert found, "no `supabase/setup-cli` step found — the migration door changed shape"
     assert len(found) == 1, f"expected exactly one setup-cli step, found {len(found)}"
     return found[0]
+
+
 def _setup_cli_block(workflow_text: str) -> list[str]:
     """The setup-cli step's own source lines, sliced from the PARSED node's marks.
 
-    Three scoping rules, each from a demonstrated defect:
+    ⛔ **NOT ON THE GUARD PATH — this is not the pin check, and editing it cannot change a verdict.**
+    The pin check is `_literal_version_lines`, which resolves each line from the PIN'S OWN KEY NODE
+    (`pin_key.start_mark.line`). Measured at #11134's head: this function's only caller in the whole
+    repo is one test's landing assertion (that a mutation landed in the setup-cli step's source and
+    not a neighbour's). It used to be described as owning the pin-scoping requirement, which made a
+    change here look like a landed change to the guard while every test stayed green — the exact
+    silent no-op the correction below removes.
+
+    Two scoping rules for the slice, each from a demonstrated defect:
     * The block comes from the composed node's `start_mark`/`end_mark`, not from a line pattern. A
       text scan is a SECOND reader of "which step is this" with its own dialect, and it disagreed:
       measured in review, `uses : supabase/setup-cli@v1` (a space before the colon — legal YAML, and
@@ -165,10 +179,11 @@ def _setup_cli_block(workflow_text: str) -> list[str]:
       here — and `_setup_cli_step_node` is the ONE locator, shared with the construct walk and
       with `_setup_cli_step`'s predicate, so there is no second answer to "which step" to drift.
     * `with:` may legally precede `uses:`, so nothing here assumes an order.
-    * The pin check must be scoped to THIS step. A file-wide search is satisfied by a decoy literal
-      — review demonstrated a green path through an `actions/setup-node` step's
-      `with: version: 2.122.1` while the setup-cli step itself carried none — so "a matching line
-      exists somewhere" is not the claim the guard needs to make.
+
+    The guard's own requirement — that the pin be scoped to THIS step, because a file-wide search is
+    satisfied by a decoy literal (review demonstrated a green path through an `actions/setup-node`
+    step's `with: version: 2.122.1` while the setup-cli step carried none) — belongs to
+    `_literal_version_lines`, not here. This slice answers only "where did a test's mutation land?".
     """
     node = _setup_cli_step_node(workflow_text)
     # ⛔ SLICE BY MARK INDEX, NOT BY LINE (#11134 review cycle 2, P2 — a false block). `end_mark` is
@@ -850,18 +865,20 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
     with pytest.raises(AssertionError, match="not a literal"):
         _requested_version(flow)
 
-    # (a2) ⛔ THE WHOLE STEP ON ONE LINE (#11134 review cycle 1, P3). Case (a) keeps `- uses:` on
-    # its own line and flow-izes only `with:`, so the step still spans several lines and the block
-    # slice is non-empty either way — it cannot test how a ONE-LINE step is sliced. THIS shape can:
-    # a one-line flow mapping starts AND ends on the same line, so a LINE slice is empty (or, with
-    # the old `end <= start` widening, empty-but-padded) and `_setup_cli_block` then asserts out with
-    # "resolved to no source lines" — a FALSE diagnosis that blames the reader for a step it
-    # resolved perfectly.
+    # (a2) ⛔ THE WHOLE STEP ON ONE LINE (#11134 review cycle 1, P3; corrected in cycle 8). A
+    # one-line flow mapping starts AND ends on the same line, so a reader that sliced the step by
+    # LINE would produce an empty (or, with an `end <= start` widening, empty-but-padded) slice and
+    # assert out with "resolved to no source lines" — a FALSE diagnosis that blames the reader for a
+    # step it resolved perfectly. `_literal_version_lines` cannot make that mistake: it takes the
+    # line from the pin's KEY NODE mark, so the read is byte-precise by construction.
     #
-    # Measured on this tree: the byte-precise slice refuses with `not a literal`; reverting
-    # `_setup_cli_block` to a LINE slice throws the widening away with it and refuses with `no source
-    # lines`. Asserting the REASON is what makes this case red on that reversion — case (a) cannot,
-    # because it passes either way.
+    # ⛔ The assertion below is on `_literal_version_lines`, NOT on `_setup_cli_block`: the block
+    # slicer is not on the guard path (its only caller is a landing assertion), so reverting IT
+    # changes nothing here. The reader whose reversion this case reds is `_literal_version_lines`:
+    # with the pin genuinely absent it must ANSWER `[]` — "the step was found and carries no literal
+    # `version:` line" — and only then may `_requested_version` refuse with `not a literal`. A
+    # slicing reader that cannot resolve the step raises instead, so the two outcomes are
+    # distinguishable, and that is what makes asserting the REASON load-bearing.
     one_line = workflow.replace(
         "      - uses: supabase/setup-cli@v1\n"
         "        with:\n"
@@ -875,6 +892,10 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
         "mutation (a2) did not apply — vacuous. The canonical step shape changed; update this "
         "mutation rather than deleting the case"
     )
+    assert _literal_version_lines(one_line) == [], (
+        "a one-line step carries no literal `version:` line, so the reader must ANSWER [] rather "
+        f"than fail to resolve the step — it returned {_literal_version_lines(one_line)!r}"
+    )
     with pytest.raises(AssertionError, match="not a literal"):
         _requested_version(one_line)
 
@@ -884,8 +905,10 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
     # line, which here is the PIN ITSELF, so the guard refused a legal workflow with "not a literal
     # `version:` line … write `version:` on its own line" — a remedy the file already satisfied —
     # while ONE BYTE decided it: appending `\n` moved `end_mark` to `(9, 0)` and the same file
-    # passed. GitHub parses both identically, so this is a FALSE BLOCK, and the byte-precise slice
-    # is what makes it go away. Reverting to a LINE slice reds this case.
+    # passed. GitHub parses both identically, so this is a FALSE BLOCK, and the byte-precise
+    # KEY-NODE read is what makes it go away. Reverting `_literal_version_lines` to a LINE slice of
+    # the step reds this case — and the reversion is asserted on THAT reader, on the line below,
+    # rather than on the block slicer it never calls.
     eof = (
         "name: t\non: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n"
         "      - uses: supabase/setup-cli@v1\n"
@@ -893,6 +916,10 @@ def test_a_duplicate_or_decoy_version_line_is_refused() -> None:
         f"          version: {pin}"
     )
     assert not eof.endswith("\n"), "this case must end at the pin with NO trailing newline"
+    assert _literal_version_lines(eof) == [pin], (
+        "the pin is the file's last line and the file has no trailing newline — a LINE slice of the "
+        f"step drops exactly that line, so this must read {pin!r}: {_literal_version_lines(eof)!r}"
+    )
     assert _requested_version(eof) == pin, (
         "a workflow whose LAST line is the pin, with no trailing newline, was refused — the block "
         "slice dropped the final line, so the guard blamed a step it had resolved correctly"
@@ -1161,8 +1188,9 @@ def test_an_alias_that_does_not_supply_the_pin_does_not_refuse() -> None:
     #     `- ` line — so an inclusive bound attributed the NEIGHBOUR's alias to this step and refused
     #     a legal workflow, naming a line this step does not own. Measured: a following step written
     #     `- with: *shared` produced "an alias (`*shared`) … at line 243" and `_requested_version`
-    #     raised on a step carrying no construct at all. `_setup_cli_block` already slices this bound
-    #     exclusively; the two readers must agree about where the step STOPS.
+    #     raised on a step carrying no construct at all. The step's own node span IS the bound, and
+    #     `_alias_supplies_the_pin` compares against it exclusively; every reader must agree about
+    #     where the step STOPS.
     after = workflow.replace(
         "      - name: Link project",
         "      - with: *shared\n        name: Link project",
