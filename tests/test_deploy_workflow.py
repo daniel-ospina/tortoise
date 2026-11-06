@@ -2495,10 +2495,17 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "never reaches Postgres"
     )
     # The BEFORE-and-after baseline: "growth" has no referent without it.
-    assert re.search(r"read both counters BEFORE the\s+capture and again after", flat), (
+    # ⛔ The noun is pinned as *every record counter*, not "both counters": the
+    # presence list below requires FOUR counters (plus two row reads), so a
+    # "both" baseline told the operator to take two of them — and the positive
+    # witness this bar exists to add (#9548's `record_writes_applied`) was one it
+    # omitted, leaving the delta it demands uncomputable from the reading it
+    # prescribed (#9548 review P2).
+    assert re.search(r"read every record counter BEFORE\s+the capture and again after", flat), (
         "the bar says 'growth' but never tells the operator to take a reading "
         "BEFORE the capture — an absolute count left from earlier in the "
-        "process's life then reads as this capture's growth"
+        "process's life then reads as this capture's growth — or it names a "
+        "subset of the counters the presence list then requires"
     )
     assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", flat), (
         "the bar has no arm for an empty reading — an operator landing there is "

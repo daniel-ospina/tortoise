@@ -41,6 +41,7 @@ import json
 import os
 import socket
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -51,6 +52,11 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 import tortoise.hosted_api as hosted_api
 from tortoise import monitoring, record_writer
 from tortoise.record_writer import RecordWriteError, dsn_fingerprint
+
+#: The runbook section this module's (a)-(f),(i) map is documented in — read by the
+#: name-drift pin below, which is the only place the /health key names are checked
+#: against the prose that claims them.
+_RUNBOOK = Path(__file__).resolve().parent.parent / "docs" / "infra-runbook.md"
 
 #: A realistic pooler DSN: the shape `docs/infra-runbook.md` §"Arming the Postgres
 #: record" mandates (R6's app role, URL-encoded password). Its PASSWORD is the one
@@ -660,6 +666,14 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
     `tests/test_9078_record_written_by_production_path.py`; this is its other
     half. Asserted against the real `metrics()` dict, key-set form, so the test
     cannot pass vacuously on a substring of some other key.
+
+    ⛔ It also pins the TWO SURFACES THAT MAKE THE CLAIM — `_record_health`'s own
+    docstring ("under the SAME names ``metrics()`` publishes") and the runbook's
+    field row — because neither is reachable from a literal assertion: a COHERENT
+    rename (block + `metrics()` + the literals here) left both prose surfaces
+    false with every test in the repo green (#9548 review P3). `config/
+    ci-surfaces.yml` states that this suite reds such a rename; that sentence is
+    only true because of the two assertions below.
     """
     published = monitoring.metrics()
 
@@ -667,6 +681,21 @@ def test_the_positive_pair_is_named_by_metrics_too(monkeypatch):
         "the /health block documents these as `metrics()`'s own names, and "
         f"metrics() publishes {sorted(published)}"
     )
+    # …and the same two names must appear where the claim is MADE, not only in
+    # the code that makes it true. Scoped to the whole runbook file: the field
+    # row and the §"Arming the Postgres record" prose are both inside it, and a
+    # tighter section slice would pin a heading's wording rather than the names.
+    contract = hosted_api._record_health.__doc__ or ""
+    runbook = _RUNBOOK.read_text(encoding="utf-8")
+    for name in ("record_writes_applied", "record_last_write_at"):
+        assert name in contract, (
+            f"`_record_health`'s docstring no longer names {name!r} — the field is "
+            "published but undocumented, which is the paper-only claim inverted"
+        )
+        assert name in runbook, (
+            f"docs/infra-runbook.md no longer names {name!r} — the operator has no "
+            "reading to take, however correct the payload is"
+        )
 
 
 def test_an_unread_applied_counter_publishes_none_never_a_zero(monkeypatch):
