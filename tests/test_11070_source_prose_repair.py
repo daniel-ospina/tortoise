@@ -1386,31 +1386,58 @@ def test_the_embedded_DEFAULT_graph_is_tortoise_not_the_empty_name(
     assert json.loads(capsys.readouterr().out)["graph"] == "tortoise"
 
 
-def test_the_runbook_commands_that_touch_the_cache_all_name_the_graph():
-    """One operator instruction must not contradict the next.
+def test_every_uv_run_runbook_command_names_the_cache_graph():
+    """⛔ STRUCTURE, not prose: scanning free text for commands is a trap.
 
-    Step 1 (`--dry-run`) omitted `--graph` while the docstring ten lines below
-    warns that omitting it counts a different graph; the same defect appeared in
-    the replay hook's FAILED-path message. Both are the command an operator
-    copies, so both are pinned here against the source that emits them.
+    Three attempts failed in a row, each measured: matching the name and the flag
+    on ONE source line found ZERO commands (every command wraps with `\\`); a
+    fixed-width window bled into the next command's flags; and a segment between
+    occurrences matched the flag inside step 2's PROSE ("⛔ PASS --graph"), and
+    `--graph-id` contains `--graph`. The round-4/5/7 defect — a census that reads
+    the wrong graph, so `--assert-clean` exits 0 over an unrepaired graph — passed
+    all three (#11152 review round 10, MATERIAL).
+
+    So this asserts on structure only: a line that STARTS a `uv run ... 11070_`
+    command must carry the standalone flag (joined across `\\` continuations),
+    and the two commands the MODULE emits must carry it too.
     """
+    import re
     from pathlib import Path
 
     import tortoise.session_source_prose_migration as mod
 
-    cli = Path(_CLI_PATH).read_text()
-    module = Path(mod.__file__).read_text()
+    standalone = re.compile(r"--graph(?![\w-])")
 
-    for label, text in (("the CLI runbook", cli), ("the module", module)):
-        for line in text.splitlines():
-            if "11070_repair_session_source_prose.py" not in line:
+    def _commands(text: str) -> list[str]:
+        out, buf = [], ""
+        for raw in text.splitlines():
+            line = raw.rstrip()
+            if buf:
+                buf = f"{buf} {line.strip()}"
+            elif line.strip().startswith("uv run python graph-scripts/11070_"):
+                buf = line.strip()
+            if buf and buf.endswith("\\"):
+                buf = buf[:-1].rstrip()
                 continue
-            if "--dry-run" in line or "--repair" in line or "re-run" in line:
-                following = text[text.index(line):text.index(line) + 400]
-                assert "--graph" in following or line.rstrip().endswith(
-                    "11070_repair_session_source_prose.py"), (
-                    f"{label} hands the operator a cache-touching command that "
-                    f"does not name the graph: {line.strip()}")
+            if buf:
+                out.append(buf)
+                buf = ""
+        return out
+
+    cli_commands = _commands(Path(_CLI_PATH).read_text())
+    assert len(cli_commands) >= 3, (
+        f"only {len(cli_commands)} runbook command(s) parsed — the parse is not "
+        f"reaching them, which is how the earlier versions passed while checking "
+        f"nothing: {cli_commands!r}")
+    for command in cli_commands:
+        assert standalone.search(command), (
+            f"a runbook command does not name the cache graph: {command}")
+
+    # The two commands the MODULE emits (the replay hook's WARNING and the
+    # FAILED-path message) are what an operator copies after a rebuild.
+    emitted = Path(mod.__file__).read_text()
+    assert emitted.count("--graph <") >= 2, (
+        "an instruction the module emits no longer names the cache graph")
 
 
 def test_the_flag_still_USES_the_record_when_a_scope_is_typed(monkeypatch,

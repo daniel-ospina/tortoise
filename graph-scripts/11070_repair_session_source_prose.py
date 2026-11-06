@@ -397,12 +397,27 @@ def main() -> int:
         # these, so the operator must see the count that the default refused and
         # the flag that would take it — a report that hides this reads as a
         # clean run that repaired less than it should have.
-        print(f"⚠️ {len(report['left_alone'])} candidate(s) were NOT written: the "
-              f"record could not supply a replacement, and clearing is "
-              f"irreversible (a second run cannot find the node to re-derive "
-              f"it). Re-run with --record-dsn (and --org-id/--graph-id) to "
-              f"re-derive, or with --clear-without-record to take the "
-              f"clear-only arm deliberately.", file=sys.stderr)
+        # ⛔ BRANCH ON WHY. `left_alone` also holds nodes nobody ASKED the record
+        # about (`no_reader`), so the causal clause is only true when a reader was
+        # actually supplied; on the documented step-1 census it told the operator
+        # "the record could not supply a replacement" for a record that was never
+        # opened — the conflation the `no_reader` bucket exists to end (#11152
+        # review round 10).
+        if report.get("no_reader") and len(report["no_reader"]) == len(
+                report["left_alone"]):
+            print(f"⚠️ {len(report['left_alone'])} candidate(s) were NOT written: "
+                  f"no record was consulted, so no lexicon could be re-derived "
+                  f"(this is a CENSUS). Clearing is irreversible — a second run "
+                  f"cannot find the node to re-derive it. Pass --record-dsn with "
+                  f"--org-id/--graph-id to re-derive, or --clear-without-record "
+                  f"to take the clear-only arm deliberately.", file=sys.stderr)
+        else:
+            print(f"⚠️ {len(report['left_alone'])} candidate(s) were NOT written: "
+                  f"the record could not supply a replacement, and clearing is "
+                  f"irreversible (a second run cannot find the node to re-derive "
+                  f"it). Re-run with --record-dsn (and --org-id/--graph-id) to "
+                  f"re-derive, or with --clear-without-record to take the "
+                  f"clear-only arm deliberately.", file=sys.stderr)
     for node in report.get("candidate_detail") or []:
         print(f"          {node['url']}: summary={node['summary_bytes']}B "
               f"_searchText={node['search_text_bytes']}B session={node['session_id']}")

@@ -319,9 +319,12 @@ def _server_timeout_cap(g) -> int | None:
     zero milliseconds", so it is folded into ``None`` here.
 
     ⛔ ASKING BEATS GUESSING, AND THE VERB IS ON THE **CLIENT**, NOT THE GRAPH.
-    A ``falkordb.Graph`` has NO ``config_get`` and NO ``connection`` attribute
-    (measured: ``hasattr(Graph, 'config_get') is False``,
-    ``hasattr(Graph, 'client') is True``) — the projection's ``_GuardedGraph``
+    A ``falkordb.Graph`` **instance** has NO ``config_get`` and NO ``connection``
+    attribute (measured: ``hasattr(g, 'config_get') is False``,
+    ``hasattr(g, 'connection') is False``, ``hasattr(g, 'client') is True`` —
+    ``client`` is an INSTANCE attribute set in ``Graph.__init__``, not a class
+    attribute, so ``hasattr(Graph, 'client')`` is False and quoting that as the
+    measurement is itself misleading); the projection's ``_GuardedGraph``
     forwards to the same thing. Probing the graph handle itself therefore found
     nothing and the clamp silently never ran: the 60 000 ms request went out
     unclamped and every read took the ResponseError path below. That is how a
