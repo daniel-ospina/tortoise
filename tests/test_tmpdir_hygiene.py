@@ -438,6 +438,49 @@ def test_sweep_reclaims_a_dead_marked_root_and_keeps_a_live_one():
         shutil.rmtree(live, ignore_errors=True)
 
 
+def test_sweep_names_the_root_it_reclaimed(tmp_path, monkeypatch):
+    """The sweep's RETURN value is pinned, on a base no peer process can walk.
+
+    #10610 review (P2): the test above pins the OUTCOME only, and that relaxation
+    is right — a peer shard's install-time sweep shares `ROOT_BASE` and can
+    reclaim the dead root first (measured 2026-11-05). What it must not do is
+    leave `reclaimed` in a failure message alone: `sweep_stale_session_roots()`
+    is declared `-> list[str]` ("Reclaim roots left by a SIGKILLed suite"), the
+    test above was the ONLY assertion on that return anywhere in the tree (its
+    other caller, `tests/conftest.py`, ignores it), and the outcome check cannot
+    see it — so a refactor that unlinks correctly and returns `[]`, or loses its
+    per-entry attribution, would have been green everywhere.
+
+    Deterministic by construction instead of by luck: the base is this test's own
+    `tmp_path`, which no peer process enumerates, so the sweep below is the only
+    one that can see these roots and its return value is the whole question.
+    """
+    import tests._tmpdir_hygiene as hygiene
+
+    private_base = tmp_path / "root-base"
+    private_base.mkdir()
+    monkeypatch.setattr(hygiene, "ROOT_BASE", str(private_base))
+
+    dead = private_base / "tt_deadnamed"
+    live = private_base / "tt_livenamed"
+    dead.mkdir()
+    live.mkdir()
+    (dead / ".session-pid").write_text("pid=99999999\n")  # > pid_max everywhere
+    (live / ".session-pid").write_text(f"pid={os.getpid()}\n")
+
+    reclaimed = sweep_stale_session_roots()
+
+    # `realpath` on BOTH sides: this base is a real directory on Linux and a
+    # /private/-resolved one on macOS, and the pin is about WHICH root was
+    # named, never about the spelling of the prefix.
+    assert [os.path.realpath(p) for p in reclaimed] == [
+        os.path.realpath(str(dead))], (
+        "the sweep must NAME the root it reclaimed, and only that one: "
+        f"returned {reclaimed!r} for a dead {dead!r} beside a live {live!r}")
+    assert not dead.exists(), "a named root must actually be gone"
+    assert live.exists(), "a live suite's root must not be reclaimed"
+
+
 # ── #1005 (epic #1647 E2E-7): the RUN-scoped root registry ─────────────────
 # The CI orphan gate may only call a residue a leak if it can attribute the
 # server to THIS run, and the attribution key is the run's session temp roots.
