@@ -1408,13 +1408,29 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # is still open — 0 >= 2 was simply the wrong pair of numbers. `_fence_line_column` is the
         # existing conversion between them (it consumes at most the container's own markers), which
         # is why this is a third reader of one definition rather than a fourth formula.
+        # ⛔ THE TWO TERMS BELOW MEASURE IN DIFFERENT SPACES, SO THEY CANNOT SHARE ONE NUMBER
+        # (round 41 review, P2 — class A, fail-open, arm 2 of `issue_process_lint` included).
+        # `_fence_line_column` returns BOTH spellings, and they differ by the marker width the
+        # container's own prefix consumed — so for any `container.depth >= 1` the previous single
+        # `[2]` read (the RAW content column) asked §4.4's distance question against
+        # `container.rest_col`, which is expressed in the space `rest` lives in (`_ListItem`).
+        # The comparison then fired `len(prefix)` columns EARLY and suppressed the rule that blanks a
+        # marker line whose own content sits 4+ columns past the item's content column — the
+        # fail-open direction, where a quoted `Closes #N` was credited, a quoted box cleared a
+        # criteria-less `## Satisfies`, and a quoted `IN FLIGHT:` read as live. Measured on
+        # `> - item` + `>      -     Closes #100` (rest indent 5, item content column 2 = exactly the
+        # §4.4 distance, renderer `code_block`): `[100]` before, `[]` after.
+        # `_lazy_indent` gets the RESIDUAL indent (index 1, the same coordinate `rest_col` holds and
+        # the same one the fence branch compares against `close_base`), while `_lazy_marker` keeps
+        # the RAW column (index 2), which is what round 39's `- > q` + `  > 2.     Closes #100` pin
+        # needs (`0 >= 2` was the wrong pair of numbers there, and it stays fixed).
         if container is not None:
-            _line_col = _fence_line_column(line, container.depth)[2]
+            _, _line_residual, _line_col = _fence_line_column(line, container.depth)
         else:
-            _line_col = rest_indent
+            _line_residual = _line_col = rest_indent
         _indent_base = container.rest_col if container is not None else 0
         _lazy_indent = (prev_prose
-                        and _line_col > _indent_base + _MAX_FENCE_INDENT
+                        and _line_residual > _indent_base + _MAX_FENCE_INDENT
                         and container is prev_container)
         _lazy_marker = (prev_prose
                         and _ordered_marker_at_least_two(rest)

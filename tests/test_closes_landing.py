@@ -1973,8 +1973,13 @@ def test_a_marker_that_opens_NO_item_has_no_content_column_to_inspect():
     assert token_type(body) == "code_block", body
     assert cl.parse_closing_refs(body) == [], body
     # …and with no paragraph above, the ordered marker opens its item too.
+    # ⛔ ONE ANSWER, NOT "EITHER" (round 41 review, P3). `in ([], [100])` accepted both possible
+    # answers, so it could not detect a regression in the very control it documents: the ordered
+    # marker DOES open its item here (no paragraph to interrupt), so `3.     Closes #100` is CODE.
     body = "2. # H\n  3.     Closes #100\n"
-    assert cl.parse_closing_refs(body) in ([], [100]), body
+    assert token_type(body) == "code_block", body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
 
 
 def test_the_HTML_block_rule_is_the_SPEC_s_two_rules_not_one():
@@ -3470,6 +3475,53 @@ def test_a_whitespace_only_line_does_not_carry_the_previous_line_s_per_line_stat
     # …and the answer is `main`'s, not a crash-shaped placeholder: the indented blank tail is
     # dropped and the paragraph before it survives.
     assert cl.strip_code("- [ ] b\n        \n\n", strict=True) == "- [ ] b\n\n"
+
+
+def test_the_INDENT_term_is_measured_in_the_ITEMS_own_space():
+    """Round 41 review, P2 — class A (fail-open): §4.4's distance is measured in ONE space.
+
+    `_ListItem.rest_col` is the item's content column *in the space `rest` lives in*, while
+    `_fence_line_column` returns BOTH that residual indent (index 1) and the RAW content column
+    (index 2). `_lazy_indent` read the RAW one and compared it against `rest_col`, so for any
+    container opened INSIDE a blockquote it asked the §4.4 question `len(prefix)` columns too early
+    and suppressed `own_code` — the rule that blanks a marker line whose own content is code:
+
+        `> - item` + `>      -     Closes #100`
+            the item's content column is 2 and the line's residual indent is 5 = 2 + 3 + 1, so
+            §4.4 puts `Closes #100` in `<pre><code>` (renderer: `code_block`), but the RAW column 7
+            cleared `2 + 3` and the line was emitted as PROSE — `[100]`, a `lands` GitHub never
+            fires, and the same blanking arm 2 relies on (`own_code` is mode-independent).
+
+    It is a DISTANCE, not "blank anything deep", so the two controls below stay: 5 columns past the
+    same item is a lazy PARAGRAPH continuation (§4.4 cannot interrupt a paragraph), and the
+    unquoted sibling of the same shape is the round-37 pin.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    # The defect: exactly four columns past a QUOTED item's content column -> §4.4 code.
+    body = "> - item\n>      -     Closes #100\n"
+    assert token_type(body) == "code_block", body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    # Control 1: a nested marker at the item's own content column — code, and it always was.
+    body = "> - item\n>    -     Closes #100\n"
+    assert token_type(body) == "code_block", body
+    assert cl.parse_closing_refs(body) == [], body
+    # Control 2: five columns past is a LAZY PARAGRAPH continuation, not code — the fix must not
+    # turn the false positive into a silent miss.
+    body = "> - item\n>       -     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
+    # Control 3: the same shape with no blockquote is the round-37 pin and stays prose too.
+    body = "- item\n      -     Closes #100\n"
+    assert token_type(body) == "inline", body
+    assert cl.parse_closing_refs(body) == [100], body
 
 
 def test_a_paragraph_one_container_deeper_than_its_line_is_STILL_another_container():
