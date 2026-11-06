@@ -37,9 +37,11 @@ WHAT THIS PINS — and the polarity that makes it worth having
    (§2 R10). A log line containing "S5" is therefore NOT evidence that the v4
    CONNECT step ran; only a named call site is. Pinned so a log-string "proof"
    cannot be substituted for a call site.
-4. **The acceptance probe cannot silently take another door** — the lane and the
-   two prompt-rendering switches are pinned and READ BACK inside
-   ``measured_arm``, and a leak refuses the run (``capstone_measure``).
+4. **The acceptance probe cannot silently take another door** — the lane, the
+   commit-dispatch switch (`TORTOISE_EXTRACTOR`, defensive: it is NOT on the
+   capture path) and the render diagnostic (`TORTOISE_LABEL_ORDER`) are pinned
+   and READ BACK inside ``measured_arm``, and a leak refuses the run
+   (``capstone_measure``).
 5. **The negative control, measured and DIFFERENT** — the same corpus session
    through both lanes. The measurement is recorded verbatim in the assertion
    message because its *result* is the finding: under the shipped offline mock
@@ -180,22 +182,44 @@ def test_the_lane_selector_defaults_to_v2_and_m2_is_the_opt_in():
         f"declare a lane the code does not run (#10983)")
 
 
+def _hosted_capture_targets() -> list[str]:
+    """The sdk extractor each hosted capture call actually hands the worker.
+
+    Resolved from the CALL SITE, never from a substring: ``sdk._extract_session_v2``
+    also appears in a COMMENT in that module, so "the string is in the file"
+    stayed true with the v2 arm rewired to ``_extract_session_llm`` (#10983
+    review, cycle 3).
+    """
+    targets = []
+    for node in ast.walk(_tree(HOSTED)):
+        if isinstance(node, ast.Call) and \
+                ast.unparse(node.func).endswith("_run_capture_bounded") and \
+                len(node.args) >= 2:
+            targets.append(ast.unparse(node.args[1]))
+    return targets
+
+
 def test_the_v2_arm_calls_the_sdk_extractor_entry():
     """The chain is a chain: hosted v2 arm → sdk method → extractor entry.
 
-    ⛔ Both assertions below read a CALL SHAPE (from a docstring-stripped body
-    where one is needed). The first revision grepped for the bare NAMES:
-    `"sdk._extract_session_v2"` was satisfied by a COMMENT in `hosted_api.py`,
-    and `"extract_session_v2"` by `_extract_session_v2`'s docstring plus its own
-    import line — so deleting the real call left this test GREEN (#10983
-    review).
+    ⛔ Every assertion below reads a CALL SHAPE, never a bare name. The first
+    revision grepped for names: `"sdk._extract_session_v2"` was satisfied by a
+    COMMENT in `hosted_api.py`, and `"extract_session_v2"` by
+    `_extract_session_v2`'s docstring plus its own import line — so deleting the
+    real call left this test GREEN (#10983 review).
     """
-    hosted = _source(HOSTED)
-    assert re.search(r"slot, sdk\._extract_session_v2,", hosted), (
-        "the hosted capture no longer PASSES sdk._extract_session_v2 as the "
-        "bounded call — the v2 arm of _capture_lane would then name a lane "
-        "nothing runs (#10983). A bare name also appears in a nearby comment, "
-        "so this asserts the call form")
+    # BOTH arms, resolved from the AST: the target each hosted capture hands the
+    # worker. Requiring both is what makes a SWAPPED arm red, which a single
+    # call-shape match on the v2 arm cannot see.
+    targets = _hosted_capture_targets()
+    assert "sdk._extract_session_v2" in targets, (
+        f"the hosted capture no longer CALLS sdk._extract_session_v2 — it hands "
+        f"{targets} to the worker, so the v2 arm of _capture_lane would name a "
+        f"lane nothing runs (#10983)")
+    assert "sdk._extract_session_llm" in targets, (
+        f"the hosted capture no longer CALLS sdk._extract_session_llm for the "
+        f"m2 arm — it hands {targets} to the worker, so 'm2' would route to a "
+        f"lane nobody dispatches to (#10983)")
     sdk_body = _body(SDK, "_extract_session_v2")
     assert re.search(r"out = extract_session_v2\(", sdk_body), (
         f"sdk._extract_session_v2 at {_cite(SDK, '_extract_session_v2')} no "
@@ -204,6 +228,29 @@ def test_the_v2_arm_calls_the_sdk_extractor_entry():
     assert "extract_session_v2" in _funcs(EXTRACTOR), (
         f"extractor_v2.extract_session_v2 is GONE from "
         f"{EXTRACTOR.relative_to(REPO)} — the door's last hop does not exist")
+
+
+def _llm_call_branch() -> ast.If | None:
+    """The ``if`` whose BODY dispatches ``sdk._extract_session_llm``.
+
+    The branch, not the module: ``TORTOISE_SESSION_EXTRACTOR`` is also compared
+    with ``!=`` elsewhere in this module for unrelated guards, so "no ``!=``
+    anywhere" would be a false alarm, and "the env name appears" is satisfied by
+    the capture LABEL. This pins the one branch that chooses the other extractor.
+    """
+    def _is_llm_capture(call: ast.Call) -> bool:
+        return (ast.unparse(call.func).endswith("_run_capture_bounded")
+                and len(call.args) >= 2
+                and ast.unparse(call.args[1]) == "sdk._extract_session_llm")
+
+    for node in ast.walk(_tree(HOSTED)):
+        if not isinstance(node, ast.If):
+            continue
+        for stmt in node.body:
+            if any(isinstance(c, ast.Call) and _is_llm_capture(c)
+                   for c in ast.walk(stmt)):
+                return node
+    return None
 
 
 def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
@@ -224,6 +271,40 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
         "'os.environ.get(\"TORTOISE_SESSION_EXTRACTOR\") == \"m2\"' — the "
         "hosted mirror and the SDK dispatch have started to disagree about "
         "which lane is which (#10983)")
+    # ⛔ The BRANCH that dispatches the other extractor, structurally. The
+    # previous revision read ``_capture_lane`` here — the LABEL the hosted path
+    # stamps on the capture, NOT the branch that chooses the extractor. Inverting
+    # the real branch left this test green (#10983 review, cycle 3).
+    branch = _llm_call_branch()
+    assert branch is not None, (
+        "the hosted endpoint no longer dispatches sdk._extract_session_llm from "
+        "a guarded branch — the two lanes are no longer distinguishable by "
+        "their call sites (#10983)")
+    test_src = ast.unparse(branch.test)
+    assert "os.environ.get('TORTOISE_SESSION_EXTRACTOR')" in test_src or \
+        'os.environ.get("TORTOISE_SESSION_EXTRACTOR")' in test_src, (
+        f"the m2 branch is no longer guarded by the extraction lane variable "
+        f"(#10983): {test_src!r}")
+    assert any(isinstance(op, ast.Eq) for op in branch.test.ops), (
+        f"the m2 branch now tests {test_src!r} — an inverted comparison flips "
+        f"every hosted capture to the other extractor while the log still "
+        f"declares the v2 lane (#10983)")
+    assert any(isinstance(c, ast.Constant) and c.value == "m2"
+               for c in branch.test.comparators), (
+        f"the m2 branch no longer compares against the literal 'm2' (#10983): "
+        f"{test_src!r}")
+
+    # …and the SDK's dispatch is the same comparison, so one door.
+    sdk_dispatch = [
+        ast.unparse(n.test) for n in ast.walk(_tree(SDK))
+        if isinstance(n, ast.If)
+        and "os.environ.get('TORTOISE_SESSION_EXTRACTOR')"
+        in ast.unparse(n.test).replace('"', "'")
+        and any(isinstance(op, ast.Eq) for op in n.test.ops)]
+    assert sdk_dispatch, (
+        "the SDK no longer has an `== 'm2'` dispatch on "
+        "TORTOISE_SESSION_EXTRACTOR — the hosted mirror and the SDK have "
+        "started to disagree about which lane is which (#10983)")
     hosted_body = _resolve(HOSTED, "_capture_lane")
     assert re.search(r'os\.environ\.get\("TORTOISE_SESSION_EXTRACTOR"\)', hosted_body)
 
@@ -507,6 +588,46 @@ def test_an_unmeasured_door_never_claims_a_read_back():
     assert "read back from os.environ" in probe.door_header(all_unset)
 
 
+def test_the_probe_refuses_a_PINNED_ON_switch_that_reads_back_wrong(monkeypatch):
+    """The pinned-ON half of the same rule: a pin that cannot fail is a claim.
+
+    ⛔ Found in the #10983 review (cycle 3): the cycle-2 fix covered only the
+    pinned-OFF members, so deleting the whole ``DOOR_PINNED_ON`` refusal block
+    left 15 tests green while the registration states that every value is
+    re-read and a mismatch REFUSES the run.
+    """
+    probe = _load_probe()
+    assert probe.DOOR_PINNED_ON, "no pinned-ON switch is declared at all"
+
+    class _Sticky(dict):
+        """Accepts ONE assignment and ignores it — that pin does not take.
+
+        Only the target key is swallowed: the measured arm's own writes must
+        land, or the earlier ``ARM_ON`` refusal fires first and this test would
+        pass for the wrong reason.
+        """
+
+        stuck: str = ""
+
+        def __setitem__(self, key, value):
+            if key == self.stuck:
+                return
+            super().__setitem__(key, value)
+
+    for key, expected in probe.DOOR_PINNED_ON:
+        env = _Sticky(os.environ)
+        env.stuck = key
+        env[key] = "0"          # the value it will READ BACK, not the pin
+        monkeypatch.setattr(probe, "os", type(
+            "os", (), {"environ": env})())
+        with pytest.raises(SystemExit) as exc, probe.measured_arm():
+            pass
+        assert "REFUSED" in str(exc.value) and key in str(exc.value), (
+            f"{key} did not read back as pinned {expected!r} and the run was "
+            f"accepted: it would declare an arm it did not run (got "
+            f"{exc.value})")
+
+
 def test_the_probe_records_the_door_in_the_log_and_the_machine_record():
     """Target 1 & 3: the seam set is recorded IN THE RUN, not inferred later."""
     probe = _load_probe()
@@ -560,6 +681,32 @@ def test_the_PUBLISHED_ledgers_are_the_codes_not_a_second_transcription():
         "preregistration.json door.seams is not the code's ledger — the "
         f"registration states it as the record:\n  published: "
         f"{published_json}\n  code:      {expect}")
+
+    # …and the DOCUMENT is a THIRD copy, read by humans. It was unpinned until
+    # the #10983 review (cycle 3): setting its VALUE_GATE row back to off left
+    # the suite green, re-publishing in §1.6.2 exactly the false ledger this PR
+    # corrects — while §1.6.2 claimed "the pin suite resolves every row against
+    # the modules so it cannot rot quietly".
+    published_md = _md_seam_table()
+    md_view = {env: published_md.get(env) for env in expect}
+    assert md_view == expect, (
+        f"PRE-REGISTRATION.md §1.6.2 is not the code's ledger — that table is "
+        f"what a reader takes as the record:\n  document: {md_view}\n  "
+        f"code:     {expect}")
+
+
+def _md_seam_table() -> dict[str, str]:
+    """§1.6.2's six rows, parsed out of the registration document itself."""
+    text = REGISTRATION.with_name("PRE-REGISTRATION.md").read_text(encoding="utf-8")
+    rows: dict[str, str] = {}
+    for line in text.splitlines():
+        match = re.match(
+            r"\|\s*`(TORTOISE_[A-Z0-9_]+)`\s*\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|", line)
+        if match:
+            env, _resolver, default = match.groups()
+            token = default.replace("*", "").replace("⚠️", "").strip().lower()
+            rows[env] = "on" if token.startswith("on") else "off"
+    return rows
 
 
 def test_the_registration_records_the_door_and_the_corpus_attribution():
@@ -707,10 +854,20 @@ def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE():
         "door"]["negative_control"]["measured"]
     for arm, census in (("v2 (the door)", door), ("m2 (the other lane)", other)):
         cells = " ".join(f"{k}={v}" for k, v in census["counts"].items())
-        assert cells in published, (
-            f"door.negative_control does not publish the {arm} census this run "
-            f"measured ({cells!r}) — the record and the control have drifted "
-            f"apart (#10983): {published!r}")
+        # Bind the CENSUS to the SEGMENT its label introduces. A bare
+        # `cells in published` is satisfied by either arm's numbers (they are
+        # both in one string), so swapping the two halves — inverting the
+        # control's own claim — stayed green even after the label was added to
+        # the match (#10983 review, cycles 3 and 4).
+        segment = re.search(re.escape(arm) + r": ([^;]+)", published)
+        assert segment, (
+            f"door.negative_control publishes no {arm!r} segment — the record "
+            f"no longer attributes its numbers to an arm (#10983): {published!r}")
+        assert segment.group(1).strip().startswith(cells), (
+            f"door.negative_control's {arm!r} segment reads "
+            f"{segment.group(1).strip()!r}, not the {cells!r} this run "
+            f"measured — the record and the control have drifted apart "
+            f"(#10983): {published!r}")
     assert door["counts"]["Object"] >= 1, (
         "the door wrote no Objects at all, so the control compares two empty "
         f"graphs and proves nothing: {door}")
