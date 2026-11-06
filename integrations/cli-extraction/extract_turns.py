@@ -955,11 +955,19 @@ warnings_seen = []
 #     `folded_onto_other_sources` is named for.
 #   * ARRAY prop — `extractedFrom` came back a LIST: the survivor was born from a
 #     ref SEQUENCE (a caller passing a list — ingest bundles do) or holds a
-#     prop-only ref no edge addresses. The point EXISTS already, no
-#     equality-matched read can see it, and the all-fold branch below would
-#     otherwise refuse the batch as "SDK drift" (the #10010 review P2 false
-#     failure: sticky, and it names the wrong component). Counted here, so
-#     `written` and `new`/`folded` still describe the same batch.
+#     prop-only ref no edge addresses. The EQUALITY filter cannot match an array
+#     property, which is why this arm exists — but post-#10063 the population
+#     read does NOT need it to: `query(extractedFrom=…)` also matches the
+#     authoritative `:Source` edge (#3263), so a sequence-born survivor IS
+#     visible and `after` > 0. What the arm buys now is the COUNT: a fold is read
+#     off the write's OWN result shape, so `new` never double-reports one
+#     (`folded_onto_other_sources` is the single place it is counted). It also
+#     keeps the all-fold branch from being reached for the wrong reason —
+#     without it a sequence-born fold read as a MINT and the batch was refused
+#     as "SDK drift" (the #10010 review P2 false failure: sticky, and it names
+#     the wrong component). The ONE sub-shape still invisible to the read door is
+#     the prop-only ref no `:Source` edge addresses; it is a fold here for the
+#     same reason, and for it alone `after` can be 0 with folds recorded.
 # A point this run MINTED carries the SCALAR this writer passed (line above) and
 # `query()` matches it, so a mint can never be mistaken for a fold here.
 # No message template involved.
@@ -1074,8 +1082,19 @@ try:
         #     #7704), and since #10063 the population read SEES it — so `after` is
         #     now > 0 here. Nothing is NEW, so there is nothing to tier or
         #     propagate: the folds are counted above and the run exits 0.
-        #   * DRIFT would land here only with `minted` empty AND nothing
-        #     readable — that is what the guard above the branch refuses.
+        #   * DRIFT is NOT refused here, and the comment must not claim it is
+        #     (#11038 review P3). The guard above the branch is
+        #     `if minted and after == 0:` — it can only fire when `minted` is
+        #     NON-empty, so the shape named above (`minted` empty AND nothing
+        #     readable) falls straight through to the exit below. That residual
+        #     is stated rather than papered over: a batch that reports only folds
+        #     and leaves nothing readable under the source exits 0. It is not a
+        #     silent failure — `total_for_source` is in the receipt and is 0
+        #     there, and the write's own result is what `folded` is derived from
+        #     — but nothing REFUSES it, and extending the guard to
+        #     `not minted and not pts` needs a decision about the legitimate
+        #     `before > 0` case (a rerun whose folds all predate this run), which
+        #     is why it is a recorded residual and not a silent widening here.
         receipt['folded_onto_existing'] = len(folded)
         print(json.dumps(receipt))
         sdk.close()

@@ -1130,20 +1130,31 @@ class TestWriterValidation(unittest.TestCase):
         # The fold arm a "names a ref OTHER than ours" classifier CANNOT see
         # (#10010 review P2). A survivor born from a ref SEQUENCE (a caller
         # passing a list — ingest bundles do) carries `extractedFrom` as an
-        # ARRAY, so `query(extractedFrom=…)` (property EQUALITY) cannot match it
-        # and the read-back is empty. The classifier then read "no ref in the
-        # list differs from ours" as "this run minted it", the fold count stayed
-        # 0, and the drift guard refused a HEALTHY all-fold batch as "SDK
-        # drift" — naming the wrong component. Sticky by construction: the point
-        # exists, so every rerun takes the same path and can never heal.
+        # ARRAY, so the classifier has to read the WRITE'S RESULT SHAPE rather
+        # than "a ref that names another source". The classifier then read "no
+        # ref in the list differs from ours" as "this run minted it", the fold
+        # count stayed 0, and the drift guard refused a HEALTHY all-fold batch
+        # as "SDK drift" — naming the wrong component. Sticky by construction:
+        # the point exists, so every rerun takes the same path and can never
+        # heal.
+        # ⛔ POST-#10063 (#11038 review P3): `query(extractedFrom=…)` is now
+        # equality ∪ `:Source` edge, and the fold wires the edge (#7704), so the
+        # REAL read door DOES see a sequence-born survivor — pinned by
+        # `test_provenance_extractedfrom_3263.py::test_query_answers_for_every_
+        # ref_of_a_sequence_born_point`. The `[]` this fake returns is therefore
+        # a FABRICATED premise, not a measurement of the product, and that is
+        # the point: the classification must be satisfiable from the write's own
+        # result, independent of what `query()` says today or tomorrow. It is
+        # kept as `[]` on purpose so a fix that leans on the read-back reds here.
         #   * mutation: delete the `isinstance(_refs, (list, tuple))` arm -> the
         #     scalar-only classifier reds this with the RuntimeError.
         class _ArrayPropSurvivorSDK:
             def __init__(self, **kw):
                 pass
             def query(self, **kw):
-                # an ARRAY prop is not equality-matchable: this read cannot see
-                # the survivor — the shape that made the misclassification fatal
+                # `[]` BY CONSTRUCTION, not because an array prop is invisible
+                # post-#10063 (the `:Source` edge makes it visible) — so the
+                # classification cannot be satisfied by the read-back
                 return []
             def create_point(self, kind, content, **kw):
                 return {"id": "p-array", "status": "live",
@@ -1181,7 +1192,10 @@ class TestWriterValidation(unittest.TestCase):
                     return {"id": "p-minted", "status": "live",
                             "extractedFrom": kw.get("extractedFrom")}
                 # an existing survivor whose prop is an ARRAY (born from a ref
-                # sequence) — invisible to the equality-matched read-back
+                # sequence) — `[]` here is FABRICATED by this fake (post-#10063
+                # the real read sees it through the `:Source` edge), so the
+                # fold must be classified off the WRITE'S RESULT:
+                # `extractedFrom` came back an ARRAY
                 return {"id": "p-array", "status": "live",
                         "extractedFrom": [kw.get("extractedFrom")],
                         "extractedFromAll": [kw.get("extractedFrom")]}
