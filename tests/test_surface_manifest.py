@@ -29,6 +29,8 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "config" / "surface-manifest.yml"
 RENDERED = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
+CANONICAL = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
+VISION = ROOT / "docs" / "product" / "vision-mcp-sdk-surface.md"
 
 
 def _public_sdk_methods() -> set[str]:
@@ -250,6 +252,110 @@ def test_the_rendered_list_agrees_with_the_manifest():
     )
     if doc.get("retired"):
         assert "warn the caller with the" in text, "the retired legend is missing"
+
+
+def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
+    """A PRESENT-TENSE count in the consent carriers must be the number the manifest derives.
+
+    `docs/product/canonical-mcp-tools.md` is what `read_approval` parses and what the owner reads
+    to decide what to cut, and its own amendment records that the advertised count "was wrong
+    three times, and each error is a different trap". It then drifted once more: it read **77
+    advertised tools** at a head where `counts.tools` derives 72, pairing a post-compose retired
+    count (23) with a pre-compose advertised count — arithmetically impossible on its own, and
+    contradicted two screens earlier in the same file. Nothing machine-reads that prose, which is
+    exactly why it survived, so this pins it.
+
+    Only claims about the CURRENT head are pinned. Both documents legitimately record history
+    ("was 81 before #4282 Phase 3.2", "99 → 94", "the vision started at 99"), and a blanket
+    number match would red on those. A claim's STARTING figure is such a record and is not
+    derivable here; its ENDPOINT is a statement about this head, so the endpoint is what is
+    checked. Each block asserts nothing when its sentence is absent, but the canonical blocks also
+    require their sentence to EXIST, so deleting the claim cannot make the guard vacuous.
+    """
+    live = _manifest()["counts"]["tools"]
+    retired = len(_manifest()["retired"])
+    canonical = CANONICAL.read_text(encoding="utf-8")
+    vision = VISION.read_text(encoding="utf-8")
+
+    # 1. "the surface is now **N advertised tools** with **M** retired-forward entries"
+    now_live = [int(n) for n in re.findall(r"surface is now \*\*(\d+) advertised tools\*\*", canonical)]
+    assert now_live, "the canonical doc's #4282 amendment stopped stating a live count"
+    assert now_live == [live] * len(now_live), (
+        f"canonical-mcp-tools.md says the surface is NOW {now_live[0]} advertised tools; "
+        f"config/surface-manifest.yml derives counts.tools = {live}"
+    )
+    now_retired = [int(n) for n in re.findall(r"with \*\*(\d+)\*\* retired-forward entries", canonical)]
+    assert now_retired, "the canonical doc's #4282 amendment stopped stating a retired count"
+    assert now_retired == [retired] * len(now_retired), (
+        f"canonical-mcp-tools.md says {now_retired[0]} retired-forward entries; the manifest "
+        f"carries {retired}"
+    )
+
+    # 2. "took the live surface A → B" — B is a claim about this head.
+    live_endpoints = [
+        int(b) for b in re.findall(r"took the live surface \d+\s*→\s*(\d+)", canonical)
+    ]
+    assert live_endpoints, "the canonical doc stopped naming the surface this container lands on"
+    assert live_endpoints == [live] * len(live_endpoints), (
+        f"canonical-mcp-tools.md ends the container's movement on {live_endpoints[0]} advertised "
+        f"tools; the manifest derives {live}"
+    )
+
+    # 3. The vision doc's present-tense restatement of the same two numbers.
+    served_claims = re.findall(r"the MCP server serves \*\*(\d+) tools\*\* \((\d+) of them advertised", vision)
+    for served, advertised in served_claims:
+        assert int(advertised) == live, (
+            f"vision-mcp-sdk-surface.md: {advertised} of {served} served tools are advertised; "
+            f"the manifest derives {live} live of {live + retired} served"
+        )
+        assert int(served) == live + retired, (
+            f"vision-mcp-sdk-surface.md: {served} served tools; live + retired = {live + retired}"
+        )
+
+    composed = re.findall(r"\*\*(\d+) live \+ (\d+) retired shims = (\d+) served\*\*", vision)
+    for live_n, retired_n, served_n in composed:
+        assert (int(live_n), int(retired_n), int(served_n)) == (live, retired, live + retired), (
+            "vision-mcp-sdk-surface.md's reconciliation does not compose: "
+            f"{live_n} live + {retired_n} retired = {served_n} served, but the manifest derives "
+            f"{live} + {retired} = {live + retired}"
+        )
+
+
+def test_the_two_canonical_documents_table_lists_every_document_it_defers_to():
+    """The vision doc's `## The two canonical documents` table must list every document the same
+    file names as an authority.
+
+    This is a MERGE-ARTEFACT guard, not a style rule. `911a1e240` (a forward-merge of
+    `origin/main`) dropped the `beta-sdk-surface.md` row that BOTH parents carried, leaving a
+    heading that says "The two canonical documents" over a table of one document plus an
+    inventory — while the paragraph six lines below still said `beta-sdk-surface.md` is "the
+    authority for the SDK target (40)". Nothing machine-read the table, so nothing reddened.
+    The property asserted here is derived from the file's own deferrals, so it cannot be
+    satisfied by deleting the sentence that names the authority either.
+    """
+    vision = VISION.read_text(encoding="utf-8")
+    heading = "## The two canonical documents"
+    assert heading in vision, "the vision doc lost its canonical-documents section"
+    section = vision.split(heading, 1)[1]
+    # The table ends at the first blank line after the ``**These documents …**`` sentence.
+    listed = set(re.findall(r"^\|\s*[^|]*\*?`docs/product/([^`]+)`\*?", section, re.M))
+    assert listed, "the canonical-documents table lists no document at all"
+
+    # Every document this file calls an authority must be a row in the table.
+    authorities = set(re.findall(r"`([A-Za-z0-9._-]+\.md)` is the\s+authority for", vision))
+    authorities |= set(re.findall(r"`([A-Za-z0-9._-]+\.md)` is the[a-z\s]*authority", vision))
+    assert authorities, "the vision doc stopped naming which document is the authority"
+    missing = sorted(a for a in authorities if a not in listed)
+    assert not missing, (
+        "vision-mcp-sdk-surface.md defers to documents its own 'canonical documents' table "
+        f"does not list: {missing} (listed: {sorted(listed)})"
+    )
+
+    # Each listed document must exist — a row for a file that is gone is the mirror defect.
+    for name in sorted(listed):
+        assert (ROOT / "docs" / "product" / name).is_file(), (
+            f"the canonical-documents table lists docs/product/{name}, which does not exist"
+        )
 
 
 def test_the_retired_table_does_not_assert_a_nonexistent_sdk_method():
@@ -1108,9 +1214,10 @@ def test_the_guard_reds_when_the_live_surface_grows_past_the_high_water_pin(tmp_
     """
     doc = _manifest()
     # The pin is set ONE BELOW the live count so the run must red: the property
-    # under test is "growth past the pin reds", not any particular number.
-    # (#4282 Phase 3.2 moved the live count 81 -> 76, so the pin moves with it.)
-    doc["high_water_counts"] = {"tools": 75, "sdk_public_methods": 150}
+    # under test is "growth past the pin reds", not any particular number. The live count
+    # moved twice again in the merge — #4282's container (81 -> 77) and #4282 Phase 3.2's
+    # `run_onboarding` retirement (77 -> 72) — so the pin follows to 72 - 1.
+    doc["high_water_counts"] = {"tools": 71, "sdk_public_methods": 150}
     result = _run("tools/surface-guard.py", "--manifest", _write(doc, tmp_path))
     assert result.returncode == 1, "growth past the frozen pin did not red the gate"
     assert "high-water pin" in result.stdout, result.stdout
@@ -2056,6 +2163,48 @@ def test_response_fields_block_is_present_and_anchored():
         )
 
 
+def test_every_recorded_tortoise_error_row_anchors_to_a_wrap_envelope_tool():
+    """A `_meta.tortoise_error` row must name a tool whose OWN schema is a WRAP envelope.
+
+    #8482's repair is applied ONLY to a tool whose advertised output schema carries
+    `x-fastmcp-wrap-result` (`tortoise/mcp_server.py::_wrap_envelope_schema` → the
+    caller repairs nothing when it returns `None`). So a `_meta.tortoise_error` row on
+    any other tool records a key that is NEVER written — a false record in the surface
+    report the owner reads to learn a tool's error channel.
+
+    This is the #10914 review's finding 3, and it was reachable because the retirement
+    rename re-anchored `tortoise_check_structure`'s row onto `tortoise_graph_overview`
+    (`-> Any`, `output_schema is None`): the `response_fields` block is hand-authored and
+    deliberately NOT derivable (`NON_DERIVABLE_DOC_KEYS`), so `check` cannot settle
+    wrap-ness and both gates stayed green over it. Measured against the live tool list,
+    not against a hand-kept list of names.
+    """
+    import asyncio
+
+    import tortoise.mcp_server as ms
+
+    rows = [rf for rf in _manifest()["response_fields"]
+            if rf.get("field") == "_meta.tortoise_error"]
+    assert rows, "the `_meta.tortoise_error` record vanished from the manifest"
+
+    async def _schema(name: str):
+        return (await ms.mcp.get_tool(name)).output_schema
+
+    not_wrap: list[str] = []
+    for rf in rows:
+        name = str(rf["response"])
+        if name.startswith("sdk:"):
+            continue  # an endpoint row; this repair is a TOOL-envelope property
+        schema = asyncio.run(_schema(name))
+        if not (isinstance(schema, dict) and schema.get("x-fastmcp-wrap-result")):
+            not_wrap.append(f"{name} (output_schema={schema!r})")
+    assert not not_wrap, (
+        "these `_meta.tortoise_error` rows name a tool with NO wrap envelope, so the key "
+        "is never written for them — move the row to the tool that carries the envelope: "
+        + "; ".join(not_wrap)
+    )
+
+
 def test_response_fields_block_is_carried_across_a_re_cut():
     """`cut` must carry the hand-authored record forward, not drop it."""
     sys.path.insert(0, str(ROOT / "tools"))
@@ -2932,6 +3081,154 @@ def test_the_check_refuses_a_baseline_with_no_cut_at_commit(checker, tmp_path):
     assert "::error::" in out and "cut_at_commit" in out, out
 
 
+# ── `cut_at_commit` is PROVENANCE, and `_read_manifest` is its only gate ──────
+#
+# The field is excluded from the drift comparison, so before `cut_commit_verdict` the ONLY
+# thing that touched it was a non-empty-string assertion: a value naming no object at all
+# passed `check`, `render`, `cut` and `tools/surface-guard.py`, while `cmd_render` slices it
+# to nine characters for the document's header — so the corruption was invisible in the
+# rendered document too. Measured on #10914: `911a1e240c16c37a1a8e0f2bc46dba9dd8ae2a90`, an
+# abbreviation whose 30-char tail had been INVENTED, in the one commit whose whole purpose
+# was to record that provenance. The real merge commit is
+# `911a1e240c2415b094b370f32a2a24f88a5fb1ea`.
+#
+# Every arm below is driven through a STUBBED `_git`, because the verdict depends on what
+# the clone can answer (shallow vs full, promisor remote vs not) and a test that asserted
+# one of those would pass or fail on the checkout rather than on the code.
+
+#: The value from the finding: shape-valid, 30 of its 40 chars invented.
+FABRICATED_SHA = "911a1e240c16c37a1a8e0f2bc46dba9dd8ae2a90"
+
+
+def _stub_git(monkeypatch, sm, *, rc=1, stderr="fatal: Not a valid object name", shallow="false"):
+    """Replace `_git` with the two answers the verdict reads; assert nothing else is asked."""
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(*args: str):
+        calls.append(args)
+        if args[:2] == ("cat-file", "-e"):
+            return rc, "", stderr
+        if args[:2] == ("rev-parse", "--is-shallow-repository"):
+            return 0, shallow, ""
+        raise AssertionError(f"cut_commit_verdict asked git something unexpected: {args}")
+
+    monkeypatch.setattr(sm, "_git", fake_git)
+    return calls
+
+
+def _baseline_at(tmp_path, **overrides) -> Path:
+    doc = _manifest()
+    doc.update(overrides)
+    path = tmp_path / "baseline.yml"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
+    return path
+
+
+def test_the_committed_cut_at_commit_is_a_full_sha_and_the_resolved_arm_works():
+    """The artifact's own value, plus real git on the one object every clone holds.
+
+    The shape half is hermetic and would have caught the abbreviation this finding is
+    about; the resolution half runs against `HEAD` because that object is present in
+    every checkout — shallow, partial, or full — so the arm is measured without assuming
+    history.
+    """
+    sm = _load_manifest_tool()
+    sha = _manifest()["cut_at_commit"]
+    assert re.fullmatch(r"[0-9a-f]{40}", sha), (
+        f"`cut_at_commit: {sha}` is not a full 40-char lowercase sha — `cut` records "
+        "`git rev-parse HEAD`, so an abbreviated value cannot have come from the generator")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
+    assert head.returncode == 0, head.stderr
+    verdict, why = sm.cut_commit_verdict(head.stdout.strip())
+    assert verdict == sm.CUT_RESOLVED, f"the resolved arm does not resolve HEAD: {verdict} / {why}"
+    # `HEAD` resolves; a well-formed value that names no commit does not. In a shallow
+    # clone this can only reach UNPROVABLE, so the assertion is the NEGATIVE one.
+    assert sm.cut_commit_verdict("deadbeef" * 5) != sm.CUT_RESOLVED
+
+
+def test_a_fabricated_cut_at_commit_REFUSES_even_where_nothing_is_missing(
+        monkeypatch, tmp_path):
+    """A full clone that holds no such object is a DISPROOF: refuse, do not warn."""
+    sm = _load_manifest_tool()
+    _stub_git(monkeypatch, sm, rc=1, stderr="fatal: Not a valid object name", shallow="false")
+    assert sm.cut_commit_verdict(FABRICATED_SHA)[0] == sm.CUT_FABRICATED
+    with pytest.raises(sm.SurfaceEvidenceUnreadable) as excinfo:
+        sm._read_manifest(_baseline_at(tmp_path, cut_at_commit=FABRICATED_SHA))
+    assert FABRICATED_SHA in str(excinfo.value)
+    assert "NOT a commit" in str(excinfo.value)
+
+
+def test_a_promisor_remotes_refusal_is_a_DISPROOF_even_in_a_SHALLOW_clone(monkeypatch):
+    """The arm that makes this gate bite on the fleet's own checkouts.
+
+    `blob:none` promisor clones are shallow AND remote-backed: asking for an object the
+    remote does not have returns rc=128 with `not our ref`, which is the remote ANSWERING.
+    Keying only on shallowness would report UNPROVABLE here — i.e. it would not have
+    caught the very value this finding is about, on the very checkout that holds it.
+    """
+    sm = _load_manifest_tool()
+    _stub_git(
+        monkeypatch, sm, rc=128,
+        stderr=f"fatal: remote error: upload-pack: not our ref {FABRICATED_SHA}",
+        shallow="true")
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_FABRICATED, (
+        f"a remote's \"not our ref\" was not read as a disproof ({verdict}): {why}")
+    assert "has no such object" in why, why
+
+
+def test_a_shallow_clone_that_cannot_answer_is_UNPROVABLE_and_NEVER_SILENT(
+        checker, monkeypatch, tmp_path):
+    """Fail-open is the defect, but a FALSE BLOCK on a healthy tree is not the fix.
+
+    The required `surface-guard` job checks out at the default `fetch-depth: 1`, and
+    `cut_at_commit` names an ancestor rather than the head, so absence there proves
+    nothing. The arm is therefore UNPROVABLE — and `check` NAMES it instead of returning a
+    green that reads as verified (the same shape `changes` prints for the capstone ordering
+    gate on its shallow path).
+    """
+    sm = _load_manifest_tool()
+    _stub_git(monkeypatch, sm, rc=1, stderr="fatal: Not a valid object name", shallow="true")
+    verdict, why = sm.cut_commit_verdict(FABRICATED_SHA)
+    assert verdict == sm.CUT_UNPROVABLE, verdict
+    assert "SHALLOW" in why, why
+    # A healthy tree in a shallow clone must NOT red: `_read_manifest` returns the doc.
+    assert sm._read_manifest(_baseline_at(tmp_path))["cut_at_commit"]
+    # …and the unverified arm is stated, not silent. The stub goes on the SAME module
+    # instance `cmd_check` runs from (`checker`), never on a second load: a stub on a
+    # sibling instance leaves the real `git` in place and the test then measures the
+    # checkout instead of the code.
+    _stub_git(monkeypatch, checker, rc=1, stderr="fatal: Not a valid object name", shallow="true")
+    doc = _manifest()
+    doc["cut_at_commit"] = FABRICATED_SHA
+    rc, out = _check(checker, doc, tmp_path)
+    assert rc == 0, f"a shallow checkout red the check on a provenance it cannot see:\n{out}"
+    assert "NOT VERIFIED" in out and FABRICATED_SHA in out, out
+
+
+def test_an_abbreviated_cut_at_commit_is_refused_without_asking_git(monkeypatch):
+    """No abbreviation, no upper case, no `HEAD`-ish symbolic name: `cut` writes a sha."""
+    sm = _load_manifest_tool()
+    calls = _stub_git(monkeypatch, sm, rc=0, stderr="", shallow="false")
+    for bad in ("911a1e240c", FABRICATED_SHA.upper(), "HEAD", "main"):
+        assert sm.cut_commit_verdict(bad)[0] == sm.CUT_FABRICATED, bad
+    assert calls == [], f"the shape check shelled out to git for a value it could refuse: {calls}"
+
+
+def test_a_recut_can_STILL_read_a_baseline_whose_provenance_is_fabricated(
+        monkeypatch, tmp_path):
+    """The repair path must not be self-blocked.
+
+    `cut` reads the existing baseline to carry hand-curated cells forward, and a re-cut is
+    the repair for a `cut_at_commit` that resolves to nothing — so refusing to read it there
+    would remove the only way to fix the field (`check_provenance=False`).
+    """
+    sm = _load_manifest_tool()
+    _stub_git(monkeypatch, sm, rc=1, stderr="fatal: Not a valid object name", shallow="false")
+    path = _baseline_at(tmp_path, cut_at_commit=FABRICATED_SHA)
+    assert sm._read_manifest(path, check_provenance=False)["cut_at_commit"] == FABRICATED_SHA
+
+
 def test_the_render_refuses_instead_of_tracing(tmp_path, monkeypatch, capsys):
     """`cmd_render` indexed `family_rank` / `cut_at_commit` with no guard at all."""
     sm = _load_manifest_tool()
@@ -3254,6 +3551,78 @@ def test_cmd_cut_is_actually_wired_to_carry_the_recorded_fields(tmp_path, monkey
     )
 
 
+def test_a_recut_carries_the_committed_observed_usage_forward(tmp_path, monkeypatch):
+    """A re-cut must NOT re-stamp the evidence it cannot reproduce (#10914 review P2).
+
+    `used_by` / `recommendation` / `basis` / `reason` are read from THIS box's call log, and
+    `exemption` is a human recording. None is a function of the code, so a routine re-cut used
+    to overwrite the columns the owner reads with whatever this machine happened to observe —
+    measured on #10914: two rows the change never touched flipped `agents` -> `never called`,
+    while a tool the PR had just introduced was stamped `called by agents` off the lane's own
+    test call. Every gate stayed green over it, because these keys are not compared.
+
+    The sentinels below cannot be produced by the derivation (the first two are not corpus
+    labels, and `exemption` is written `False` for every row), so a re-cut that re-derives
+    them fails here on the PRE-fix code.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    tool = next(r for r in doc["rows"] if r["name"] == "tortoise_query")
+    tool["used_by"] = "never called, sentinel-corpus"
+    tool["recommendation"] = "review"
+    tool["basis"] = "decided"
+    tool["reason"] = "sentinel reason committed by a human and carried forward"
+    exempt = next(r for r in doc["rows"] if str(r["name"]).startswith("sdk:"))
+    exempt["exemption"] = True
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "evidence.yml"))
+    empty_home = tmp_path / "home"
+    empty_home.mkdir()
+    monkeypatch.setenv("HOME", str(empty_home))
+
+    derived = {r["name"]: r for r in sm.build_doc()["rows"]}
+    carried = derived["tortoise_query"]
+    for key in ("used_by", "recommendation", "basis", "reason"):
+        assert carried[key] == tool[key], (
+            f"a re-cut re-derived `{key}` instead of carrying the committed evidence: "
+            f"{carried[key]!r} != {tool[key]!r}")
+    assert derived[exempt["name"]]["exemption"] is True, (
+        "a re-cut reset a recorded `exemption` — the human recording the guard judges")
+
+
+def test_a_recut_does_not_stamp_a_new_row_as_called_by_agents(tmp_path, monkeypatch):
+    """The #10914 defect itself: a NEW row picked up this box's log as if it were usage.
+
+    The container is new in this PR, so it cannot have production usage — but the cutting box
+    logged the lane's own `mcp_tool_call` to the tool it had just written, and `build_doc`
+    turned that into `called by agents` in the column the owner reads. The log is reproduced
+    here (a real `analytics_fallback.jsonl` under a temp `HOME`), and the SAME state is derived
+    twice: `--refresh-observations` is what a re-cut used to do unconditionally, so it shows
+    the defect is real rather than described, and the default shows it is gone.
+    """
+    sm = _load_manifest_tool()
+    doc = _manifest()
+    # Remove the container row: it is NEW to the manifest, exactly as it was when this PR cut.
+    doc["rows"] = [r for r in doc["rows"] if r.get("name") != "tortoise_graph_overview"]
+    monkeypatch.setattr(sm, "MANIFEST_FILE", _manifest_at(sm, doc, tmp_path, "new-row.yml"))
+    home = tmp_path / "home"
+    (home / ".tortoise").mkdir(parents=True)
+    (home / ".tortoise" / "analytics_fallback.jsonl").write_text(
+        '{"event": "mcp_tool_call", "properties": {"tool_name": "tortoise_graph_overview"}}\n'
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    refreshed = {r["name"]: r for r in sm.build_doc(refresh_observations=True)["rows"]}
+    assert refreshed["tortoise_graph_overview"]["used_by"].startswith("agents"), (
+        "the fixture no longer reproduces the defect — this is the value the pre-fix cut wrote")
+
+    carried = {r["name"]: r for r in sm.build_doc()["rows"]}
+    new_row = carried["tortoise_graph_overview"]
+    assert not new_row["used_by"].startswith("agents"), (
+        "a re-cut stamped a brand-new tool `called by agents` from the cutting box's own log")
+    assert new_row["used_by"].startswith("never called"), (
+        f"a new row must record that no call was observed, got {new_row['used_by']!r}")
+
+
 def test_the_render_is_identical_with_no_machine_local_call_log(tmp_path, monkeypatch):
     """The drift step must be satisfiable OFF the machine that committed the file.
 
@@ -3266,8 +3635,8 @@ def test_the_render_is_identical_with_no_machine_local_call_log(tmp_path, monkey
     committed document.
 
     The render reads COMMITTED inputs only. `used_by` is the checked-in cell the document
-    already prints, so the flag is derived from it; the log keeps driving the artifact
-    through `build_doc`, which refreshes the MANIFEST and lands as a reviewed diff.
+    already prints, so the flag is derived from it; `build_doc` only WRITES a new value under
+    `--refresh-observations` or for a row with no committed evidence (#10914 review P2).
     """
     sm = _load_manifest_tool()
     out = _render_scratch()
@@ -3494,12 +3863,13 @@ def test_the_render_derives_the_uncalled_count_from_the_baseline(tmp_path, monke
     tool_rows = [r for r in doc["rows"] if not str(r.get("name", "")).startswith("sdk:")]
     committed_never = sum(1 for r in tool_rows if sm.observed_usage(r) == "never called")
     victim = next(r for r in tool_rows if sm.observed_usage(r) == "never called")
-    # SELECT the "in use" row BEFORE mutating `victim` (#4282 Phase 3.2 caught this):
-    # flipping `victim` to `agents` makes it read `in use`, so a search performed
-    # afterwards can return the victim itself — and whether it does depends purely on
-    # where the first "in use" row sits relative to the first "never called" row in the
-    # manifest. That made the fixture data-order dependent, and it broke the moment the
-    # row set changed. Selecting both first makes the two rows provably distinct.
+    # ⛔ SELECT BOTH ROWS BEFORE the perturbation, never after — the same fix arrived from
+    # two directions in the merge and both reasons hold. Flipping `victim` to `agents` makes
+    # it an `in use` row, so a search performed afterwards can return `victim` ITSELF, and
+    # whether it does depends purely on where the first `in use` row sits relative to the
+    # first `never called` row — which made the fixture data-order dependent and broke the
+    # moment a surface change reordered the list (#4282, and again in #4282 Phase 3.2).
+    # Selecting both first makes the two rows provably distinct.
     dropped = next(r for r in tool_rows if sm.observed_usage(r) == "in use")
     assert dropped is not victim, "the flipped row and the dropped row must differ"
     rest = [p.strip() for p in (victim.get("used_by") or "").split(",") if p.strip()]
@@ -3654,8 +4024,13 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     manifest = _manifest()
     # #3540 ruling B: 82 -> 81 (two per-source switches retired into ONE
     # consolidated tool — the surface SHRANK, which is the ruling's point).
-    # #4282 Phase 3.2: 81 -> 76 (the five dropped `run_onboarding` tools).
-    assert live["mcp"] == manifest["counts"]["tools"] == 76
+    # #4282: 81 -> 77 — the `graph_overview` container absorbs FIVE advertised names
+    # and adds itself (`check_structure` is absorbed as a section while its door stays
+    # live, since it carries the #8482 wrap-envelope repair). The pin moves with every
+    # landed container batch until the approved 27 is reached. #4282 Phase 3.2 (main) then
+    # removes the five `run_onboarding` tools — a disjoint name set — so the merged
+    # surface is 72, not either side's own figure.
+    assert live["mcp"] == manifest["counts"]["tools"] == 72
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
