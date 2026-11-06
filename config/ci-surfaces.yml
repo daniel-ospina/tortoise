@@ -3400,6 +3400,17 @@ surfaces:
   - test_collision_preflight.py
   - test_vector_write_seam_4520.py
   - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
+  # #11052: the declared-invariant gh read cache (`tools/gh_read_cache.py`) and its
+  # hermetic suite. `core` carries it: the tool pins no api/engine surface (it is a
+  # subprocess wrapper around a stub `gh`), and every sibling stdlib tool suite sits
+  # here (`test_who_is_on.py` above, `test_lane_stash.py`, `test_worktree_report.py`).
+  # `tools/` is a flat NON_PYTHON_PREFIXES entry with no matching SOURCE_PATTERNS row,
+  # so a TOOL-ONLY diff would select NO surface and fall back to tier-1 smoke, which
+  # does not carry this file — the neighbouring `CORE_ALSO` entry for the tool closes
+  # that half (same #1349/#3332/#3616 class as `test_worktree_report.py` above).
+  # Pinned by
+  # `tests/test_ci_selection.py::test_gh_read_cache_tool_change_selects_core_not_tier1`.
+  - test_gh_read_cache.py
   # #10220: the durable lane report (WORKTREE-REPORT.md) and its anti-fabrication
   # checker — `tools/worktree_report.py`. Hermetic (a throwaway git repo in
   # `tmp_path`; no DB, no network), so it pins no api/engine surface and `core`
@@ -10675,6 +10686,7 @@ durations:
   test_temporal_aggregation.py: 0.3
   test_vocabulary_gap_census_5329.py: 0.4
   test_worktree_report.py: 6.5
+  test_gh_read_cache.py: 2.0  # unmeasured — new in #11052, so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a dev-box reading: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), and this map forbids a local timing as a SHARD-LAYOUT input. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it. ⛔ READ THIS BEFORE "JUST SETTING THE MEASURED NUMBER": an earlier cut of this row carried 22.8 taken from a local run, which is exactly the "just pick a number" the header forbids — and it is not a harmless one, because a weight decides which files are pooled together. The two local bases were therefore taken only to confirm this file belongs on the FAST pool at all, and NEITHER is the weight: the pytest basis (`python3 -m pytest tests/test_gh_read_cache.py -q`) landed at 25.0s and the suite's own documented `python3` runner at 21.3s — the same order as its `core` siblings, which is the only claim they support. ⛔ NO CASE COUNT IS RECORDED EITHER: this row has already carried 76, 82 and 84, each correct at the head that measured it and stale one commit later, so count it with `grep -c 'def test_' tests/test_gh_read_cache.py` when you need it. Hermetic (stdlib + one `sys.executable` subprocess per case against a bash stub, no network/graph).
 # ── THE NON-GATING LANE (`on_demand:`) ──
 #
 # A file listed here RUNS but does not GATE: it is excluded from every pre-merge
