@@ -4711,12 +4711,12 @@ def test_the_runbook_field_row_documents_the_positive_pair():
 
     ⛔ Registered on `tier1` — that is the whole point. `docs/infra-runbook.md` is under
     `docs/`, which is in `NON_PYTHON_PREFIXES` and matches no `SOURCE_PATTERNS` entry, so
-    a runbook-only diff selects NO surface and runs `tier1` only (#4309). The same
-    assertion lived in `tests/test_9548_record_arming_health.py`, which is registered on
-    `api`/`core` and therefore does not run on that diff: measured, renaming the row to
-    keys the payload never publishes (`record_applied_total` / `record_last_commit_at`)
-    left every selected suite GREEN — the #9548-review P1 shape this file's own
-    `tier1` registration comment records, re-introduced one file over.
+    a runbook-only diff selects NO surface and runs `tier1` only (#4309). The assertion
+    that first tried to guard this was a whole-file `name in runbook` membership test in
+    `tests/test_9548_record_arming_health.py` — and it failed on BOTH counts, each measured:
+    that suite is not selected on a docs-only diff, and the membership form stays green
+    under the rename anyway (the row's own explanation still names both fields further
+    along it). So this pin names the row's HEAD CELL, in the suite the diff actually runs.
 
     Scoped to the section's TABLE ROWS — and to each row's **HEAD CELL**, not its prose — so it
     pins the operator's row without pinning its punctuation: a head cell that annotates the types
