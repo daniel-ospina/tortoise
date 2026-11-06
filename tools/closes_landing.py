@@ -260,6 +260,23 @@ _BLOCK_START_RE = re.compile(
     r"| {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$"  # thematic break
     r"| {0,3}<)"                                            # an HTML block
 )
+#: The same three block starts WITHOUT the bare `<` arm, for the §4.4/§5.1 depth CARRY. ⛔ ` {0,3}<`
+#: IS NOT AN HTML-BLOCK START CONDITION (the fact round 36 recorded for `_leaves_no_paragraph`, which
+#: this call site had not learned). Reading any leading `<` as "this line starts something of its own"
+#: dropped the carried paragraph depth onto the LAZY line's own depth instead of the paragraph's, and
+#: the marker below was measured against a top-level paragraph that does not exist — a FAIL-OPEN in the
+#: `strict` PASS arm (round 50 review, P1):
+#:     `> Notes` + `<span>x</span>` + `    ``` ` + `2.     Closes #100`
+#:         renderer: ONE `<p>` in the blockquote (`Notes <span>x</span> ```` `), then a NEW `<ol>`
+#:         whose wide-gap content is `<pre><code>` -> CODE; `origin/main` `(True,False,False)`, the
+#:         round-49 head credited `[100]` in `strict`. A type-7 line is INLINE in an open paragraph and
+#:         starts nothing, which is why the bare-`<` arm is wrong HERE (it stays right where
+#:         `_paragraph_end` uses it).
+_OWN_BLOCK_START_RE = re.compile(
+    r"(?: {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)"          # a list item marker
+    r"| {0,3}#{1,6}(?:[ \t]|$)"                             # an ATX heading
+    r"| {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$)"   # thematic break
+)
 
 
 def _paragraph_end(text: str, start: int) -> int:
@@ -990,7 +1007,7 @@ _HTML_TYPE1_TAGS = "script|pre|style|textarea"
 #: `</pre>` and `</span>` do not (`pre` is type 1, `span` type 7 — neither is type 6), which is what
 #: this arm now reproduces.
 _HTML_BLOCK_INTERRUPT_RE = re.compile(
-    rf" {{0,3}}(?:<!--|<\?|<![A-Za-z\[]|<(?:{_HTML_TYPE1_TAGS})(?:[ \t]|/?>|$)"
+    rf" {{0,3}}(?:<!--|<\?|<![A-Za-z\[]|<(?:{_HTML_TYPE1_TAGS})(?:[ \t]|>|$)"
     rf"|</?(?:{_HTML_TYPE6_TAGS})(?:[ \t]|/?>|$))", re.IGNORECASE)
 
 #: ⛔ §4.6's SIX TYPES DO NOT END THE SAME WAY, AND THE START SET IS NOT ONE REGEX (round 44 review,
@@ -1020,7 +1037,16 @@ _HTML_BLOCK_INTERRUPT_RE = re.compile(
 #: This set is DERIVED from `_HTML_TYPE1_TAGS`, which is what the comment above has claimed since
 #: round 48: the old independent dict let an editor add a tag to the constant alone and get a
 #: `KeyError` from inside `strip_code` (the crash class that aborts `--sweep` for every PR).
-_HTML_TYPE1_TAG_RE = re.compile(rf" {{0,3}}<({_HTML_TYPE1_TAGS})(?:[ \t]|/?>|$)", re.IGNORECASE)
+#: ⛔ …AND A TYPE-1 START IS NOT A SELF-CLOSING TAG (round 50 review — a fail-open in `strict`, the
+#: PASS arm). §4.6 type 1's start condition is the tag name "followed by a space, a tab, the string
+#: `>`, or the end of the line" — `/` is NONE of those, and `/>` belongs to type 6, whose tag list
+#: does not carry these four. `<pre/>` is therefore a COMPLETE tag alone on a line: type 7, which
+#: hides nothing and ends at the blank line. Accepting `/>` opened a type-1 block that ran to EOF or
+#: to a closer, and the 4-column line below the blank line was credited:
+#:     `<pre/>` + `` + `    Closes #100`   renderer `<pre/>` then `<pre><code>` -> CODE
+#:     `origin/main` `[]`; the head credited `[100]` in `strict` — 4 of 4 tags, measured.
+#: The `/>` spelling stays on the TYPE-6 arm of `_HTML_BLOCK_INTERRUPT_RE`, where the spec allows it.
+_HTML_TYPE1_TAG_RE = re.compile(rf" {{0,3}}<({_HTML_TYPE1_TAGS})(?:[ \t]|>|$)", re.IGNORECASE)
 _HTML_TYPE1_END_TOKENS = frozenset(f"</{tag}>" for tag in _HTML_TYPE1_TAGS.split("|"))
 
 
@@ -1134,7 +1160,16 @@ def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
             # paragraph open, refused the leaf and blanked the real close).
             and (_ordered_marker_at_least_two(rest)
                  or (_is_bare_marker(rest) and not _SETEXT_UNDERLINE_RE.match(rest.strip())))
-            and container is prev_container):
+            # ⛔ AND WHEN THE POP JUST RECORDED THAT THE PARAGRAPH'S ITEM ENDED, THE QUESTION IS
+            # ANSWERABLE AGAINST THAT ITEM (round 50 review, P1 — a LOST CLOSE in all three arms).
+            # The identity test below is right to refuse a STACK item that is not the paragraph's,
+            # but `dropped_paragraph_item` is not a stack item: it is the fact "the item that held
+            # this paragraph has ENDED", and the renderer answers that line as the paragraph's LAZY
+            # continuation when it sits in an indented-code position (§4.4):
+            #     `  1.` + `        x` + `    2.      Closes #100`   renderer ONE `<li>` -> PROSE
+            #     `origin/main` `(True,False,False)`; the round-49 head `(False,False,False)`.
+            and (container is prev_container
+                 or (container is None and dropped_paragraph_item is not None))):
         return False
     depth = _quote_depth(prefix)
     if depth > prev_quote_depth:
@@ -1159,7 +1194,20 @@ def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
         # and hand back 870-2,170 real closes, because they move EVERY reader of `prev_container`,
         # not just this one question.
         if container is None and dropped_paragraph_item is not None:
-            return line_col >= dropped_paragraph_item.rest_col
+            # ⛔ …AND A LINE AT AN INDENTED-CODE POSITION IS STILL THAT PARAGRAPH'S TEXT (round 50
+            # review, P1 — a LOST CLOSE in all three arms, the silent case #10597 was filed for).
+            # §5.2's lazy continuation does NOT have to reach the content column, and the pop is a
+            # COLUMN test that runs before this question is asked — so the item it dropped is the
+            # one to measure in, and 4+ columns is §4.4's "an indented code block cannot interrupt a
+            # paragraph", whatever marker the line carries:
+            #     `  1.` + `        x` + `    2.      Closes #100`
+            #         renderer ONE `<li>` holding both lines -> PROSE
+            #         `origin/main` `(True,False,False)`; the round-49 head `(False,False,False)`.
+            # The term is the SAME one `_dropped_quote_is_lazy` carries, for the same reason: at a
+            # column <= 3 the line can START A BLOCK instead (`  1.` + `        x` +
+            # `2.     Closes #100` opens a sibling item whose wide-gap content is `<pre><code>`).
+            return (line_col >= dropped_paragraph_item.rest_col
+                    or line_col > _MAX_FENCE_INDENT)
         return container is None or line_col >= container.rest_col
     # depth < prev_quote_depth: the line dropped a `>` — see the docstring's third bullet.
     return _dropped_quote_is_lazy(prefix, prev_quote_depth, container, prev_container,
@@ -1277,6 +1325,20 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # holds for a BULLET (`- ` + `  2.      Closes #100`), which `_lazy_push` never answers true for.
     if lazy_marker:
         return False
+    # ⛔ §4.4 COMES BEFORE THE LEAF TESTS, NOT AFTER THEM (round 50 — the ordering half of the
+    # finding that kept the WIP arm from blanking a paragraph's own text). "An indented code block
+    # cannot interrupt a paragraph" is a fact about the LINE, so when it holds nothing below this
+    # point can apply: a 4+-column line at a code position IS that paragraph's lazy continuation
+    # whatever the line looks like — and the empty-content answer read a 4-column bare `-` as an empty
+    # ITEM (which it is not; the renderer keeps it as text) and ended a paragraph that is open:
+    #     `Notes` + `    -` + `2.     Closes #100`   renderer ONE `<p>` -> PROSE, `origin/main` credits
+    # Whichever of the two answers runs first IS the verdict, which is why round 40 put `lazy_marker`
+    # first for the same reason.
+    # ⚠️ AND A CONTENT-BLANK LINE IS NOT PROTECTED: `rest.strip()` — `>     ` is a BLANK line to the
+    # block grammar, so it ENDS the paragraph rather than continuing it.
+    if rest.strip() and rest_indent > _MAX_FENCE_INDENT and (
+            container is None or rest_indent > container.rest_col + _MAX_FENCE_INDENT):
+        return not prev_prose
     if not body.strip():
         return True
     # ⛔ A BARE MARKER OPENS AN EMPTY ITEM (round 49 review, P1). §5.2 lets a list marker be followed
@@ -1299,13 +1361,6 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # it is then prose, and `origin/main` credits it).
     if _SETEXT_UNDERLINE_RE.match(body):
         return prev_prose
-    # §4.4: an indented code block CANNOT INTERRUPT A PARAGRAPH. With one open, a 4+-column line is
-    # that paragraph's lazy continuation, not a code block — so it does not end anything. Reading it
-    # as an ender blanked real closes (`Notes` + `    cont` + `2.     Closes #100` is one paragraph in
-    # the renderer and `origin/main` credits it): a REGRESSION, measured at 228 lenient / 72 strict.
-    if rest_indent > _MAX_FENCE_INDENT and (
-            container is None or rest_indent > container.rest_col + _MAX_FENCE_INDENT):
-        return not prev_prose
     return False
 
 
@@ -2138,6 +2193,29 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         own_code = own_gap > 4 and not ordered_continuation and not _html_here
         indent_code = rest_indent > _MAX_FENCE_INDENT and not _html_here and (
             strict or (indented_code
+                       # ⛔ §4.4's PROTECTION IS THE ARM'S OWN RULE, NOT `strict`'s (round 50 review,
+                       # P1 — LOST CONTENT in the one arm `in_flight_markers` and the comment-body
+                       # read go through). "An indented code block cannot interrupt a paragraph", so a
+                       # 4-column line under an OPEN paragraph is that paragraph's continuation and
+                       # the renderer keeps it — the arm blanked it anyway, and a live `IN FLIGHT:`
+                       # marker or a real checklist criterion in it then vanished SILENTLY:
+                       #     `Notes` + `1. ` + `    IN FLIGHT: 3.2c — branch fix/x`
+                       #         renderer ONE `<p>` -> PROSE; `origin/main` KEEPS the line, the
+                       #         round-49 head returned `Notes\n1. \n` (the marker is dropped).
+                       # `rest.strip()` is part of the term: a CONTENT-BLANK line (`>     `) is a
+                       # BLANK line to the block grammar and ends the paragraph instead of
+                       # continuing it. And the paragraph must be in the container this line falls
+                       # into, not one it has dedented out of, and the line must NOT be past that
+                       # container's OWN code threshold (§5.2 measures from the content column) —
+                       # `-     Closes #100` + `    code` + `    ---` + `      2.      Closes #100`
+                       # renders the marker inside `<pre><code>`, and the quoted exemplars this arm
+                       # exists to hide stay hidden. The `strict` half deliberately does NOT take
+                       # the term (a PASS arm blanks every indented line — round 30's choice).
+                       and not (prev_prose and rest.strip()
+                                and container is prev_container
+                                and _quote_depth(prefix) >= prev_quote_depth
+                                and (container is None
+                                     or rest_indent <= container.rest_col + _MAX_FENCE_INDENT))
                        and (container is None
                             # ⛔ AN EMPTY ITEM HAS NO PARAGRAPH TO CONTINUE, SO IT DOES NOT EXTEND
                             # §5.2's ALLOWANCE (round 49 review, P1). The `+ _MAX_FENCE_INDENT`
@@ -2309,9 +2387,11 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         #     `> q` + `2. x` + `   2.     Closes #100`  line 2 opens an <ol start="2">, so line 3's
         #                                               paragraph belongs to the NEW item (PROSE)
         # — while `> Notes` + `lazy` + `2.     Closes #100` must still read CODE, because `lazy`
-        # starts nothing and the quote is still open. `not pushed` and `_BLOCK_START_RE` are the two
-        # spellings of "this line started something of its own"; both are required, because a line
-        # can start a heading or a break without `_content_column` seeing an item.
+        # starts nothing and the quote is still open. `not pushed` and `_OWN_BLOCK_START_RE` are the
+        # two spellings of "this line started something of its own"; both are required, because a
+        # line can start a heading or a break without `_content_column` seeing an item. ⛔ IT IS NOT
+        # `_BLOCK_START_RE`: that pattern counts ANY leading `<`, so a lazy type-7 line
+        # (`<span>x</span>`) reset the carried depth to its own (0) — a `strict`-arm fail-open.
         # ⛔ THE DROPPED-ITEM FACT BELONGS TO THE PARAGRAPH THAT WAS OPEN BEFORE THIS LINE, and a
         # line in a DEEPER container opens a new one (§5.1: a blockquote opener does interrupt a
         # paragraph), so the fact is stale from here on. Without this, a quote opened after an item
@@ -2323,7 +2403,7 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             dropped_paragraph_item = None
         prev_quote_depth = (max(_own_depth, prev_quote_depth)
                             if (_paragraph_was_open and prev_prose and not pushed
-                                and not _BLOCK_START_RE.match(rest))
+                                and not _OWN_BLOCK_START_RE.match(rest))
                             else _own_depth)
         # The paragraph lives in the item this line OPENED when it opened one (`- Notes` puts its
         # text inside the `<li>`), not in the item it sat in before.

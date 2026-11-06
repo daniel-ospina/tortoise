@@ -5067,3 +5067,137 @@ def test_a_CLOSING_block_tag_opens_a_TYPE6_block():
     body = "- a bullet\n</div>\n2.     Closes #100\n"
     assert cl.parse_closing_refs(body) == [100], body
     assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+
+
+def test_a_LAZY_marker_line_need_not_reach_the_items_CONTENT_COLUMN():
+    """Round 50, P1 — a LOST CLOSE in all three arms: the pop ran BEFORE the lazy question.
+
+    `_item_dedented` is a COLUMN test, and §5.2's lazy continuation does not have to reach the item's
+    content column — so a marker BELOW it popped the item before `_is_lazy_marker` could answer, and
+    the wide gap then read as code. This is the SILENT case #10597 was filed for: the tool says
+    nothing about a body that DOES close the issue.
+
+    ⚠️ Fails at the pre-fix head (`7f834a6a03`): `[]` in the lenient arm, renderer `inline`.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "  1.\n        x\n    2.      Closes #100\n"
+    assert keyword_types(body) == {"inline"}, body
+    assert cl.parse_closing_refs(body) == [100], body
+
+    # CONTROLS — a marker at a column that CAN start a block really does end the item, and the lazy
+    # answer must not swallow it: column 0 and the item's own marker column open SIBLING items whose
+    # wide-gap content is `<pre><code>`.
+    for sibling in ("  1.\n        x\n2.     Closes #100\n",
+                    "  1.\n        x\n  2.      Closes #100\n"):
+        assert keyword_types(sibling) == {"code_block"}, sibling
+        assert cl.parse_closing_refs(sibling) == [], sibling
+    # …and the round-49 pin that this term must not disturb: a paragraph inside an item with a
+    # 4-column code line under it still opens a NEW `<ol>`, so the marker is CODE.
+    pinned = "- a bullet\nSummary of the change.\n    indented code\n2.     Closes #100\n"
+    assert keyword_types(pinned) == {"code_block"}, pinned
+    assert cl.parse_closing_refs(pinned, None, strict=True) == [], pinned
+
+
+def test_the_INDENTED_CODE_arm_keeps_a_paragraphs_own_text():
+    """Round 50, P1 — LOST CONTENT in the live `indented_code` arm (the one WIP markers use).
+
+    §4.4 says an indented code block cannot interrupt a paragraph, so a 4-column line under an OPEN
+    paragraph is that paragraph's continuation and the renderer keeps it. The arm blanked it anyway,
+    and a live `IN FLIGHT:` marker and a real checklist criterion vanished SILENTLY from a body the
+    renderer reads as one `<p>` — a product consequence, not just a parse difference.
+
+    ⚠️ Fails at the pre-fix head (`7f834a6a03`): `strip_code(..., indented_code=True)` returns
+    `'Notes\\n1. \\n'` for both bodies below, i.e. the marker-line content is gone.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "Notes\n1. \n    Closes #100\n"
+    assert keyword_types(body) == {"inline"}, body
+    assert "Closes #100" in cl.strip_code(body, indented_code=True)
+    assert cl.parse_closing_refs(body) == [100], body
+
+    marker = "Notes\n1. \n    IN FLIGHT: 3.2c — branch fix/x"
+    assert md.parse(marker)[0].type == "paragraph_open"
+    assert "IN FLIGHT: 3.2c" in cl.strip_code(marker, indented_code=True)
+    criterion = "Notes\n1. \n    - [ ] criterion"
+    assert md.parse(criterion)[0].type == "paragraph_open"
+    assert "- [ ] criterion" in cl.strip_code(criterion, indented_code=True)
+
+    # CONTROLS — §4.4's protection is for a PARAGRAPH in the container the line falls into, and the
+    # arm still hides the quoted exemplars it was written for: a box in the item's OWN code position
+    # (after a blank line), a 4-column line the blockquote left, and one past the item's own code
+    # threshold are all `<pre><code>` in the renderer.
+    for hidden, needle in (("- item\n\n      - [ ] example\n", "[ ] example"),
+                           ("> <div>\n> Notes\n    Closes #100\n", "Closes #100"),
+                           ("-     Closes #100\n    code\n    ---\n      2.      Closes #100\n",
+                            "2.      Closes #100")):
+        assert needle not in cl.strip_code(hidden, indented_code=True), hidden
+
+
+def test_the_paragraph_CARRY_keeps_the_PARAGRAPHS_depth_not_the_lazy_lines():
+    """Round 50, P1 — a fail-open in the `strict=True` PASS arm (the arm a claim cannot pass on).
+
+    The §4.4 carry keeps a paragraph open across a blanked indented line, but it carried the LAZY
+    line's own depth (0) instead of the depth of the paragraph being carried (1) — ` {0,3}<` counted
+    as "this line starts a block". The marker below was then measured against a top-level paragraph
+    that does not exist, and a `<pre><code>` keyword was credited.
+
+    ⚠️ Fails at the pre-fix head (`7f834a6a03`): `strict` credits `[100]`, renderer `code_block`.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "> Notes\n<span>x</span>\n    ```\n2.     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    assert cl.parse_closing_refs(body) == [], body
+
+    # CONTROL — the carry still does its own job: a lazy line at the paragraph's own depth inside an
+    # item keeps the paragraph, so the ordered marker below it is that item's text (prose).
+    prose = "> - item\n> Notes\n    2.      Closes #100\n"
+    assert keyword_types(prose) == {"inline"}, prose
+    assert cl.parse_closing_refs(prose) == [100], prose
+    # …and a line that genuinely STARTS a block ends the paragraph: a THEMATIC BREAK under the quote.
+    broke = "> Notes\n<span>x</span>\n---\n2.     Closes #100\n"
+    assert keyword_types(broke) == {"code_block"}, broke
+    assert cl.parse_closing_refs(broke, None, strict=True) == [], broke
+
+
+def test_a_SELF_CLOSING_type1_tag_opens_NO_type1_block():
+    """Round 50 — a fail-open in the `strict` PASS arm: §4.6 type 1's START is not a self-closing tag.
+
+    Type 1 starts with the tag name "followed by a space, a tab, the string `>` or the end of the
+    line" — `/` is none of them, and `/>` belongs to type 6 (whose tag list does not carry these
+    four). So `<pre/>` is a complete tag alone on a line: TYPE 7, which hides nothing. Accepting it
+    opened a type-1 block that ran to EOF, and the 4-column line below the blank line was credited.
+
+    ⚠️ Fails at the pre-fix head (`7f834a6a03`): `strict` credits `[100]` for all four tags.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    for tag in ("pre", "script", "style", "textarea"):
+        body = f"<{tag}/>\n\n    Closes #100\n"
+        assert "code_block" in keyword_types(body), (tag, keyword_types(body))
+        # the LENIENT arm keeps a top-level 4-space block as prose by design (its declared
+        # residual — losing a real claim is worse than over-reporting); only the PASS arm can blank
+        # it, and the PASS arm is what this finding is about.
+        assert cl.parse_closing_refs(body, None, strict=True) == [], tag
+
+    # CONTROL — the NON-self-closing spelling IS type 1, and an HTML block's own TEXT is READ (not
+    # hidden), so a keyword line inside it is a claim the renderer also shows as prose.
+    for tag in ("pre", "script", "style", "textarea"):
+        body = f"<{tag}>\n-     Closes #100\n</{tag}>\n"
+        assert keyword_types(body) == {"html_block"}, (tag, keyword_types(body))
+        assert cl.parse_closing_refs(body) == [100], tag
