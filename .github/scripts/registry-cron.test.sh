@@ -2364,6 +2364,31 @@ assert_eq "$RC" 1 "78q. an unparseable secret-shaped timestamp reds"
 if grep -qF "$SECRET_TS" "$LOG" 2>/dev/null; then bad "78q. the raw secret-shaped value reached the issue body"; else ok "78q. the raw value does not reach the issue body"; fi
 assert_file_match "$LOG" 'could not be parsed' "78q. the cause is still reported"
 
+# ── 78r. #10234 review P3 (round 19): BOTH published channels are BOUNDED ──
+# 78q pinned the REDACTION of the filed body, not the WIDTH of the `80`, and
+# not the Actions log at all. `redact` leaves a non-secret shape intact, so
+# raising the width (or dropping the truncation) shipped green while an
+# app-controlled LastModified ran unbounded into a PUBLIC body; and the raw
+# value reached the Actions log through the sibling `treating pool as stale`
+# line whatever the body did. `a@`x50 survives every redact rule (no 20-char
+# alnum run, no quotes, no path shape) and is unparseable as a date, so this
+# case measures the WIDTH and the CHANNEL, not the scrubber.
+LONG_NONSECRET_TS="$(python3 -c 'print("a@"*50)')"   # 100 chars
+LONG_TS_PREFIX="${LONG_NONSECRET_TS:0:80}"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$LONG_NONSECRET_TS"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78r. an over-long unparseable timestamp still reds"
+assert_not_contains "$OUT" "$LONG_NONSECRET_TS" "78r. the ACTIONS LOG does not publish the whole value"
+# The prefix assertion is what pins the width from ABOVE: it fails if the bound
+# is lowered, and the not-contains above fails if it is raised or dropped.
+assert_contains "$OUT" "$LONG_TS_PREFIX" "78r. the Actions log keeps the first 80 chars, so the bound is 80 and not merely some bound"
+if grep -qF "$LONG_NONSECRET_TS" "$LOG" 2>/dev/null; then bad "78r. the whole value reached the filed body"; else ok "78r. the filed body does not carry the whole value"; fi
+assert_file_match "$LOG" 'could not be parsed' "78r. the cause is still reported in the body"
+
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case
 export R2_TEAMS=$'backups/teamA/'

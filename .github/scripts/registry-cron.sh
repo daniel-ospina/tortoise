@@ -1148,7 +1148,12 @@ if [ "$R2_OK" = "1" ]; then
         if [ "$newest_ts" = "0" ]; then
           # An unparseable timestamp is an unmeasurable pool — fail loud, never
           # report it fresh.
-          log "team ${org_id}: unparseable archive timestamp '${newest}' — treating pool as stale"
+          # #10234 review P3 (round 19): this value is app-controlled and THIS
+          # line reaches the Actions log, while the round-18 fix redacted only
+          # the filed body (`UNPARSEABLE_TEAMS`, below). Same value, other
+          # channel — an unredacted secret shape here is the leak 78q exists to
+          # prevent, so scrub and bound BOTH channels or the fix is half a fix.
+          log "team ${org_id}: unparseable archive timestamp '$(redact_truncate "$newest" 80)' — treating pool as stale"
           POOL_STALE=1
           # #10234 review P2 (round 4): this is the ONLY pool-stale cause with no
           # healthy reading. The other two are ambiguous — "team prefix present
