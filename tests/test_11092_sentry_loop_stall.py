@@ -283,8 +283,10 @@ def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
     # `--log-level`; nothing in `tortoise/` or `entrypoint.sh` sets a level for
     # `tortoise.*`), so `tortoise.api` is effectively WARNING in production and a
     # `.debug()` record is dropped there. The production per-abort signal is
-    # uvicorn's own `ERROR: Exception in ASGI application` traceback (see
-    # `hosted_api.py:3147-3149`), which is not ours to silence.
+    # uvicorn's own `Exception in ASGI application` ERROR record with traceback
+    # (see the ⛔ block in `_unhandled_exception_handler`), which is not ours to
+    # silence. So `caplog` observes this record only because the test RAISES the
+    # level; the assertion pins the call, not a production emission.
     #
     # The level is asserted as `< ERROR` rather than `== DEBUG` because that is
     # the property this repo DEPENDS on: Sentry's logging integration captures at
@@ -295,8 +297,8 @@ def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
         r.levelno < logging.ERROR and "client disconnected" in r.getMessage()
         for r in caplog.records
     ), (
-        "a benign disconnect must still be logged below ERROR — one record per "
-        "abort, below the level Sentry turns into an event"
+        "a benign disconnect must still emit one sub-ERROR record wherever the "
+        "level is enabled — below the level Sentry turns into an event"
     )
     # Review round 1 (P3): the response SHAPE is deliberately unchanged. A 204
     # for a request whose body never arrived would tell a slow-but-alive caller

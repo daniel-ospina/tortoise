@@ -3142,8 +3142,8 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     # re-raises after this handler returns, and the Sentry Starlette integration
     # captures the re-raised exception through `capture_event`, bypassing this
     # module's helpers. `ignore_errors` in `tortoise/sentry.py::init` is the
-    # guard that stops THAT path; uvicorn still logs its own
-    # `ERROR: Exception in ASGI application` (round 1, P2 — not fixable here).
+    # guard that stops THAT path; uvicorn still logs its own `Exception in ASGI
+    # application` ERROR record, with traceback (round 1, P2 — not fixable here).
     # ⛔ CLASSIFICATION CANNOT BREAK THE 500 (review round 3, P3). This import and
     # call used to sit outside any `try`, in an exception HANDLER — an error here
     # would have escaped the handler and produced no response at all, instead of
@@ -3180,17 +3180,19 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
         # in `tortoise/` or `entrypoint.sh` sets a level for `tortoise.*` — so
         # `tortoise.api` is effectively WARNING there and `Logger.isEnabledFor`
         # drops the record (reproduced under the real `dictConfig`). The PRODUCTION
-        # per-abort signal is uvicorn's own `ERROR: Exception in ASGI
-        # application` + traceback, from `ServerErrorMiddleware`'s unconditional
-        # re-raise (see the block above `:3147-3149`) — not this line.
+        # per-abort signal is uvicorn's own `Exception in ASGI application` ERROR
+        # record with traceback, from `ServerErrorMiddleware`'s unconditional
+        # re-raise (see the ⛔ block above in this method) — not this line.
         #
         # Why not WARNING instead? Because uvicorn already emits an ERROR with the
         # full traceback for every abort, so raising ours would ADD a record per
-        # abort to the very storm this change exists to make cheap, while adding no
-        # signal that is not already there. If our own structured one-liner IS
-        # wanted in production, the fix is a uvicorn `--log-config`/dictConfig arm
-        # that sets `tortoise.*` to DEBUG and pins that config — a deployment
-        # change, recorded rather than taken silently here.
+        # abort to the very storm this change exists to make cheap, while adding
+        # only the request line (method + path) — which uvicorn's traceback does
+        # not carry, so it is not nothing, just not worth a record per abort. If
+        # that attribution IS wanted in production, the fix is a uvicorn
+        # `--log-config`/dictConfig arm that sets `tortoise.*` to DEBUG and pins
+        # that config — a deployment change, recorded rather than taken silently
+        # here.
         _logging.getLogger("tortoise.api").debug(
             "client disconnected: %s %s", request.method, _path)
     else:
