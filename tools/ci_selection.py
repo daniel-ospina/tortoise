@@ -3368,15 +3368,22 @@ class DuplicateManifestKeyError(ValueError):
       the unioned document, its duplicate sequence entries and its malformed
       shapes. It is the validator ``.gitattributes`` pairs with ``merge=union``
       (#5373).
-    * this refusal is authoritative for READERS — it is the one parse every
-      consumer of the manifest reaches (``load_manifest``/``--integrity``,
-      ``ci_manifest._load``, ``ci_timing._manifest_of``), so a consumer that
-      never passes through the CI job still refuses the shape instead of
-      packing by a silently collapsed map.
+    * this refusal is authoritative for READERS — the parse every consumer
+      reaches (``load_manifest``/``--integrity``, ``ci_manifest._load``,
+      ``register``), so a consumer that never passes through the CI job still
+      refuses the shape instead of packing by a silently collapsed map.
+    * ⛔ ONE READER IS A DELIBERATE EXCEPTION, and it has to stay NAMED as one:
+      ``ci_timing._manifest_of`` parses with the plain ``yaml.safe_load`` (see
+      its LENIENT-ON-PURPOSE note in ``tools/ci_timing.py``). Raising there was
+      tried in #10790 and reverted, because it pre-empted
+      ``ci_timing.integrity_problems``' composed
+      ``duplicate_mapping_key_issues(text=…)`` walk, which NAMES the key as a
+      red instead of a could-not-evaluate. It is not a consumer of this parse;
+      its own write path is guarded by that walk.
 
     So the refusal belongs at the PARSE *as well*, not only in a check composed
-    onto a dict that has already lost the information: every reader of this
-    file gets it, and no future entry point can be half-wired.
+    onto a dict that has already lost the information: every reader that goes
+    through this parse gets it, and no future entry point can be half-wired.
 
     What this refuses is a repeat among a mapping's OWN pairs. A ``<<:`` merge
     key that overrides an inherited key is **not** a duplicate: the YAML merge
@@ -3571,9 +3578,14 @@ def _duplicate_key_loader():
 def parse_manifest_text(text: str) -> dict:
     """The manifest text as a mapping, refusing a duplicate mapping key.
 
-    The one parse of ``config/ci-surfaces.yml`` into a mapping — the path every
-    READER of this file takes (``load_manifest``/``--integrity``,
-    ``ci_manifest._load``, ``ci_timing._manifest_of``). It is not the only
+    The strict parse of ``config/ci-surfaces.yml`` — the path every READER of
+    this file takes, with ONE deliberate EXCEPTION: ``ci_timing._manifest_of``
+    parses with the plain ``yaml.safe_load`` so that
+    ``ci_timing.integrity_problems`` can NAME a duplicate key as a red instead
+    of raising. The readers that take THIS path are
+    ``load_manifest``/``--integrity``, ``ci_manifest._load`` and ``register``
+    (see ``DuplicateManifestKeyError`` for the division of labour and the
+    reason the exception exists). It is not the only
     guard on the file: ``tools/registry_integrity.py`` reads the same text with
     ``yaml.compose`` (the raw node graph, no constructor) and is the
     authoritative validator for the union-merge shape that ``.gitattributes``
@@ -4065,11 +4077,20 @@ def duplicate_mapping_key_issues(
     text: str | None = None,
     shown: str | None = None,
 ) -> list[str]:
-    """#5373: a duplicate MAPPING key — invisible to every reader in this module.
+    """#5373: a duplicate MAPPING key — the walk that answers for the FILE AS TEXT.
 
-    :func:`load_manifest` goes through ``yaml.safe_load``, which keeps only the
+    ⛔ THE PREMISE IN THIS PARAGRAPH IS DATED, NOT CURRENT, and the distinction is
+    the whole point of keeping it: when this walk was written,
+    :func:`load_manifest` went through ``yaml.safe_load``, which keeps only the
     LAST of two duplicate keys, so ``integrity()``/``duplicate_entries()`` and
-    every selection path are structurally blind to the class. Meanwhile
+    every selection path were structurally blind to the class. **That stopped
+    being true in #10790**: ``load_manifest`` is now
+    ``_normalize_surfaces(parse_manifest_text(...))``, and
+    :func:`parse_manifest_text` RAISES :class:`DuplicateManifestKeyError`, so the
+    reader side refuses the shape by construction. What still needs THIS walk is
+    the other question — a document as TEXT, and the refresher's in-memory
+    ``text=`` pre-write check (below), where the graded document is not a path
+    anything parsed yet. Meanwhile
     ``tools/ci_timing.py --refresh-durations`` updates the FIRST occurrence in
     the TEXT (its own contract,
     ``tests/test_ci_timing.py::test_durations_bridge_updates_a_quoted_key_instead_of_appending_a_duplicate``),

@@ -109,9 +109,12 @@ def _probe_payload() -> dict:
     up" and does not pretend to. Declare an endpoint (even the default) to move a
     down daemon into the can't-reach-it state.
 
-    ⛔ The rewrite applies to a LEGACY word ONLY — one that cannot be translated
-    without the configuration fact (`LEGACY_WORDS_NEEDING_CONFIGURATION`, i.e.
-    `tortoise_unavailable`). A word the DRIVER already reports inside the recorded
+    ⛔ The rewrite applies to a word OUTSIDE the recorded term set
+    (`CLIENT_STATUS_TERMS`) — in practice the `tortoise_unavailable` outage word
+    and the flat legacy `not_configured` (both resolve to `unconfigured` and
+    neither can be translated without the configuration fact). It is NOT keyed on
+    `LEGACY_WORDS_NEEDING_CONFIGURATION`, which is narrower and would pass
+    `not_configured` through verbatim. A word the DRIVER already reports inside the recorded
     term set passes through VERBATIM, url included (#10605 review, P1): the
     credential-less refusal arrives as the recorded `unconfigured` carrying the
     endpoint it actually resolved and contacted, and rewriting THAT to

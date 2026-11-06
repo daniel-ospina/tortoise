@@ -3847,11 +3847,17 @@ def paid_vs_selected_cli(args) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import ci_selection  # lazy by design
 
-    # `_manifest_of` is this module's existing seam for exactly this — it parses
-    # through `ci_selection.parse_manifest_text` (which refuses a duplicate
-    # mapping key, #10790) and normalizes with
-    # `ci_selection._normalize_surfaces`, i.e. what `load_manifest()` does for
-    # every other consumer. Feeding the raw YAML straight to `fast_pool` would
+    # `_manifest_of` is this module's existing seam for exactly this — and it is
+    # the LENIENT one, BY DESIGN (see its ⛔ note above): it parses with the
+    # plain `yaml.safe_load`, which keeps the LAST of two duplicate keys, and
+    # normalizes with `ci_selection._normalize_surfaces`. It does NOT go through
+    # `ci_selection.parse_manifest_text`, so it does not refuse a duplicate
+    # mapping key — and `--paid-vs-selected` composes no duplicate walk of its
+    # own either, so on this path a union-merged manifest is read SILENTLY
+    # COLLAPSED. That residual is known, not implied: hardening `_manifest_of`
+    # was tried in #10790 and reverted, because raising there pre-empts the NAMED
+    # red `integrity_problems` returns on the WRITE path (#5373). What the seam
+    # is for is the SHAPE: feeding raw YAML straight to `fast_pool` would
     # iterate a scalar surface character-by-character and raise on a None one.
     try:
         manifest = _manifest_of(Path(args.manifest).read_text())

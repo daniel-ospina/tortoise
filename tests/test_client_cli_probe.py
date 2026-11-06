@@ -108,6 +108,44 @@ def test_status_forwards_driver_not_configured(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["status"] == "unconfigured"
 
 
+def test_the_rewrite_rule_is_the_TERM_set_not_the_narrower_legacy_pair(monkeypatch, capsys):
+    """The rewrite's rule is `raw not in CLIENT_STATUS_TERMS` — stated as code.
+
+    This probe's docstring claimed the rewrite applies to a word in
+    `LEGACY_WORDS_NEEDING_CONFIGURATION` (in practice `tortoise_unavailable`),
+    which is a NARROWER rule than the code applies and differs on a reachable
+    input: `not_configured` is a flat legacy word that resolves to
+    `unconfigured` and is NOT in the recorded term set, so the code rewrites it
+    (`url: None`, `configured: false`) where the narrower rule passes it
+    through verbatim (#10790 review, P3).
+
+    No behavioural defect was in the code — the payload is defensible for
+    `not_configured` too — so this pins BOTH halves: the payload the code
+    produces for that word, and the rule the docstring names. Without the
+    second arm a maintainer "correcting" the code toward the narrower sentence
+    would silently change a legacy-word payload and no test would red.
+    """
+    monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+    monkeypatch.setattr(cli, "endpoint_declared", lambda: False)
+    monkeypatch.setattr(cli, "status", _fake_status("not_configured"))
+
+    assert cli.main(["status"]) == 4  # a SET-UP gap, not an outage
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "unconfigured"
+    assert out["url"] is None, (
+        f"a legacy word with no declared endpoint must drop the driver's "
+        f"default url, as `tortoise_unavailable` does: {out}")
+    assert out["configured"] is False, out
+
+    doc = " ".join((cli._probe_payload.__doc__ or "").split())
+    assert "CLIENT_STATUS_TERMS" in doc, (
+        "the docstring must state the rule the code applies — a word OUTSIDE "
+        "`CLIENT_STATUS_TERMS`. Naming only "
+        "`LEGACY_WORDS_NEEDING_CONFIGURATION` describes a narrower rule that "
+        "does not rewrite `not_configured`, which is the word this test just "
+        "rewrote")
+
+
 def test_a_missing_key_refusal_keeps_the_endpoint_it_probed(monkeypatch, capsys):
     """The driver's `unconfigured` is passed through VERBATIM (#10605 review, P1).
 

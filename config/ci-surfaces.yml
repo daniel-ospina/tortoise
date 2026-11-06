@@ -4913,7 +4913,7 @@ surfaces:
   # the `manifest-integrity` check reds on). FOUR arms drive a REAL searchable
   # graph through the `sdk` fixture, and those skip VISIBLY via
   # `LIVE_URI_SKIP_REASON` on a URI-less leg rather than passing vacuously; the
-  # other THIRTEEN are hermetic and run on every leg — including
+  # other FOURTEEN are hermetic and run on every leg — including
   # `test_the_m2_capture_lane_reports_the_gap_on_its_own_receipt`, the only
   # end-to-end exercise of the `sdk.py` wrapper. Stated as a split because a
   # reader who takes the whole file as docker-only would mis-size the shard and
