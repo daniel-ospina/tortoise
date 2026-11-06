@@ -176,11 +176,26 @@ SATISFIES_WORDS = ("satisfy", "satisfies", "satisfied")
 # which is the #10534 hole the arm exists to close. A resolving word must therefore be followed by
 # punctuation/whitespace only; a linking word keeps the lenient window, because that leniency is
 # what makes `Refs, as agreed, #12` a claim.
+#
+# ⛔ "WHITESPACE ONLY" HAS TO MEAN WHITESPACE AND A COLON — round 5 narrowed the WINDOW and left the
+# SEPARATOR's class carrying every clause end (`.` `;` `,` `(` `[` `—`), which re-opened the same
+# false PASS by a different door: a sentence-final verb plus punctuation then read as a closing
+# keyword and RESOLVED the claim. Measured at the merge head (review round 20, P1), rc 0 with
+# `closes_landing.parse_closing_refs(body) == []` — GitHub performs no close and this lint said there
+# was nothing to say:
+#     `Part of #10543 — reverses the recorded #10119 trade.`
+#     `The arm was added to close. #10543 is the issue this PR serves.`      -> NOTHING FLAGGED
+# plus `Closes. #100 remains open.`, `Closes — #100 is the umbrella.`, `the gate resolves (#9957)`.
+# The spelling below is `tools/closes_landing.py`'s OWN separator (`_CLOSING_SEPARATORS["lenient"]`
+# = `\s*:?\s*`), this repo's authoritative model of what GitHub acts on, so the two grammars can no
+# longer disagree about whether a body closed a reference. It is a NARROWING: the only error it can
+# introduce is a claim this lint no longer credits (a finding where there was none), never a close
+# it invents.
 CLAIM_RE = re.compile(
     r"\b(?:(?P<kw>refs?|part\s+of|serves?|addresses)\b"
     r"(?P<mid>[^\n#]{0,16}?)"
     r"|(?P<ckw>satisf(?:y|ies|ied)|close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b"
-    r"(?P<cmid>[\s:.,;()\[\]–—]*))"
+    r"(?P<cmid>[\s:]*))"
     # A COMMA-CONTINUED list is claimed in full: `Part of #10085, #10063` claims BOTH, and
     # reading only the first dropped every subject after it (F3) — measured on three open PRs
     # (#11038, #11065, #11093). The list shape is unambiguous in a way a bare `#N` elsewhere on
@@ -273,16 +288,29 @@ _DET = rf"(?:an?{_EMPH}|the{_EMPH}|this{_EMPH}|these{_EMPH}|those{_EMPH})?"
 # depending on where the author put the word `closing`. Flagging it is the FALSE-POSITIVE
 # direction — the author is answering the question the block asks.
 _CLOSING_OBJ = rf"{_DET}{_CLOSING_STEM}{_EMPH}{_REF_LIST}"
+# ⛔ A DECLINE MAY CARRY A REASON, AND THE REASON MUST NAME NO REFERENCE (round 20, P2). The tail
+# after the object admitted `$`, `.`, `;`, a comma, or a conjunction — so the most natural way to
+# write the honest sentence, with its REASON attached, was FLAGGED (class B, the direction the
+# module's doctrine says to avoid):
+#     `Refs #100 — deliberately not closing this issue because it is a measurement PR.`   -> rc 3
+#     `Refs #100 — deliberately not closing this issue (measurement only).`              -> rc 3
+#     `Refs #100 — no close intended.`                                                   -> rc 3
+# The shapes below are admitted as ONE structural rule rather than a longer word list: the remainder
+# must contain NO `#`, so a reason clause can never sweep a claim into the decline —
+#     `Refs #100 — deliberately not closing this issue because #300 must land.`  -> FLAGGED
+# which is correct: that sentence names a live claim in the same breath as the decline.
+_REASON_TAIL = rf"(?:{_EMPH}(?:because|since|as|intended)\b|[ \t]*\()[^#\n]*$"
 DECLINE_RE = re.compile(
     # (a) the author's convention: `deliberately not …`
     rf"deliberately{_EMPH}not"
     rf"(?={_DECLINE_TAIL}$"
     rf"|{_EMPH}{_DET}(?P<stem_a>{_CLOSING_STEM})"
     rf"(?P<obj_a>{_EMPH}(?:{_DET}{_REF_LIST}|{_CLOSING_OBJ}))?"
-    rf"{_DECLINE_TAIL}(?:$|[.;]|,(?!{_LIST_SEP}#\d{{1,7}})|{_EMPH}(?:and|or){_EMPH}))"
+    rf"{_DECLINE_TAIL}(?:$|[.;]|,(?!{_LIST_SEP}#\d{{1,7}})|{_EMPH}(?:and|or){_EMPH}"
+    rf"|{_REASON_TAIL}))"
     # (b) the ordinary-English shapes: the closing word must END its clause or name the reference.
     rf"|\b(?:does{_EMPH}not|not|no{_EMPH}|non-)(?:{_EMPH})?{_DET}{_CLOSING_STEM}"
-    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?{_DECLINE_TAIL}$",
+    rf"(?P<obj_b>{_EMPH}{_DET}{_REF_LIST})?(?:{_DECLINE_TAIL}$|{_REASON_TAIL})",
     re.IGNORECASE,
 )
 # ⛔ A DECLINE IS ABOUT *ITS OWN* REFERENCE — the two properties the grammar alone cannot express,
@@ -302,6 +330,20 @@ DECLINE_RE = re.compile(
 #      noun there (`the sprint is`, `the outage on the other box is`) is prose about that noun, so
 #      the reference is NOT declined and the claim stays flagged.
 #
+# ⛔ A SUBJECT IS NOT AN OUTCOME (round 20, P3). The vocabulary above admitted bare `pr`, so a
+# sentence about the PULL REQUEST's own merge state declined the reference and the claim vanished:
+#     `Refs #100 — the PR is not closed.`     -> CLEAN, declined=[100], nothing closes #100
+# `the PR is not closed` says the PR is not merged; it says NOTHING about whether #100 is closed, and
+# it is not the honest convention, which names an ACTION and its object (`this PR does not close the
+# issue`). Two narrowings close it without touching any pinned decline:
+#   * `pr`/`prs` are admitted only as the two-word subject `this PR` / `these PRs` — never bare, and
+#     never behind `the`, so `the PR is not closed` has no route through the bridge;
+#   * the STATE copulas (`is`/`was`/`are`/`were`) are admitted ONLY after a reference-only subject
+#     (`this`/`it`/`that`/`which`), as their own bridge shape — `it is not closed` IS a statement
+#     about the reference and still declines, while `this PR is not closed` does not.
+# Both are NARROWINGS of the decline direction, so the worst case is a false positive (an honest
+# decline flagged) and never a new false PASS. The pinned controls below cover both sides.
+#
 # ⛔ WHY AN ALLOW-LIST AND NOT `\w+`-TOLERANCE. The measured false-negative pair at `e7dd41058`
 # (review, P2) was `Refs #1234 — deliberately does not close the issue.` and
 # `Refs #1234 — this PR does not close the issue.` — both the honest convention, both FLAGGED
@@ -309,16 +351,33 @@ DECLINE_RE = re.compile(
 # subject broke it. Admitting `pr`/`we`/`author`/`deliberately` fixes those without re-admitting
 # `the sprint is` / `the estimate does` (the round-12 negatives), which still fail the bridge.
 _DECLINE_TAIL_BRIDGE = _DECLINE_TAIL
-_SUBJECT_WORD = r"(?:this|it|that|which|we|i|they|author|pr|prs)"
-_COPULA = (r"(?:is|was|are|were|does|do|did|has|have|had|will|would|should|must|could|can"
+_SUBJECT_WORD = r"(?:this|it|that|which|we|i|they|author)"
+# `pr` is NOT a subject word: it is admitted only in the two-word form whose demonstrative makes it
+# the reference (`this PR`), so `the PR is not closed` cannot reach the decline.
+_SUBJECT_PHRASE = rf"(?:this|these){_EMPH}(?:pr|prs)"
+# An ACT (do-support or a modal): the subject may be a human agent and the verb takes an object.
+_COPULA = (r"(?:does|do|did|has|have|had|will|would|should|must|could|can"
            r"|may|might)")
-# Every word the bridge may contain: the human subjects/copulas above, plus the article that can
-# only introduce `the author`, plus `deliberately` (which `DECLINE_RE`'s ordinary-English
+# A STATE of the subject (`is`/`was`/`are`/`were`): admitted ONLY behind a reference-only subject,
+# because `it is not closed` is a statement about the reference while `the PR is not closed` is a
+# statement about the pull request. See the comment above the bridge for the measured shape.
+_STATE_COPULA = r"(?:is|was|are|were)"
+_REF_ONLY_SUBJECT = r"(?:this|it|that|which)"
+# Every word the bridge may contain: the human subjects/phrases/copulas above, plus the article that
+# can only introduce `the author`, plus `deliberately` (which `DECLINE_RE`'s ordinary-English
 # alternatives do NOT start on, so it lands here: `— deliberately does not close the issue.`).
-_BRIDGE_WORD = rf"(?:{_SUBJECT_WORD}|{_COPULA}|the|a|an|deliberately)"
+_BRIDGE_WORD = rf"(?:{_SUBJECT_WORD}|{_SUBJECT_PHRASE}|{_COPULA}|the|a|an|deliberately)"
 _BRIDGE_WORDS_MAX = 3
 _DECLINE_BRIDGE_RE = re.compile(
+    # (i) a STATE of the reference itself: `— it is not closed`, `— this is not closed`.
     rf"^{_DECLINE_TAIL_BRIDGE}"
+    rf"{_REF_ONLY_SUBJECT}{_EMPH}{_STATE_COPULA}{_DECLINE_TAIL_BRIDGE}$"
+    # (ii) the reference IS the subject, with no separate subject word: `#200 is deliberately not
+    #      Closes.`, `Part of #11000 — #11000 is not closed.` — the bridge is the copula alone.
+    rf"|^{_DECLINE_TAIL_BRIDGE}{_STATE_COPULA}{_DECLINE_TAIL_BRIDGE}$"
+    # (iii) an ACT by a named subject: `— this PR does not close the issue`,
+    #       `— the author deliberately does not close the issue`.
+    rf"|^{_DECLINE_TAIL_BRIDGE}"
     rf"(?:{_BRIDGE_WORD}{_EMPH}){{0,{_BRIDGE_WORDS_MAX}}}"
     rf"{_DECLINE_TAIL_BRIDGE}$",
     re.IGNORECASE,

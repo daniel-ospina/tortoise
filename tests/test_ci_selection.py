@@ -3077,6 +3077,7 @@ def test_gh_read_cache_tool_change_selects_core_not_tier1():
     r = _sel(["tools/gh_read_cache.py"])
     assert "core" in r["surfaces"], r
     assert "test_gh_read_cache.py" in r["test_files"], r
+    assert r["full"] is False, r
 
 
 def test_issue_process_lint_tool_change_selects_core_not_tier1():
