@@ -1680,9 +1680,50 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # "pull_request", load_manifest())` -> surfaces=[], full=False, test file ABSENT;
              # after -> surfaces=['core'], present. Same #1349/#3332/#3616 class as above.
              # ⚠️ n is a SNAPSHOT — re-measure, do not trust a count.
-             # Pinned by
-             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1.
-             "tools/gh_write_preflight.py",
+             # Pinned by TWO cases, and they do not cover the same thing:
+             # tests/test_ci_selection.py::test_gh_write_preflight_tool_change_selects_core_not_tier1
+             # (the entry EXISTS; green under either the exact path or the prefix) and
+             # tests/test_ci_selection.py::test_gh_write_preflight_carveout_is_a_PREFIX_so_a_sibling_cannot_be_dropped
+             # (the entry is a PREFIX — reds on THREE mutations, not just a narrowing: narrowed
+             # back to the exact path, widened to the blanket `tools/`, and removed outright. The
+             # WIDENING is the one the sibling asserts cannot catch — a blanket `tools/` still
+             # claims both siblings — so the body carries an over-match negative control
+             # (`tools/other_tool.py` must not claim this suite), which is the bound the prefix's
+             # stated cost relies on. Measured: under the exact path the second case FAILS and the
+             # first still passes, which is why the first alone did not pin this line).
+             # ⚠️ Both citations carry their `tests/…py` path deliberately. The ratchet that makes
+             # "Pinned by" checkable only resolves citations written as `tests/<path>.py::<name>`,
+             # so a bare `::<name>` is INVISIBLE to it — such a citation would silently survive a
+             # rename or deletion of the very case that pins this line.
+             # #11027: PREFIX, not the exact path (the #9487 P2 lesson applied to this entry).
+             # NOTE THE TUPLE — which tuple holds a `tools/` path is what decides its fate, and
+             # that is why this entry is in `CORE_ALSO` rather than `TOOL_CARVEOUTS`:
+             #   * `CORE_ALSO` membership KEEPS the path (`_selection_relevant`) AND CLAIMS it, so
+             #     `core` is forced into the selection — the `matched.add("core")` in `select()`'s
+             #     `CORE_ALSO` branch — hence this entry yields `core` only, `full=False`. Cited by
+             #     SYMBOL, not by line: a line number here has already drifted twice on this entry.
+             #   * `TOOL_CARVEOUTS` membership only KEEPS the path (`_keep_changed`); it claims no
+             #     surface, so a kept path that no `SOURCE_PATTERNS` row matches stays unknown and
+             #     fails closed to the FULL matrix — `tools/work_claim.py` -> all eight surfaces,
+             #     `full=True`. Measured by moving THIS entry there: `full=True`, every surface.
+             #   * a KEPT path's surface is `SOURCE_PATTERNS`' job (`tools/longmem_eval/x.py` ->
+             #     `eval`, `full=False`).
+             #   * in NEITHER tuple is the path kept at all: `surfaces=[]`, `full=False` — the
+             #     tier-1 smoke set, which does not carry this suite. That is the silent drop below.
+             # ⚠️ Both of the first two are measured against paths that NO `SOURCE_PATTERNS` row
+             # matches, so the tuple alone is the variable that differs between them — do not
+             # restate this as "the row decides", which was wrong in the opposite direction.
+             # The mechanism here is the same `startswith`, so an EXACT path claims only the
+             # spelling that exists today and silently re-opens this very drop for a split-out
+             # sibling (`gh_write_preflight_<something>.py`): the gate would again be a diff that
+             # runs none of its own arms. Over-matching costs extra CI on a file that is not the
+             # tool; under-matching ships the write proof nobody runs.
+             # ⛔ The prefix does NOT buy RENAME survival — a renamed `tools/write_preflight.py` no
+             # longer carries the stem, and nothing here claims it. Said explicitly because this
+             # sentence previously read as if both shapes were covered, which is the "a pin that
+             # does not exist" class (the prefix case's docstring states the same boundary; a
+             # rename-detection pin belongs with the diff that performs the rename).
+             "tools/gh_write_preflight",
              # #7814 review P2: the queue-reconcile schedule installer owns
              # tests/test_install_queue_reconcile_schedule.py, registered
              # `core`, but `tools/` is swallowed by NON_PYTHON_PREFIXES and no
@@ -3740,6 +3781,84 @@ def duplicate_entries(manifest: dict) -> list[str]:
                 reported.add(f)
             seen.add(f)
     return dupes
+
+
+def duplicate_mapping_key_issues(
+    manifest_path: Path | None = None,
+    *,
+    text: str | None = None,
+    shown: str | None = None,
+) -> list[str]:
+    """#5373: a duplicate MAPPING key — invisible to every reader in this module.
+
+    :func:`load_manifest` goes through ``yaml.safe_load``, which keeps only the
+    LAST of two duplicate keys, so ``integrity()``/``duplicate_entries()`` and
+    every selection path are structurally blind to the class. Meanwhile
+    ``tools/ci_timing.py --refresh-durations`` updates the FIRST occurrence in
+    the TEXT (its own contract,
+    ``tests/test_ci_timing.py::test_durations_bridge_updates_a_quoted_key_instead_of_appending_a_duplicate``),
+    so the post-landing sweep rewrites a weight the shard packer never reads.
+
+    It is not hypothetical: ``config/ci-surfaces.yml`` is ``merge=union``
+    (``.gitattributes``), so a replay in which BOTH sides changed the SAME
+    ``durations:`` row to DIFFERENT values keeps both copies — a merge, a
+    rebase, or a re-applied commit. An identical change on both sides, or a
+    replay only one side touched, emits the row once. This batch PR (#10726)
+    has re-created the class on repeated forward-merges; each occurrence is
+    recorded, dated, in that PR body's fold ledger — a record of what happened,
+    not a claim about the next merge.
+
+    ⛔ DO NOT RESTATE THOSE COUNTS HERE. A series of event counts describes a
+    mechanism that fires on every merge, so it is guaranteed to go stale — and
+    it did, twice within an hour, before this paragraph replaced it. What
+    belongs here is the CONDITION (above) and the instruction (below); the
+    numbers belong where they are dated, one entry per event.
+
+    ``--integrity`` — the check that PR body cited as proof of "0 duplicates" —
+    did not compose this walk until ``dd4f66e6a`` (``02133e21b`` has no
+    ``duplicate_mapping_key_issues`` in ``tools/ci_selection.py``, though
+    ``tools/registry_integrity.py::check_registry`` already walked for duplicate
+    keys, and
+    ``tests/test_registry_integrity.py::test_the_real_registries_are_clean``
+    — registered in BOTH the ``api`` and ``core`` surfaces — already asserted
+    ``check() == []``). That is why the walk is now COMPOSED INTO
+    ``--integrity`` (``dd4f66e6a``).
+
+    ⛔ A GREEN RUN FROM BEFORE A REPLAY DOES NOT COVER THE REPLAY. Measured at
+    ``13a53ef7e``: that head is AFTER ``dd4f66e6a``, and it still carried
+    duplicates of this class, because the replay itself created them and that
+    merge was pushed BEFORE the check ran (``c660ffcee`` records it). Re-run
+    ``--integrity`` after every merge, rebase or re-applied commit into this
+    branch, and judge the COMMITTED TREE rather than a commit subject: a fold
+    merge's subject announces the duplicates its own resolution then removes.
+
+    The walk lives in ``tools/registry_integrity.py`` and is imported rather
+    than re-spelled, so the two entry points cannot disagree about what a
+    duplicate is. A check that cannot run returns a problem and never an empty
+    list: an unrunnable gate must not read as a passing one.
+
+    ``text`` grades a document held in memory instead of one on disk. It exists
+    for ``tools/ci_timing.py::integrity_problems``, which validates the
+    REFRESHED manifest BEFORE ``--refresh-durations`` writes it. Grading the
+    text is a deliberate design choice rather than the only possible one: in the
+    shape that actually reaches that writer — a duplicated TOP-LEVEL
+    ``durations:`` key, which the renderer emits twice and
+    ``validate_refreshed_manifest`` does not report — the duplicate is already
+    in the INPUT file, so a path-based composition would also catch it. Grading
+    the text simply keeps the gate's question ("is the document I am about to
+    write valid?") the one it answers.
+    """
+    path = Path(manifest_path or MANIFEST)
+    tools_dir = str(Path(__file__).resolve().parent)
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    try:
+        import registry_integrity
+    except Exception as exc:  # pragma: no cover - it ships beside this file
+        return [f"{path}: duplicate-key check UNAVAILABLE ({exc}) — not clean"]
+    if text is not None:
+        return registry_integrity.check_registry_text(text, shown or str(path))
+    return registry_integrity.check([path])
 
 
 def unlisted_tests(tests_dir: Path, manifest: dict) -> list[str]:
@@ -6720,7 +6839,16 @@ def main() -> int:
         # at this call site so the union of the two pipelines drops neither — the
         # same rule the folded-in checks followed. Both entry points compose it,
         # so it stays single-sourced.
-        problems = missing + slow_file_issues(manifest) \
+        #
+        # `duplicate_mapping_key_issues` (#5373) is composed FIRST for the same
+        # reason: `ci_manifest` does not own it either — the walk lives in
+        # `tools/registry_integrity.py` and is imported rather than re-spelled.
+        # Without it here, `--integrity` was structurally blind to a duplicate
+        # MAPPING key, which is the one class `config/ci-surfaces.yml`'s
+        # `merge=union` produces on every replay, and the weekly
+        # `--refresh-durations` then rewrites the FIRST copy in the text while
+        # every reader loads the LAST.
+        problems = duplicate_mapping_key_issues() + missing + slow_file_issues(manifest) \
             + _manifest_contract_issues(manifest) \
             + carve_shard_issues(manifest) \
             + slow_shard_issues(manifest) \

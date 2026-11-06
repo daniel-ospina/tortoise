@@ -3279,6 +3279,20 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
         f"lane that owns it (§9.1 residual (a), `#10017`): {note}")
 
 
+# ⛔ KEPT, NOT REMOVED — the resolution of a merge where BOTH sides were right. The
+# #10692 review P2 asked for this test's REMOVAL: as it stood, it called
+# `record_read.served_turn_count` with literals and passed VERBATIM on the
+# pre-#10000 tree (the predicate is not in this diff), so it discriminated
+# nothing while being presented as one of the two independent falsifiers of the
+# seeder's declared length. `origin/main` (#10675, review P3) answered the SAME
+# critique the other way — it kept the test and made it non-vacuous: every arm is
+# now asserted BY VALUE (`(3, "")` on the unarmed arm, `None` + `"short copy"`
+# on the armed one) instead of by `!= (0, "")`, and three HALF-REPAIRED arms were
+# added. Taking this branch's deletion would silently drop those additions, so
+# the removal no longer applies. The semantics are ALSO pinned independently
+# where the P2 said they are (`test_hosted_api.py`'s short-transcript 503,
+# `test_onboarding_seed_endpoint.py`'s read-door assertion, and the note at the
+# end of `test_the_demo_seed_declares_NO_length_it_cannot_serve` above).
 def test_the_shared_read_predicate_accepts_0_and_rejects_a_short_claim():
     """The predicate both session doors call must accept 0 and reject a short claim.
 
