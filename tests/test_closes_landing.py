@@ -4821,21 +4821,25 @@ def test_no_ITEM_opens_inside_an_HTML_block_and_none_of_its_text_is_HIDDEN():
         assert cl.parse_closing_refs(body) == [100], body
 
 def test_a_WIDE_GAP_marker_in_a_NEW_blockquote_after_an_HTML_block_is_CODE():
-    """#11287 — round 52's per-line `_html_here`, pinned on the shape the review round reported.
+    """#11287 — the fail-open the review round reported, pinned on the shape it reported.
 
-    §4.6's types 1-6 interrupt a paragraph and a type-7 leaf (`<span>`) cannot interrupt one, so the
-    line under `> <span>` is that block's raw TEXT and the block ends once that container does. The
-    marker then arrives in a NEW blockquote, and `2.` + five spaces is §5.2's wide-gap item: one
-    space is the delimiter and the remaining four are the item's indented CODE block —
+    An HTML block takes NO lazy continuation: the unquoted `    x` ends the blockquote that held
+    `> <span>`, so it is a top-level indented CODE block, and the marker then arrives in a NEW
+    blockquote. `2.` + five spaces is §5.2's wide-gap item — one space is the delimiter and the
+    remaining four are the item's indented CODE block:
 
         `> <span>` + `    x` + `> 2.     Closes #100`
             renderer: `<blockquote><span></blockquote><pre><code>x</code></pre><blockquote>
             <ol start="2">…<pre><code>Closes #100`  -> the keyword is CODE, so every arm owes `[]`.
 
-    The round-46..51 heads credited it in ALL FOUR arms (a `_html_here` carried from the
-    container's opener line exempted the marker from the indented-code rule); `origin/main` refused
-    it in the two arms `--pr` uses. Round 52 made `_html_here` the LINE's own answer, and this test
-    reds on the round-51 tree (`1bbc16ce57`) — that is the property it exists to keep.
+    The round-46..51 heads credited it in ALL FOUR arms; `origin/main` refused it in `strict` and
+    `indented_code` and credited it in `lenient` (the pre-existing #11156 direction), and round 52
+    (`cc8f7baf02`, merged as #11186) closed both. Round 52's term is `_html_rest` — §4.6's opener
+    allowance measured from the containing block's CONTENT column — which ends the phantom paragraph
+    the wide-gap marker used to ride as a continuation. ⚠️ `_html_here` is NOT the term: it is
+    `False` on the marker line at BOTH trees, and its "this line's own answer" comment predates
+    round 52. This test reds on the round-51 tree (`1bbc16ce57`) — that is the property it exists to
+    keep.
 
     ⚠️ Not #11268 (the `indented_code` arm crediting inside a DEEPER blockquote) and not #11156
     (`strip_code` never blanks raw-HTML content): what is measured here is the HTML block's END,
