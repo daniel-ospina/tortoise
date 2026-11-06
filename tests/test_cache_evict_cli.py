@@ -368,6 +368,25 @@ def test_a_licensed_population_dry_runs_and_the_metric_is_a_MEASUREMENT(wired, t
     assert body["metric"]["dry_run"] is True
 
 
+def _verdict(body: dict):
+    """The report's verdict, whichever arm emitted it.
+
+    Three arms emit their own shape — a bare `{"verdict": ...}` for UNBOUNDED / an
+    unreadable report / an unmeasurable cache, and the full body (`eviction.metric`) for
+    a pass that ran. Reading both keeps these tests about the EXIT CODE rather than about
+    which arm answered.
+    """
+    if "verdict" in body:
+        return body["verdict"]
+    return body.get("eviction", {}).get("metric", {}).get("verdict")
+
+
+def _reason(body: dict) -> str:
+    if "reason" in body:
+        return body["reason"]
+    return body.get("eviction", {}).get("metric", {}).get("reason") or ""
+
+
 def _parity_report(tmp_path, *, instrument: str):
     path = tmp_path / "parity.json"
     path.write_text(json.dumps({
@@ -504,4 +523,140 @@ def test_a_report_that_is_not_utf8_is_a_REFUSAL_not_a_traceback(wired, tmp_path)
         "--parity-report", str(path), "--parity-graph", "tortoise"))
 
     assert code == 3, "unreadable evidence is a refusal about the STORE, not a typo"
+    assert graph.mutations == []
+
+
+# ── the refusal MAPPINGS, and the report that must survive a bad --out ────────
+#
+# ⛔ Each of these was pinned by NOTHING: satisfying the handler with an exception
+# that never fires (e.g. `except ZeroDivisionError`) left all 17 CLI tests green, and
+# removing `_emit`'s OSError fallback left all 95 across the suite green. A regression in
+# any of them turns a REFUSAL (3) into a traceback with exit 1 — this file's USAGE code —
+# or destroys the only record of a run that already committed deletes.
+
+
+def test_an_unwritable_out_does_not_destroy_a_completed_runs_record(wired, tmp_path,
+                                                                    capsys):
+    """The report IS the record of a destructive run; a bad `--out` must not eat it.
+
+    ⛔ The unwritable path here is not a typo — it is the ENOSPC / read-only-mount /
+    stale-directory case, which surfaces AFTER `evict()` has committed deletes. Without
+    the fallback the run exits 1 ("retry the FLAGS") with no record, and a scheduler
+    keyed on 1 may re-run the sweep and delete a second licensed batch.
+    """
+    client, _unused = wired
+    graph = _Graph(delete_removes=4, fail_recount=True)
+    import tools.cache_eviction_census as census
+
+    census._connection = lambda ep: (client, graph)  # type: ignore[assignment]
+    unwritable = tmp_path / "a-directory"
+    unwritable.mkdir()                      # a DIRECTORY cannot be written to as a file
+
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "5", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(_parity_report(tmp_path,
+                                              instrument="tools/turn_parity_census.py")),
+        "--parity-graph", "tortoise", "--out", str(unwritable),
+        "--execute", "--confirm-graph", "tortoise"))
+
+    body = json.loads(capsys.readouterr().out)   # fell back to STDOUT
+    assert body["metric"]["nodes_evicted"] == 4
+    assert code == 2, "the destructive run's exit code must survive a bad --out"
+
+
+def test_an_unwritable_out_on_a_REFUSAL_still_reports_3(wired, tmp_path, capsys):
+    """The other arm: a refusal must not become a traceback/exit 1 either."""
+    _client, graph = wired
+    unwritable = tmp_path / "a-directory"
+    unwritable.mkdir()
+
+    code = cache_evict.main(_argv(
+        "--population", "Point", "--max-nodes", "5", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(_parity_report(tmp_path,
+                                              instrument="tools/turn_parity_census.py")),
+        "--parity-graph", "tortoise", "--out", str(unwritable)))
+
+    body = json.loads(capsys.readouterr().out)
+    assert _verdict(body) == "REFUSED", body
+    assert code == 3
+    assert graph.mutations == []
+
+
+def test_an_ABSENT_graph_is_refused_and_never_created(wired, tmp_path, monkeypatch):
+    """Reading a non-existent graph CREATES it — so this refusal is the one that stops a
+    refused invocation from being a mutation (R2). The census pins the helper; its USE
+    here was pinned by nothing (`if absent is not None:` disabled left 17/17 green)."""
+    client, graph = wired
+    import tools.cache_eviction_census as census
+
+    monkeypatch.setattr(census, "_absent_graph_refusal",
+                        lambda c, name: f"graph {name!r} does not exist")
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "5", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(_parity_report(tmp_path,
+                                              instrument="tools/turn_parity_census.py")),
+        "--parity-graph", "tortoise"))
+    assert code == 3
+    assert graph.statements == [], f"an absent graph was opened: {graph.statements}"
+    assert client.statements == []
+
+
+def test_a_store_that_cannot_be_REACHED_reports_3_not_1(wired, tmp_path, monkeypatch,
+                                                        capsys):
+    """An unreachable store is a refusal about the STORE, never a flag mistake."""
+    import tools.cache_eviction_census as census
+
+    def boom(ep):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(census, "_connection", boom)
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "5", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(_parity_report(tmp_path,
+                                              instrument="tools/turn_parity_census.py")),
+        "--parity-graph", "tortoise"))
+    body = json.loads(capsys.readouterr().out)
+    assert body["verdict"] == "REFUSED"
+    assert code == 3, "exit 1 would tell the operator to retry FLAGS against a dead store"
+
+
+def test_a_cache_that_cannot_be_MEASURED_reports_3_not_1(wired, tmp_path, monkeypatch,
+                                                         capsys):
+    _client, graph = wired
+    import tools.cache_eviction_census as census
+
+    def boom(*a, **k):
+        raise RuntimeError("INFO memory unreadable")
+
+    monkeypatch.setattr(census, "_absent_graph_refusal", lambda c, n: None)
+    monkeypatch.setattr(cache_evict, "assess", boom)
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "5", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(_parity_report(tmp_path,
+                                              instrument="tools/turn_parity_census.py")),
+        "--parity-graph", "tortoise"))
+    body = json.loads(capsys.readouterr().out)
+    assert body["verdict"] == "REFUSED"
+    assert code == 3
+    assert graph.mutations == []
+
+
+def test_an_invalid_BOUND_refuses_rather_than_sweeping(wired, tmp_path, capsys):
+    """`--max-nodes 0` is the state the executor's own floor exists to refuse."""
+    _client, graph = wired
+    code = cache_evict.main(_argv(
+        "--population", "turn", "--max-nodes", "0", "--ceiling-bytes", "1",
+        "--selector", "m:f", "--record-probe", "m:g",
+        "--parity-report", str(_parity_report(tmp_path,
+                                              instrument="tools/turn_parity_census.py")),
+        "--parity-graph", "tortoise", "--execute", "--confirm-graph", "tortoise"))
+    body = json.loads(capsys.readouterr().out)
+    assert _verdict(body) == "REFUSED", body
+    assert "config refused" in _reason(body), _reason(body)
+    assert code == 3
     assert graph.mutations == []
