@@ -285,6 +285,203 @@ class TestTheHoldIsDrainable:
             again["warnings"]
 
 
+class TestADrainedRefResolvesToWhatTheRunEmitted:
+    """⛔ Review round 6, P1 (measured): the drain minted without `_resolve`.
+
+    The ordinary mint-before-wire pre-pass gates EVERY mint on
+    `not _resolve(ref)`, and `_resolve` reads BOTH maps (`point_ids` AND
+    `event_ids`). The drain called `_mint_endpoint` directly, and that helper
+    dedups on `point_ids` only — so a held ref the SAME run emitted as an EVENT
+    was materialised a second time as a content-identical Point (one identity,
+    `ev_…` and `pt_…` with the same content hash), and because `_resolve`
+    consults `point_ids` first, the restored edge wired the DUPLICATE. The Event —
+    the thing the model actually asserted — lost, and `confirm` bound the store's
+    key to the fabricated copy.
+
+    This is the duplicate manufacturer #10997 exists to remove, produced by the
+    drain half of the same mechanism.
+    """
+
+    def test_the_drain_binds_the_id_the_run_already_emitted(self, tmp_path):
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        first = v2.execute_embed(_EMBED, {}, session_id="s1", hold_store=store)
+        assert len(first["held"]) == 1, first["held"]
+        assert len(store.pending()) == 1, store.summary()
+
+        # run 2: the lookup RESOLVES, and the model emits the held ref as an EVENT
+        # — an identity this run already HAS, which the drain must bind, not mint.
+        embed = {**_EMBED,
+                 "events": [{"content": _REF, "eventKind": "core:occurrence"}]}
+        second = v2.execute_embed(embed, _search(True), session_id="s2",
+                                  hold_store=store)
+
+        events = [e for e in second["payload"]["events"] if e["content"] == _REF]
+        assert len(events) == 1, second["payload"]["events"]
+        event_id = events[0]["id"]
+
+        assert [p for p in second["payload"]["points"] if p["content"] == _REF] == [], (
+            "the drain fabricated a second node for an identity this run already "
+            f"emitted as an Event ({event_id}) — one identity, two ids")
+        assert [o["src"] for o in second["payload"]["operators"]] == [event_id], (
+            "the restored edge wired the drain's duplicate instead of the Event")
+        assert [e["point_id"] for e in second["held_drained"]] == [event_id]
+        assert second["held_drained"][0]["committed"] is True, second["held_drained"]
+        assert not any("minted as" in w for w in second["warnings"]
+                       if "#10997" in w), (
+            "the COMMITTED arm reported a MINT for an identity this run minted "
+            f"nothing for (it bound the run's own Event): {second['warnings']}")
+        assert store.get(second["held_drained"][0]["key"])["minted_id"] == event_id, (
+            "the store bound the key to an id no node in this payload carries")
+        assert store.pending() == [], store.summary()
+        assert second["held"] == [], second["held"]
+
+    def test_a_held_ref_longer_than_the_content_cap_resolves_to_its_event(
+            self, tmp_path):
+        """⛔ Review round 7, P1 (measured): `event_ids` is keyed on the CLAMPED
+        content (`_write_span`, `_MAX_CONTENT` = 1000), while `point_ids` also
+        carries the untruncated key. A `_resolve` that asked one form missed the
+        other, so a >cap ref emitted as an Event was re-minted as a duplicate
+        Point — and the run reported it committed.
+
+        The pre-pass had the same asymmetry (a >cap ref+Event duplicated with NO
+        store at all), which is why the fix is in `_resolve` itself: one resolver,
+        both key forms, and every caller inherits it.
+        """
+        long_ref = "the release train slips to the third quarter because " + "x" * 1400
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        first = v2.execute_embed(
+            {**_EMBED, "operators": [{"src": long_ref, "dst": "the budget is 40k",
+                                      "op_type": "IMPL"}]},
+            {}, session_id="s1", hold_store=store)
+        assert len(first["held"]) == 1, first["held"]
+
+        embed = {**_EMBED,
+                 "events": [{"content": long_ref, "eventKind": "core:occurrence"}],
+                 "operators": [{"src": long_ref, "dst": "the budget is 40k",
+                                "op_type": "IMPL"}]}
+        second = v2.execute_embed(embed, _search(True), session_id="s2",
+                                  hold_store=store)
+        events = [e for e in second["payload"]["events"]
+                  if e["content"].startswith("the release train")]
+        assert len(events) == 1, second["payload"]["events"]
+        event_id = events[0]["id"]
+        assert [p for p in second["payload"]["points"]
+                if p["content"].startswith("the release train")] == [], (
+            "a ref longer than the content cap was re-minted as a duplicate Point "
+            f"beside the Event {event_id}")
+        assert [o["src"] for o in second["payload"]["operators"]] == [event_id]
+        assert second["held_drained"][0]["committed"] is True, second["held_drained"]
+        assert store.pending() == [], store.summary()
+
+    def test_an_identity_that_survived_is_not_reported_as_a_pruned_point(
+            self, tmp_path):
+        """⛔ Review round 7, P2 (measured): once `_pid` can be an EVENT id, the
+        settle's "did it survive?" set (`payload_points` + `_wired`) no longer
+        covers it, and the not-committed arm asserted *"the Point was pruned"*
+        about an identity whose node is right there in the payload.
+
+        The DISPOSITION is unchanged and correct (no surviving edge ⇒ hold again,
+        I2): only the reported cause was false.
+        """
+        store = hold.HoldStore(tmp_path / "hold.jsonl")
+        # The held ref's edge names an ENTITY as its `dst` — a shape the mint refuses
+        # — so the hold carries an edge that can NEVER be re-emitted. Run 1 holds the
+        # ref; run 2 resolves the ref (an emitted Event) but the restored edge drops.
+        entity_embed = {**_EMBED,
+                        "entities": [{"name": "Acme Corp", "kind": "core:organization"}],
+                        "operators": [{"src": _REF, "dst": "Acme Corp",
+                                       "op_type": "IMPL"}]}
+        v2.execute_embed(entity_embed, {}, session_id="s1", hold_store=store)
+        embed = {**entity_embed,
+                 "events": [{"content": _REF, "eventKind": "core:occurrence"}]}
+        second = v2.execute_embed(embed, _search(True), session_id="s2",
+                                  hold_store=store)
+        assert [e["content"] for e in second["payload"]["events"]] == [_REF]
+        assert second["payload"]["operators"] == [], second["payload"]["operators"]
+        assert second["held_drained"][0]["committed"] is False
+        assert len(store.pending()) == 1, store.summary()
+        assert not any("pruned" in w or "endpoint keeps" in w
+                       for w in second["warnings"] if "#10997" in w), (
+            "the run asserted a fate for the ENDPOINT (pruned / kept) that this "
+            f"arm cannot know: {[w for w in second['warnings'] if '#10997' in w]}")
+        assert any("EDGE did not survive" in w for w in second["warnings"]), (
+            "the not-committed arm must name the loss it actually suffered — the "
+            f"restored EDGE, never the endpoint: {second['warnings']}")
+
+
+class TestTheResolverAsksBothKeyForms:
+    """⛔ Review round 8, P1 (measured on the MERGED tree): the asymmetry is not
+    only the drain's — it is `_resolve`'s, so it duplicates with **no store at
+    all**, on the ordinary production call.
+
+    `event_ids` is keyed on the CLAMPED content (`_write_span`, `_MAX_CONTENT`
+    = 1000) while `point_ids` ALSO carries the untruncated key. A pre-pass
+    `_resolve(full_ref)` therefore missed an Event emitted from a >cap ref and
+    materialised a content-identical Point beside it — then wired the operator
+    to the duplicate, and warned that *"no emitted point/event carried it"*
+    about an Event that is right there in the payload.
+
+    Pinned with `hold_store` ABSENT on purpose: this path needs no opt-in, so
+    the defect was reachable on every shipped call, not only on the drain.
+    """
+
+    def test_a_long_ref_emitted_as_an_event_is_not_duplicated_without_a_store(
+            self):
+        long_ref = ("the release train slips to the third quarter because "
+                    + "x" * 1400)
+        embed = {**_EMBED,
+                 "events": [{"content": long_ref,
+                             "eventKind": "core:occurrence"}],
+                 "operators": [{"src": long_ref, "dst": "the budget is 40k",
+                                "op_type": "IMPL"}]}
+        # The production shape: no `hold_store`, a RESOLVED lookup.
+        result = v2.execute_embed(embed, _search(True), session_id="s1")
+
+        events = [e for e in result["payload"]["events"]
+                  if e["content"].startswith("the release train")]
+        assert len(events) == 1, result["payload"]["events"]
+        event_id = events[0]["id"]
+        assert [p for p in result["payload"]["points"]
+                if p["content"].startswith("the release train")] == [], (
+            "a ref longer than the content cap was re-minted as a duplicate "
+            f"Point beside the Event {event_id} — with no store supplied")
+        assert [o["src"] for o in result["payload"]["operators"]] == [event_id]
+        assert not any("no emitted point/event carried it" in w
+                       for w in result["warnings"]), (
+            "the mint warned that nothing carried a ref the payload's own "
+            f"Event carries: {result['warnings']}")
+
+    def test_a_ref_whose_span_clamp_differs_from_the_hard_cut_also_resolves(self):
+        """⛔ Review round 8, P2 (both reviewers, measured): the two maps do not
+        key the SAME >cap form either.
+
+        `event_ids` is keyed on the HARD cut (``content[:_MAX_CONTENT]``), while
+        `point_ids` is keyed on ``_write_span`` — which SHORTENS the span when the
+        cut would split a numeral-bearing token (990 chars for the ref below). A
+        resolver that probes only the span form therefore misses the Event and
+        re-mints the duplicate, which is why the resolver asks the FULL ref, the
+        HARD cut and the span.
+        """
+        # 989 + a numeral-bearing tail: `_write_span` stops at 990, the Event's
+        # content is the 1000-char hard cut, so the two clamped keys differ.
+        long_ref = "x" * 989 + " p95hit4" + "0" * 100 + " end"
+        embed = {**_EMBED,
+                 "events": [{"content": long_ref,
+                             "eventKind": "core:occurrence"}],
+                 "operators": [{"src": long_ref, "dst": "the budget is 40k",
+                                "op_type": "IMPL"}]}
+        result = v2.execute_embed(embed, _search(True), session_id="s1")
+        events = [e for e in result["payload"]["events"]
+                  if e["content"].startswith("xxxx")]
+        assert len(events) == 1, result["payload"]["events"]
+        event_id = events[0]["id"]
+        assert [p for p in result["payload"]["points"]
+                if p["content"].startswith("xxxx")] == [], (
+            "the span clamp and the hard cut keyed different forms, so the Event "
+            f"{event_id} was duplicated as a Point")
+        assert [o["src"] for o in result["payload"]["operators"]] == [event_id]
+
+
 class TestEveryHeldEdgeIsCarried:
     """⛔ Review round 4, P1/P2: `hold()` kept ONE operator per key, and the key is
     the REF — so a second operator naming the same unresolved ref had its edge

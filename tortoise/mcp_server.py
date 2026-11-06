@@ -7265,15 +7265,34 @@ def _maybe_onboarding_auto_complete(*,
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
 # gate order: boundary 422 → admission 429 (#3060) / in-flight 409 (#3129)
-# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402;
-# the tool docstring below carries the full list, including the inner
-# extractor-provider 503 that can follow them.
+# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402
+# → ingest_rate_limited 429 (#4051 §3.1 — the per-org window, NOT the
+# admission 429 above); the tool docstring below carries the list through the
+# 402 and NOT the 429 (see below), including the inner extractor-provider 503
+# that can follow them.
+# ⛔ The 429 note lives HERE and NOT in the tool docstring: the docstring is a
+# `co_consts` member, so prose there moves `_code_digest` and reds the required
+# `surface-guard` job (measured at head c0cb695152 — served_from
+# `bd6dbf27d57b404c` → `d93e6d0ba135d51f`, rc=1, reversed to rc=0 by keeping
+# this note here). A description change is a FROZEN-SURFACE change and needs
+# Daniel's approval (#4282); a comment carries the same information to the same
+# reader at no surface cost.
 # A missing provider key is NOT a gate (#3892): the capture
 # is STORED and only the LLM extraction is skipped, reported as
 # `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
 # hosted mode" error —
 # there is deliberately NO local fallback that bypasses the capture pipeline
 # (a prompt-injection exfiltration surface must not exist).
+#
+# ⛔ THE LAST-ERROR EXEMPTION IS EVERY 429, and the tool docstring below still
+# names only the #3060 capacity one — kept that way on purpose, because a
+# docstring edit is a FROZEN-SURFACE change (see the note above). The predicate
+# it describes reads `if (status >= 400 and status != 429 and detail !=
+# _CAPTURE_SESSION_IN_FLIGHT_DETAIL)` — modelled on `hosted_api.py`'s REST
+# wrapper, which carries the same `!= 429` — so since #4051 §3.1 the per-org
+# ingest throttle (#11214) is a THIRD exempt class: a transient server
+# condition that must not paint a harness failure on the dashboard. Recorded
+# here as a comment rather than in the docstring, for the reason above.
 
 
 def tortoise_session_capture(conversation: list[dict],
