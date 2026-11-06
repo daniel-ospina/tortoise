@@ -110,12 +110,9 @@ class TestTools:
         import json as _json
 
         assert result.is_error in (False, None)
-        # The PAYLOAD is `content[0]`. Extra blocks are appended LAST by the
-        # dispatch seam (#10084's graph disclosure, and `_warn_retired_result`
-        # before it), so joining every block and `json.loads`-ing the result is
-        # not a contract — it fails with "Extra data" the moment a second block
-        # appears.
-        text = getattr((result.content or [None])[0], "text", "")
+        text = "".join(
+            getattr(b, "text", "") for b in (result.content or [])
+        )
         parsed = _json.loads(text)
         assert isinstance(parsed, dict)
         assert parsed.get("id"), f"expected point id in result, got: {parsed}"

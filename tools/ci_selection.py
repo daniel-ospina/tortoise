@@ -1483,13 +1483,6 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # guard. Same silent-drop class as tools/tmpdir_sweep.py above,
              # and the same defect #4174 describes a gate having.
              "tools/drift-guard.py",
-             # #10597: tools/closes_landing.py owns
-             # tests/test_closes_landing.py (registered `core`) and is reached by
-             # a workflow step — but `tools/` is swallowed by NON_PYTHON_PREFIXES
-             # and no SOURCE_PATTERNS entry matches it, so a tool-only fix selects
-             # NO surface, drops to tier-1 smoke, and never runs the suite that
-             # pins the instrument. Same class as the drift-guard entry above.
-             "tools/closes_landing.py",
              # #5084 review P1: tools/test_lane.py owns
              # tests/test_test_lane_tool.py (registered `core`), but `tools/` is
              # swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry
@@ -1875,22 +1868,6 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `test_10017_cache_tier.py`, not merely a `core` registration
              # (#1349/#3332/#3616).
              "supabase/migrations/20261029000001_record_point_cache_tier.sql",
-             # #10620 / PR #10648 review P1: the FORWARD record migration that
-             # NARROWS `public.point.search_keys` from `jsonb` to `text` — the
-             # same `ALTER COLUMN … TYPE … USING` shape as #9264's
-             # `session.capture_redactions` entry above, and it sorts outside the
-             # `2026101200000` prefix while `supabase/` is a NON_PYTHON_PREFIX.
-             # Measured on the pre-fix head: `_sel([<this path>])` ->
-             # `surfaces: []`, `full: False`, so EVERY guard that reads this
-             # file's text or applies it ran nothing on a change to it alone —
-             # `test_9078`'s `RECORD_REAPPLY_STEPS` (an older container keeps
-             # `jsonb` and would drop rows again), `RECORD_MIGRATIONS`'
-             # registry-completeness pin (`test_9231`), and
-             # `test_record_schema_placement.py`. The #1349/#3332/#3616
-             # silent-drop class, and nine sibling entries exist for exactly it.
-             # Pinned by
-             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
-             "supabase/migrations/20261102000002_record_point_search_keys_text.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The
              # #9555/R7 entry above was inserted over this path, so a
@@ -2574,25 +2551,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # zips — no DB, no network) and `core` is where it is registered. Pinned by
              # tests/test_ci_selection.py::
              # test_ci_catch_history_tool_change_selects_core_not_tier1.
-             "tools/ci_catch_history.py",
-             # #2148: `tools/` is a flat NON_PYTHON_PREFIXES entry and no
-             # SOURCE_PATTERNS row matches `tools/rail_detach.py`, so a
-             # TOOL-ONLY change filtered to `changed == []` and took the
-             # docs-only early return — the durability pin registered under
-             # `core` (`tests/test_rail_detach.py`) would never run on the very
-             # file whose `DETACH_NEW_SESSION` seam is the whole mechanism (the
-             # #1349/#3332/#3616 silent-drop class, the same shape as
-             # `tools/lane_stash.py` and `tools/ci_catch_history.py` above).
-             # The `core` row that registers the test file is CLASSIFICATION
-             # only (#4348): a name in a surface's test_files only runs when that
-             # surface is ALREADY selected. MEASURED before this entry:
-             # `select(["tools/rail_detach.py"], "pull_request",
-             # load_manifest())` -> surfaces=[], full=False, 72 files, the pin
-             # ABSENT. CORE_ALSO (not TOOL_CARVEOUTS) because the guard is
-             # hermetic (a stub rail, temp dirs) and `core` is where its suite
-             # lives. Pinned by
-             # tests/test_ci_selection.py::test_rail_pin_runs_on_a_tools_only_change.
-             "tools/rail_detach.py")
+             "tools/ci_catch_history.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -2927,14 +2886,6 @@ TOOL_CARVEOUTS = (
     # matrix) is the safe default for a tool whose answer drives dispatch.
     "tools/who_is_on.py",
     "tools/who-is-on.sh",
-    # #10687 (attest census): `tools/attest_census.py` decides, per PR, whether a review proof may
-    # be RE-POSTED or must be re-reviewed — the fabricate-vs-repair boundary. Same silent-drop class
-    # as the carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so a TOOL-ONLY diff came
-    # back `surfaces=[]` and fell to tier-1 smoke, which does not carry `tests/test_attest_census.py`
-    # (measured: registering the test under `core` alone leaves a tool-only change unguarded). Its
-    # classifier IS the rule this lane exists to enforce, so a weakening of it must never ship on a
-    # smoke-only matrix. Fail-closed: the whole `attest_census` family.
-    "tools/attest_census",
     # #5052/#9487 review P1: the dispatch-time CLAIM on the graph
     # (tools/work_claim.py) owns tests/test_work_claim.py — the 87 hermetic arms
     # that pin the fail-closed refusal contract (`acquire`/`status`/`release`

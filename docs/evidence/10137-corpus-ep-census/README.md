@@ -107,21 +107,11 @@ Two honest limits on that 10%:
   `points_off_neutral`, `points_moved_off_neutral`). Indicator (a) is satisfied by publishing the
   ratio **with** those cells — which is what this artifact does.
 
-**Disclosure of what this artifact can and cannot re-derive:** `census.json` carries the run totals
-and the per-question cells but not the per-question graphs, and the corpus cache lives outside the
-repo. The **aggregate `cells` ARE re-derived from the committed `per_question` rows** —
-`tests/longmem_eval/test_ep_census_10137.py::test_committed_census_rederives_its_own_aggregate` pins
-them, along with the `questions_with_ep_ratio` quotient, `errors` and the per-type bucket cells, plus
-the committed sample identity (`census.json.completed`: 24 `question_id` + `question_type` pairs).
-Residually un-derived, and declared as such in the pin's own docstring: the `questions_in_run` /
-`questions_failed` pair, and the per-row shape identity. `source` is a third case of a different kind —
-asserted as an artifact-identity anchor rather than derived, so a hand-edit reds, but it is an
-assertion about provenance, not a re-derivation. What the artifact **cannot** do is
-re-derive the per-question **values** — those need the graphs, so they are reproducible only by
-re-running the two probes. The pin is therefore internal consistency, and the measurement's TRUTH
-still needs that re-run. ⚠️ It is registered in the NON-GATING `on_demand` eval lane
-(`config/ci-surfaces.yml`, #10194/#10206): it reds a hand-edit when it runs, it does not block a
-merge.
+**Disclosure of what this artifact cannot re-derive:** `census.json` carries the run totals and the
+per-question cells but not the per-question graphs, and the corpus cache lives outside the repo — so
+the cells are auditable against the committed sample identity (`census.json.completed`: 24
+`question_id` + `question_type` pairs) and reproducible by re-running the two probes, not
+recomputable from the artifact alone.
 
 - The issue's **open owner decision** ("should `activated` additionally require contribution?") gains
   data: every question here has `questions_off_neutral == 1` and `points_moved_off_neutral > 0`, so

@@ -29,27 +29,18 @@ working, and its refusal table stays the artifact that pins the refusal contract
     OBSERVED without editing this probe, and the count is derived.
   * **THE NUMBERS** are E3 (a census over the run's own graph), E4 (the committed
     operator receipt, read verbatim), E5 (a fresh re-score of the #7947 arms
-    against this corpus's current gold), and E1/E1b/E2a/E2b (read out of the
-    `#9889` measurement record, ``E1_E2_SCORES``). Each row's ``evidence`` is the
-    artifact that actually carries its number.
+    against this corpus's current gold), and E1/E1b/E2a/E2b (parsed out of the
+    landed ``e1-e2.log``). Each row's ``evidence`` is the artifact that actually
+    carries its number.
 
 ⚠️ WHAT THIS PROBE DOES NOT DO, stated so the table cannot be read as more than it
-is. E1/E2 are scored from ``docs/evidence/9889/e1-e2-scores.json``, one
-invocation of ``e1_e2_scores.py`` over the three ``#9889`` probes' own outputs,
-and NOT from the superseded ``e1-e2.log`` — that parse path is removed, because
-the log carries 25 Objects (under E1's frozen floor of 30), ONE arm, and a corpus
-that is not the pre-registration's. What the record cannot give is **n**: the
-after arm exists once and the before arm twice, so E1's pairings disagree (20.6 pp
-apart) and the row is REFUSED rather than decided — the honest reading, and the
-next requirement (n >= 2 per arm) is stated in the row's note. E2a's frozen
-14-unit denominator IS carried (8 of 14 survived, falsifier reaches 14/14), so the
-E2 row is scored fact rather than a refusal. E1b's
-``grading.strict_survival_counts`` over the m2 lane is still unproduced, so that
-half stays a no-loss CONTROL, not the frozen metric.
-
-⚠️ WHAT A REFUSED ROW IS. ``BLOCKED`` is neither a pass nor a fail: "the
-population could not decide" and "the criterion was scored and failed" are
-different findings, and the table admits both on purpose
+is. E1/E2's only artifacts are (a) ``e1-e2.log``, whose Object population is the
+25-name owner-labelled audit set — below E1's frozen floor of 30 Objects — and
+which ran on a DIFFERENT corpus revision than the pre-registration froze, and
+(b) nothing else: no committed artifact carries E2a's 14-unit denominator or
+E1b's ``grading.strict_survival_counts`` over the m2 lane. Those two rows are
+therefore reported with their proxy numbers PRINTED and their verdict ``BLOCKED``
+— a refused measurement is neither a pass nor a fail, and the record says the same
 (``below_floor``: *"REFUSED, which is neither a pass nor a fail"*).
 
 ⚠️ THE RUN ARM. ``TORTOISE_VET`` and ``TORTOISE_CLASSIFY_LATER`` are forced ON for
@@ -68,7 +59,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:10576-10582`` and
 ``result["vet"]`` at ``:10586-10590``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:16250``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:15484``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -208,21 +199,7 @@ TURN_WRITE_CITE = f"tortoise/sdk.py:{_sdk_line('_TURN_WRITE_CYPHER = (')}"
 
 EVIDENCE_DIR = Path("docs/evidence/7949-capstone")
 PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
-
-#: E1/E2's artifact is the `#9889` measurement record, NOT `e1-e2.log`.
-#:
-#: `e1-e2.log` was the only E1/E2 artifact for eleven days, and it cannot decide
-#: either row: 25 Objects (under E1's frozen floor of 30), one arm, and a corpus
-#: that is not the pre-registration's frozen one. Its parse path is GONE — E1/E2
-#: are scored from `e1_e2_scores.py`'s record, which reads the three `#9889`
-#: probes' own outputs (`e1_paired_arm` x2 OFF realizations, the ON run's census,
-#: `e2a_value_units` + its anchor-injection falsifier, `e1_gate_drops`) and
-#: carries the frozen corpus digest because the OFF probe refuses to run on any
-#: other corpus (G1). A row that cited the old log is now a row with no artifact.
-E1_E2_SCORES = "docs/evidence/9889/e1-e2-scores.json"
-E1_E2_SCORES_CMD = (
-    "uv run python docs/evidence/7949-capstone/probes/e1_e2_scores.py "
-    f"--out {E1_E2_SCORES}")
+E1E2_LOG = "docs/evidence/7949-capstone/e1-e2.log"
 E4_RECEIPT = "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
 E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
@@ -268,7 +245,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:16531`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:15765`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -477,12 +454,10 @@ def parse_bars(prereg: dict) -> dict:
     """EVERY bar and floor, read out of the frozen record — never typed here.
 
     The record states its thresholds as prose in ``criteria[].threshold`` and its
-    floors in ``denominator_floors`` — integer COUNTS plus E1's fraction
-    ``e1_min_before_share`` (``0.2``), which is a floor under a SHARE and so is
-    carried as a float. The prose is PARSED rather than transcribed: a bar typed
-    into this file is a bar nobody froze, so a lane could move a threshold by
-    editing the probe. An unparseable threshold refuses the run (ValueError → G0,
-    exit 3) instead of falling back to a default.
+    floors as integers in ``denominator_floors``. The prose is PARSED rather than
+    transcribed: a bar typed into this file is a bar nobody froze, so a lane could
+    move a threshold by editing the probe. An unparseable threshold refuses the
+    run (ValueError → G0, exit 3) instead of falling back to a default.
     """
     crit = _criteria(prereg)
     floors = prereg.get("denominator_floors")
@@ -495,20 +470,6 @@ def parse_bars(prereg: dict) -> dict:
             raise ValueError(f"denominator_floors[{key!r}] is not an integer: "
                              f"{value!r}")
         return value
-
-    def share_floor(key: str) -> float:
-        """A floor under a SHARE (a fraction), not a count.
-
-        ``bool`` is an ``int`` in Python and a fraction is neither, so the count
-        helper above would refuse ``0.2``; the record really does carry one
-        non-integer floor, and leaving it out of this map is how a renderer came
-        to read a key nothing emitted (#10610 review issue 1).
-        """
-        value = floors.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"denominator_floors[{key!r}] is not a number: "
-                             f"{value!r}")
-        return float(value)
 
     e1b_ok, e1b_total = _ints(r">=\s*(\d+)\s*of\s*(\d+)",
                               _threshold(crit, "E1b"), "E1b")
@@ -536,7 +497,6 @@ def parse_bars(prereg: dict) -> dict:
         "E5": {"ratio": e5_bars[0], "raw_absolute": e5_bars[1]},
         "floors": {
             "e1_objects": floor("e1_objects"),
-            "e1_min_before_share": share_floor("e1_min_before_share"),
             "e2b_surviving_units": floor("e2b_surviving_units"),
             "e3_derived_nodes": floor("e3_derived_nodes"),
             "e5_rate_min_sentences": floor("e5_rate_min_sentences"),
@@ -565,32 +525,13 @@ def outcome(*, measured: bool, below_floor: bool, passed: bool,
 
 
 def e1_outcome(*, before_share: float | None, after_share: float | None,
-               objects: int | None, bars: dict,
-               decidable: bool = True,
-               below_floor: bool | None = None) -> dict:
+               objects: int | None, bars: dict) -> dict:
     """E1: volume falls (``after <= multiplier x before``) over ALL Objects, floor 30.
 
     ⚠️ ``objects`` is the DENOMINATOR the criterion names ("**all** `:Object`
     nodes written by the run") — not a hand-picked population. A run under the
     frozen floor is REFUSED: with five Objects a single delete moves the share by
     20 points, which is what the floor exists to stop.
-
-    ⚠️ ``below_floor`` is the RECORD's own floor finding, and it is passed in
-    rather than re-derived, because the population that is floored and the one
-    that is scored are the same one: the AFTER arm. `e1_pairings` folds it into
-    ``decidable`` (`decidable = len(verdicts) == 1 and not below_floor`), so a
-    caller that reads only ``decidable`` reports an under-floor after arm as a
-    PAIRING DISAGREEMENT it does not have (#10610 review issue 2). The floor arm
-    is therefore checked BEFORE the decidability arm, and it has its own value
-    text: the pre-registration calls the floor `below_floor` and its verdict
-    "REFUSED, which is neither a pass nor a fail".
-
-    ⚠️ ``decidable`` is the second refusal, and it is measured rather than
-    assumed (`#9889`): where the after arm exists once and the before arm exists
-    in more than one independent realization, the pairings can disagree, and a
-    metric whose verdict depends on which before run you pair against has not
-    decided anything. The aggregate is REFUSED with both pairings printed — never
-    the convenient one.
     """
     floor = bars["floors"]["e1_objects"]
     multiplier = bars["E1"]["multiplier"]
@@ -600,76 +541,10 @@ def e1_outcome(*, before_share: float | None, after_share: float | None,
         return outcome(measured=False, below_floor=False, passed=False,
                        bar=bar, value="unmeasured")
     bound = multiplier * before_share
-    over_floor = (objects < floor) if below_floor is None else below_floor
-    if over_floor:
-        return outcome(measured=True, below_floor=True, passed=False, bar=bar,
-                       value=(f"before={before_share:.6f} after={after_share:.6f} "
-                              f"objects={objects} bound={bound:.6f} — but "
-                              f"{objects} Objects is under the frozen floor of "
-                              f"{floor}, so the population is too small to "
-                              "decide the bar and the row is REFUSED, which is "
-                              "neither a pass nor a fail"))
-    if not decidable:
-        return outcome(measured=False, below_floor=False, passed=False,
-                       bar=bar,
-                       value=(f"before={before_share:.6f} after={after_share:.6f} "
-                              f"objects={objects} bound={bound:.6f} — but the "
-                              "pairings DISAGREE across before realizations, so "
-                              "the bar is not decided at n=1 per arm"))
-    return outcome(measured=True, below_floor=False,
+    return outcome(measured=True, below_floor=objects < floor,
                    passed=after_share <= bound, bar=bar,
                    value=f"before={before_share:.6f} after={after_share:.6f} "
                          f"objects={objects} bound={bound:.6f}")
-
-
-def e2_outcome(*, e2a_result: dict, e2b_result: dict, bars: dict) -> dict:
-    """E2 is the COMPOSITE — E2a AND E2b, floored — never E2a alone.
-
-    This function exists because the composite used to be assembled INLINE in
-    ``main``, so no pin could reach it: reverting the row's verdict to
-    ``verdict_word(e2a_result)`` — a 13/14 E2a beside a fused 7/114 reading GREEN
-    in the table and FAIL in the artifact the row cites — left every case green
-    (#10610 review issue 1). Extracting it is what makes that mutant killable, and
-    the pin calls THIS function while a second pin asserts ``main`` derives its
-    row from it (``test_the_e2_row_verdict_is_the_composite_main_uses``).
-
-    ⛔ NEITHER half's refusal state is dropped. The composite used to hard-code
-    ``measured=True`` and take ``below_floor`` from E2b ALONE, so an E2a half that
-    was never scored (a record carrying no ``e2a.outcome`` — ``main`` then builds
-    an ``measured=False`` E2a result) was folded into a MEASURED composite: the
-    row read RED and its note asserted a scored shortfall for a half nobody
-    measured, where the pre-composite path read BLOCKED (#10610 P2). A composite
-    is unmeasured when EITHER half is, and below its floor when either half is —
-    the conjunction cannot know more than its weakest operand.
-    """
-    measured = bool(e2a_result.get("measured")) and bool(
-        e2b_result.get("measured"))
-    return outcome(
-        measured=measured,
-        below_floor=bool(e2a_result.get("below_floor"))
-        or bool(e2b_result.get("below_floor")),
-        passed=(e2a_result["outcome"] == "PASS"
-                and e2b_result["outcome"] == "PASS"),
-        bar=f"E2a {bars['E2a']['required']} of {bars['E2a']['of']} AND E2b "
-            f"fused <= {bars['E2b']['max_fused_share']}",
-        value=f"E2a {e2a_result['value']}; E2b {e2b_result['value']}")
-
-
-def e2a_outcome(e1: dict, bars: dict) -> dict:
-    """E2a: value-bearing planted units that STRICTLY survive, bar 13 of 14.
-
-    The denominator comes from the pre-registration's §3.3 rule (a digit in the
-    ``verbatim_anchor``, minus two named exclusions), computed by
-    ``e2a_value_units.py`` from the gold and read here — never typed. The bar is
-    the record's own ``E2a`` criterion, so a change to either moves both.
-    """
-    units = e1["e2a_units"] or 0
-    survived = e1["e2a_survived"] or 0
-    required = bars["E2a"]["required"]
-    return outcome(measured=True, below_floor=units == 0,
-                   passed=survived >= required,
-                   bar=f"{required} of {bars['E2a']['of']}",
-                   value=f"value_units {survived}/{units} survived")
 
 
 def e3_outcome(*, anchored: int, derived: int, bars: dict) -> dict:
@@ -723,13 +598,52 @@ def e5_outcome(*, raw_loss: float, narrative_loss: float, sentences: int,
     return result
 
 
-# ⛔ THE `e1-e2.log` PARSE PATH IS GONE, not merely unused (#9889 item 5,
-# #10610 P3). `parse_e1e2_log` / `corpus_sha_of_log` / `line_value` survived the
-# re-point with no production caller — the rows cite `E1_E2_SCORES`, and the
-# README states the parse path `is deleted from probes/capstone_measure.py` — so
-# the file was keeping a READER for an artifact no row may cite, which reads as
-# "this log is still scored" to the next lane that greps for it. The record is
-# the one source; a log reader here would be a second, quieter one.
+def parse_e1e2_log(text: str) -> dict:
+    """The arms of ``e1-e2.log`` as ``{arm: {metric: {key: value}}}``.
+
+    Two line shapes: ``arm=<name> metric=<metric> k=v k=v …`` and the summary
+    lines whose first token is the label (``e1 …``, ``e1-control …``,
+    ``e2-state …``, ``e2-atomic …``), which land under the ``summary`` bucket. A
+    ``k=v`` token is split on the FIRST ``=`` so a value containing ``=`` survives;
+    a value containing SPACES (``matches=[["count", "4668"], …]``) is truncated at
+    the first space — that field is a literal list this probe does not read.
+    """
+    arms: dict[str, dict[str, dict[str, str]]] = {}
+    summary_labels = ("e1", "e1-control", "e2-state", "e2-atomic")
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        tokens = line.split(" ")
+        if tokens[0].startswith("arm="):
+            arm = tokens[0][len("arm="):]
+            rest = tokens[1:]
+            if not rest or not rest[0].startswith("metric="):
+                continue
+            metric = rest[0][len("metric="):]
+            bucket = arms.setdefault(arm, {}).setdefault(metric, {})
+            rest = rest[1:]
+        elif tokens[0] in summary_labels:
+            bucket = arms.setdefault("summary", {}).setdefault(tokens[0], {})
+            rest = tokens[1:]
+        else:
+            continue
+        for token in rest:
+            key, sep, value = token.partition("=")
+            if sep:
+                bucket[key] = value
+    return arms
+
+
+def corpus_sha_of_log(text: str) -> str | None:
+    match = re.search(r"\bcorpus_sha256=([0-9a-f]{64})\b", text)
+    return match.group(1) if match else None
+
+
+def line_value(text: str, key: str) -> str | None:
+    """The first token of a ``key=value`` line (a line may carry more tokens)."""
+    match = re.search(rf"^{re.escape(key)}=(\S+)", text, re.M)
+    return match.group(1) if match else None
 
 
 def normalise_corpus(value: str | None) -> str | None:
@@ -748,130 +662,6 @@ def verdict_word(result: dict) -> str:
     findings, and E1 is the case that makes the difference load-bearing.
     """
     return {"PASS": "GREEN", "FAIL": "RED"}.get(result["outcome"], "BLOCKED")
-
-
-def e1_pass_objects(e1: dict) -> int | None:
-    """E1's row numerator: the Objects that are NOT bare-definite.
-
-    ⛔ The table's numerator is the count that PASSED, on every other row (E1b's
-    real facts, E2a's surviving units, E3's anchored nodes, E5's recovered facts).
-    E1's criterion is written over the OPPOSITE quantity — the bare-definite
-    `:Object` share it MINIMISES — so carrying that count in the slot would put a
-    row whose best possible outcome is `0 of 61` in front of V5, which refuses a
-    GREEN row with a zero numerator as the silent-drop shape ("a green row must
-    measure at least ONE success"). Refusing the PERFECT outcome is the same
-    green-row-cannot-be-written defect this row was repaired for, one boundary
-    earlier. The complement keeps the table's polarity and the population (all
-    `:Object` nodes written by the after arm, floored at 30), and leaves the
-    measured bare-definite count where it belongs: in the note and in the artifact
-    the row cites.
-
-    ``None`` when the arm is unmeasured — an empty slot, which V5 refuses on a
-    GREEN row and V6 covers with the blocker on every other.
-    """
-    numerator = e1.get("after_numerator")
-    denominator = e1.get("after_objects")
-    if not isinstance(numerator, int) or not isinstance(denominator, int):
-        return None
-    return denominator - numerator
-
-
-def e1_row_note(e1: dict, e1_result: dict, bars: dict) -> str:
-    """E1's row note — the narration BRANCHES on the state the row is in.
-
-    The refusal sentence used to be unconditional (#10610 review issue 3): "the
-    pairings do not agree, so the row is REFUSED" rendered on every scored log,
-    so the first run where E1 became DECIDABLE would have written "… and the
-    pairings do not agree, so the row is PASS — not RED and not GREEN" into the
-    very log that is the evidence. A sentence no input can change is a decision
-    replaced by a constant, and the repo already holds a pin for this class (the
-    E3 narration defect, `#10525`); this is the same branch for E1, and
-    ``test_the_e1_note_narrates_the_state_the_row_is_in`` is its pin.
-
-    The two refusals are also kept DISTINCT here, not merged into "REFUSED": an
-    after arm under the frozen floor is a population finding, and a disagreement
-    between before realizations is an arm-count finding. Reporting the first as
-    the second is #10610 review issue 2.
-    """
-    pass_objects = e1_pass_objects(e1)
-    floor = bars["floors"]["e1_objects"]
-    if e1.get("below_floor"):
-        state = (
-            f"The AFTER arm carries {e1['after_objects']} Objects, under the "
-            f"frozen floor of {floor} — a population that small cannot decide "
-            f"the bar at any n, so the row is {e1_result['outcome']} (neither a "
-            f"pass nor a fail), not RED and not GREEN")
-    elif not e1["decidable"]:
-        state = (
-            f"The two before realizations are {e1['before_spread_pp']} pp apart "
-            f"and the pairings do not agree, so the row is "
-            f"{e1_result['outcome']} — not RED and not GREEN: at n=1 per arm the "
-            f"verdict would depend on which before run is chosen")
-    else:
-        state = (
-            f"Every before realization agrees on the pairing, so the row is "
-            f"{e1_result['outcome']} on the bar")
-    return (
-        f"E1 is scored from {E1_E2_SCORES} (one invocation over the #9889 "
-        f"probes), whose corpus IS the frozen one ({e1['corpus_sha256']}) because "
-        f"e1_paired_arm.py refuses any other. {e1_result['value']} vs bar "
-        f"{e1_result['bar']}. {state}. The deterministic mechanism check "
-        f"(e1_gate_drops) reports value_gate drops {e1['gate_drops_total']} of "
-        f"{e1['gate_drops_objects']} Objects with its positive controls alive, so "
-        f"the selection pass is not the mover — the removal/relocation ruling is "
-        f"(#5333). n >= 2 per arm is the next requirement. The row's count is "
-        f"that population — Objects that are NOT bare-definite over all Objects = "
-        f"{pass_objects}/{e1['after_objects']} — i.e. the PASS-direction half of a "
-        f"share the criterion MINIMISES (the measured bare-definite count is "
-        f"{e1['after_numerator']} of {e1['after_objects']}); E2 carries the "
-        f"planted-unit counts, over the frozen 14")
-
-
-def e2_row_note(e1: dict, e2a_result: dict, e2b_result: dict,
-                e2_result: dict) -> str:
-    """E2's row note — and `E2a falls short of …` only where it DID fall short.
-
-    The clause was hard-coded (#10610 review issue 3), so the 13-of-14 run this
-    record exists to unbury — the one where E2's row finally reads GREEN — would
-    have printed "E2a falls short of 13 of 14 on the run's own graph" beside its
-    own GREEN verdict. The row and the artifact it cites disagreeing, inside the
-    log that IS the evidence, is the class `#10525`'s narration pin closed for E3.
-
-    ⛔ …and "falls short" is a SCORED finding, so it may not be written over a half
-    that was never measured. `main` builds an ``measured=False`` E2a result when
-    the record carries no ``e2a.outcome``; an unmeasured outcome is not ``PASS``,
-    so the old clause asserted a shortfall for a half nobody scored — beside a
-    composite that (correctly) reads BLOCKED (#10610 P2).
-    """
-    return (
-        f"E2a: {e2a_result['outcome']} — {e2a_result['value']} vs bar "
-        f"{e2a_result['bar']} (denominator = pre-registration §3.3's "
-        f"value-bearing planted units, read from "
-        f"docs/evidence/9889/e2a-value-units.json, and PROVEN live by the "
-        f"anchor-injection falsifier reaching "
-        f"{e1['e2a_falsifier_survived']}/{e1['e2a_units']} over the same "
-        f"population). E2b: "
-        f"{e2b_result['outcome']} — {e2b_result['value']} vs bar "
-        f"{e2b_result['bar']}. The E2 row is "
-        f"{verdict_word(e2_result)} on the COMPOSITE "
-        f"({e2_result['bar']}): "
-        + (f"E2a was NOT measured on this record (no `e2a.outcome`), so the "
-           f"composite is {verdict_word(e2_result)} rather than a scored "
-           f"shortfall; the {e1['e2a_required']}-of-{e1['e2a_units']} bar is "
-           f"neither met nor missed"
-           if not e2a_result["measured"] else
-           f"E2a falls short of {e1['e2a_required']} of {e1['e2a_units']} on "
-           f"the run's own graph"
-           if e2a_result["outcome"] != "PASS" else
-           f"E2a meets the {e1['e2a_required']}-of-{e1['e2a_units']} bar on the "
-           f"run's own graph")
-        + f", and E2b's fused count is a proxy over atomic POINTS "
-        f"rather than surviving planted units. #10360 records that "
-        f"nothing enforces retention (the render half closed, #9775). "
-        f"The row's count slots carry the E2a count over the FROZEN "
-        f"denominator ({e1['e2a_survived']}/{e1['e2a_units']}), so a "
-        f"green row here states the number the bar is written over "
-        f"instead of leaving it empty")
 
 
 def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
@@ -893,52 +683,27 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             corpus_sha256: str | None, blocked_by: str | None, note: str,
             artifact_corpus_sha256: str | None = None,
             sibling: str | None = None) -> dict:
-        # GREEN and BLOCKED are mutually exclusive in the gate (V5 refuses a green
-        # row that carries a blocker; V6 requires one on every non-green row), so
-        # the pair is resolved ONCE, here. Without this a row that is correctly
-        # measured GREEN arrives still carrying the issue it was blocked on and is
-        # refused for it — the row for the criterion a record unblocks (E2 at
-        # 13 of 14) could never be written green at all.
-        if verdict == "GREEN":
-            blocked_by = None
         built = {
             "criterion": criterion, "verdict": verdict,
             "evidence_kind": "measurement", "evidence": evidence, "sha": sha,
             "numerator": numerator, "denominator": denominator,
-            "corpus_sha256": corpus_sha256,
+            "corpus_sha256": corpus_sha256, "sibling": sibling,
             "blocked_by": blocked_by, "note": note,
         }
-        # `sibling` is emitted only where a row really has one: V8 reads a pair as
-        # two copies of ONE population, and a `"sibling": null` on every row reads
-        # as "the pair is there, the numbers are missing" rather than "no pair".
-        if sibling is not None:
-            built["sibling"] = sibling
         if artifact_corpus_sha256 is not None:
             built["artifact_corpus_sha256"] = artifact_corpus_sha256
         return built
 
     return [
-        # E1 and E2 carry the counts their OWN criteria are written over — E2 the
-        # E2a count over the FROZEN 14 value-bearing units (8/14, bar >= 13 of 14),
-        # E1 the after arm's Objects that are NOT bare-definite over all its
-        # Objects (48/61 on the #9889 record, whose bare-definite count is 13).
-        #
-        # ⛔ They are NOT a sibling pair and name no `sibling`. V8 requires a pair
-        # to carry the SAME numerator/denominator, which is right for two readings
-        # of ONE population; these two read two populations (all Objects vs the
-        # 14 planted value-bearing units) that no edit can reconcile. Naming them
-        # siblings forced BOTH counts to None — and an empty count on a GREEN row
-        # is exactly what V5 refuses, so the row for the criterion this record
-        # unburies (E2a >= 13 of 14) could not have been written green. The
-        # populations are stated per row instead: in the note, and in the
-        # numerator/denominator themselves.
-        row("E1", verdict=e1["verdict"], evidence=E1_E2_SCORES, sha=e1["sha"],
-            numerator=e1["numerator"], denominator=e1["denominator"],
+        row("E1", verdict=e1["verdict"], evidence=E1E2_LOG, sha=e1["sha"],
+            numerator=None, denominator=None,
             corpus_sha256=e1["corpus_sha256"],
+            artifact_corpus_sha256=e1["corpus_sha256"], sibling="E2",
             blocked_by="#5333", note=e1["note"]),
-        row("E2", verdict=e2["verdict"], evidence=E1_E2_SCORES, sha=e2["sha"],
-            numerator=e2["numerator"], denominator=e2["denominator"],
+        row("E2", verdict=e2["verdict"], evidence=E1E2_LOG, sha=e2["sha"],
+            numerator=None, denominator=None,
             corpus_sha256=e2["corpus_sha256"],
+            artifact_corpus_sha256=e2["corpus_sha256"], sibling="E1",
             blocked_by="#10360", note=e2["note"]),
         row("E3", verdict=e3["verdict"], evidence=out_path, sha=head,
             numerator=e3["numerator"], denominator=e3["denominator"],
@@ -2199,70 +1964,42 @@ def score_e5(sessions: list[str], out_path: Path) -> dict:
 
 
 def measure_e1_e2(repo: Path = ROOT) -> dict:
-    """E1/E1b/E2a/E2b, read off the `#9889` measurement record.
-
-    The record is produced by ONE invocation of ``e1_e2_scores.py`` over the
-    three probes' own outputs (see ``E1_E2_SCORES``); this function only maps it
-    onto the shape the rows need. Both rows now cite a measurement on the FROZEN
-    corpus taken at a named head — which the committed ``e1-e2.log`` never was.
-    """
-    path = repo / E1_E2_SCORES
+    """E1/E1b/E2a/E2b, parsed out of the landed ``e1-e2.log``."""
+    path = repo / E1E2_LOG
     if not path.is_file():
-        raise SystemExit(
-            f"capstone-measure: REFUSED — {E1_E2_SCORES} does not exist. It is "
-            f"produced by: {E1_E2_SCORES_CMD}")
-    record = json.loads(path.read_text())
-    e1 = record.get("e1") or {}
-    e2 = record.get("e2") or {}
-    e2a = e2.get("e2a") or {}
-    e2b = e2.get("e2b") or {}
-    e1b = record.get("e1b") or {}
-    pairings = e1.get("pairings") or []
-    if not pairings:
-        raise SystemExit(f"capstone-measure: REFUSED — {E1_E2_SCORES} carries "
-                         "no E1 pairings; E1 cannot be scored")
-    if not e2a.get("value_units"):
-        raise SystemExit(f"capstone-measure: REFUSED — {E1_E2_SCORES} carries "
-                         "no E2a denominator")
-    # E1's arithmetic is reported against the FIRST before realization; the
-    # ``decidable`` flag is what stops that reading being mistaken for a verdict.
-    first = pairings[0]
+        raise SystemExit(f"capstone-measure: REFUSED — {E1E2_LOG} does not exist")
+    text = path.read_text()
+    arms = parse_e1e2_log(text)
+    before = (arms.get("before") or {}).get("objects") or {}
+    after = (arms.get("after-vet-shipped") or {}).get("objects") or {}
+    if not before.get("share") or not after.get("share"):
+        raise SystemExit(f"capstone-measure: REFUSED — {E1E2_LOG} carries no "
+                         "objects/share line for both arms; E1 cannot be parsed")
+    summary = arms.get("summary") or {}
+    scored = arms.get("after-vet-shipped") or {}
+    real_facts = scored.get("real_facts") or {}
+    state = scored.get("state_value_points") or {}
+    atomic = scored.get("atomic_points") or {}
     return {
-        "sha": record.get("head"),
-        "decidable": bool(e1.get("decidable")),
-        # The record's own floor finding. `e1_pairings` folds it INTO `decidable`
-        # (`decidable = len(verdicts) == 1 and not below_floor`), so reading only
-        # `decidable` makes an under-floor after arm report a pairing
-        # disagreement it does not have — #10610 review issue 2.
-        "below_floor": bool(e1.get("below_floor")),
-        "before_share": first["before_share"],
-        "after_share": first["after_share"],
-        "before_spread_pp": e1.get("before_spread_pp"),
-        "pairings": pairings,
-        "objects_total": first["before_objects"],
-        # READ from the record, never re-derived from share x objects: a
-        # reconstruction that disagrees with the measurement is a number this
-        # bundle did not take.
-        "objects_numerator": first["before_bare_definite"],
-        "after_objects": first["after_objects"],
-        # The AFTER arm's own numerator, for the row's count slots. It is READ
-        # from the record (the ON log's `e1-aux ... bare_definite=` line), never
-        # re-derived as share x objects — the rule the two lines above state, and
-        # which the E1 row needs now that it carries its count instead of
-        # leaving the slots empty.
-        "after_numerator": first.get("after_bare_definite"),
-        "real_facts": e1b.get("real_facts") or 0,
-        "atomic_points": e2b.get("atomic_points") or 0,
-        "fused": e2b.get("fused") or 0,
-        "e2a_units": e2a.get("value_units"),
-        "e2a_survived": e2a.get("value_survived"),
-        "e2a_required": e2a.get("required"),
-        "e2a_outcome": e2a.get("outcome"),
-        "e2a_falsifier_survived": (e2a.get("falsifier") or {}).get(
-            "value_survived"),
-        "gate_drops_total": (record.get("gate_drops") or {}).get("drops_total"),
-        "gate_drops_objects": (record.get("gate_drops") or {}).get("objects"),
-        "corpus_sha256": normalise_corpus(record.get("corpus_sha256")),
+        "sha": line_value(text, "sha"),
+        "before_share": float(before["share"]),
+        "after_share": float(after["share"]),
+        "objects_total": int(float(before.get("total") or 0)),
+        "objects_numerator": int(float(before.get("numerator") or 0)),
+        "real_facts": int(float(real_facts.get("count") or 0)),
+        "state_values": int(float(state.get("values") or 0)),
+        "state_points": int(float(state.get("points") or 0)),
+        "atomic_points": int(float(atomic.get("atomic") or 0)),
+        "fused": int(float(atomic.get("fused") or 0)),
+        "e1_summary": summary.get("e1") or {},
+        "e1_control": summary.get("e1-control") or {},
+        "e2_state": summary.get("e2-state") or {},
+        "e2_atomic": summary.get("e2-atomic") or {},
+        "corpus": (re.search(r"\bcorpus=(\S+)", text) or [None, None])[1]
+                  if re.search(r"\bcorpus=(\S+)", text) else None,
+        "corpus_sha256": corpus_sha_of_log(text),
+        "declared_prereg": line_value(text, "prereg"),
+        "declared_result": line_value(text, "result"),
     }
 
 
@@ -2359,54 +2096,31 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"note=AFTER arm only — this run has no before arm, so E1 is NOT "
         f"scoreable from it; {floor_note}")
     add("")
-    add("## E1 / E1b / E2a / E2b — read out of the #9889 measurement record")
-    add(f"e1 source: {E1_E2_SCORES} (one invocation of e1_e2_scores.py over the "
-        "#9889 probes' own outputs)")
-    add(f"e1 pairing: before_share={e1['before_share']:.6f} "
+    add("## E1 / E1b / E2a / E2b — parsed out of the landed e1-e2.log")
+    add(f"e1 parsed: before_share={e1['before_share']:.6f} "
         f"after_share={e1['after_share']:.6f} "
-        f"before_objects={e1['objects_total']} "
-        f"after_objects={e1['after_objects']} "
-        f"sha={e1['sha']} corpus_sha256={e1['corpus_sha256']} "
-        f"decidable={e1['decidable']} before_spread_pp={e1['before_spread_pp']}")
-    for pairing in e1["pairings"]:
-        add(f"e1 before={pairing['before_share']:.6f} "
-            f"bound={pairing['bound']:.6f} after={pairing['after_share']:.6f} "
-            f"-> {'PASS' if pairing['passed'] else 'FAIL'} "
-            f"ratio={pairing['ratio']:.6f} graph={pairing['before_graph']}")
+        f"objects={e1['objects_numerator']}/{e1['objects_total']} "
+        f"sha={e1['sha']} corpus={e1['corpus']} "
+        f"corpus_sha256={e1['corpus_sha256']} "
+        f"declared prereg={e1['declared_prereg']} "
+        f"declared result={e1['declared_result']}")
     add(f"e1 outcome={e1_out['outcome']} {e1_out['value']} bar={e1_out['bar']}")
-    # The narration BRANCHES on the state — the same class as the row note
-    # (#10610 review issue 3). An unconditional "the pairings disagree" writes a
-    # contradiction into the log of the first run that decides E1.
-    add("e1 note: both before realizations clear E1's own floors ("
-        f"{bars['floors']['e1_objects']} Objects, e1_min_before_share "
-        f"{bars['floors']['e1_min_before_share']}) and the record's corpus IS "
-        "the frozen fixtures_hash, so the shares are measurements. "
-        + (f"The AFTER arm carries {e1['after_objects']} Objects, under the "
-           f"frozen floor of {bars['floors']['e1_objects']}, so the row is "
-           f"REFUSED as a floor finding — neither a pass nor a fail, and not "
-           f"a pairing disagreement"
-           if e1.get("below_floor") else
-           "What they cannot do is decide the bar: the two before shares are "
-           f"{e1['before_spread_pp']} pp apart and the pairings disagree, so the "
-           "row is REFUSED at n=1 per arm rather than RED or GREEN"
-           if not e1["decidable"] else
-           "Every before realization agrees on the pairing, so the bar is "
-           f"DECIDED: the row is {e1_out['outcome']} rather than a refusal"))
+    add("e1 note: the artifact's denominator is the 25-name owner-labelled audit "
+        "population, NOT 'all :Object nodes written by the run', and its "
+        "corpus_sha256 is not the frozen fixtures_hash — so the arithmetic "
+        "(0.600000 vs a 0.300000 bound) would FAIL the bar, but the record's own "
+        f"floor ({bars['floors']['e1_objects']} Objects) makes it REFUSED: "
+        "neither a pass nor a fail")
     add(f"e1b outcome={e1b_out['outcome']} {e1b_out['value']} bar={e1b_out['bar']}")
-    add(f"e1b note: the record reports real_facts={e1['real_facts']} on the "
-        "scored arm; no committed artifact carries "
-        "grading.strict_survival_counts over the m2 lane, so this is a no-loss "
-        "CONTROL, not the frozen metric")
+    add(f"e1b note: the artifact reports real_facts={e1['real_facts']} on both "
+        "arms; no committed artifact carries grading.strict_survival_counts over "
+        "the m2 lane, so this is a no-loss CONTROL, not the frozen metric")
     add(f"e2a outcome={e2a_out['outcome']} {e2a_out['value']} "
         f"bar={e2a_out['bar']}")
-    add(f"e2a note: the frozen denominator IS carried — "
-        f"{e1['e2a_survived']} of {e1['e2a_units']} value-bearing planted units "
-        "strictly survive on the run's own graph (docs/evidence/9889/"
-        "e2a-value-units.json), and the anchor-injection falsifier over the SAME "
-        f"{e1['e2a_units']}-unit population reaches "
-        f"{e1['e2a_falsifier_survived']}/{e1['e2a_units']} — so the counter is "
-        "shown to move and the short bar is a measurement, not an inert "
-        "instrument")
+    add(f"e2a note: the artifact carries state_value_points values="
+        f"{e1['state_values']} on both arms (a no-loss control); the frozen "
+        "denominator is the 14 value-bearing PLANTED UNITS, which no committed "
+        "artifact counts")
     add(f"e2b outcome={e2b_out['outcome']} {e2b_out['value']} "
         f"bar={e2b_out['bar']}")
     add(f"e2b note: fused={e1['fused']} of atomic={e1['atomic_points']} Points on "
@@ -2530,17 +2244,12 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "source": e5["artifact"],
             },
             "e1_e2_artifact": {
-                "source": E1_E2_SCORES,
                 "before_share": e1["before_share"],
                 "after_share": e1["after_share"],
-                "before_objects": e1["objects_total"],
-                "after_objects": e1["after_objects"],
+                "objects": e1["objects_total"],
                 "corpus_sha256": e1["corpus_sha256"],
-                "decidable": e1["decidable"],
-                "before_spread_pp": e1["before_spread_pp"],
-                "e2a_value_units": e1["e2a_units"],
-                "e2a_value_survived": e1["e2a_survived"],
-                "e2a_falsifier_survived": e1["e2a_falsifier_survived"],
+                "declared_prereg": e1["declared_prereg"],
+                "declared_result": e1["declared_result"],
             },
         },
         "rows": rows,
@@ -2659,18 +2368,16 @@ def main(argv: list[str] | None = None) -> int:
     # ── E1 / E1b / E2a / E2b (E1/E2 are the table's rows) ────────────────
     e1_result = e1_outcome(before_share=e1["before_share"],
                            after_share=e1["after_share"],
-                           objects=e1["after_objects"], bars=bars,
-                           decidable=e1["decidable"],
-                           below_floor=e1["below_floor"])
+                           objects=e1["objects_total"], bars=bars)
     e1b_result = outcome(measured=True, below_floor=False,
                          passed=e1["real_facts"] >= bars["E1b"]["required"],
                          bar=f"{bars['E1b']['required']} of {bars['E1b']['of']}",
                          value=f"real_facts={e1['real_facts']}")
-    e2a_result = (e2a_outcome(e1, bars) if e1["e2a_outcome"] else
-                  outcome(measured=False, below_floor=False, passed=False,
-                          bar=f"{bars['E2a']['required']} of {bars['E2a']['of']}",
-                          value=f"value_units={e1['e2a_units']} survived="
-                                f"{e1['e2a_survived']}"))
+    e2a_result = outcome(measured=False, below_floor=False, passed=False,
+                         bar=f"{bars['E2a']['required']} of {bars['E2a']['of']}",
+                         value=f"values={e1['state_values']} (the frozen 14-unit "
+                               "denominator is not carried by any committed "
+                               "artifact)")
     e2b_floor = bars["floors"]["e2b_surviving_units"]
     e2b_share = ((e1["fused"] / e1["atomic_points"])
                  if e1["atomic_points"] else 1.0)
@@ -2681,29 +2388,43 @@ def main(argv: list[str] | None = None) -> int:
                              f"(floor {e2b_floor} surviving units)",
                          value=f"fused={e1['fused']}/{e1['atomic_points']} = "
                                f"{e2b_share:.6f}")
-    e2_result = e2_outcome(e2a_result=e2a_result, e2b_result=e2b_result,
-                           bars=bars)
 
     e1_row = {
         "verdict": verdict_word(e1_result),
         "sha": e1["sha"],
         "corpus_sha256": e1["corpus_sha256"],
-        # The population E1's own criterion is written over: a share over ALL
-        # `:Object` nodes written by the AFTER arm. The count slot carries the
-        # PASS-direction half of it (Objects that are NOT bare-definite) because
-        # that is the table's convention on every other row and the bare-definite
-        # count it minimises can legitimately be 0 — see `e1_pass_objects`.
-        "numerator": e1_pass_objects(e1),
-        "denominator": e1["after_objects"],
-        "note": e1_row_note(e1, e1_result, bars),
+        "note": (f"the only E1 artifact is {E1E2_LOG}: {e1_result['value']} vs "
+                 f"bar {e1_result['bar']} — after_share is NOT <= 0.5 x "
+                 f"before_share, so the arithmetic would FAIL — but the row is "
+                 f"NOT RED, because the record's own floor makes it REFUSED: the "
+                 f"artifact's denominator is {e1['objects_total']} Objects (under "
+                 f"the frozen floor of {bars['floors']['e1_objects']}) and is the "
+                 f"25-name owner-labelled audit population rather than 'all "
+                 f":Object nodes written by the run'. Its corpus "
+                 f"({e1['corpus_sha256']}) is not the frozen corpus "
+                 f"({corpus_sha}), and the artifact declares "
+                 f"prereg={e1['declared_prereg']} "
+                 f"result={e1['declared_result']}. No before/after pair on the "
+                 f"pre-registered corpus exists, and the mechanism that must move "
+                 f"the share is an owner ruling on removal/relocation (#5333) — so "
+                 f"no scored E1 measurement exists to be red"),
     }
     e2_row = {
-        "verdict": verdict_word(e2_result),
+        "verdict": verdict_word(e2a_result),
         "sha": e1["sha"],
         "corpus_sha256": e1["corpus_sha256"],
-        "numerator": e1["e2a_survived"],
-        "denominator": e1["e2a_units"],
-        "note": e2_row_note(e1, e2a_result, e2b_result, e2_result),
+        "note": (f"E2a: {e2a_result['outcome']} — {e2a_result['value']} vs bar "
+                 f"{e2a_result['bar']}. E2b: {e2b_result['outcome']} — "
+                 f"{e2b_result['value']} vs bar {e2b_result['bar']} (a proxy: the "
+                 f"artifact counts atomic POINTS, not surviving planted units). "
+                 f"The E2 row is BLOCKED because the composite criterion needs "
+                 f"BOTH halves and E2a's frozen 14-value-bearing-unit denominator "
+                 f"is carried by no committed artifact; the artifact's no-loss "
+                 f"control (values {e1['state_values']} before and after, "
+                 f"real_facts {e1['real_facts']}) is consistent with E2a but does "
+                 f"not compute it. Same corpus caveat as E1: "
+                 f"{e1['corpus_sha256']} is not {corpus_sha}, and #10360 records "
+                 f"that nothing enforces retention (the render half closed, #9775)"),
     }
 
     # ── E3 ────────────────────────────────────────────────────────────────

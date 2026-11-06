@@ -5437,43 +5437,6 @@ def metering_get_usage(cp, org_id: str, period_start: str) -> dict:
     }
 
 
-def metering_get_capture_usage(cp, org_id: str, period_start: str) -> dict:
-    """Capture (extractor) usage for an org's window starting at
-    *period_start* — the supabase-mode READ path for
-    ``metering.get_capture_usage`` (#4051).
-
-    Returns the ``capture_*`` columns as a dict (all ZEROS when the row is
-    absent — the MERGE only creates the record on the first write).
-
-    ⛔ It exists because the columns were written and UNREADABLE: the
-    ``capture_extraction`` dimension in ``tortoise/cost_dimensions.py``
-    declared ``get_current_usage`` as its reader, and that function returns
-    write-op fields only — so "tokens per team per period" was a recorded
-    dimension with no reader, the exact shape ``#4493`` names as "a
-    measurement that does not exist". Nothing calls this from a request
-    path: it is the read half the owner's calibration pass needs.
-
-    #3825: keyed on ``period_start``, not the derived month label.
-    """
-    rows = cp.query(
-        "metering_records",
-        select=["capture_calls", "capture_tokens_in", "capture_tokens_out",
-                "capture_cost_usd"],
-        filters=[("org_id", "eq", org_id),
-                 ("period_start", "eq", period_start)],
-    )
-    if not rows:
-        return {"capture_calls": 0, "capture_tokens_in": 0,
-                "capture_tokens_out": 0, "capture_cost_usd": 0.0}
-    row = rows[0]
-    return {
-        "capture_calls": int(row.get("capture_calls") or 0),
-        "capture_tokens_in": int(row.get("capture_tokens_in") or 0),
-        "capture_tokens_out": int(row.get("capture_tokens_out") or 0),
-        "capture_cost_usd": float(row.get("capture_cost_usd") or 0.0),
-    }
-
-
 def metering_increment_ask(cp, org_id: str, period_start: str,
                            period_end: str, *, calls: int = 1,
                            tokens_in: int = 0, tokens_out: int = 0,

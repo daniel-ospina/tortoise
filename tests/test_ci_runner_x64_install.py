@@ -1789,7 +1789,7 @@ def test_label_coverage_does_not_verdict_a_custom_label_that_starts_ubuntu_digit
     `ubuntu-[0-9]*`, which matches anything after the digits. A zero-carrier custom label therefore
     exited `5` and was told *"python-ci-gate is never dispatched and every PR stays BLOCKED"* — a
     false red, and a false all-PRs-blocked claim, from the one instrument whose own comment says it
-    must never produce one. `tools/runner_autoscale.py:330-333` states the boundary the verdict arm
+    must never produce one. `tools/runner_autoscale.py:284-287` states the boundary the verdict arm
     was missing ("a custom label that merely starts `ubuntu-<digits>` … is NOT in the class"), so
     the two files disagreed about it.
 
@@ -1837,7 +1837,7 @@ def test_label_coverage_verdicts_only_the_label_this_script_can_register(tmp_pat
     `5`, and printed the remedy `CI_RUNNER_OS_LABEL=on --repair-labels` — a command that CANNOT
     apply `ubuntu-22.04`, because the installer only ever emits `$OS_LABEL`. That is a permanent red
     with an unactionable remedy: the false-red class this block refuses to create, and the mirror of
-    `tools/runner_autoscale.py:330-333` ("a custom label that merely starts `ubuntu-<digits>` … is
+    `tools/runner_autoscale.py:284-287` ("a custom label that merely starts `ubuntu-<digits>` … is
     NOT in the class") in the other direction.
 
     Mutation: `if [ "$shell_asks_os_label" = 1 ]` without the `$label = $OS_LABEL` conjunct -> this
@@ -4731,180 +4731,4 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
             f"once in that file — found {len(hits)} match(es) at {hits}. A deleted sentence is a "
             "relay that no longer says what the citing paragraph claims; a duplicated one no "
             "longer identifies a single landing site. Re-anchor on the sentence the tree carries."
-        )
-
-
-# ── 8i. the wedged section's REPAIR COMMANDS — an operator RUNS these, so they must run ───────
-def test_the_wedged_sections_restore_command_can_run_and_reaches_every_detached_instance():
-    """⛔ THE REPAIR IS AN EXECUTABLE INSTRUCTION, AND THE OBVIOUS FORM IS A SILENT NO-OP.
-
-    At the reviewed head the restore line read
-
-        uv run python tools/install-ci-runner-x64.sh --repair-labels   # restores it once ...
-
-    which has two independent defects. (1) `tools/install-ci-runner-x64.sh` is
-    `#!/usr/bin/env bash` (case/esac, `[[ ]]`), so `uv run python <that file>` is a SyntaxError and
-    every other in-tree invocation of it is direct. (2) `--repair-labels` never enumerates the
-    pool: it loops `seq 1 "$COUNT"` and the installer's `DEFAULT_COUNT` is 2, so with no `--count`
-    only instances 1-2 are visited. The registrations the same section tells the operator to
-    detach are `/opt/gh-runner-x64-{4,6,7,8}` — NONE of them — and each unconfigured instance
-    prints `skip: … is not configured` while the loop exits 0: a success exit over a repair that
-    touched nothing, in the one document a human reaches for when CI serves nothing.
-
-    Non-vacuity: with the pre-fix line this reds on BOTH arms — the interpreter arm (it is the only
-    `uv run python <x>.sh` form in the tree) and the `--count` arm (it carried neither a direct
-    invocation nor a count).
-    """
-    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
-    start = next(
-        i
-        for i, line in enumerate(doc)
-        if line.startswith("## A runner can be ONLINE, IDLE and serve NOTHING")
-    )
-    end = next((i for i in range(start + 1, len(doc)) if doc[i].startswith("## ")), len(doc))
-    section = "\n".join(doc[start:end])
-
-    # (1) NO `.sh` IS EVER HANDED TO A PYTHON INTERPRETER — not in this section, and not anywhere
-    #     else in the runbook either (this was the only such form in the tree, which is how it
-    #     survived review).
-    wrong_interp = [
-        f":{n + 1}: {line.strip()}"
-        for n, line in enumerate(doc)
-        if re.search(r"\bpython3?\s+\S*\.sh\b", line)
-    ]
-    assert not wrong_interp, (
-        "the runbook runs a BASH script through the Python interpreter — `uv run python <x>.sh` is "
-        "a SyntaxError and the installer is `#!/usr/bin/env bash`. Invoke it directly: "
-        + "; ".join(wrong_interp)
-    )
-
-    # (2) THE RESTORE INVOCATION MUST PASS A `--count` THAT REACHES EVERY INSTANCE THE SECTION
-    #     DETACHES. `--repair-labels` loops 1..COUNT, so the default (2) skips the very
-    #     registrations this section names — and still exits 0.
-    restore = [
-        (n + 1, line.strip())
-        for n, line in enumerate(doc)
-        if "install-ci-runner-x64.sh" in line
-        and "--repair-labels" in line
-        and not line.lstrip().startswith("#")
-        and start < n < end
-    ]
-    assert restore, (
-        "the wedged section no longer tells an operator how to restore the detached fallback "
-        "label — re-anchor this pin rather than deleting it"
-    )
-    named = [
-        int(n)
-        for group in re.findall(r"/opt/gh-runner-x64-\{([\d,\s]+)\}", section)
-        for n in group.replace(" ", "").split(",")
-        if n.isdigit()
-    ] + [int(n) for n in re.findall(r"/opt/gh-runner-x64-(\d+)\b", section)]
-    assert named, "the section no longer names the instances it detaches — re-anchor this pin"
-    highest = max(named)
-    for lineno, line in restore:
-        m = re.search(r"--count[= ]+(\d+)", line)
-        assert m, (
-            f"docs/ops/ci-runner-x64.md:{lineno} restores the label with `--repair-labels` and NO "
-            f"`--count`. The installer loops 1..COUNT and `DEFAULT_COUNT` is 2, so instances "
-            f"{sorted(set(named))} are never visited; each prints `skip: … is not configured` and "
-            "the loop exits 0 — a success code over a repair that touched nothing."
-        )
-        assert int(m.group(1)) >= highest, (
-            f"docs/ops/ci-runner-x64.md:{lineno} passes --count {m.group(1)}, which cannot reach "
-            f"instance {highest} that this same section tells the operator to detach"
-        )
-
-    # (3) AND THE PRECONDITION TRAVELS WITH IT: the label returns only while the gate still asks
-    #     for it, so `--fallback auto` (not an unconditional "restores it") is the honest promise.
-    assert "--fallback auto" in section, (
-        "the restore guidance no longer names the `--fallback auto` precondition — the repair only "
-        "UNIONS the COMPUTED set, so `ubuntu-latest` returns only while the ARM64 pool still asks "
-        "for it"
-    )
-
-
-# ── 8j. a TEST citing `tools/` BY LINE — the direction nothing covered ─────────────────────────
-def test_the_version_pin_drop_citation_lands_on_the_drop_sentence():
-    """⛔ THE THIRD DIRECTION: `tests/` → `tools/` BY LINE HAD NO PIN, SO A +182-LINE PR BROKE IT.
-
-    `tests/test_reporting_workflow_concurrency.py` explains why the four observers are
-    pool-eligible while the #6897 mitigation is engaged, and cites `tools/runner_autoscale.py` by
-    LINE for the fact that `_preserve_labels` DROPS the version pin on every re-registration. This
-    PR added 182 lines above that sentence (126 at the wedged block, 22 in `converge`, 13 in the
-    verdict tail) and the citation kept pointing at what had moved INTO its place: the
-    `fill-refused-by-provisioner` note prose, whose subject is the OPPOSITE half of the label
-    contract (`--repair-labels` KEEPS). The installer→runbook and runbook→installer directions are
-    pinned two-way; this one was checked by nothing, which is why it drifted silently.
-
-    Non-vacuity: with the pre-fix number this reds, and the message names where the sentence
-    actually is.
-    """
-    citing = (REPO_ROOT / "tests" / "test_reporting_workflow_concurrency.py").read_text()
-    tool = (REPO_ROOT / "tools" / "runner_autoscale.py").read_text().splitlines()
-    m = re.search(
-        r"on every re-registration \(`tools/runner_autoscale\.py:(\d+)-(\d+)`",
-        citing,
-    )
-    assert m, (
-        "the `_preserve_labels` DROPS sentence lost its line citation — re-anchor this pin rather "
-        "than deleting it"
-    )
-    start, end = int(m.group(1)), int(m.group(2))
-    assert 1 <= start <= end <= len(tool), f"cites :{start}-{end}, past EOF ({len(tool)} lines)"
-    text = "\n".join(tool[start - 1:end])
-    actual = [
-        n
-        for n, line in enumerate(tool, 1)
-        if "THAT DROP STANDS" in line or "DROPS the rest of the family" in line
-    ]
-    assert "THAT DROP STANDS" in text and "--repair-labels" in text, (
-        f"the citation points at {text.strip()[:200]!r}, which is not the `_preserve_labels` drop "
-        f"sentence — re-derive the number at this head (the sentence is at {actual})"
-    )
-
-
-def test_the_version_pinned_hosted_label_citations_land_on_the_class_boundary():
-    r"""⛔ THIS PR'S OWN EXIT HUNK BROKE FOUR CITATIONS, AND ONLY THE RANGE CHECK CAUGHT IT.
-
-    `tools/install-ci-runner-x64.sh` (2 sites) and this file (2 sites) cite
-    `tools/runner_autoscale.py:<a>-<b>` for the boundary "a custom label that merely starts
-    `ubuntu-<digits>` … is NOT in the class". The wedged/uncertified EXIT documentation added ~48
-    lines ABOVE that block, so the cited span landed on the interpreter guard
-    (`requires Python >= 3.12`) — a range check (`1 <= a <= b <= EOF`) still passed, which is
-    exactly why the three sibling citations are pinned by SENTENCE. R5 of this PR's scope contract
-    is "every pinned cross-file line citation still lands on the sentence it names"; this is that
-    arm for the label-boundary paragraph.
-
-    Non-vacuity: with the pre-fix numbers this reds (the span reads "requires Python >= 3.12"),
-    and the message names where the sentence actually is.
-    """
-    tool = (REPO_ROOT / "tools" / "runner_autoscale.py").read_text().splitlines()
-    sites = [
-        REPO_ROOT / "tools" / "install-ci-runner-x64.sh",
-        REPO_ROOT / "tests" / "test_ci_runner_x64_install.py",
-    ]
-    cited = set()
-    for site in sites:
-        for m in re.finditer(r"runner_autoscale\.py:(\d+)-(\d+)(?=`|\s|$)", site.read_text()):
-            cited.add((int(m.group(1)), int(m.group(2))))
-    # the two label-boundary pairs the repo cites (the `_preserve_labels` pin is separate)
-    boundary = {(a, b) for (a, b) in cited if b - a == 3}
-    assert boundary, f"the label-boundary citation lost its span form: {sorted(cited)}"
-    actual = [
-        n
-        for n, line in enumerate(tool, 1)
-        if "custom label that merely" in line
-        or "is NOT in the class and must still be" in line
-    ]
-    for lo, hi in boundary:
-        assert 1 <= lo <= hi <= len(tool), f"cites :{lo}-{hi}, past EOF ({len(tool)} lines)"
-        span = "\n".join(tool[lo - 1 : hi])
-        # ⛔ THE SENTENCE IS LINE-WRAPPED in the source (`A custom label that merely` / `starts
-        # \`ubuntu-<digits>\``), so match the two fragments rather than a co-joined string — the
-        # first cut of this pin asserted the co-joined form and failed on its OWN text, not on a
-        # drifted citation.
-        assert "custom label that merely" in span and "NOT in the class" in span, (
-            f"the label-boundary citation :{lo}-{hi} does not land on the sentence it names "
-            f"({span.strip()[:160]!r}) — re-derive the number at this head (the sentence is at "
-            f"{actual})"
         )

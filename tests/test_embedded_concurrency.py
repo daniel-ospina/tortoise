@@ -6,7 +6,6 @@ SIGKILL mid-sweep, lock release on SIGKILL).
 """
 from __future__ import annotations
 
-import inspect
 import os
 import signal
 import subprocess
@@ -21,7 +20,7 @@ import pytest
 # shared system temp dir, so a socket/pid lookup can never again walk the whole
 # host temp tree (2 min at 53% CPU) nor match a concurrent suite's
 # redis.socket / redis.pid.
-from tests._tmpdir_hygiene import SessionRedisResidue, scan_root
+from tests._tmpdir_hygiene import scan_root
 
 pytest.importorskip("redislite")
 
@@ -461,61 +460,59 @@ def _clean_spawned_residue():
     processes (a race generator, and lethal when test (a)/test-slow ran
     concurrently). This fixture snapshots pids + socket dirs before the
     test and kills/removes ONLY the delta (the test_reaper pattern #493).
-
-    The pid population is SESSION-scoped (`SessionRedisResidue`,
-    tests/_tmpdir_hygiene.py): a host-wide `pgrep` delta also contains every
-    server a concurrent CI job on this shared runner started while the test
-    ran, so killing it SIGTERMed *their* servers — measured 2026-11-03 as
-    `redis.socket ... No such file or directory` in a sibling shard (#7522).
     """
-    residue = SessionRedisResidue(kill=_kill_pid, alive=_pid_alive)
+    def _snapshot() -> tuple[set[int], set[str]] | None:
+        """Snapshot ambient pids + socket dirs. Returns None when the probe
+        fails — the caller must SKIP cleanup entirely (fail-safe: clean
+        nothing rather than compute a delta against an empty baseline, which
+        would kill every server on the host)."""
+        pids: set[int] = set()
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", "redislite/bin/redis-server"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            pids = {int(p) for p in out.split() if p.strip().isdigit()}
+        except Exception:
+            return None
+        dirs: set[str] = set()
+        tmp = scan_root()  # #3752: private root, never the shared temp dir
+        try:
+            for entry in os.scandir(tmp):
+                if entry.is_dir() and (
+                    os.path.exists(os.path.join(entry.path, "redis.socket"))
+                    or os.path.exists(os.path.join(entry.path, "redis.pid"))
+                ):
+                    dirs.add(entry.path)
+        except Exception:
+            return None
+        return pids, dirs
+
+    before = _snapshot()
+    if before is None:
+        yield  # probe failed — fail-safe: no cleanup at all
+        return
+    before_pids, before_dirs = before
     yield
-    residue.reap()
-
-
-def test_the_autouse_teardown_actually_calls_reap(monkeypatch):
-    """The finaliser must CALL ``reap()`` — the code after the ``yield``.
-
-    The sibling pin of ``tests/test_reaper.py::test_the_autouse_teardown_actually_calls_reap``,
-    for THIS module's fixture. ``yield SessionRedisResidue(...)`` performs no
-    cleanup at all (pytest never inspects the yielded object), so the whole
-    kill/rmtree block is dead while the fixture's docstring still promises it:
-    nothing reds, and every server a test leaked stays discoverable for the
-    rest of the module — the order-flakiness the fixture exists to prevent
-    (#493, #1365). That regressed HERE once already (#7522, fixed in
-    ``db02391dc``), which is why both fixtures carry a pin rather than one.
-
-    Driven as a plain generator (``inspect.unwrap`` steps past pytest's
-    direct-call guard), so the assertion is about the finaliser's REAL body
-    rather than its source text. The module skips without ``redislite``, and
-    so does this pin — the coverage it certifies is exactly the coverage the
-    fixture it guards has.
-    """
-    from tortoise import embedded_reaper
-
-    # No real process probe: the baseline is beside the point here.
-    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
-                        lambda: [])
-    monkeypatch.setattr(embedded_reaper, "_batch_cmdlines_or_none",
-                        lambda pids: {})
-    reaped: list[bool] = []
-    monkeypatch.setattr(SessionRedisResidue, "reap",
-                        lambda self: reaped.append(True))
-
-    setup_and_teardown = inspect.unwrap(_clean_spawned_residue)
-    assert inspect.isgeneratorfunction(setup_and_teardown), (
-        "the teardown fixture must be a yield fixture: a `return`-style body "
-        "has no finaliser at all"
-    )
-    events = setup_and_teardown()
-    next(events)                      # setup — the before-snapshot
-    list(events)                      # drain — runs the finaliser
-
-    assert reaped == [True], (
-        "the autouse teardown never called reap(): `yield "
-        "SessionRedisResidue(...)` is a no-op finaliser, so the servers and "
-        "socket dirs THIS test spawned are never removed"
-    )
+    try:
+        after = _snapshot()
+        if after is None:
+            return  # probe failed — fail-safe: skip cleanup
+        after_pids, after_dirs = after
+        delta = after_pids - before_pids
+        for pid in delta:
+            _kill_pid(pid)
+        # Poll briefly so the rmtree below does not race a dying server.
+        for _ in range(6):
+            alive = {p for p in delta if _pid_alive(p)}
+            if not alive:
+                break
+            time.sleep(0.1)
+        import shutil
+        for d in after_dirs - before_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
 
 
 @pytest.fixture(scope="module", autouse=True)

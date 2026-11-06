@@ -20,11 +20,7 @@
 #                              module level in the `code:` file(s) this same row
 #                              names — where `__all__`/dunders do not count,
 #                              because re-exporting a name is not defining it
-#   state: not-implemented  -> `tracking_issue:` is present AND `pins:` names
-#                              the test node that reds the day the absence
-#                              closes (`path::test_name` /
-#                              `path::Class::test_name`; see `pins:` below).
-#                              `code:`, `tests:`
+#   state: not-implemented  -> `tracking_issue:` is present. `code:`, `tests:`
 #                              and `symbols:` are OPTIONAL on this state — they
 #                              are how a row records the half that IS built —
 #                              but WHEN PRESENT they are verified by the SAME
@@ -53,36 +49,6 @@
 # test" half). `code:` alone proved a FILE existed, so a mechanism whose symbol
 # had been renamed or removed still read as shipped while any `.py` sat at that
 # path. Each `implemented` row therefore names the symbol that IS the mechanism.
-#
-# ⭐ `pins:` is the ABSENCE PIN (#5064 indicator (3) applied to the mechanisms,
-# and the mirror of `symbols:` on the TEST side). `tracking_issue:` says WHERE an
-# absence is tracked; it cannot say that anything would NOTICE the absence
-# closing, and `tests:` proves only that a FILE exists — so a pin's cited call
-# could be renamed away while the row kept reading as watched. ⚠️ A pin names the
-# test that observes the absence OR THE NAMED PART OF IT when a row records a
-# multi-part absence — `sufficiency_router` is the live case: its pin watches the
-# read-path caller, and the row's `note` owns the tier walk and the Tier-1
-# store. A row that narrows its pin this way says which part in its `note`:
-# `atomic_point_write`'s pin is not narrowed by PART (it targets the single
-# constraint claim; its SCAN scope is bounded in its note); `span_link` (1 of 4 gates),
-# `failure_policy` (1 of 3 declared parts) and `sufficiency_router` (the caller)
-# narrow theirs, and each NOTE names the part — so no row's `pins:` line can be
-# read as wider than its note. #10636 is the
-# measured case: `span_link`'s row asserted an every-point requirement whose real
-# coverage was 1 of 4 gates, with the other three named only in the note's prose
-# ("pinned ELSEWHERE, not by it"). Every `not-implemented` row therefore names
-# the test NODE that reds the day the absence closes — `path::test_name` or
-# `path::Class::test_name`, pytest's own selector, so a reader can run exactly
-# what the row cites — and the gate resolves it (an unreadable test source is
-# UNVERIFIABLE, never a pass). ⚠️ What the gate ESTABLISHES is narrower than
-# what the pin MEANS, and it is stated rather than overclaimed: the cited NODE is
-# still defined at that call, so a rename or a deletion cannot leave the row
-# silently unwatched. That the node actually OBSERVES this absence is the row
-# author's claim, reviewed once (a `skip`/`xfail` node that can never red is a
-# review-time refusal, not a verdict this gate can return). When the
-# mechanism lands, the ROW flips and the pin is dropped — never the pin deleted
-# while the row still claims the absence. A pin on an `implemented` row is
-# refused for that reason: it would read watched-and-shipped at once.
 #
 # A row that is **neither** fails the gate (FAIL CLOSED). That is the root
 # sentence made checkable: a declared-and-absent mechanism cannot be read as a
@@ -444,8 +410,6 @@ mechanisms:
       - docs/architecture/STORAGE-ARCHITECTURE.md       # §9.4
     state: not-implemented
     tracking_issue: 2684
-    pins:
-      - tests/test_v4_declared_mechanisms.py::test_the_span_link_row_records_the_widening_as_unbuilt
     code:
       - tortoise/commit_schema.py
     tests:
@@ -532,8 +496,6 @@ mechanisms:
       - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.4 the router, §12.5 the escalation write-back
     state: not-implemented
     tracking_issue: 5009
-    pins:
-      - tests/test_sufficiency_router.py::TestTheRemainingAbsence::test_nothing_outside_the_router_imports_it
     note: >-
       Escalate on measured INSUFFICIENCY of the assembled evidence, not on query
       type. The DECISION layer landed in `tortoise/sufficiency_router.py`
@@ -545,11 +507,7 @@ mechanisms:
       `not-implemented` on purpose: NOTHING ESCALATES YET — no tier walk, no
       Tier-1 store, no read-path caller, and #5009's premise measurement (are
       our queries actually answered badly by a cheap tier?) precedes that
-      wiring. ⚠️ WHAT THE PIN COVERS, stated so the `pins:` contract is not read
-      as wider than it is: the pin observes the READ-PATH CALLER only — an AST
-      scan for a production module that reaches this one. The tier walk and the
-      Tier-1 store stay THIS note's claim (a tier walk added inside
-      `tortoise/sufficiency_router.py` reds nothing). §12.3's tier count is also OPEN (a design fold, not an owner
+      wiring. §12.3's tier count is also OPEN (a design fold, not an owner
       ruling). A row marked `implemented` here would recreate the exact
       declared-implies-present defect this registry exists to catch.
 
@@ -1081,8 +1039,6 @@ mechanisms:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §4.2 "The against-store exact dedup has FOUR preconditions"
     state: not-implemented
     tracking_issue: 9879
-    pins:
-      - tests/test_v4_declared_mechanisms.py::test_the_atomic_write_absence_is_pinned_to_the_schema
     note: >-
       The declared requirement, in §4.2's own words: *"`create_point(dedup=True)`
       is a check-then-CREATE, and there is no uniqueness constraint on `Point`.
@@ -1143,9 +1099,6 @@ mechanisms:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §4.4 (declared in §4.3 as G3)
     state: not-implemented
     tracking_issue: 5087
-    pins:
-      - tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence::test_an_unresolved_lookup_still_mints
-      - tests/test_v4_declared_mechanisms.py::test_the_failure_policy_absence_is_pinned_to_the_mint_not_the_render
     note: >-
       §4.4 states its own status in its closing paragraph: it *"is a SPEC, not a
       description of what runs"*, and the load-bearing instance is S3. The
@@ -1164,10 +1117,7 @@ mechanisms:
       did not run (per candidate, not per run), and `extract_session_v2` carries
       an always-present `identity` block plus a warning that fires when a candidate's
       own identity query did not run (a budget cut that touches only non-candidate
-      queries gets its own sentence, and a lookup that ran NOTHING at all with no
-      candidate to check gets a third on any run that reaches the warning block —
-      the empty-conversation early return precedes it, so it emits none — and the
-      three are different facts).
+      queries gets its own sentence — the two are different facts).
       ⛔ **WHAT IS STILL ABSENT — and this is why the row stays
       `not-implemented`:** nothing suppresses a create. I1's *"never mint it"*
       needs a CREATE gate inside S5, and NOT `execute_embed({})`: that function

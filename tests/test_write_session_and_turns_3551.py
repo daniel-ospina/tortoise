@@ -509,16 +509,9 @@ def test_demo_seed_is_excluded_from_the_primitive(client):
     assert "_write_session_and_turns" not in src
     assert "_write_capture_turns" not in src
     assert "_capture_turn_id" not in src
-    # It still writes its OWN deliberately-different demo Session (a turn
-    # counter, no is_episodic / capture_ok) — the reason it must stay out.
-    # ⛔ The counter is 0 since #10000: the seed stores no turn anywhere
-    # (§9.1/D1), so it may not declare a length. A non-zero count here is a
-    # completeness claim `served_turn_count` acts on, and the demo session has
-    # nothing to serve — that refusal/contradiction is the regression the value
-    # was changed to remove. Asserted by VALUE, not by parameter name, so a
-    # refactor that reintroduces a declared length fails this pin.
-    assert "s.turn_count=0" in src
-    assert "s.turn_count=3" not in src
+    # It still writes its OWN deliberately-different demo Session (3 turns, no
+    # is_episodic / capture_ok) — the reason it must stay out.
+    assert "s.turn_count=3" in src
 
     demo_org = "demo-3551-org"
     ha_mod._seed_demo_graph(demo_org)

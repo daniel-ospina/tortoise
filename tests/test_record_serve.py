@@ -324,95 +324,6 @@ def test_an_unknown_fallback_reason_is_refused():
         rs.note_fallback("because")
 
 
-# ── the DEFERRED cache answer (#10602 review, ISSUE 1) ────────────────────
-
-
-def test_a_deferred_cache_answer_names_the_reason_and_counts_nothing():
-    """``cache_answer=None`` (prefer): the seam decides, the CALLER reads.
-
-    ``get_point`` runs the record consult on the read lane and the cache's COLD
-    OPEN on the construction lane, because the two are budgeted differently and
-    one synchronous callback cannot honour both bounds. So the seam keeps the
-    DECISION — whether to fall back, and the named reason why — and hands the
-    execution back through :class:`CacheAnswerRequired`.
-
-    Nothing is counted on the way out: the fallback is counted by
-    :func:`answered_by_cache` when a cache read actually answers, so a read that
-    never came back contributes no increment (the metric means "answered by the
-    cache").
-
-    RED on the pre-fix shape: deferral did not exist, so ``cache_answer=None``
-    raised a ``TypeError`` from inside the seam instead of naming the reason.
-    """
-    rs.reset_fallback_counts()
-
-    with pytest.raises(rs.CacheAnswerRequired) as miss:
-        rs.serve_point(tenant=TENANT, point_id="gone", cache_answer=None,
-                       connect=_opener(_FakeConn(rows=[])),
-                       mode=rs.MODE_PREFER)
-    assert miss.value.reason == rs.FALLBACK_RECORD_MISS
-
-    with pytest.raises(rs.CacheAnswerRequired) as down:
-        rs.serve_point(tenant=TENANT, point_id="p-1", cache_answer=None,
-                       connect=_opener(OSError("connection refused")),
-                       mode=rs.MODE_PREFER)
-    assert down.value.reason == rs.FALLBACK_RECORD_UNAVAILABLE
-
-    assert rs.fallback_counts() == {}, (
-        "a deferred fallback counted before anything answered — the count means "
-        "'answered by the cache' and must land with the answer")
-
-
-def test_a_deferred_cache_answer_never_hides_a_structural_refusal():
-    """Deferral moves the cache read, not the error taxonomy.
-
-    A tenancy MISCONFIGURATION is a fault (500 at the route), never a fallback:
-    it must escape the deferred shape unchanged, exactly as it escapes the
-    callback shape.
-    """
-    from tortoise.record_projection import RecordProjectionError
-
-    def _boom(_dsn):
-        raise RecordProjectionError(
-            "the connecting role BYPASSES RLS — arm TORTOISE_RECORD_DSN with "
-            "tortoise_record_app")
-
-    with pytest.raises(RecordProjectionError):
-        rs.serve_point(tenant=TENANT, point_id="p-1", cache_answer=None,
-                       connect=_boom, mode=rs.MODE_PREFER)
-
-
-def test_the_deferred_shape_is_prefer_only():
-    """``off`` has no other answer and ``record`` never needs one.
-
-    A missing callback in ``off`` mode would be a silent "nothing to serve"; in
-    ``record`` mode the real callback is passed so the never-called contract
-    stays visible at the call site. Both are refused loudly.
-    """
-    for mode in (rs.MODE_OFF, rs.MODE_RECORD):
-        with pytest.raises(ValueError):
-            rs.serve_point(tenant=TENANT, point_id="p-1", cache_answer=None,
-                           connect=_opener(_FakeConn(rows=[_row()])),
-                           mode=mode)
-
-
-def test_answered_by_cache_counts_with_the_answer_and_names_it():
-    """The one place a LANDED fallback is recorded, for both fallback shapes."""
-    rs.reset_fallback_counts()
-    answer = rs.answered_by_cache(
-        read=rs.READ_POINT_BY_ID, coordinate="Point:p-1",
-        props={"id": "p-1", "content": "cache"},
-        reason=rs.FALLBACK_RECORD_MISS)
-    assert answer.served_from == "cache"
-    assert answer.fallback_reason == rs.FALLBACK_RECORD_MISS
-    assert answer.props == {"id": "p-1", "content": "cache"}
-    assert rs.fallback_counts() == {rs.FALLBACK_RECORD_MISS: 1}
-
-    with pytest.raises(ValueError):
-        rs.answered_by_cache(read=rs.READ_POINT_BY_ID, coordinate="Point:p-1",
-                             props=None, reason="because")
-
-
 # ── the anchor ─────────────────────────────────────────────────────────────
 
 
@@ -609,7 +520,7 @@ def _call_endpoint(monkeypatch, point_id="p-1", *, cache="unusable"):
                     return _R()
             return type("P", (), {"g": _G()})()
 
-    async def _sdk(_org, **_kwargs):  # #10602: the seam grew
+    async def _sdk(_org):
         built.append(_org)
         return _SpySDK()
 
@@ -777,15 +688,13 @@ def test_the_endpoint_prefers_the_cache_with_a_named_reason(monkeypatch):
                     return _R()
             return type("P", (), {"g": _G()})()
 
-    async def _sdk(_org, **_kwargs):  # #10602: the seam grew
-        # `attach_projection` — these stubs mirror its signature so a keyword the
-        # route now passes cannot turn every record-mode case into a TypeError.
+    async def _sdk(_org):
         return _CacheSDK()
 
-    # #7970/#10602: `prefer` builds its handle LAZILY — only once the record has
-    # not answered — through the bounded graph-lane seam (`_data_sdk_offloaded`,
-    # #3498); `record` constructs nothing. So the spy records the seam's calls,
-    # and this arm's fallback is what consults the cache.
+    # #7970: `prefer` constructs its handle eagerly through the bounded
+    # graph-lane seam (`_data_sdk_offloaded`, #3498) and captures a construction
+    # failure; only `record` constructs nothing. So the spy records the seam's
+    # calls, and this arm's fallback is what consults the cache.
     monkeypatch.setattr(api, "_data_sdk_offloaded", _sdk)
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
@@ -817,47 +726,6 @@ def test_record_mode_builds_no_cache_handle_at_all(monkeypatch):
     assert built == [], (
         "record mode constructed a cache handle, so the endpoint is "
         "cache-dependent even when the record answers")
-
-
-def test_a_record_served_prefer_read_builds_no_cache_handle(monkeypatch):
-    """#10602 review, ISSUE 1 (P2): ``prefer``'s handle is built LAZILY.
-
-    The lenient mode exists to answer from the RECORD, and it does so for most
-    reads. An eager construction made every one of them pay a graph-pool slot for
-    a cold projection open (connect + version probe + ``_ensure_indexes()``,
-    budgeted by ``probe_setup_timeout()``: 20 s, up to 300 s) it never used — and
-    on a restored/DR graph that open sat in front of the record consult, so an
-    answerable read could cross the 10 s transport bound and come back as the
-    504 -32009 "the work may still complete" body this change exists to replace.
-
-    Patching the SDK FACTORY is what makes it observable: a construction here is
-    the regression (the same seam `test_record_mode_builds_no_cache_handle_at_all`
-    uses for `record`).
-    """
-    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
-    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[_row()])))
-    body, err, built = _call_endpoint(monkeypatch)
-    assert err is None and body["servedFrom"] == "record"
-    assert built == [], (
-        "a record-served `prefer` read constructed a cache handle — the open "
-        "must be lazy, so a read the record answers pays nothing (#10602 "
-        "review ISSUE 1)")
-
-
-def test_a_prefer_fallback_STILL_builds_the_handle(monkeypatch):
-    """The lazy arm must not become an arm that never builds.
-
-    A record miss is exactly when the cache is needed; a "fix" that simply
-    stopped constructing on the `prefer` path would fail every fallback with a
-    programming error instead of answering. This pins the other side.
-    """
-    rs.reset_fallback_counts()
-    monkeypatch.setenv(rs.RECORD_SERVE_ENV, rs.MODE_PREFER)
-    monkeypatch.setattr(rs, "open_record", _opener(_FakeConn(rows=[])))
-    _body, err, built = _call_endpoint(monkeypatch, cache="empty")
-    assert err is not None and err.status_code == 404
-    assert built, "the fallback arm never constructed its cache handle"
-    assert err.detail["fallbackReason"] == rs.FALLBACK_RECORD_MISS
 
 
 def test_open_record_closes_the_connection_when_the_bound_fails(monkeypatch):
@@ -991,7 +859,7 @@ def test_a_credential_without_a_record_tenant_is_a_fault_not_an_outage(monkeypat
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: None)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
 
-    async def _no_cache(_org, **_kwargs):  # pragma: no cover - must not be reached
+    async def _no_cache(_org):  # pragma: no cover - must not be reached
         raise AssertionError("the cache was consulted without a record tenant")
 
     monkeypatch.setattr(api, "_data_sdk_offloaded", _no_cache)
@@ -1025,10 +893,8 @@ def test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened(monkeypa
     Measured defect this pins: the handle was constructed eagerly for `prefer`, so
     `_data_sdk_offloaded` raised **403 GRAPH_NOT_FOUND** before the record was ever
     asked — making the lenient mode strictly LESS able to answer than `record`,
-    which is the opposite of its purpose. Since #10602 review ISSUE 1 the handle is
-    not constructed until the CACHE is needed at all, so a record-served `prefer`
-    read never even reaches this seam (pinned by
-    `test_a_record_served_prefer_read_builds_no_cache_handle`).
+    which is the opposite of its purpose. The construction failure is captured and
+    re-raised only when the cache is actually needed.
     """
     from fastapi import HTTPException
 
@@ -1039,7 +905,7 @@ def test_prefer_answers_from_the_record_when_the_cache_cannot_be_opened(monkeypa
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
 
-    async def _graph_down(_org, **_kwargs):  # #10602: the seam grew
+    async def _graph_down(_org):
         raise HTTPException(status_code=403,
                             detail={"error_code": "GRAPH_NOT_FOUND"})
 
@@ -1075,7 +941,7 @@ def test_prefer_counts_an_unresolved_tenant_under_its_own_reason(monkeypatch):
                     return _R()
             return type("P", (), {"g": _G()})()
 
-    async def _sdk(_org, **_kwargs):  # #10602: the seam grew
+    async def _sdk(_org):
         return _EmptySDK()
 
     monkeypatch.setattr(api, "_data_sdk_offloaded", _sdk)
@@ -1109,7 +975,7 @@ def test_the_unresolved_tenant_arm_counts_only_when_the_cache_answers(monkeypatc
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: None)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
 
-    async def _graph_down(_org, **_kwargs):  # #10602: the seam grew
+    async def _graph_down(_org):
         raise HTTPException(status_code=403,
                             detail={"error_code": "GRAPH_NOT_FOUND"})
 
@@ -1171,7 +1037,7 @@ def test_prefer_surfaces_the_cache_failure_when_the_record_also_misses(monkeypat
     monkeypatch.setattr(api, "_resolve_record_tenant", lambda _org: TENANT)
     monkeypatch.setattr(api, "_require_scope", lambda *_a, **_k: None)
 
-    async def _graph_down(_org, **_kwargs):  # #10602: the seam grew
+    async def _graph_down(_org):
         raise HTTPException(status_code=403,
                             detail={"error_code": "GRAPH_NOT_FOUND"})
 

@@ -3102,10 +3102,10 @@ def test_emission_write_is_handed_off_the_event_loop(
     for the duration of the Supabase round-trip (the #2988/#3498 class).
     Asserted BEHAVIOURALLY — the loop thread and the writer thread must differ,
     and the writer thread must be the shared off-loop entry point's telemetry
-    pool (#4468), NOT the loop's SHARED default executor that the selfhost
-    readiness probe and every other ``to_thread`` site compete on — because
-    inlining the call leaves every other emission test green (with Supabase
-    unset the write is a fast local append).
+    pool (#4468), NOT the loop's SHARED default executor that the abuse hooks
+    and the selfhost readiness probe compete on — because inlining the call
+    leaves every other emission test green (with Supabase unset the write is a
+    fast local append).
 
     The loop thread is sampled INDEPENDENTLY of the props build (via the
     awaited ``_async_audit`` seam), so a future refactor that moves the whole
@@ -3154,14 +3154,14 @@ def test_emission_write_is_handed_off_the_event_loop(
         f"the capture-lane analytics emit ran on {seen['emit_thread_name']!r} "
         f"— it must use the dedicated telemetry pool "
         f"({monitoring.CONTROL_PLANE_TELEMETRY_WORKER_NAME!r}), never the "
-        "loop's shared default executor (#4468)")
+        "loop's shared default executor the abuse hooks compete on (#4468)")
 
 
 def test_capture_lane_analytics_emit_rides_the_telemetry_pool(monkeypatch):
     """#4468: the capture lane's analytics emit is routed through the shared
     off-loop entry point (``_emit_analytics_off_loop`` → ``_cp_offload`` on the
     dedicated ``telemetry`` pool), not ``asyncio.to_thread`` on the loop's
-    SHARED default executor.
+    SHARED default executor that the abuse hooks also use.
 
     REDs on unpatched main: the emit is
     ``asyncio.to_thread(_track_analytics_event, …)``, which never reaches

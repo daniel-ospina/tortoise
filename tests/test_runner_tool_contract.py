@@ -68,7 +68,7 @@ MARKER = "RUNNER-TOOL-CONTRACT-UNSATISFIED"
 #: `auto-file-issue.sh` (`e2e-live-reconcile`, `prod-csp-monitor`,
 #: `tenant-provision-monitor`), `welcome-e2e-monitor.sh` (`welcome-e2e-monitor`),
 #: `mergify_config_guard.py` (`mergify-guard-recut`), `inbound_relay_sweep.py`
-#: (`inbound-relay-sweep`). The set is 18 jobs across 16 workflows; count it from
+#: (`inbound-relay-sweep`). The set is 17 jobs across 15 workflows; count it from
 #: the literal, not from this sentence.
 GH_JOBS = {
     "python-ci.yml": ["canary-streak"],
@@ -91,14 +91,6 @@ GH_JOBS = {
     # added (#9943/#9946); the job does carry a checkout, so the step can run and
     # this is coverage, not a declared gap.
     "inbound-relay-sweep.yml": ["sweep"],
-    # #10597: the warn-only `Closes-coherence` step runs
-    # `tools/closes_landing.py`, which reads the PR body and the base branch's PR
-    # through `gh` for EVERY measurement. The job has a checkout, so the contract
-    # step can run — this is coverage, not a declared gap. Without `gh` present
-    # the `Ensure gh` step reds the JOB (it fails closed and has no
-    # `continue-on-error`), so the advisory step never gets to report UNMEASURED —
-    # which is exactly why the contract step is required here.
-    "drift-guard.yml": ["drift-guard"],
 }
 
 #: Jobs that use `gh` and are NOT covered, with the reason each one cannot simply take

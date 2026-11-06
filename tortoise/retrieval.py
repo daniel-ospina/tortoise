@@ -665,13 +665,9 @@ SESSION_TRANSCRIPT_KIND = "session-transcript"
 #: product writer. The literal is a product constant here so the READ side
 #: (``session_reinjection``'s default fetch kind, :func:`_is_turn_point`)
 #: has one home. The TURN literal is the one that is HARDCODED: ``sdk``'s
-#: capture turn loop, the hosted turn loop, and both eval ingest legs all
-#: write ``"event"`` literally, so this constant is a read-side home, not a
-#: single source. ⚠️ NOR the ask-fixture seeder:
-#: ``tools/ask_spotcheck.py::seed_capture_turn_store`` also hardcodes it
-#: (``"k": "event"``, raw Cypher, no gate) — the stand-in every ask fixture is
-#: seeded through (#3914). ⚠️ NOT the hosted demo seed: since #10000 it writes
-#: no turn node at all (§9.1/D1), so it is no longer a writer of this literal. ``SESSION_TRANSCRIPT_KIND`` is
+#: capture turn loop, the hosted turn loop, the hosted demo seed, and both
+#: eval ingest legs all write ``"event"`` literally, so this constant is a
+#: read-side home, not a single source. ``SESSION_TRANSCRIPT_KIND`` is
 #: imported by the two eval ingest legs and has a derivation pin
 #: (``tests/test_session_reinjection_rules.py::
 #: test_chunk_kind_is_single_sourced_across_all_four_consumers``) — that pin
@@ -838,7 +834,6 @@ def guard_and_recap_pool(
         session_key: Callable[[dict], str] | None = None,
         window: int = DEFAULT_POOL_GUARD_WINDOW,
         per_session_cap: int = DEFAULT_POOL_SESSION_CAP,
-        floor_term: bool = False,
         max_chunks_per_session: int) -> list[dict]:
     """The shared merge discipline (C3-1 #2567 / C4 #2517): optional
     session-diverse window guard THEN the C5 per-session raw-chunk re-cap,
@@ -852,19 +847,11 @@ def guard_and_recap_pool(
     guard without a second recap entry point (the guard→re-cap ordering
     lives here exactly once). Additive: reordering never drops an item;
     the re-cap may drop raw chunks beyond the per-session cap.
-
-    ``floor_term`` (#2513) passes through to the guard's missing LOWER
-    bound: an unrepresented session may take a slot back from a session
-    holding more than one, so a session ranked past the window can still
-    be admitted. OFF by default — it is default-preserving, and arming it
-    changes the graded top-k, so it awaits the sealed A/B measurement
-    (see ``coverage_loop.session_diverse_order`` for the measured density
-    cost, which this does NOT avoid).
     """
     if guard:
         items = session_diverse_order(
             items, window=window, per_session_cap=per_session_cap,
-            session_key=session_key, floor_term=floor_term)
+            session_key=session_key)
     return dedup_pool(items, max_chunks_per_session=max_chunks_per_session,
                       session_key=session_key)
 
@@ -2963,13 +2950,11 @@ def _is_turn_point(h: dict) -> bool:
 
     ⚠️ DELIBERATELY BROADER than ``session_reinjection._TURN_SHAPE_FILTER``,
     which needs BOTH conjuncts. This OR classifies a non-turn ``event``
-    point (the hosted demo/dashboard seed, which WROTE no ``is_episodic``
-    before #10000 stopped it writing ``event`` at all) as a turn. That is NOT
-    harmless any more, and this docstring said it was
+    point (the hosted demo/dashboard seed, which writes no ``is_episodic``)
+    as a turn. That is NOT harmless any more, and this docstring said it was
     until #9092: D3 made the predicate an ORDERING key as well as a
     collapse/slot key (``_package_type_tier``), so every ``point_kind ==
-    "event"`` hit — including one on a graph the demo seed populated before
-    #10000 — is filed in the
+    "event"`` hit — including that demo/dashboard seed — is filed in the
     MIDDLE (turn) tier and ordered BEHIND every distilled statement. That is
     intended: an ``event`` point is verbatim-event-shaped, not a distilled
     claim, so it belongs with the turns rather than leading the window — and
@@ -3098,9 +3083,8 @@ def _package_type_tier(h: dict) -> int:
 
     ⚠️ The turn leg reuses :func:`_is_turn_point`, which is deliberately
     broader than the C4 fetch's conjunct predicate (any ``point_kind ==
-    "event"`` counts, including a demo/dashboard ``event`` point seeded before
-    #10000, which wrote no ``is_episodic``). That breadth is REQUIRED here:
-    pass 2 partitions
+    "event"`` counts, including the hosted demo/dashboard seed that writes no
+    ``is_episodic``). That breadth is REQUIRED here: pass 2 partitions
     ``sources`` with the same predicate, so a narrower tier predicate would
     file a hit that pass 2 treats as a source in the STATEMENT tier and the
     sort key would disagree with the package membership. The consequence —

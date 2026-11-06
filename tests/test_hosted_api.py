@@ -98,11 +98,6 @@ TEST_TEAM = {
     "max_sessions": None,
 }
 
-# #10602: a SECOND org, used only where a test needs two reads on DIFFERENT
-# snapshot identities (``_namespace`` is the org_id, and it is the
-# fallback-snapshot key). Same shape as TEST_TEAM, different tenant.
-_SECOND_TEAM = {**TEST_TEAM, "org_id": "team-002"}
-
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -8396,7 +8391,7 @@ class TestSearchOffloadConcurrency:
                     t0 = time.monotonic()
                     await asyncio.wait_for(asyncio.gather(
                         search("falkordb traversal", limit=10, org=TEST_TEAM),
-                        search("graph performance", limit=10, org=_SECOND_TEAM),
+                        search("graph performance", limit=10, org=TEST_TEAM),
                     ), timeout=15)
                     return time.monotonic() - t0
 
@@ -13352,22 +13347,6 @@ class TestOverLimitSurfacesOfferTheHumanPath:
         # customer ceiling. Offering the upgrade path here would promise a
         # plan that cannot lift a data fault.
         "unreadable for resource",
-        # #4051 (this lane): the gate builds the SDK whose graph it counts
-        # (`quota._resolve_count_sdk` calls the `sdk_factory`), so a
-        # CONSTRUCTION fault is now a reachable fail-closed arm — the third of
-        # the same SERVER-fault category as "quota count failed" directly above
-        # (that is the arm `_count_resource` raises when the count itself fails;
-        # this is the arm that fires one step earlier, when the handle a
-        # graph-scoped count reads through cannot be made) and "unreadable for
-        # resource" (corrupt state on our side, never a customer ceiling — no
-        # plan lifts it).
-        # `_check_org_limit` wraps it as "Quota check failed: ...", which IS the
-        # exempted prefix — but this guard reads raise-site LITERALS, and the wrap
-        # happens at the HTTPException site in another module, so the literal here
-        # needs its own entry or the arm reads as an unregistered ceiling refusal.
-        # Registered the same way the previous arm was (#10142, f8970b536): a new
-        # fail-closed arm gets a category entry, not a rewritten message.
-        "quota count sdk unavailable",
         "resolve_org_limits requires a org_id", "cohort is larger than the",
         "cannot bound anything", "cannot be evaluated",
         "an unscoped cap would apply", "Import artifact exceeds the size cap",

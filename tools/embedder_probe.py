@@ -41,7 +41,6 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import importlib
 import threading
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -219,7 +218,7 @@ def inject_model(name: str, query_prompt: str | None = None,
             _state = {
                 "name": name,
                 "hf_id": hf_id,
-                "resolved_revision": _resolved_revision(model, hf_id, revision),
+                "resolved_revision": _resolved_revision(model),
                 "query_prompt": query_prompt,
                 "dim": dim,
             }
@@ -297,27 +296,8 @@ def _model_dim(model: Any) -> int | None:
         return None
 
 
-def _resolved_revision(model: Any, hf_id: str | None = None,
-                      revision: str | None = None) -> str | None:
-    """Best-effort resolved commit for the loaded model (HF cache metadata).
-
-    Three sources, strongest first:
-
-    1. a ``_commit_hash`` on the model or on any submodule's config —
-       transformers through **5.21** sets it from the resolved Hub commit;
-    2. the LOCAL HF CACHE snapshot the load resolved to, via
-       ``huggingface_hub.try_to_load_from_cache`` — transformers **5.22**
-       stopped setting ``_commit_hash`` at all (it is only *popped* now:
-       ``transformers/configuration_utils.py`` v5.22.0 line 486), so on the
-       transformers CI installs a REAL model loaded perfectly well and this
-       function answered ``None`` — the `test (d)` red of PR #10677, where
-       the load, the dim and the encode path were all correct;
-    3. ``model_card_data.base_model_revision`` (what the Hub card names).
-
-    The cache lookup is offline-safe (it reads the local cache only) and
-    needs the repo id: ``hf_id`` when the caller knows the pin it forced,
-    else the model's own ``name_or_path``/``_name_or_path``.
-    """
+def _resolved_revision(model: Any) -> str | None:
+    """Best-effort resolved commit for the loaded model (HF cache metadata)."""
     if model is None:
         return None
     direct = getattr(model, "_commit_hash", None)
@@ -329,9 +309,6 @@ def _resolved_revision(model: Any, hf_id: str | None = None,
             commit = getattr(cfg, "_commit_hash", None)
             if commit:
                 return str(commit)
-        cached = _cached_revision(hf_id or _model_repo_id(model), revision)
-        if cached:
-            return cached
         mcd = getattr(model, "model_card_data", None)
         rev = getattr(mcd, "base_model_revision", None)
         if rev:
@@ -339,58 +316,6 @@ def _resolved_revision(model: Any, hf_id: str | None = None,
     except Exception:
         pass
     return None
-
-
-def _model_repo_id(model: Any) -> str | None:
-    """The Hub repo id the model was loaded from, when it is not a local path."""
-    for module in list(model.modules()) if hasattr(model, "modules") else [model]:
-        cfg = getattr(module, "config", None)
-        for attr in ("_name_or_path", "name_or_path"):
-            value = getattr(cfg, attr, None)
-            if isinstance(value, str) and value.count("/") == 1:
-                return value
-    return None
-
-
-def _cached_revision(hf_id: str | None, revision: str | None,
-                     cache_dir: str | Path | None = None) -> str | None:
-    """The cache SNAPSHOT commit ``hf_id`` resolves to at ``revision``.
-
-    ``try_to_load_from_cache`` answers a path shaped
-    ``<cache>/models--<org>--<name>/snapshots/<commit>/config.json``, so the
-    commit is read back from the path rather than from any library object —
-    which is the point: the answer must not depend on a transformers internal
-    that a version bump can drop (5.22 dropped ``_commit_hash``).
-
-    Returns ``None`` for every shape that is not a Hub cache hit (no cache,
-    repo not cached, no ``refs`` entry for an unpinned ``revision``), because
-    "the cache could not tell me" is not a commit.
-
-    ``cache_dir`` exists for tests (a synthetic cache layout); production
-    callers pass nothing and read the Hub's own default cache.
-    """
-    if not hf_id or "/" not in hf_id:
-        return None
-    try:
-        from huggingface_hub import try_to_load_from_cache
-    except Exception:  # pragma: no cover — hub always ships with ST
-        return None
-    try:
-        path = try_to_load_from_cache(hf_id, "config.json",
-                                      cache_dir=cache_dir, revision=revision)
-    except Exception:
-        return None
-    if not isinstance(path, str):
-        return None
-    parts = Path(path).parts
-    if "snapshots" not in parts:
-        return None
-    idx = parts.index("snapshots")
-    if idx + 1 >= len(parts):
-        return None
-    commit = parts[idx + 1]
-    return commit if len(commit) == 40 and all(
-        c in "0123456789abcdef" for c in commit) else None
 
 
 def _encode_vec(model: Any, text: str) -> np.ndarray:

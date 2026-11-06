@@ -495,33 +495,8 @@ class QueueHealth:
         IS executing — just too slowly to answer. Folding it in would make the
         per-PR report claim "CI is not running" about a repo where it demonstrably
         is, which is a false statement in the instrument that exists to refuse them.
-
-        For "is PR work waiting behind the QUEUE?" use `delays_pr`, which is the
-        superset and says so — the two questions are different and one flag cannot
-        answer both truthfully.
         """
         return self.verdict in STARVING_VERDICTS
-
-    @property
-    def delays_pr(self) -> bool:
-        """True when PR work is waiting behind the QUEUE rather than behind itself.
-
-        The superset of `starves_pr`: it adds `PR-BACKLOGGED`, the state where PR CI
-        IS executing but the oldest queued PR run has waited past its budget
-        (`DEFAULT_MAX_PR_WAIT_SECONDS`, derived from the measured max first-job wait
-        in `docs/ops/ci-wall-clock.md` §1). Both readings describe the same thing for
-        a caller deciding whether a per-PR action would help: the wait is the queue's,
-        so no rerun and no reopen can shorten it, and a cancel would discard whatever
-        queue position the run had reached.
-
-        It is a SEPARATE property rather than part of `starves_pr` because the two
-        answer different questions: `starves_pr` asserts an ABSENCE ("no PR-event run
-        is executing") which a backlogged-but-moving queue falsifies, while this one
-        asserts congestion, which PR-BACKLOGGED witnesses. `PR-UNWITNESSED` stays
-        false here too — a page-capped feed did not measure the wait at all, and an
-        unmeasured queue is not a congested one.
-        """
-        return self.starves_pr or self.verdict == PR_BACKLOGGED
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -536,8 +511,6 @@ class QueueHealth:
             "pr_queued": self.pr_queued,
             "oldest_pr_queued_age_seconds": self.oldest_pr_queued_age_seconds,
             "pr_wait_budget_seconds": self.pr_wait_budget_seconds,
-            "starves_pr": self.starves_pr,
-            "delays_pr": self.delays_pr,
             "truncated": self.truncated,
             "reasons": list(self.reasons),
             "trimmable": [run.id for run in self.trimmable],

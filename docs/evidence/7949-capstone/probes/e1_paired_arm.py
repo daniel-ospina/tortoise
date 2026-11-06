@@ -145,14 +145,12 @@ def min_before_share(prereg: dict | None = None) -> float:
     a reader who took it as a before-share would compute `after <= 0.50 x before`
     over a corpus the record says cannot measure E1.
 
-    Read straight off the record, not through `parse_bars`: that map is the BAR
-    reader for the scored rows, while this driver PRODUCES the number the floor is
-    written over and must refuse with its own message (an escaping `ValueError`
-    from a helper is not a refusal a run can be read from). A floor re-typed here
-    would be a floor nobody froze (#9513's `floor_unconsumed` rule, one map over).
-    Absent and unreadable are DIFFERENT states and both are refused — a probe that
-    silently drops a floor it declared it would honour emits a number its own
-    record refuses.
+    Read straight off the record, not through `parse_bars`: that map exposes the
+    four integer floors and not this one, and a floor re-typed here would be a
+    floor nobody froze (#9513's `floor_unconsumed` rule, one map over). Absent and
+    unreadable are DIFFERENT states and both are refused — a probe that silently
+    drops a floor it declared it would honour emits a number its own record
+    refuses.
     """
     floors = _frozen_record(prereg).get("denominator_floors")
     value = floors.get("e1_min_before_share") if isinstance(floors, dict) else None

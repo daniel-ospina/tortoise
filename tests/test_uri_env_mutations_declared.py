@@ -150,10 +150,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # undeclared mutation in the tree).
     "test_9664_capstone_connector_to_record.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #10655 `tortoise config show` — the intent (declared below with the entry,
-    # after the #2084 reconciliation): the suite never opens a graph, every URI
-    # mutation feeds the REPORT (a redacted DSN, an unusable target, the trio, a
-    # path-shaped fallback).
     # #9567 capstone: the D11/D12 quota case forces the EMBEDDED lane (delenv
     # the URI, then pin TORTOISE_DB_PATH to a tmp_path db) so the gate's count
     # never rides a shared server graph. The delenv IS the point; the
@@ -449,27 +445,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # leak into a later docker-lane test).
     "test_subject_binding_1370.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # ── Mixed lanes: CLI/HTTP surfaces force BOTH lanes deliberately ────────
-    # #10655: `config show` REPORTS the graph store, so several tests feed it a
-    # credential-bearing `TORTOISE_DB_URI` and assert what the report does and
-    # does NOT print (masked DSN, no query/fragment, the #2987 scheme-less
-    # `user:password` shape, a blank/whitespace value, and the embedded-file
-    # fallback). The env control IS the test input and no lane is being forced —
-    # the suite constructs no SDK and contacts no server. Every site is the
-    # fixture-param `monkeypatch.setenv`, so pytest auto-undoes at teardown (no
-    # lane leak); the isolation fixture's `delenv(var)` loop is not censused
-    # (no literal) and is auto-undone too. Registered only after the fact: the
-    # module landed without this entry, which reds `--integrity`/this gate on
-    # the PR head (measured 2026-11-03: the only undeclared mutations in the
-    # tree, 11 sites in the one file).
-    # #10655 `tortoise config show`: the suite never opens a graph — every URI
-    # mutation exists to feed the REPORT (a redacted DSN, an unusable target, a
-    # trio, a path-shaped fallback), so it forces the EMBEDDED lane on purpose. A
-    # URI redirect would fold those assertions onto a shared server graph whose
-    # target the test does not control, and the report would assert about a store
-    # it was not given. The setenv IS the point; the fixture-param monkeypatch
-    # auto-restores (no lane leak).
-    "test_cli_config_show.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
-                                 r'monkeypatch\.setenv\(\s*$'],  # the multi-line form (`setenv(` then the name on the next line) is censused by its FIRST source line, so it needs the open-paren pattern
     "test_cli_context.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                             r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_cli_serve.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"'],
@@ -817,26 +792,6 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_s3_prior_ablation.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    # #10655 `tortoise config show`: the URI VALUE is the input under test — a
-    # scheme-less DSN, an empty string, white space, a docker DSN with
-    # user:password, a query-string credential — because the verb's whole job is
-    # to classify the target and MASK its credentials. DELIBERATE_URI: several
-    # sites deliberately probe a docker DSN, and every site needs the lane the
-    # value names rather than the ambient one (a redirect would fold the masked
-    # DSN onto the lane's own URI and the assertion would observe the ambient
-    # target instead of the one under test). Nothing connects: `config show` is a
-    # REPORT of the resolved target, so a docker-half green is not claimed for
-    # any site. Function-scoped `monkeypatch`, auto-undone at teardown (no lane
-    # leak) — including the site that replaces a RAW `os.environ[...] = ...`
-    # whose `finally: del` is a DELETE, not a restore: the site never puts the
-    # ambient value back, which is the shape this module's second guard reds
-    # (the #2062 pop-without-restore class). ⚠️ In THIS module that shape could
-    # not have reached a later test — the autouse `_isolated` fixture removes the
-    # URI with `monkeypatch.delenv` before every test and its teardown restores
-    # the ambient value — so the red was the mutation SHAPE, not an observed
-    # lane flip. Do not cite it as a measured leak (review finding, baf951165).
-    "test_cli_config_show.py": [
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

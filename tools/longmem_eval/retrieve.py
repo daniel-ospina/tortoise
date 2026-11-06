@@ -115,7 +115,6 @@ from tortoise.retrieval import (
     DEFAULT_EVIDENCE_BOOST_SOURCE,
     DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
-    DEFAULT_POOL_SESSION_CAP,
     DEFAULT_POOL_SIZE,
     SESSION_TRANSCRIPT_KIND,
     _has_claim_text,  # #3594 — the seed must mirror the reader's #2978 skip
@@ -1413,34 +1412,6 @@ def resolve_rerank_arm_pool_limit(
     return max(rerank_pool, baseline)
 
 
-def _floor_arm_guard_kwargs(
-        *, floor_term: bool,
-        guard_per_session_cap: int | None) -> dict[str, Any]:
-    """#2513 (#10629 review): the floor-term arm AS THE GUARD RECEIVES IT,
-    expressed in ONE place.
-
-    Both pool-order compositions call this — the coverage loop's additive
-    merge (``_guard_and_recap_pool``) and the source-session re-injection
-    MOVE (``reinjection_merge_order``, which reaches the same guard). The
-    second composition is the one that gets forgotten: the seam landed
-    armable from the direct composition only, so a re-injection A/B would
-    have run with the lower bound silently OFF while the receipt said it was
-    armed. One expression, called twice, is what makes that class of drift
-    impossible rather than reviewed-for.
-
-    ``guard_per_session_cap=None`` means "the product default" — an explicit
-    value is passed through, so the value a run resolved (and stamped on the
-    checkpoint fingerprint and the methodology) is EXACTLY the value the
-    guard serves.
-    """
-    return {
-        "per_session_cap": (guard_per_session_cap
-                            if guard_per_session_cap is not None
-                            else DEFAULT_POOL_SESSION_CAP),
-        "floor_term": bool(floor_term),
-    }
-
-
 def retrieve_for_question(
     sdk: TortoiseSDK,
     question: dict,
@@ -1596,19 +1567,6 @@ def retrieve_for_question(
     # the fetch serves (methodology == actual == fingerprint). None = a
     # direct caller passed nothing; the env fallback below resolves it.
     session_reinjection_total_cap: int | None = None,
-    # #2513 (#10629 review): the guard's LOWER bound (the floor term) and its
-    # per-session UPPER cap, as the two pool-order compositions receive them.
-    # ``floor_term`` is tri-state (True/False explicit, None = env
-    # ``TORTOISE_LME_FLOOR_TERM``; only 1/true/yes/on enables — fail-safe OFF,
-    # the #1745 default decision); OFF by default and default-preserving, so
-    # arming it is the sealed A/B's decision, not this seam's. The run path
-    # resolves both once and passes them explicitly, so the value that gated
-    # the checkpoint fingerprint and the methodology record is exactly the
-    # value the guard serves (methodology == actual == fingerprint).
-    # ``guard_per_session_cap=None`` = the product default
-    # (``retrieval.DEFAULT_POOL_SESSION_CAP``).
-    floor_term: bool | None = None,
-    guard_per_session_cap: int | None = None,
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state (True/False explicit, None = env
     # ``TORTOISE_LME_AGGREGATIVE_FLAG``; only 1/true/yes/on enables —
@@ -2204,18 +2162,6 @@ def retrieve_for_question(
     # Default OFF + env gate (TORTOISE_LME_COVERAGE_LOOP); TR questions keep
     # the R5 date machinery and skip the loop; any failure keeps the
     # ORIGINAL pool (fail-open, byte-identical). ──
-    # #2513 (#10629 review): resolve the floor-term arm ONCE here — before the
-    # first composition that spends it — and express it once, through
-    # ``_floor_arm_guard_kwargs``, so the coverage-loop leg and the
-    # re-injection leg can never disagree about what arm they are running.
-    if floor_term is not None:
-        floor_term_on = bool(floor_term)
-    else:
-        from .rerank import _TRUTHY
-        _ft_env = (os.environ.get("TORTOISE_LME_FLOOR_TERM") or "")
-        floor_term_on = _ft_env.strip().lower() in _TRUTHY
-    _guard_arm = _floor_arm_guard_kwargs(
-        floor_term=floor_term_on, guard_per_session_cap=guard_per_session_cap)
     if coverage_loop is not None:
         coverage_loop_on = coverage_loop
     else:
@@ -2293,7 +2239,6 @@ def retrieve_for_question(
                     # toggle lives inside it, never in a second entry point.
                     _merged = _guard_and_recap_pool(
                         _merged, guard=True, window=_LOOP_WINDOW,
-                        **_guard_arm,
                         max_chunks_per_session=max_chunks_per_session)
                     _merged_ids = {h["id"] for h in _merged}
                     loop_merged_added = len(
@@ -2312,13 +2257,6 @@ def retrieve_for_question(
         loop_latency_ms = (time.monotonic() - _t_loop) * 1000.0
     coverage_loop_stats = {
         "on": coverage_loop_on,
-        # #2513: the arm the RUN resolved (one value, shared by both
-        # compositions through ``_guard_arm``), recorded beside this
-        # composition's ``on`` — this composition SPENDS it only when ``on``
-        # is true; the value is stamped either way so a receipt reader never
-        # has to guess which arm produced the pool.
-        "floor_term": floor_term_on,
-        "guard_per_session_cap": _guard_arm["per_session_cap"],
         "loop_iterations": loop_iterations,
         "loop_fired_facet": loop_fired_facet,
         "loop_merged_added": loop_merged_added,
@@ -2510,7 +2448,6 @@ def retrieve_for_question(
                             seed_order=[s.session_id for s in _seeds],
                             guard=reinjection_guard,
                             guard_window=_LOOP_WINDOW,
-                            **_guard_arm,
                             max_chunks_per_session=max_chunks_per_session)
                         _merged_ids = {h["id"] for h in _merged}
                         sr_injected_per_session_merged = {
@@ -2536,11 +2473,6 @@ def retrieve_for_question(
         sr_latency_ms = (time.monotonic() - _t_sr) * 1000.0
     session_reinjection_stats = {
         "on": reinjection_on,
-        # #2513: the arm the RUN resolved — the same value as
-        # ``coverage_loop_stats``, spent here only when ``on`` is true (see
-        # the note there).
-        "floor_term": floor_term_on,
-        "guard_per_session_cap": _guard_arm["per_session_cap"],
         "seed_window": _sr_seed_window,
         "seed_limit": _sr_seed_limit,
         "seed_sessions": sr_seeds,

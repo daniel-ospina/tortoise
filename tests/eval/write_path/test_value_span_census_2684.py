@@ -22,16 +22,15 @@ The T's per-question leg is *"the value-bearing evidence is verbatim-present"*
   ``tortoise.extractor_v2._resolve_source_turn`` / ``_carries_value`` /
   ``_value_verbatim_span``, called in the SHIPPED ORDER (resolve, then stamp
   against the resolved turn). **The two stamp-side inputs are the ones
-  production hands it** — content cut to ``_MAX_CONTENT`` and the quote to
-  ``_MAX_QUOTE``, both at a TOKEN boundary (``extractor_v2.py:8773`` /
-  ``:8841``), while the resolver gets the raw point (``:9056``). See
-  ``_stamp_inputs``.
+  production hands it** — content clamped to ``_MAX_CONTENT`` and the quote to
+  200 chars (``extractor_v2.py:7548`` / ``:7610``), while the resolver gets the
+  raw point (``:7740``). See ``_stamp_inputs``.
 
 ⛔ **The resolver is not optional in this census.** The receipt's
 ``source_turn_id`` is the model's ADVISORY index; the write path resolves the
 turn from the quote first and never lets a wrong model index win
-(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:9056`` →
-``:9072``). Passing the receipt field straight through measures a population
+(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:7740`` →
+``:7756``). Passing the receipt field straight through measures a population
 production never produces *and* never fires the resolver's own E3 anchor
 warning — it under-counts ``no_turn`` and over-counts ``band`` (measured: 3
 points, all ``wp06_quarry_rollout``/``narrative``, which the resolver reports
@@ -43,8 +42,8 @@ observation: it answers *"what would the shipped mechanism stamp on these
 committed points?"*. The structural reason is that the measuring harness
 persists the S2 *model* output (``tests/eval/write_path/raw_vs_narrative.py`` →
 ``ev2.run_s2(...)``), which is pre-``pt_entry``; the span is stamped later, when
-``pt_entry`` is built (``extractor_v2.py:9057-9064``, stamped at
-``:9072-9075``). It is NOT a question of
+``pt_entry`` is built (``extractor_v2.py:7741-7748``, stamped at
+``:7756-7759``). It is NOT a question of
 dates — the receipts (committed 2026-10-19, ``ecc7bc8ca8``) postdate #8659
 (``2312845b6``, 2026-10-14) — so no re-ingest through that harness can ever put
 a span key in a receipt.
@@ -57,10 +56,7 @@ OBSERVED rate needs an end-to-end run — wave scoping §6's T-2, re-homed to
 census counts whether a value can be re-read verbatim from an address; it says
 nothing about whether the reader then sums it correctly.
 
-Hermetic: no DB, no network, no model. Reads committed JSON only — plus one
-`git ls-files` call per bare-basename cite in the FINAL sweep (it needs a `git`
-binary and a readable git dir; the sweep says so BY NAME when it cannot ask, so
-an environment failure is never read as a broken cite).
+Hermetic: no DB, no network, no model. Reads committed JSON only.
 """
 
 from __future__ import annotations
@@ -68,7 +64,6 @@ from __future__ import annotations
 import itertools
 import json
 import re
-import subprocess
 from pathlib import Path
 
 from tortoise import extractor_v2 as v2
@@ -204,7 +199,7 @@ def _edus(session: str) -> list[dict]:
     ``_resolve_source_turn`` — "position and value can diverge"). A hand-rolled
     copy keeps the empty turns, so its list is LONGER and the divergence lands
     on the resolver's in-range bound, ``0 <= model_idx < len(edus)``
-    (``extractor_v2.py:8240``): a model index that fell inside the hand-rolled
+    (``extractor_v2.py:7052``): a model index that fell inside the hand-rolled
     list can fall outside production's, so the resolved ``turn_idx`` differs for
     exactly those points. That flips them between ``no_turn`` (``turn_idx is
     None``) and ``band``/``valuefree_quote``, changes which warning variant an
@@ -228,9 +223,9 @@ def _stamp_inputs(point: dict) -> tuple[str, str]:
     write path clamps them.
 
     ⛔ Not the receipt's raw strings. ``extractor_v2`` trims the content to
-    ``_MAX_CONTENT`` (``:8773``) and the quote to ``_MAX_QUOTE`` (``:8841``)
-    BEFORE ``_value_verbatim_span(content, quote, ...)`` is called (``:9072``);
-    only ``_resolve_source_turn`` gets the raw point (``:9056``, deliberately).
+    ``_MAX_CONTENT`` (``:7350``) and the quote to ``_MAX_QUOTE`` (``:7383``)
+    BEFORE ``_value_verbatim_span(content, quote, ...)`` is called (``:7504``);
+    only ``_resolve_source_turn`` gets the raw point (``:7488``, deliberately).
     A census on the raw strings therefore answers a question production never
     asks: a >``_MAX_QUOTE``-char quote gets an address production cannot stamp.
     Measured over the sealed corpus: 3 of the 217 points carry a
@@ -246,28 +241,9 @@ def _stamp_inputs(point: dict) -> tuple[str, str]:
     whole file green while the census reported offsets production never writes.
     With the caps imported, production's cap and the census's cap are one
     object, and the literal ``(0, 200)`` in the pin is what forces a re-measure.
-
-    ⛔ **AND THE CUT IS PRODUCTION'S TOO — ``_write_span``, not ``[:cap]``**
-    (#10742). #10513 (``ee31e0412``) moved the write path off the hard slice
-    onto a TOKEN-BOUNDARY cut that drops a split token whole when dropping it
-    would truncate a numeral; this function kept re-typing ``[:cap]``, so the
-    census stamped addresses production no longer writes. That is the SAME
-    trap as the ``[:200]`` revision above, one layer down: the caps were
-    imported and the cut was not, so the pin stayed green on a re-typed
-    mechanism. Measured on the sealed corpus: **0 of 217 points diverge** (no
-    committed quote happens to end mid-token at a cap) — the divergence is
-    LATENT, which is exactly why nothing caught it. The mechanism pin below
-    (``test_the_census_clamps_with_the_writes_own_cut``) constructs the case
-    that makes it visible.
     """
-    # The coercions differ ON PURPOSE, because production's do: the write path
-    # builds `_raw_content` with `str(p.get("content", ""))` — a falsy content is
-    # the claim "None" (#5060), so `or ""` would collapse it and drop the item —
-    # and the quote with `str(p.get("quote") or "")`.
-    content = v2._write_span(str(point.get("content", "")).strip(),
-                             v2._MAX_CONTENT)
-    quote = v2._write_span(str(point.get("quote") or "").strip(),
-                           v2._MAX_QUOTE)
+    content = str(point.get("content") or "").strip()[:v2._MAX_CONTENT]
+    quote = str(point.get("quote") or "").strip()[:v2._MAX_QUOTE]
     return content, quote
 
 
@@ -275,9 +251,9 @@ def _stamp_quote(point: dict) -> str:
     """The ``quote`` production COMMITS for this point — ``_stamp_inputs``' quote half.
 
     The dedupe half reads quotes too, and ``retrieval._same_fact`` compares the
-    COMMITTED hit (``retrieval.py:3055``: ``qa = str(a.get("quote") or "")``),
-    i.e. after ``extractor_v2`` rewrote the field to the ``_MAX_QUOTE`` span at
-    the point's own commit (``:8841``). Reading the raw
+    COMMITTED hit (``retrieval.py:2403-2405``: ``qa = str(a.get("quote") or
+    "")``), i.e. after ``extractor_v2`` rewrote the field to
+    ``[:_MAX_QUOTE]`` at the point's own commit (``:7383``). Reading the raw
     receipt string here would measure a population no package holds — the same
     defect §2.1 and §2.3 each corrected once already (advisory turn index, raw
     span inputs), one field over.
@@ -398,7 +374,7 @@ def test_the_census_stamps_on_the_inputs_production_hands_it():
 
     ``_stamp_inputs`` trims the content to ``_MAX_CONTENT`` and the quote to
     ``_MAX_QUOTE`` because that is what ``extractor_v2`` hands
-    ``_value_verbatim_span`` (``:8773`` / ``:8841`` -> ``:9072``). Measured at
+    ``_value_verbatim_span`` (``:7350`` / ``:7383`` -> ``:7504``). Measured at
     this head: 3 points in the population carry a >``_MAX_QUOTE``-char quote and
     exactly ONE of them is value-bearing AND spanned — ``wp04_aurora_perf``/``raw``
     — and it is the only place the two readings differ, ``(0, 201)`` raw vs
@@ -468,7 +444,7 @@ def test_the_census_resolves_the_turn_the_way_the_write_path_does():
     """The census must not measure a population production never produces.
 
     The write path resolves the source turn from the quote BEFORE stamping
-    (``extractor_v2.py:9056`` → ``:9072``), and the receipt's
+    (``extractor_v2.py:7740`` → ``:7756``), and the receipt's
     ``source_turn_id`` is only the model's ADVISORY index. Reading that field
     straight through puts three ``wp06_quarry_rollout``/``narrative`` points on
     turns the resolver refuses (quote-overlap < 0.6), which (a) hides the
@@ -773,10 +749,9 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
 
     ⛔ Not the receipt's own ``source_turn_id``. That field is the S2 model's
     ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
-    answer before the point is committed (``extractor_v2.py:9056`` → ``:9063``),
+    answer before the point is committed (``extractor_v2.py:7740`` → ``:7747``),
     and ``_same_fact`` groups on the committed field
-    (``retrieval.py:3051-3053`` — the ``_pkg_turn_key`` pair and its equality
-    test). Same defect class as §2.1's, one leg over —
+    (``retrieval.py:2403-2405``). Same defect class as §2.1's, one leg over —
     grouping by the advisory index counts pairs production never forms."""
     warnings: list[str] = []
     return _pkg_turn_key({"source_turn_id":
@@ -795,7 +770,7 @@ def _same_turn_route(acc: dict, a: dict, b: dict, edus: list[dict]) -> None:
 
     ⛔ Both quotes are the ones production COMMITS (``_stamp_quote``), not the
     receipt's raw strings: ``_same_fact`` compares the committed hit
-    (``retrieval.py:3055-3056``), which the write path already rewrote to
+    (``retrieval.py:2403-2405``), which the write path already rewrote to
     ``[:_MAX_QUOTE]``. On the sealed corpus the published counts are
     clamp-invariant (3 points carry a longer quote, none of them moves a
     counter), so a corpus-shaped pin cannot tell the two readings apart — this
@@ -982,7 +957,7 @@ def test_the_dedupe_leg_reads_the_COMMITTED_quote_not_the_raw_receipt(monkeypatc
     assert committed == {"consulted": 1, "value_flagged": 0,
                          "value_guard_decisive": 0, "collapsed": 1}, (
         f"the route did not read the COMMITTED quote: {committed} — production "
-        f"commits the _MAX_QUOTE span (extractor_v2.py:8841), so the pair is a "
+        f"commits quote[:_MAX_QUOTE] (extractor_v2.py:7610), so the pair is a "
         "collapse, not a value conflict")
 
     # … and the SAME pair read the way this file used to read it, to show the
@@ -1127,19 +1102,18 @@ def _longest_quote_run(turn: str, quote: str):
 # lines reds until the numbers are re-derived, and a cite edited without
 # re-deriving reds too. That is the contract, not an inconvenience.
 _PUBLISHED_CITES = {
-    8773: ("content = _write_span(_raw_content, _MAX_CONTENT)",
-           "the content clamp"),
-    8841: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
+    7548: ("content = _raw_content[:_MAX_CONTENT]", "the content clamp"),
+    7610: ('quote = str(p.get("quote") or "").strip()[:_MAX_QUOTE]',
            "the quote clamp, at the point's own commit"),
-    8240: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
+    7052: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
            "the resolver's in-range bound"),
-    9056: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
+    7740: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
            "the resolver call"),
-    9057: ("pt_entry = {", "the point entry the span is stamped into"),
-    9063: ('"source_turn_id": turn_idx,',
+    7741: ("pt_entry = {", "the point entry the span is stamped into"),
+    7747: ('"source_turn_id": turn_idx,',
            "the resolved turn the point COMMITS"),
-    9064: ("}", "the end of the point entry"),
-    9072: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
+    7748: ("}", "the end of the point entry"),
+    7756: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
            "the stamp itself"),
 }
 
@@ -1147,241 +1121,7 @@ _PUBLISHED_CITES = {
 #: artifacts this PR adds (they disagreed about it: the index row said
 #: `:3603-3604`, which is prose INSIDE the same docstring, while the runbook said
 #: `:3613-3614`). One site, three readers — so all three are pinned together.
-_VALUE_FREE_GATE = (4927, "if not _carries_value(content, quote):")
-
-#: The same contract, for the RUNBOOK — the doc half of the census (#10742).
-#: The runbook `publishes the same numbers` as this file, so when the file's
-#: cites rotted the runbook's rotted with them and nothing read the doc at all:
-#: `test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook`
-#: asserted ONE number, and the other seven went stale unread. This mapping is
-#: keyed the same way so the two halves can never drift apart again.
-_RUNBOOK_CITES = {
-    8773: ("content = _write_span(_raw_content, _MAX_CONTENT)",
-           "the content clamp"),
-    8841: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
-           "the quote clamp, at the point's own commit"),
-    9056: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
-           "the resolver call"),
-    9057: ("pt_entry = {", "the point entry the span is stamped into"),
-    9064: ("}", "the end of the point entry"),
-    9072: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
-           "the stamp itself"),
-    4000: ("def _verbatim_span_in_turn(turn_text: str, quote: str) -> tuple[int, int] | None:",
-           "`_verbatim_span_in_turn`'s definition"),
-    4028: ("def _carries_value(*texts: object) -> bool:",
-           "`_carries_value`'s definition"),
-    4887: ("def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,",
-           "`_value_verbatim_span`'s definition"),
-    8222: ("if not edus:", "the resolver's empty-edus silent bound"),
-    8223: ("return None", "the resolver's silent early return"),
-    4927: ("if not _carries_value(content, quote):",
-           "the value-free gate (`_VALUE_FREE_GATE`)"),
-    4928: ("return None", "the value-free gate's refusal"),
-    9061: ('"source_ref": "session.md", "quote": quote, "status": "draft",',
-           "the committed quote inside `pt_entry`"),
-    9063: ('"source_turn_id": turn_idx,',
-           "the resolved turn the point COMMITS"),
-    9075: ('pt_entry["span_start"], pt_entry["span_end"] = _span',
-           "the span assignment"),
-}
-
-_RUNBOOK = "docs/runbook/2684-slice-b-t-gate.md"
-_REPO = WRITE_PATH.resolve().parents[2]
-
-#: #10742's root fix, one level up: the two artifacts cite MORE than
-#: `extractor_v2.py`, and until this existed **nothing read those cites at all**.
-#: The first revision of this pin repeated the pre-fix shape exactly — it pinned
-#: the `extractor_v2.py` subset and called that "the doc" — and the review of
-#: that revision found FIVE false `file:line` cites left behind in the two files
-#: it was editing, one of which was a live INSTRUCTION ("Delete `if
-#: _pkg_differ_value_critical(qa, qb): return False`", cited at what had once
-#: been the guard's lines but was by then depth-cap counters — so a lane
-#: following it would have edited the wrong two lines and concluded the guard
-#: was not decisive, the OPPOSITE of the published finding). Partial coverage of
-#: a document is the same defect as no coverage with a green tick.
-#:
-#: So the sweep is now TOTAL over both artifacts for any `*.py:NNNN` cite,
-#: excluding `extractor_v2.py` (held by `_PUBLISHED_CITES` / `_RUNBOOK_CITES`).
-#: Both ENDS of a range must be mapped: a range's end is a cite too, and it is
-#: the end that silently points at unrelated code when the file grows.
-_CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
-    ("tortoise/commit_schema.py", 445):
-        ("def validate_span(span_start: object, span_end: object) -> None:",
-         "`validate_span`'s definition"),
-    ("tortoise/commit_schema.py", 589):
-        ("span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)",
-         "the `span_start` field"),
-    ("tortoise/commit_schema.py", 609):
-        ("return self", "the end of `_span_is_an_address`"),
-    ("tools/longmem_eval/retrieve.py", 938):
-        ('if p.get("span_start") is not None and p.get("span_end") is not None:',
-         "the eval lane's offset annotation"),
-    ("tools/longmem_eval/retrieve.py", 940):
-        ('entry["span_end"] = p["span_end"]',
-         "the annotated end offset"),
-    ("tortoise/sdk.py", 36840):
-        ("rows = graph.query(", "the provenance query's opener"),
-    ("tortoise/sdk.py", 36846):
-        ('+ ", n.quote, n.source_turn_id, n.span_start, n.span_end",',
-         "the RETURN continuation appending #8658's four columns"),
-    ("tortoise/sdk.py", 36807):
-        ("# ⛔ KNOWN LIMITATION — this read is the PROJECT-search point",
-         "the ⛔ KNOWN LIMITATION comment"),
-    ("tortoise/sdk.py", 36823):
-        ("# or of #8658.", "the end of the ⛔ KNOWN LIMITATION comment"),
-    ("tortoise/retrieval.py", 3051):
-        ("at = _pkg_turn_key(a)",
-         "the same-source-turn route's entry"),
-    ("tortoise/retrieval.py", 3053):
-        ("if not (at and at == bt):",
-         "the same-turn GROUPING test `_same_fact` keys on"),
-    ("tortoise/retrieval.py", 3055):
-        ('qa = str(a.get("quote") or "")',
-         "the COMMITTED quote read (`_same_fact`)"),
-    ("tortoise/retrieval.py", 3056):
-        ('qb = str(b.get("quote") or "")',
-         "the COMMITTED quote read, partner half"),
-    ("tortoise/retrieval.py", 3059):
-        ("if _pkg_differ_value_critical(qa, qb):",
-         "the quote-value guard"),
-    ("tortoise/retrieval.py", 3060):
-        ("return False", "the quote-value guard's refusal"),
-    ("tortoise/retrieval.py", 3061):
-        ("return _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP",
-         "the same-turn overlap gate"),
-}
-
-#: A `*.py:NNNN`, optionally with a `-NNNN` range end.
-_CITE_RE = re.compile(r"([\w][\w./-]*\.py):(\d+)(?:-(\d+))?")
-
-
-def _resolve_cite_path(spelled: str) -> str | None:
-    """The repo-relative path a cite spells, or None if it does not resolve.
-
-    A doc writes both `retrieval.py:3055` and `tortoise/retrieval.py:3055`; the
-    mapping is keyed repo-relative so the two spellings share one entry (and a
-    spelling that resolves to NOTHING is itself reported, rather than silently
-    filtered out of the sweep).
-
-    ⛔ Resolved through `git ls-files`, NEVER a `_REPO.glob("**/<name>")` walk
-    (#10742 review, measured). The repo's lane convention is
-    `<repo>/.worktrees/<lane>`, so from the CANONICAL checkout a tree-wide glob
-    for `extractor_v2.py` finds 111 copies and `retrieval.py` 118 — the obvious
-    "take the unique hit" rule then resolves to None and reds 23 cites that are
-    all CORRECT, i.e. a false RED on the primary checkout for a diff that did
-    not touch them (and invisible to CI, which has no `.worktrees`). Tracked
-    files are exactly the ones a cite can legitimately name, and `git ls-files`
-    is also the cheap form: one subprocess instead of three full-tree walks.
-    ⛔ "Could not ask git" and "this cite does not resolve" are DIFFERENT
-    failures and must not share a message (#10742 review, measured). 23 of the 31
-    cites in the two artifacts are bare basenames that resolve only through `git
-    ls-files`, so a machine without a usable `git` (a mounted/exported checkout, a
-    minimal image, a `safe.directory` refusal at exit 128) red the sweep with 23
-    entries that are ALL CORRECT, under a message that says the cites are broken.
-    `_GIT_FAILURE` carries the reason; the test reports it as an ENVIRONMENT
-    failure before it looks at a single cite.
-    """
-    if (_REPO / spelled).is_file():
-        return spelled
-    name = Path(spelled).name
-    tracked = _git_ls_files(name)
-    if tracked is None:
-        return None
-    hits = [ln for ln in tracked if Path(ln).name == name and (_REPO / ln).is_file()]
-    return hits[0] if len(hits) == 1 else None
-
-
-#: Why the last `git ls-files` could not be asked, or None when it worked. Set by
-#: `_git_ls_files` so the sweep can tell an environment failure from a bad cite.
-_GIT_FAILURE: list[str] = []
-
-
-def _git_ls_files(name: str) -> list[str] | None:
-    """Tracked paths named ``name``, or None when git could not be asked.
-
-    Read-only: `git ls-files` never writes, so the sweep stays non-mutating (the
-    earlier tree-wide glob was read-only too, and was dropped only because it
-    resolved 113 copies of `extractor_v2.py` from the canonical checkout).
-    """
-    try:
-        done = subprocess.run(
-            ["git", "-C", str(_REPO), "ls-files", "--", f"**/{name}", name],
-            capture_output=True, text=True, timeout=60, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        _GIT_FAILURE.append(f"`git ls-files` could not run: {type(exc).__name__} {exc}")
-        return None
-    if done.returncode != 0:
-        _GIT_FAILURE.append(
-            f"`git ls-files` exited {done.returncode}: "
-            f"{(done.stderr or done.stdout).strip()[:200]}")
-        return None
-    return done.stdout.splitlines()
-
-
-def _cites(text: str) -> list[tuple[str, int]]:
-    """Every `(repo-relative path, line)` the text cites, `extractor_v2.py`
-    excluded (held by `_PUBLISHED_CITES` / `_RUNBOOK_CITES`).
-
-    ⛔ The ONE enumerator: this function used to be dead code while the sweep
-    inlined its own `_CITE_RE.findall`, so a lane that hardened `_cites` (for
-    instance to add the `.worktrees` guard above) changed NOTHING. One
-    implementation, called by the test.
-    """
-    out: list[tuple[str, int]] = []
-    for spelled, start, end in _CITE_RE.findall(text):
-        path = _resolve_cite_path(spelled)
-        if path is None or Path(path).name == "extractor_v2.py":
-            continue
-        out.append((path, int(start)))
-        if end:
-            out.append((path, int(end)))
-    return out
-
-
-def _file_lines(relpath: str) -> list[str]:
-    return (_REPO / relpath).read_text(encoding="utf-8").splitlines()
-
-
-def _extractor_lines() -> list[str]:
-    return (_REPO / "tortoise/extractor_v2.py").read_text(encoding="utf-8") \
-        .splitlines()
-
-
-def _stale(mapping: dict, lines: list[str]) -> list[tuple[int, str, str, list[int]]]:
-    """``(old number, expected text, label, the lines that DO carry it)``.
-
-    The 4th element is the whole point: a stale cite that reports only *what* it
-    found leaves the re-derivation to hand, and hands are why these rot again
-    (#10742 ask 4 — the 2026-11-01 #10360 lane derived these by hand).
-    """
-    out: list[tuple[int, str, str, list[int]]] = []
-    for number, (expected, label) in sorted(mapping.items()):
-        got = (lines[number - 1].strip()
-               if 0 < number <= len(lines) else "<past EOF>")
-        if got == expected:
-            continue
-        found = [i + 1 for i, ln in enumerate(lines) if ln.strip() == expected]
-        out.append((number, expected, label, found))
-    return out
-
-
-def _paste_ready(stale: list[tuple[int, str, str, list[int]]]) -> str:
-    """The corrected mapping, READY TO PASTE — issue #10742 ask 4."""
-    blocks: list[str] = []
-    for number, expected, label, found in stale:
-        if not found:
-            blocks.append(
-                f"  {number}: # ⛔ SYMBOL GONE — {label}: {expected!r} is not in\n"
-                "      # extractor_v2.py at this head; re-author the cite, do\n"
-                "      # not merely move the number")
-        elif len(found) == 1:
-            blocks.append(f"  {found[0]}: ({expected!r},\n"
-                          f"          {label!r}),")
-        else:
-            blocks.append(
-                f"  {number}: # ⛔ AMBIGUOUS — {label}: {expected!r} is on\n"
-                f"      # lines {found}; cite the one this sentence means")
-    return "\n".join(blocks)
+_VALUE_FREE_GATE = (3777, "if not _carries_value(content, quote):")
 
 
 def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
@@ -1392,13 +1132,10 @@ def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
     the reason a future lane cannot re-stale these sites silently. An
     UNLISTED file-qualified cite reds as unverified, so the pin cannot be
     outgrown by adding a cite beside it.
-
-    The failure emits the CORRECTED MAPPING, ready to paste (#10742 ask 4): a
-    message that names only the mismatch makes re-derivation hand work, and hand
-    derivation is what rotted all eight entries at once.
     """
     text = Path(__file__).read_text(encoding="utf-8")
-    lines = _extractor_lines()
+    lines = (WRITE_PATH.resolve().parents[2] / "tortoise/extractor_v2.py") \
+        .read_text(encoding="utf-8").splitlines()
 
     published = {int(n) for n in re.findall(r"extractor_v2\.py:(\d+)", text)}
     # … and any bare continuation (``→ `:7495` ``, or a range end like
@@ -1415,188 +1152,23 @@ def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
         "this file publishes a file-qualified extractor_v2.py cite that this pin "
         "does not hold, so nothing verifies it — add it to _PUBLISHED_CITES "
         f"with the line it must name: {unswept}")
-    orphaned = sorted(set(_PUBLISHED_CITES) - published
-                      - {n for (_p, n) in _CROSS_FILE_CITES})
+    orphaned = sorted(set(_PUBLISHED_CITES) - published)
     assert not orphaned, (
         "_PUBLISHED_CITES holds numbers this file no longer publishes — the pin "
         f"would cover a cite nobody reads: {orphaned}")
 
-    stale = _stale(_PUBLISHED_CITES, lines)
+    stale = []
+    for number, (expected, label) in sorted(_PUBLISHED_CITES.items()):
+        got = lines[number - 1].strip()
+        if got != expected:
+            stale.append(f"extractor_v2.py:{number} ({label}) reads {got!r}, "
+                         f"not {expected!r}")
     assert not stale, (
         "the cites this census publishes point at lines that no longer carry "
-        "the code they name — the symbol is authoritative and the line is a "
-        "convenience, so paste the corrected mapping below over "
-        "`_PUBLISHED_CITES` and update the prose with the same numbers:\n\n"
-        "_PUBLISHED_CITES = {\n" + _paste_ready(stale) + "\n}")
+        "the code they name — re-derive the numbers (the symbol is "
+        "authoritative, the line is a convenience) and update the prose with "
+        "them:\n  " + "\n  ".join(stale))
 
-
-def test_every_extractor_v2_cite_THE_RUNBOOK_publishes_resolves_at_this_head():
-    """The runbook publishes the same numbers — so it gets the same tripwire.
-
-    #10742: the census file and the runbook are two readers of one set of
-    cites, and the pin used to cover only one of them (`_VALUE_FREE_GATE`). All
-    eight of the census's mapped numbers had rotted, and the runbook's had
-    rotted with them while its own test stayed green on a single number — the
-    doc half had NO reader at all. Symmetric coverage is the fix: every
-    file-qualified `extractor_v2.py:NNNN` the runbook publishes must be in
-    `_RUNBOOK_CITES`, and every mapped number must still name its line.
-    """
-    text = (_REPO / _RUNBOOK).read_text(encoding="utf-8")
-    lines = _extractor_lines()
-
-    # ⛔ TOTAL over the runbook's numbers, not just its file-qualified ones
-    # (#10742 review). The runbook continues a cite with a bare `:9061`, and
-    # prints range ENDS (`:4927-4928`, `:8222-8223`, `:9072-9075`) whose second
-    # number a lane renumbering the doc can leave pointing at unrelated code —
-    # the "one file, two answers, and no leg reading either" shape, one level
-    # down. Every number the runbook prints is in `published`.
-    published = {int(n) for n in re.findall(r"extractor_v2\.py:(\d+)", text)}
-    for start, end in re.findall(r":(\d{4,5})(?:-(\d{4,5}))?", text):
-        published.add(int(start))
-        if end:
-            published.add(int(end))
-
-    # A number that belongs to a CROSS-FILE cite is not an `extractor_v2.py`
-    # number — `_CROSS_FILE_CITES` verifies those and this map must not claim
-    # them (the bare-continuation regex cannot tell whose `:3055` it found).
-    published -= {n for (_p, n) in _CROSS_FILE_CITES}
-
-    unswept = sorted(published - set(_RUNBOOK_CITES))
-    assert not unswept, (
-        "the runbook publishes an extractor_v2.py number that no pin holds, so "
-        "nothing verifies it — add it to _RUNBOOK_CITES with the line it must "
-        f"name: {unswept}")
-    orphaned = sorted(set(_RUNBOOK_CITES) - published)
-    assert not orphaned, (
-        "_RUNBOOK_CITES holds numbers the runbook no longer publishes — the pin "
-        f"would cover a cite nobody reads: {orphaned}")
-
-    stale = _stale(_RUNBOOK_CITES, lines)
-    assert not stale, (
-        "the runbook's extractor_v2.py cites point at lines that no longer "
-        "carry the code they name — paste the corrected mapping over "
-        "`_RUNBOOK_CITES` and update the prose with the same numbers:\n\n"
-        "_RUNBOOK_CITES = {\n" + _paste_ready(stale) + "\n}")
-
-
-def test_every_non_extractor_v2_cite_in_EITHER_artifact_resolves_at_this_head():
-    """#10742's root fix: the sweep is TOTAL over both artifacts, not per-file.
-
-    The first revision covered only `extractor_v2.py` — the same partial-coverage
-    shape it was written to remove, one level up — and the review of that
-    revision found FIVE false `file:line` cites it had stepped over, including a
-    live runbook INSTRUCTION that named the wrong two lines to delete. A tripwire
-    that pins part of a document reports "clean" for the part nobody checked, so
-    it is worse than an honest gap.
-
-    Coverage is demanded by construction in BOTH directions: every non-
-    `extractor_v2.py` `*.py:NNNN` cite in either artifact must be mapped (an
-    unlisted one reds), and every mapped site must still carry its line.
-    """
-    stale: list[str] = []
-    unmapped: list[str] = []
-    unresolvable: list[str] = []
-    _GIT_FAILURE.clear()
-    for artifact in (Path(__file__).resolve().relative_to(_REPO).as_posix(),
-                     _RUNBOOK):
-        body = (_REPO / artifact).read_text(encoding="utf-8")
-        for spelled, start, _end in _CITE_RE.findall(body):
-            if _resolve_cite_path(spelled) is None:
-                unresolvable.append(f"{artifact}: `{spelled}:{start}`")
-        for path, n in _cites(body):
-            key = (path, n)
-            if key not in _CROSS_FILE_CITES:
-                unmapped.append(f"{artifact}: `{path}:{n}`")
-                continue
-            expected, label = _CROSS_FILE_CITES[key]
-            lines = _file_lines(path)
-            got = (lines[n - 1].strip()
-                   if 0 < n <= len(lines) else "<past EOF>")
-            if got == expected:
-                continue
-            found = [i + 1 for i, ln in enumerate(lines)
-                     if ln.strip() == expected]
-            stale.append(
-                f"  (\"{path}\", {n}): # ⛔ {label}: reads {got!r}, wanted "
-                f"{expected!r} — found on line(s) {found}")
-
-    assert not _GIT_FAILURE, (
-        "the cite sweep could not ASK GIT, so it verified nothing — this is an "
-        "ENVIRONMENT failure, not a broken cite: every bare-basename spelling "
-        "(`extractor_v2.py:NNNN`, `retrieval.py:NNNN`, `sdk.py:NNNN`) resolves "
-        "through `git ls-files`. Fix the checkout/`git`, do NOT edit the cites. "
-        f"{_GIT_FAILURE[0]}")
-    assert not unresolvable, (
-        "a cite spells a file that does not resolve to exactly one path in this "
-        f"repo, so nothing can verify it: {unresolvable}")
-    assert not unmapped, (
-        "these artifacts cite a `file:line` that no pin holds, so nothing "
-        "verifies it — add each to _CROSS_FILE_CITES with the line it must "
-        f"name: {sorted(set(unmapped))}")
-    assert not stale, (
-        "a cross-file cite points at a line that no longer carries the code it "
-        "names — paste the corrected entries over `_CROSS_FILE_CITES`:\n\n"
-        + "\n".join(stale))
-
-
-def test_the_census_clamps_with_the_writes_own_cut():
-    """The census's clamp is production's ``_write_span``, never a re-typed slice.
-
-    #10742. The two caps were imported (see ``_stamp_inputs``), but the CUT was
-    re-typed as ``[:cap]`` while the write path has fed ``_value_verbatim_span``
-    ``_write_span``'s token-boundary pair since #10513 (``ee31e0412``). The
-    census therefore answered *"what would production stamp?"* by measuring a
-    cut production does not use.
-
-    ⛔ **The sealed corpus CANNOT catch this.** Measured: 0 of the 217 committed
-    points diverge (no committed quote ends mid-token at a cap), so every
-    published count is identical under both cuts — a corpus-shaped pin stays
-    green on a revert to ``[:cap]``, i.e. a guard that cannot fail. The
-    divergence is LATENT and has to be CONSTRUCTED.
-
-    The construction: a quote whose cap lands two characters into ``1200units``.
-    The kept prefix of the split token (``12``) carries decimals and the
-    discarded remainder (``00units…``) carries alphanumerics, so
-    ``_write_span`` drops the split token WHOLE while ``[:cap]`` keeps a
-    truncated numeral — precisely the shape that reads a value SHORT (``1200``
-    -> ``12``).
-
-    Non-vacuity: this reds if the census re-types a slice (it would return the
-    hard cut), and it reds if production's cut stops discriminating on this
-    fixture (the literal below would stop matching), which is the signal that
-    the fixture — not the mechanism — needs re-authoring.
-    """
-    # ── the QUOTE cap ──
-    head = "quarry rollout proceeds as described while handlers discuss it "
-    pad = "x" * (v2._MAX_QUOTE - 3 - len(head))
-    quote = head + pad + " 1200units and more"
-    assert len(head + pad) == v2._MAX_QUOTE - 3, len(head + pad)
-    # the cap lands INSIDE the token, else the fixture proves nothing
-    assert quote[:v2._MAX_QUOTE] == head + pad + " 12", quote[:v2._MAX_QUOTE][-8:]
-    token_safe = head + pad + " "          # the split token dropped WHOLE
-    hard_slice = head + pad + " 12"        # the numeral read as `12`
-    assert v2._write_span(quote, v2._MAX_QUOTE) == token_safe, (
-        "production's own cut no longer drops the split token on this fixture "
-        "— re-author the fixture before trusting anything below")
-    assert _stamp_inputs({"quote": quote})[1] == v2._write_span(
-        quote, v2._MAX_QUOTE), (
-        "the census's quote clamp is NOT production's `_write_span` — it is "
-        "stamping an address the write path never stores (#10742)")
-    assert _stamp_inputs({"quote": quote})[1] == token_safe
-    assert _stamp_inputs({"quote": quote})[1] != hard_slice
-    # and the quote production hands the span is the one it stores, so a
-    # re-typed slice is visible at the CENSUS's own door, not just at v2's
-    assert _stamp_quote({"quote": quote}) == token_safe
-
-    # ── the CONTENT cap, same shape ──
-    chead = "quarry rollout proceeds as described while handlers discuss it "
-    cpad = "y" * (v2._MAX_CONTENT - 3 - len(chead))
-    content = chead + cpad + " 1200units and more"
-    assert len(chead + cpad) == v2._MAX_CONTENT - 3, len(chead + cpad)
-    assert content[:v2._MAX_CONTENT] == chead + cpad + " 12"
-    assert _stamp_inputs({"content": content})[0] == chead + cpad + " ", (
-        "the census's content clamp is a hard slice — production stores the "
-        "token-boundary span (#10742)")
 
 def test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook():
     """The index row and the runbook must publish the SAME line for one gate.
@@ -1605,23 +1177,18 @@ def test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook():
     the docstring) while §6 of the runbook said `:3613-3614` (the gate). A
     summary that contradicts the document it summarises is the failure mode the
     bundle's cite convention exists to prevent, and nothing read either.
-
-    #10742: this test covered ONE number while the file published nine, so
-    eight rotted unread. It now emits the corrected pair too, and the other
-    eight are held by `_PUBLISHED_CITES` / `_RUNBOOK_CITES` above.
     """
     number, expected = _VALUE_FREE_GATE
-    lines = _extractor_lines()
-    got = lines[number - 1].strip()
-    assert got == expected, (
-        f"extractor_v2.py:{number} reads {got!r}, not {expected!r} — re-derive "
-        "the gate's line and update `_VALUE_FREE_GATE`, docs/00_index.md and "
-        f"{_RUNBOOK} together. Found on line(s): "
-        f"{[i + 1 for i, ln in enumerate(lines) if ln.strip() == expected]}")
+    repo = WRITE_PATH.resolve().parents[2]
+    lines = (repo / "tortoise/extractor_v2.py").read_text(encoding="utf-8") \
+        .splitlines()
+    assert lines[number - 1].strip() == expected, (
+        f"extractor_v2.py:{number} reads {lines[number - 1].strip()!r}, not "
+        f"{expected!r} — re-derive the gate's line and update both artifacts")
 
     cite = f"extractor_v2.py:{number}-{number + 1}"
-    for name in ("docs/00_index.md", _RUNBOOK):
-        body = (_REPO / name).read_text(encoding="utf-8")
+    for name in ("docs/00_index.md", "docs/runbook/2684-slice-b-t-gate.md"):
+        body = (repo / name).read_text(encoding="utf-8")
         assert cite in body, (
             f"{name} no longer publishes `{cite}` for the value-free gate — "
             "the two artifacts must name the same site, and a stale number here "

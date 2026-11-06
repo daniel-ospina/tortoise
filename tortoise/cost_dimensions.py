@@ -521,7 +521,7 @@ DIMENSIONS: tuple[Dimension, ...] = (
             "(#3359)."),
         bindings=(
             Binding("tortoise.metering", "record_capture_usage", WRITER),
-            Binding("tortoise.metering", "get_capture_usage", READER),
+            Binding("tortoise.metering", "get_current_usage", READER),
             Binding("tortoise.hosted_api", "_capture_cost_props", WRITER),
         ),
         columns=(

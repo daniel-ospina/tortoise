@@ -2605,17 +2605,6 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #     acceptance count is itself an arm
 #     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
 #     predicate cannot quietly go permissive again.
-#   * **A `self.X`/`cls.X` mention is the OTHER direction, and it is scoped to its
-#     own module (2026-11-03).** The relation is name-based, so a member call used
-#     to resolve to a same-named definition in ANOTHER module — that is how
-#     `REST GET /v1/topics/{topic}/summary` acquired
-#     `navigation.py::_hop_query` in three hops over
-#     `contextvars.copy_context().run` and `self._hop_query`, and took the accepted
-#     count 36 -> 37 with no row and no door added. `_resolved_targets` confines a
-#     name mentioned ONLY as a self-member to its own module; a name that is also
-#     mentioned free still resolves widely. Measured: exactly that one pair moved,
-#     every row's own door still attributes, and the pin is back at 36 — see
-#     `test_a_self_attribute_hop_resolves_only_inside_its_own_module`.
 #   * **Falsifiability is a SEPARATE arm**
 #     (`test_the_door_attribution_refuses_a_door_that_reaches_another_reader`),
 #     not a comment here: it runs the live registered tools through this same
@@ -2624,16 +2613,12 @@ def _route_table() -> dict[tuple[str, str], frozenset[str]]:
 #: How many reference hops a door→reader attribution may take. See the residual
 #: note above: this is a BOUND, not a proof.
 #:
-#: ⚠️ **Three, and this is a BOUND, not a proof.** Re-measured 2026-11-03 at the
-#: `self.`-scoped relation (`_symbol_index`, read through `_resolved_targets`),
-#: with function-local ASSIGNMENT targets excluded (see `_symbol_index`; the NAME
-#: of a nested `def`/`class` is still indexed) and the per-reader exceptions
-#: DISABLED, so these are the PURE relation's figures over the 418 pairs: a
-#: uniform 2 accepts 24, a uniform 3 34, a uniform 4 39, a uniform 5 40. ⚠️ The
-#: column this note carried before the scope fix (2026-10-24 at `d07c9e99e`) was
-#: `24/34/43/52` — SUPERSEDED, quoted only so an older figure met elsewhere reads
-#: as superseded rather than as a contradiction of this one. The SHIPPED predicate
-#: — the two exceptions in
+#: ⚠️ **Three, and this is a BOUND, not a proof.** Re-measured 2026-10-24 at
+#: `d07c9e99e`, with function-local ASSIGNMENT targets excluded from the symbol
+#: index (see `_symbol_index`; the NAME of a nested `def`/`class` is still indexed)
+#: and the per-reader exceptions DISABLED, so these are the PURE
+#: relation's figures over the 418 pairs: a uniform 2 accepts 24, a uniform 3 34,
+#: a uniform 4 43, a uniform 5 52. The SHIPPED predicate — the two exceptions in
 #: `_DISTANCE_EXCEPTIONS` added — accepts 36, i.e. the exceptions are worth exactly
 #: the 34 -> 36 above, stated separately so neither figure hides the other. Every
 #: one of the 31 true attributions is within 3 hops except the two named in
@@ -2701,7 +2686,7 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
 #: two exceptions whose budgets are 4 and 5) — which is NOT the same as above
 #: every CHAIN, and the difference is measured, not assumed: at this head
 #: `MCP tortoise_search` reaches `hosted_backup.py::_independent_counts` and
-#: `_DUMP_EDGE_PAGE_QUERY` in 15 hops and `_COUNT_ALL_EDGES_QUERY` in 16, so
+#: `_DUMP_EDGE_PAGE_QUERY` in 13 hops and `_COUNT_ALL_EDGES_QUERY` in 14, so
 #: `_door_distance` returns `None` for them at this cap. **`None` therefore means
 #: "not found within `_DISTANCE_SEARCH_CAP` hops", never "unreachable"**, and
 #: every message that consumes the value says which of the two it is — a short
@@ -2710,18 +2695,9 @@ _DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
 _DISTANCE_SEARCH_CAP = 12
 
 
-#: The names an attribute access `X.attr` is read as a SELF-member of.
-_SELF_NAMES = frozenset({"self", "cls"})
-
-
 @functools.cache
-def _symbol_index() -> tuple[
-    dict[str, frozenset[str]],
-    dict[str, frozenset[str]],
-    dict[str, frozenset[str]],
-]:
-    """`(symbol name -> defining node ids, node id -> names its body mentions,
-    node id -> the names it mentions ONLY as an attribute on `self`/`cls`)`.
+def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]]]:
+    """`(symbol name -> defining node ids, node id -> names its body mentions)`.
 
     A node id is `module.py::Qualname`, the SAME spelling §13's table uses for a
     reader, so an attribution compares like with like. Module- and class-level
@@ -2759,46 +2735,9 @@ def _symbol_index() -> tuple[
     Values of a local assignment are still REACHED from the enclosing function
     (`mentions` walks every `Assign` value), so dropping the target nodes loses
     no real reference.
-
-    ⛔ **A name mentioned ONLY as `self.X`/`cls.X` resolves INSIDE ITS OWN MODULE,
-    and that scope is the third map this function returns (2026-11-03).** The
-    index is name-based, so `self._hop_query` in `ep.py` and a module-level
-    `_hop_query` in `navigation.py` are the same key: the relation resolved the
-    member access to the OTHER module's function. Measured on the `#10602`
-    branch: `_read_offload`'s `contextvars.copy_context().run` bought a hop into
-    `ep.py::TortoiseEP.run`, whose `self._hop_query` then bought a hop into
-    `navigation.py::_hop_query` — so `REST GET /v1/topics/{topic}/summary`, a
-    route that never traverses anything, was attributed to the traversal
-    helper in THREE hops and the accepted count rose 36 -> 37. Both hops are
-    the class `#9817` closed for local VARIABLES one level down: a repeated
-    identifier is not a reference. A `self.`-member can never BE a module-level
-    function in another module, so the scope is a fact about the language, not
-    a budget: tightening it moved exactly that one pair (36 pairs at this head,
-    every row's own door still attributing, the uniform-3 sweep back to 34) and
-    the refused pair is a negative probe in
-    `test_the_door_attribution_refuses_a_door_that_reaches_another_reader`.
-    ⚠️ The FIRST hop of that recorded chain no longer exists at this head: the
-    context wrap moved from the inline `functools.partial(copy_context().run, fn)`
-    onto `monitoring.confine_context` (main's #10642 seam, required because main
-    deleted this module's `import contextvars`), so the chain now breaks at step
-    two as well. The arm still pins the SCOPE, which is the part that is a fact
-    about the language rather than an accident of which spelling the wrapper used.
-    ⚠️ A name mentioned as `self.X` AND somewhere non-`self` in the same body is
-    NOT scoped — the free mention may be a real reference, so only the PURE
-    member-only case is narrowed (pinned in
-    `test_a_self_attribute_hop_resolves_only_inside_its_own_module`).
-    ⚠️ **The scope's claim is about the CLASSES it was measured on, not a proof
-    that no real reach is lost.** A `self.X` whose definition is a METHOD
-    INHERITED FROM A BASE CLASS IN ANOTHER MODULE is a real reference this rule
-    drops — no such row is in the table (every row's own door still attributes,
-    which is what the arm asserts), and the measured pair it closes is a
-    module-level FUNCTION collision, so the rule is not narrowed on conjecture.
-    If a future row reds for that inheritance shape, the honest repair is to keep
-    cross-module BASE-CLASS definitions rather than to widen the rule back.
     """
     defs: dict[str, set[str]] = {}
     refs: dict[str, frozenset[str]] = {}
-    self_only: dict[str, frozenset[str]] = {}
 
     def mentions(subtree: ast.AST) -> frozenset[str]:
         """What a body REACHES — calls and references, not every attribute name.
@@ -2838,38 +2777,6 @@ def _symbol_index() -> tuple[
                 reference(inner.value)
         return frozenset(names)
 
-    def self_only_mentions(subtree: ast.AST) -> frozenset[str]:
-        """Names this body mentions ONLY as `self.X` / `cls.X`.
-
-        The companion of `mentions`, not a replacement: `mentions` still records
-        every name it records today (so `refs` is unchanged and no `#9817`
-        pin moves), and this map only says which of them were reached through a
-        SELF-member access and nowhere else. A name that is ALSO mentioned free
-        (`X(...)`, `module.X`, an argument) is deliberately absent, because the
-        free mention may be the real reference.
-        """
-        selfs: set[str] = set()
-        others: set[str] = set()
-
-        def walk(node: ast.AST) -> None:
-            for child in ast.iter_child_nodes(node):
-                if (
-                    isinstance(child, ast.Attribute)
-                    and isinstance(child.value, ast.Name)
-                    and child.value.id in _SELF_NAMES
-                ):
-                    selfs.add(child.attr)
-                    walk(child.value)
-                    continue
-                if isinstance(child, ast.Attribute):
-                    others.add(child.attr)
-                elif isinstance(child, ast.Name):
-                    others.add(child.id)
-                walk(child)
-
-        walk(subtree)
-        return frozenset(selfs - others)
-
     def index(body, rel: str, prefix: str, *, in_function: bool = False) -> None:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -2877,7 +2784,6 @@ def _symbol_index() -> tuple[
                 node_id = f"{rel}::{qual}"
                 defs.setdefault(node.name, set()).add(node_id)
                 refs[node_id] = mentions(node)
-                self_only[node_id] = self_only_mentions(node)
                 index(node.body, rel, f"{qual}.", in_function=True)
             elif isinstance(node, ast.ClassDef):
                 defs.setdefault(node.name, set()).add(f"{rel}::{prefix}{node.name}")
@@ -2902,7 +2808,6 @@ def _symbol_index() -> tuple[
                         node_id = f"{rel}::{prefix}{target.id}"
                         defs.setdefault(target.id, set()).add(node_id)
                         refs[node_id] = mentions(node.value)
-                        self_only[node_id] = self_only_mentions(node.value)
 
     for path in sorted(PKG.rglob("*.py")):
         index(_parsed(str(path)).body, str(path.relative_to(PKG)), "")
@@ -2911,7 +2816,6 @@ def _symbol_index() -> tuple[
     return (
         {name: frozenset(ids) for name, ids in defs.items()},
         refs,
-        self_only,
     )
 
 
@@ -2939,28 +2843,6 @@ def _door_entry_ids(door: str) -> frozenset[str]:
     return frozenset({handler}) if handler in _symbol_index()[1] else frozenset()
 
 
-def _resolved_targets(
-    node_id: str,
-    name: str,
-    defs: dict[str, frozenset[str]],
-    self_only: dict[str, frozenset[str]],
-) -> frozenset[str]:
-    """The definition nodes `name` resolves to when READ FROM `node_id`.
-
-    A name `node_id` mentions only as `self.X`/`cls.X` is a MEMBER access, so it
-    resolves to this file's definitions of that name and no other: `ep.py`'s
-    `self._hop_query` is `ep.py::TortoiseEP._hop_query`, never the module-level
-    `navigation.py::_hop_query` that merely shares the identifier. See
-    `_symbol_index` for the measured pair this closes. Every other name resolves
-    against the whole index, unchanged.
-    """
-    targets = defs.get(name, frozenset())
-    if name not in self_only.get(node_id, frozenset()):
-        return targets
-    module = node_id.split("::", 1)[0]
-    return frozenset(t for t in targets if t.split("::", 1)[0] == module)
-
-
 @functools.cache
 def _door_distance(door: str, reader: str) -> int | None:
     """Shortest reference distance from `door` to `reader`; `None` = NOT FOUND
@@ -2968,7 +2850,7 @@ def _door_distance(door: str, reader: str) -> int | None:
 
     ⚠️ `None` is a TRUNCATION, not a proof of absence — a chain longer than the
     cap reports `None` exactly like one that does not exist (measured at this
-    head: `_COUNT_ALL_EDGES_QUERY` is 16 hops against a cap of 12), which is why
+    head: `_COUNT_ALL_EDGES_QUERY` is 14 hops against a cap of 12), which is why
     the two are never conflated in a message.
 
     Returns the DISTANCE rather than a boolean so the failure can say how far the
@@ -2977,7 +2859,7 @@ def _door_distance(door: str, reader: str) -> int | None:
     """
     if not door or not reader:
         return None
-    defs, refs, self_only = _symbol_index()
+    defs, refs = _symbol_index()
     frontier = set(_door_entry_ids(door))
     if reader in frontier:
         return 0
@@ -2986,7 +2868,7 @@ def _door_distance(door: str, reader: str) -> int | None:
         nxt: set[str] = set()
         for node_id in frontier:
             for name in refs.get(node_id, frozenset()):
-                nxt |= _resolved_targets(node_id, name, defs, self_only) - seen
+                nxt |= defs.get(name, frozenset()) - seen
         if not nxt:
             return None
         if reader in nxt:
@@ -3072,21 +2954,15 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
     # `_independent_counts.edges` → the constant — hops two and three being the
     # locals `ids` and `edges` in unrelated functions, because the indexer used to
     # register function-local assignments as symbols. None of the dumps' own symbols
-    # is inside this door's budget and that stays so. Distances re-measured at the
-    # 2026-11-03 `self.`-scoped relation (`_symbol_index`), at CAP 24 where the cap
-    # would otherwise hide the answer: `_independent_counts` and
-    # `_DUMP_EDGE_PAGE_QUERY` are 15, `_COUNT_ALL_EDGES_QUERY` 16, `dump_graph` 14
-    # and `create_backup` 13 — every one of them BEYOND the 12-hop
-    # `_DISTANCE_SEARCH_CAP`, so `_door_distance` reports `None` for them ("further
-    # than we looked", not "unreachable"), and `restore_graph` /
+    # is inside this door's budget and that stays so — measured, `dump_graph` 12 hops
+    # and `create_backup` 11 are far past that budget and still INSIDE the cap (so
+    # `_door_distance` returns their distance and the pair is refused on the budget
+    # alone), `_independent_counts` and
+    # `_DUMP_EDGE_PAGE_QUERY` are 13 and `_COUNT_ALL_EDGES_QUERY` 14 (those three are
+    # beyond the 12-hop `_DISTANCE_SEARCH_CAP`, so `_door_distance` reports `None` for
+    # them — "further than we looked", not "unreachable"), and `restore_graph` /
     # `_restore_copy_settled` are unreachable AT CAP 24 (the cap was raised for
-    # that measurement) — "unreachable" is not claimed for caps beyond it. ⚠️ The
-    # scope is what pushed `dump_graph`/`create_backup` past the cap: at 11 and 10
-    # they used to sit INSIDE it, refused on the budget alone. That distinction is
-    # still demonstrated, by the doors that are not this one — measured at this
-    # head, rows 28/29 reach the backup count constants through
-    # `REST GET /v1/organizations/{org_id}/export` and `POST /v1/backups/restore`
-    # in 10-12 hops, inside the cap and far past a 3-4 hop budget. (Other
+    # that measurement) — "unreachable" is not claimed for caps beyond it. (Other
     # `hosted_backup.py`
     # symbols ARE reachable at 2-3 hops through ATTRIBUTE names — `list`, `delete` —
     # which is the relation's declared permissive direction: a repeated identifier
@@ -3109,9 +2985,8 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
     )
     assert not _door_reaches("MCP tortoise_search", "hosted_backup.py::_COUNT_ALL_EDGES_QUERY"), (
         "the search door is attributed to `hosted_backup.py::_COUNT_ALL_EDGES_QUERY` "
-        "INSIDE this reader's 4-hop budget. At the pinned head that pair is 16 hops "
-        "(measured at CAP 24 under the `self.` scope) — past the 12-hop search cap, "
-        "so `_door_distance` answers `None`, and far "
+        "INSIDE this reader's 4-hop budget. At the pinned head that pair is 14 hops "
+        "— past the 12-hop search cap, so `_door_distance` answers `None`, and far "
         "past the budget — so this arm reds only once the pair has come INSIDE the "
         "budget: the attribution then walked a bare NAME (`ids`/`edges`) through a "
         "function-LOCAL assignment, so any file that reuses a common variable name "
@@ -3144,7 +3019,7 @@ def test_a_local_class_body_is_not_a_source_of_symbols():
     is still indexed, so the arm cannot be satisfied by deleting the whole
     `ClassDef` branch either.
     """
-    defs, _, _ = _symbol_index()
+    defs, _ = _symbol_index()
 
     # A module-level `Enum`'s member is an `Assign` with a value at
     # `in_function=False` — it must SURVIVE (dropping class bodies wholesale would
@@ -3233,109 +3108,6 @@ def test_a_local_class_body_is_not_a_source_of_symbols():
     )
 
 
-def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
-    """A `self.X` mention is a MEMBER access, so it buys no cross-module hop.
-
-    The 2026-11-03 re-derivation of `_ACCEPTED_PAIRS_AT_THIS_HEAD` red as a RISE
-    (36 -> 37) with no table row added and no door changed, because this branch's
-    new read seam supplied a shorter COLLISION chain than the one that already
-    existed. Measured on `#10602`'s head, the full chain from the door:
-
-        hosted_api.py::topic_summary                    (the REST topic-summary door)
-      -> hosted_api.py::_read_offload                   a REAL reference
-      -> ep.py::TortoiseEP.run                          `contextvars.copy_context().run`
-      -> navigation.py::_hop_query                      `self._hop_query` in `ep.py`
-
-    Hops two and three are the `#9817` defect class one level down: a repeated
-    identifier is not a reference. `Context.run` is not `TortoiseEP.run`, and
-    `TortoiseEP.run`'s `self._hop_query` is the class's OWN method, never the
-    module-level `navigation.py::_hop_query` that merely shares the name. The
-    route that never traverses anything was attributed to the traversal helper,
-    so a substitution of that helper into row 22's cell would have passed.
-
-    ⚠️ **Why this needs its own arm.** `_resolved_targets` narrows a name to the
-    mentioning module; a change that instead DELETED `self.`-qualified names from
-    the index would also push the accepted count back to 36 (or below it) and
-    leave the count ceiling green while severing real member references, so the
-    positive half below pins that a member mention still resolves to its OWN
-    definition, and a name mentioned outside `self.` still fans out.
-    """
-    defs, refs, self_only = _symbol_index()
-
-    # The collision really exists in the index: one name, two modules.
-    assert {"ep.py::TortoiseEP._hop_query", "navigation.py::_hop_query"} <= set(
-        defs.get("_hop_query", ())
-    ), (
-        "this pin's collision has moved: `_hop_query` must be defined BOTH as "
-        "`TortoiseEP._hop_query` (in `ep.py`) and as a module-level function in "
-        "`navigation.py`, which is what makes a name walk resolve one to the "
-        f"other. Present: {sorted(defs.get('_hop_query', ()))}. Re-point the pin at "
-        "the pair that now shares a name rather than deleting it — the scope is "
-        "only exercised while some name is defined in two modules."
-    )
-    assert "_hop_query" in refs.get("ep.py::TortoiseEP.run", frozenset()), (
-        "`ep.py::TortoiseEP.run` no longer mentions `_hop_query`, so the scoping "
-        "assertions below pass without exercising anything. Re-point this pin at "
-        "the member call the class still makes."
-    )
-    # …and the mention is a PURE self-member one, so the scope is engaged at all.
-    assert "_hop_query" in self_only.get("ep.py::TortoiseEP.run", frozenset()), (
-        "`ep.py::TortoiseEP.run` mentions `_hop_query` somewhere OTHER than as "
-        "`self._hop_query`, so it resolves widely by design and the negative half "
-        "below asserts nothing about the scope. (If the call was rewritten to a "
-        "module-level `_hop_query(...)`, this arm must be re-pointed: the pair is "
-        "then a REAL reference and `_door_reaches` answering True is correct.)"
-    )
-
-    # The negative half: the OTHER module's function is not what `self.` means.
-    assert _resolved_targets(
-        "ep.py::TortoiseEP.run", "_hop_query", defs, self_only
-    ) == frozenset({"ep.py::TortoiseEP._hop_query"}), (
-        "`ep.py`'s `self._hop_query` resolves outside its own module — it reached "
-        f"{sorted(_resolved_targets('ep.py::TortoiseEP.run', '_hop_query', defs, self_only))}. "
-        "A `self.`-member can never be a module-level function in another module, "
-        "so this is the collision that took the accepted count 36 -> 37 over a "
-        "route that never traverses anything."
-    )
-    # …and the door that rode it is refused, with the reader still reachable via
-    # its TRUE doors (so the scope did not sever the reader).
-    assert _door_entry_ids("REST GET /v1/topics/{topic}/summary"), (
-        "this pin's door no longer resolves, so the refusal below would be vacuous"
-    )
-    assert not _door_reaches(
-        "REST GET /v1/topics/{topic}/summary", "navigation.py::_hop_query"
-    ), (
-        "`REST GET /v1/topics/{topic}/summary` is attributed to "
-        "`navigation.py::_hop_query` again — the route reads a topic's points and "
-        "never calls the traversal helper. Either a `self.`-qualified name is "
-        "resolving across modules again (`_resolved_targets`), or `topic_summary` "
-        "gained a REAL reference to the helper; name which before touching this pin."
-    )
-    for true_door in ("MCP tortoise_traverse", "MCP tortoise_entity_profile"):
-        assert _door_reaches(true_door, "navigation.py::_hop_query"), (
-            f"the scope severed `navigation.py::_hop_query` from its TRUE door "
-            f"`{true_door}` as well, so the tightening is not narrow: the reader is "
-            "still reached in 2 hops through `navigation.py`'s own bare-name calls."
-        )
-
-    # The positive half of the widening: a name ALSO mentioned outside `self.`
-    # fans out over the whole index, so the scope is not a deletion of self-hops.
-    assert "model" not in self_only.get("embed_metering.py::EmbedTally.note_encode", frozenset()), (
-        "`embed_metering.py::EmbedTally.note_encode` mentions `model` ONLY as a "
-        "self-member, so it is now scoped — and this pin's positive half no longer "
-        "has its subject. Re-point it at a body that mentions one name BOTH as "
-        "`self.X` and free (measured: that body reads `self.model` and "
-        "`model.encode`), rather than deleting the half."
-    )
-    assert _resolved_targets(
-        "embed_metering.py::EmbedTally.note_encode", "model", defs, self_only
-    ) == defs.get("model", frozenset()), (
-        "a name mentioned as `self.X` AND free in the same body is being narrowed "
-        "to its own module — only the PURE member-only case may be scoped, "
-        "because the free mention can be a real reference"
-    )
-
-
 #: Measured at this head: how many of the table's own TWENTY-TWO doors the attribution
 #: predicate accepts, summed over the nineteen customer-callable rows, and the
 #: worst single row. Inputs are the TABLE (whose doors change only when the
@@ -3363,30 +3135,6 @@ def test_a_self_attribute_hop_resolves_only_inside_its_own_module():
 #: still red, and the 31-cell floor still holds — which is what makes this a
 #: tightening, not a relaxation. The refused pair is pinned as a negative probe in
 #: `test_the_door_attribution_refuses_a_door_that_reaches_another_reader`.
-#: ⛔ RE-DERIVED 2026-11-03: 36 -> 36, and the RISE that would have made it 37 was
-#: REFUSED, not pinned. Measured on `#10602`'s head the predicate accepted 37 with
-#: no row added and no door changed: the branch's new read seam shortened a
-#: `self.`-collision chain from 5 hops to 3, so `REST GET /v1/topics/{topic}/summary`
-#: — a route that never traverses anything — was attributed to
-#: `navigation.py::_hop_query`. Both of its hops were name collisions
-#: (`contextvars.copy_context().run` -> `TortoiseEP.run`, then `self._hop_query` ->
-#: a module-level function in ANOTHER module), the same defect class as the local
-#: variables above, one nesting level down. The relation was tightened
-#: (`_symbol_index`'s `self.` scope, read through `_resolved_targets`), which moved
-#: exactly that one pair — every row's own door still attributes and no OTHER pair
-#: moved — and the refusal is pinned in
-#: `test_a_self_attribute_hop_resolves_only_inside_its_own_module`. The ceiling
-#: never moved: a RISE that is refused leaves the pin where the last derivation
-#: put it.
-#: ⛔ RE-DERIVED AGAIN at the merge-with-main head: 36 -> 36, unchanged, and the
-#: measurement was re-run rather than assumed. The read seam's context wrap moved
-#: from the inline `functools.partial(contextvars.copy_context().run, fn)` onto
-#: `monitoring.confine_context` (main's #10642 seam — required here, because main
-#: deleted this module's `import contextvars` and the bare inline call was a
-#: `NameError` on every read route at the merge commit), which removes the FIRST
-#: collision hop of the chain the note above records. Nothing else moved: no row,
-#: no door, no exception. Both the scope rule and the seam change tighten, so the
-#: pin reads the same either way — and the uniform-3 sweep stays at 34.
 _ACCEPTED_PAIRS_AT_THIS_HEAD = 36
 #: 15 -> 17 on 2026-10-21: the TABLE's door set grew by the two SDK doors the new
 #: call-time rows name, and `_hop_query` (an all-edge walk) legitimately reaches

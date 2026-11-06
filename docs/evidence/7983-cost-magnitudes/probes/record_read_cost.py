@@ -103,14 +103,6 @@ MIGRATIONS = [
     # is absorbed by page slack. Measured twice: `rho-bench.log`'s basis note and
     # daniel-ospina/tortoise#10070, comment 6426999081.
     "20261029000001_record_point_cache_tier.sql",
-    # #10620: `public.point.search_keys` `jsonb` → `text`. ⚠️ This probe imports NO
-    # `tortoise` module and never writes a point, so it cannot trip the refusal the
-    # entry's neighbours describe; the reason is the one every neighbouring entry
-    # gives: the row width and `pg_total_relation_size` figures it publishes must be
-    # the SHIPPED schema's. `text` is varlena like `jsonb`, so the delta is the
-    # de-TOASTing header rather than a type change (jsonb carries a 1-byte version
-    # tag on top) — small, but this probe's whole output is small differences.
-    "20261102000002_record_point_search_keys_text.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and

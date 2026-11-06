@@ -11,13 +11,11 @@ aboutObjects: "#9889, #7949, #9080, #9116, EXTRACTOR-V4-ARCHITECTURE.md §S2.2, 
 
 # `#9889` — the capstone's three E1/E2 probes, and what they measured
 
-`#7949`'s capstone could only score E1 and E2 by parsing **one fixed artifact**
+`#7949`'s capstone can only score E1 and E2 by parsing **one fixed artifact**
 (`docs/evidence/7949-capstone/e1-e2.log`), so both rows reported `BLOCKED` /
-`REFUSED` whatever a fresh run held — and `probes/capstone_measure.py` **forced
-the measured arm ON**, so E1's *before* half (`after <= 0.50 x before`) could not
-be produced by it at all. **That parse path is now gone:** the rows read
-`e1-e2-scores.json` from this directory (see "The score record" below), so the
-sentence above is the history this directory closes.
+`REFUSED` whatever a fresh run held — and `probes/capstone_measure.py` **forces the
+measured arm ON**, so E1's *before* half (`after <= 0.50 x before`) could not be
+produced by it at all.
 
 This directory holds the artifact of the three **additive** probes that close
 both gaps, plus the numbers they measured. No `tortoise/` file changed.
@@ -115,11 +113,8 @@ registered refusal, on the number itself rather than its denominator:
 arm under that share "cannot measure E1 (a share metric needs a non-trivial
 base)" and is **REFUSED**. A before-share under 0.20 therefore exits **2** and
 writes no record, citing the frozen floor. Both floors are read out of the
-record (`e1_objects` through `parse_bars`'s `floors` map, `e1_min_before_share`
-straight off `denominator_floors` — `parse_bars` exposes the share floor too, but
-this probe is the PRODUCER of the number that floor is written over and refuses
-with its own message, because an escaping `ValueError` from a helper is not a
-refusal a run can be read from), never typed here, and
+record (`e1_objects` through `parse_bars`, `e1_min_before_share` straight off
+`denominator_floors`, which `parse_bars` does not expose), never typed here, and
 an absent or unreadable `e1_min_before_share` is refused rather than read as "no
 floor" (#9513). Both arms below clear both floors (0.3590 and 0.5652 against
 0.20; 78 and 69 Objects against 30), so their shares are measurements.
@@ -258,14 +253,12 @@ metric's own precision.
 3. **The ON arm here is n=1.** Two OFF runs, one ON run. A second ON run was not
    taken inside this pass, so the ON arm's own spread is unmeasured — read the
    ON share as one realization, not as the arm's value.
-4. **The E1/E2 rows in the verdict table USED to parse `e1-e2.log`; they no
-   longer do.** This was written as an open limitation when the probes landed
-   (#10342); the re-point followed and is landed
-   (`docs/evidence/7949-capstone/probes/capstone_measure.py` cites
-   `E1_E2_SCORES` for both rows, and `E1E2_LOG` no longer exists there). Kept as
-   history because the reason the re-point was staged separately still holds: it
-   is not additive, it changes the row contract, and a second scored log in the
-   bundle would red every number the README quotes.
+4. **The E1/E2 rows in the verdict table still parse `e1-e2.log`.** These probes
+   make the artifacts exist; re-pointing the row builder at them is a change to
+   `capstone_measure.py`'s row contract plus the README pins it carries, and it
+   is left out of this PR deliberately (it is not additive, and the issue itself
+   measures that a second scored log in the bundle reds every number the README
+   quotes).
 5. **The 2026-10-24 pass's numbers are not reproduced.** They were taken at
    `5f40d832c`; this head is ~28 commits later. That is the difference reported
    above, not a contradiction.
@@ -280,67 +273,6 @@ metric's own precision.
 | `e1-gate-drops.json` | `e1_gate_drops.py` record (every Object name, its verdict, the controls) |
 | `e2a-value-units.json` | `e2a_value_units.py` record, as written (per-session ids, survived and lost) |
 | `e2a-value-units-falsifier.json` | the same with `--inject-anchor` — both readings in one record. Predates the `strict_all` label fix: its `with_anchor.strict_all` carries the as-written reading |
-| `e1-e2-scores.json` | **the score record** — E1 and E2 as the capstone's table rows read them, in one invocation of `probes/e1_e2_scores.py` (below) |
-
-## The score record — how E1 and E2 become rows (`#9889` item 5)
-
-Until this record existed, `probes/capstone_measure.py` could only score E1/E2 by
-parsing `docs/evidence/7949-capstone/e1-e2.log` — a 25-Object, one-arm artifact
-on a corpus that is not the pre-registration's. Both rows were therefore
-`BLOCKED`/`REFUSED` whatever a fresh run held. This record is the piece that
-makes the rows *these probes'*:
-
-```bash
-uv run python docs/evidence/7949-capstone/probes/e1_e2_scores.py \
-    --out docs/evidence/9889/e1-e2-scores.json
-```
-
-```text
-E1 REFUSED decidable=False (before spread 20.6 pp)
-   before 0.3590 -> bound 0.1795 vs after 0.2131 = FAIL (ratio 0.5937)
-   before 0.5652 -> bound 0.2826 vs after 0.2131 = PASS (ratio 0.3770)
-E2 FAIL — E2a 8/14 (bar >= 13), E2b fused 1/114 = 0.008772
-```
-
-It measures nothing itself: every number is read out of a record above, and every
-BAR out of the pre-registration — `capstone_measure.parse_bars`, the bundle's ONE
-reader, so this record and the row that cites it cannot read two thresholds. It
-**refuses** (exit 2, no record) when an input record is missing, when a threshold
-cannot be parsed out of the frozen record, when the E2a record grades a
-denominator other than the frozen **14** (a `13 of 14` bar printed over an N
-nobody froze), when the E2a falsifier does not reach the frozen denominator (an
-inert counter), when the ON arm and the E2a counts were taken on different
-GRAPHS (the ON log's own `# graph:` line — its `# head:` is equal either way, so
-the head cannot catch it), when the falsifier's SCORED `with_anchor` block is
-not the run the E2a record was taken on (a graph is `capstone_on_<head>_<stamp>`,
-so a SIBLING run of the same head is a different run, and naming the head is not
-enough), when a `with_anchor` block is present but EMPTY (a record that never
-wrote its counter is not the flat shape that has no block), when its `as_written`
-block carries no graph — an absent provenance is not an inherited one — sits on another run, or reads counts other than the E2a
-record's (that block IS the E2a reading), when the value-gate positive controls
-are dead, or
-when the ON run's corpus is not the pre-registration's frozen `fixtures_hash` —
-so a row can never cite a corpus the record did not freeze, a denominator the
-record did not freeze, or a population from another run.
-
-**E1's refusal is a measurement, not a gap.** Two independent OFF realizations
-(0.3590, 0.5652) and one ON realization (0.2131) can be paired two ways, and the
-two pairings give different verdicts. At n=1 per arm the verdict would depend on
-which before run is chosen, so the aggregate is `REFUSED` with both pairings
-printed. The next requirement is **n >= 2 per arm**.
-
-**The counts reach the rows.** The capstone's E2 row now carries E2a's count over
-the FROZEN 14 (`8 of 14` today; the bar is `>= 13 of 14`), and E1's carries the
-after arm's `Object` count in the PASS direction — the Objects that are NOT
-bare-definite, over all of them (`48 of 61`; the measured bare-definite count the
-criterion minimises is `13 of 61` and stays in the row's note, because a run whose
-bare-definite count is 0 is the BEST outcome and a `0` numerator is refused as a
-silent drop). They are
-NOT a sibling pair any more: `tools/capstone_verdict_check.py`'s V8 compares two
-copies of ONE population, and these two rows score two (all Objects vs the 14
-value-bearing units) — naming them siblings is what forced both counts empty, and
-an empty count on the row a `GREEN` would carry is refused by V5, so the first run
-to reach 13/14 produced a table the gate exited 1 on.
 
 ⚠️ **Provenance of these records is stated once**, in §"Which probe revision
 produced each artifact" above: the probe revision that produced the two OFF

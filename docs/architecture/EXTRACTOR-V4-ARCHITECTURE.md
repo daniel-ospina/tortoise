@@ -47,17 +47,11 @@ analytics row carries — `#5045`. The **ask** lane separately records
 token counters cannot change the cap's behaviour. That separation is deliberate: this ruling is about the **unit**,
 and the cap is a separate decision.
 
-**The token counters are readable, and the spend ceiling stays blind to them.** `metering.get_capture_usage(org_id)`
-returns `capture_calls` / `capture_tokens_in` / `capture_tokens_out` / `capture_cost_usd` per org per metering
-window on BOTH substrates (`:MeteringRecord` in the registry, or `supabase.metering_records`), degrading to a zero
-view and never raising; `capture_extraction`'s declared `READER` binding in `tortoise/cost_dimensions.py` points at
-it. The reader is MEASUREMENT ONLY — no request path calls it, and the ceiling above still cannot see the **token
-counters** (`capture_tokens_in` / `capture_tokens_out` / `ask_tokens_in` / `ask_tokens_out`) by construction. It
-does of course see `capture_cost_usd` — that column is one of the two the ceiling sums, so a change in capture
-*cost* moves the cap while a change in capture *tokens* does not. The metric set itself — the per-call metrics, the
-disclosure counters, the attribution and the derived figures — is defined in
-`docs/ops/extraction-cost-metrics.md` (`#3840`); the consumption model that consumes
-the reader is `docs/architecture/CONSUMPTION-MODEL.md` (`#4051`).
+**⚠️ Residual — the token counters have no production reader.** `get_current_usage` reads write-ops only, so
+"tokens per team per month" is written but not readable from code (the `#4493` lesson: a recorded dimension
+with no reader reads as a measurement that does not exist). The metric set itself — the per-call metrics, the
+disclosure counters, the attribution and the derived figures — is defined in `docs/ops/extraction-cost-metrics.md`
+(`#3840`).
 
 **⚠️ Open, and not decided here:** whether the token allowance and the storage allowance are enforced at the same
 seam, and whether an extraction allowance is a **pre-spend admission** gate (like the points estimate) or a
@@ -968,7 +962,7 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 - **The lookup's state is READ, not assumed** — `tortoise/failure_policy.py` (`lookup_state`) returns `resolved` / `partial` / `unresolved` from `search_graph`'s new `query_coverage` + `query_results`, which report the queries that actually ran. `degraded` alone cannot express it: the degrade handler is reachable only from the FIRST query (so a degraded lookup has **zero** priors), while a failure on query 2..N is swallowed and returns `degraded: False` with a genuinely **partial** prior set. `partial` is the common state, not an edge case: a real S2 output derives 18 queries against the shipped budget of 15, and the legs are iterated `object → event → point`, so the leg a truncation starves is the **point** one — the dedup leg.
 - **The prompt states the truth** — `_render_search_results` renders `failure_policy.lookup_note`, which says the check did not run (or did not complete), that existence is **UNRESOLVED not absent**, that nothing may be treated as new, that no `link_before_create` entry may report a search that did not happen (omit it) — and, because this clause is read by the S4 GAP REVIEWER, it keeps the **emission** requirement: the candidates must still be emitted.
 - **The record states the truth** — `execute_embed`'s `link_before_create` uses `failure_policy.created_record`, whose `found` is `false` **only** when THAT candidate's own query ran and matched nothing; otherwise it is `None`. Per candidate, not per run: a bounded lookup leaves some candidates checked and others not.
-- **The run reports it** — `extract_session_v2` returns an always-present `identity` block (state, reason, the coverage counters, per-class candidate and unresolved counts) and warns loudly when a candidate's own identity query did not run (and, separately, when the lookup was bounded but every candidate's query ran, and when the lookup did not run at all with no candidate to check — three different facts, and each gets its own sentence **on a run that reaches this block**; the empty-conversation early return precedes it and has no candidate, so it emits no `S3 identity` line). Nothing is suppressed: **I1's *"never mint it"* is still not enforced**, and duplicates are still minted.
+- **The run reports it** — `extract_session_v2` returns an always-present `identity` block (state, reason, the coverage counters, per-class candidate and unresolved counts) and warns loudly when a candidate's own identity query did not run (and, separately, when the lookup was bounded but every candidate's query ran — the two are different facts and get different sentences). Nothing is suppressed: **I1's *"never mint it"* is still not enforced**, and duplicates are still minted.
 
 **What is still absent, and it is the whole of the remaining code half:** the `HOLD` gate itself — a **create** gate inside S5, which is *not* `execute_embed({})` (that is the sole carrier for retractions, supersessions and chain notes, so suppressing it wholesale drops memory I2 forbids dropping); and the persistence that carries a run's held set forward. `#5087` (E1) remains the code-owner of both, and `config/v4-mechanisms.yml` keeps `failure_policy` at `not-implemented` for exactly this reason. <!-- v4-mechanism: failure_policy -->
 

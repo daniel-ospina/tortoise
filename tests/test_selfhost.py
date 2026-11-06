@@ -562,12 +562,10 @@ def _tool_result(body):
     the call path; both are handled here."""
     result = body.get("result", {}) if body else {}
     if isinstance(result, dict) and "content" in result:
-        # The PAYLOAD is `content[0]`; every other block is appended LAST by the
-        # dispatch seam (the #3883 retirement warning, #10084's graph
-        # disclosure). Joining all blocks turned a WRITE into `{"text": …}`
-        # instead of failing loudly once a disclosure block appeared.
-        blocks = [c for c in result["content"] if isinstance(c, dict)]
-        text = blocks[0].get("text", "") if blocks else ""
+        # Skip the trailing #3883 retirement warning block (it is not payload).
+        text = "".join(c.get("text", "") for c in result["content"]
+                       if isinstance(c, dict)
+                       and not c.get("text", "").startswith("RETIRED TOOL"))
         if text:
             import json
             try:

@@ -126,37 +126,12 @@ def _no_embedder(monkeypatch):
     (``compute_embedding`` → None) and the query path sees no embedder
     (``EmbeddingModel.get`` → None), so the vector strategy never runs and
     the differential isolates the sparse loop mechanics. No model load, no
-    network — deterministic on any machine with the docker lane.
-
-    Also pin the ARM TWINS out (#10629 review): this module asserts the
-    kernels the guard RECEIVES (``test_floor_term_arm_reaches_the_coverage_
-    loop_guard`` and siblings), and ``retrieve_for_question`` resolves every
-    one of those arms from the environment when the caller passes nothing.
-    A measurement lane arming the sealed A/B through the documented env twins
-    would otherwise get a FALSE RED in the very test that pins the arm:
-
-    * ``TORTOISE_LME_FLOOR_TERM`` — an exported value silently arms the lower
-      bound under every OFF-leg assertion (measured: the ``--no-floor-term``
-      leg of the arm-reach test reds with ``floor_term=True``).
-    * ``TORTOISE_LME_COVERAGE_LOOP`` — ``retrieve_for_question`` reads it
-      whenever the caller passes ``coverage_loop=None``, so an exported value
-      arms the loop a run-invariance test is asserting is OFF.
-    * ``TORTOISE_LME_SESSION_REINJECTION`` — the other pool-order owner; an
-      exported value arms the composition ``run_evaluation`` refuses to
-      combine with the loop.
-    * ``TORTOISE_LME_GUARD_PER_SESSION_CAP`` — the env half of the cap this
-      module's arm-reach test pins as the product default.
-    """
+    network — deterministic on any machine with the docker lane."""
     import tortoise.embeddings as _emb
     monkeypatch.setattr(_emb, "compute_embedding",
                         staticmethod(lambda content: None))
     monkeypatch.setattr(_emb.EmbeddingModel, "get",
                         staticmethod(lambda: None))
-    for _arm_env in ("TORTOISE_LME_FLOOR_TERM",
-                     "TORTOISE_LME_COVERAGE_LOOP",
-                     "TORTOISE_LME_SESSION_REINJECTION",
-                     "TORTOISE_LME_GUARD_PER_SESSION_CAP"):
-        monkeypatch.delenv(_arm_env, raising=False)
 
 
 def _question(question: str = QUESTION, *,
@@ -333,47 +308,6 @@ def test_loop_disabled_is_default_byte_identical(seeded_sdk):
     assert default["coverage_loop_stats"]["loop_iterations"] == 0
     assert JOIN_ID not in [h["id"] for h in default["hits"]], (
         "default behavior must not run the loop")
-
-
-# ── (a2) the resolved floor arm reaches the guard (#10629 review) ───────
-
-def test_floor_term_arm_reaches_the_coverage_loop_guard(seeded_sdk,
-                                                         monkeypatch):
-    """#2513 (#10629 review P2): the arming path actually ARMS something.
-
-    The seam landed correct but unarmable — no CLI flag, and neither eval-lane
-    composition forwarded it, so the published "next command" died at argparse
-    and the arm was never selected at all. This pins the COVERAGE-LOOP half by
-    execution: the kwargs the guard RECEIVES are the resolved ones. A dropped
-    forward reds here, instead of the sealed A/B silently running the OFF leg
-    while its receipt says armed.
-    """
-    from tools.longmem_eval import retrieve as _ret
-    from tortoise.retrieval import DEFAULT_POOL_SESSION_CAP
-    from tortoise.retrieval import guard_and_recap_pool as _real_guard
-
-    seen: list[dict] = []
-
-    def _capture(items, **kw):
-        seen.append({k: kw.get(k) for k in ("floor_term", "per_session_cap")})
-        return _real_guard(items, **kw)
-
-    monkeypatch.setattr(_ret, "_guard_and_recap_pool", _capture)
-    on = _ret.retrieve_for_question(
-        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
-        coverage_loop=True, floor_term=True, guard_per_session_cap=1)
-    assert seen == [{"floor_term": True, "per_session_cap": 1}], seen
-    assert on["coverage_loop_stats"]["floor_term"] is True
-    assert on["coverage_loop_stats"]["guard_per_session_cap"] == 1
-
-    # the default path rides the SAME expression, with the product cap
-    seen.clear()
-    off = _ret.retrieve_for_question(
-        seeded_sdk, _question(), ks=(5,), top_k=10, pool_size=60,
-        coverage_loop=True)
-    assert seen == [{"floor_term": False,
-                     "per_session_cap": DEFAULT_POOL_SESSION_CAP}], seen
-    assert off["coverage_loop_stats"]["floor_term"] is False
 
 
 def test_eval_env_gate_failsafe_off(seeded_sdk, monkeypatch):

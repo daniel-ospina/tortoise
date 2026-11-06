@@ -770,17 +770,6 @@ def _main(argv: list[str] | None = None) -> None:
     print(f"[w7_publish] receipt valid: {not issues}")
     for i in issues:
         print(f"  RECEIPT ISSUE: {i}")
-    # #2105 (indicator 3): the receipt gate must FAIL the process, not merely
-    # print. Printed-but-zero used to make the publication layer's only
-    # machine-readable verdict a no-op: `w7_publish … && publish` read an
-    # UNPUBLISHABLE receipt as a pass (measured: a completed report with no
-    # recorded posture printed three RECEIPT ISSUEs and exited 0). The sibling
-    # report gate RAISES for the same class of missing record — this is the
-    # same discipline at the artifact's own boundary. The artifact above is
-    # already written, so the evidence (and `receipt_issues`) survives the
-    # failure for an auditor to re-run `validate_receipt` over.
-    if issues:
-        raise SystemExit(1)
 
 
 if __name__ == "__main__":

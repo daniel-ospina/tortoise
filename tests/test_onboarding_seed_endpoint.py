@@ -420,7 +420,7 @@ class TestSeedJourney:
 # naturalPerson Subject + their Organization as an organization Subject,
 # linked memberOf (org_id/user_id/email refs). Never writes demo Points, so
 # the Overview digest (team.point_count — Points only) reads 0 on a fresh
-# org, never the demo's count filed.
+# org, never '13 points filed'.
 
 # Internal endpoints authenticate via FASTAPI_INTERNAL_KEY — read at CALL
 # time by hosted_api._check_internal, so setting it here is sufficient even
@@ -477,7 +477,7 @@ class TestStarterSeed:
             assert "first-points-filed" in _completed(org_id)
             # ZERO demo/sample Points on the fresh org
             assert _point_count(org_id) == 0
-            # the Overview digest reads 0 (never the demo's count filed)
+            # the Overview digest reads 0 (never '13 points filed')
             r2 = tc.get("/v1/team")
             assert r2.status_code == 200, r2.text
             assert r2.json()["point_count"] == 0
@@ -569,28 +569,12 @@ class TestDigestExcludesDemo:
         try:
             # a fresh org starts at 0 real Points
             assert tc.get("/v1/team").json()["point_count"] == 0
-            # opt-in / legacy demo seed writes the 9 sample Points + sentinel.
-            # ⛔ Was 12 + sentinel = 13 before #10000: the three `epi_turn*`
-            # turn nodes are gone (§9.1/D1 — the demo's episodic layer is the
-            # Session, and raw turn text is not a graph node).
+            # opt-in / legacy demo seed writes the 12 sample Points + sentinel
             r = tc.post("/internal/demo", json={"org_id": org_id},
                         headers=_internal_headers())
             assert r.status_code == 200, r.text
             assert r.json()["status"] == "demo_created"
-            assert _point_count(org_id) == 10  # 9 + _demo_sentinel (graph)
-            # ── #10000: the READ DOOR on the demo Session ──────────────────
-            # The counter is a COMPLETENESS CLAIM `record_read.served_turn_count`
-            # acts on for BOTH session doors, so a seeder that declared the
-            # sample transcript's length while storing no turn made this read
-            # either refuse (`record_unavailable`) or publish `turns: 3` beside
-            # `turn_points: []`. Asserted HERE, through the real door on a real
-            # graph, because that is the shape the seeder-side pins cannot see.
-            from tortoise.session_schema import demo_session_id
-            detail = tc.get(f"/v1/sessions/{demo_session_id(org_id)}")
-            assert detail.status_code == 200, detail.text
-            body = detail.json()
-            assert body["turns"] == 0, body
-            assert body["turn_points"] == [], body
+            assert _point_count(org_id) == 13  # 12 + _demo_sentinel (graph)
             # ...but the digest count EXCLUDES them — still 0
             assert tc.get("/v1/team").json()["point_count"] == 0
             # a real user filing counts normally
@@ -605,11 +589,9 @@ class TestDigestExcludesDemo:
             tc.__exit__(None, None, None)
 
     def test_demo_seeder_ids_match_exclusion_constant(self):
-        """The exclusion set is the source of truth: the demo seeder writes a
-        SUBSET of the ids team.point_count excludes (a drifted id would
-        silently count as user data). Since #10000 the set also names the three
-        `epi_turn*` ids the seeder no longer writes — a graph seeded before that
-        change still holds them, and they must stay excluded."""
+        """The exclusion set is the single source of truth: the demo seeder
+        writes exactly the ids team.point_count excludes (a drifted id would
+        silently count as user data)."""
         tc, org_id, _email = _registered()
         try:
             r = tc.post("/internal/demo", json={"org_id": org_id},
@@ -618,16 +600,10 @@ class TestDigestExcludesDemo:
             rows = _proj(org_id).query(
                 "MATCH (p:Point) RETURN p.id").result_set
             written = {row[0] for row in rows}
-            from tortoise.hosted_api import _DEMO_EPISODIC_TURNS, _DEMO_POINT_IDS, _DEMO_SENTINEL_ID
+            from tortoise.hosted_api import _DEMO_POINT_IDS, _DEMO_SENTINEL_ID
             assert _DEMO_SENTINEL_ID == "_demo_sentinel"
             assert written <= _DEMO_POINT_IDS
-            # The set is a deliberate SUPERSET since #10000: it still names the
-            # three `epi_turn*` ids the seeder no longer writes, so a graph
-            # seeded before that change keeps them excluded from the digest.
-            # Asserted HERE so a later reader does not "fix" the constant down
-            # to 10 and silently start counting a legacy demo graph.
+            assert len(written) == 13
             assert len(_DEMO_POINT_IDS) == 13
-            assert written == _DEMO_POINT_IDS - {
-                pid for pid, _c in _DEMO_EPISODIC_TURNS}
         finally:
             tc.__exit__(None, None, None)

@@ -722,31 +722,6 @@ RECORD_WRITE_FAILURE_COUNT = Counter(
     "Armed record writes that did not happen (#9188)",
     ["reason"],
 )
-
-#: How long a recorded refusal counts as "happening NOW" (#10185, direction 1).
-#:
-#: The counter above is CUMULATIVE since process start and is never reset — that
-#: is deliberate (a total that resets cannot be alerted on), but it means the
-#: counter can never answer "is the record refusing writes at this moment?".
-#: #10185 measured the two ways a cumulative answer is wrong: one transient
-#: refusal during a failover pins a deployment `degraded` for the life of the
-#: process (an operator who learns the flag is always red ignores the next real
-#: one), and a restart silently clears it while the rows are still missing. The
-#: issue's own constraint is verbatim: *"Do not simply fold
-#: any(record_write_failures) ⇒ ok = False"*.
-#:
-#: So the refusal state is TIME-BOUNDED and the counters stay untouched: a stamp
-#: beside the counter, read as a verdict only inside this window. Nothing is
-#: reset and nothing is hidden — a quiet window clears the signal with no
-#: restart, and the cumulative totals keep the history.
-RECORD_REFUSAL_WINDOW_SECONDS = 300.0
-
-#: ``(monotonic_ts, reason)`` of the most recent counted refusal, or ``None``.
-#: Process memory on purpose — the same lifetime as the counter it annotates;
-#: persisting it would need a store the health path may not touch (#2850: no I/O
-#: on ``/health``). A single tuple assignment is atomic under the GIL, so the
-#: read below can never see a torn value.
-_RECORD_LAST_REFUSAL: tuple[float, str] | None = None
 # #9231 review P2: an armed record write into a lane whose log is NOT a journal.
 # SEPARATE from ``RECORD_WRITE_FAILURE_COUNT`` on purpose: this is a DECLINE, not
 # a loss. The record is ``replay(journal)``, and these lanes have no journal at
@@ -768,50 +743,6 @@ RECORD_NON_JOURNAL_SKIP_COUNT = Counter(
     "tortoise_record_non_journal_skips_total",
     "Armed record writes DECLINED because the lane has no journal by design "
     "(#9231 review P2)",
-    ["reason"],
-)
-# #10515: a LEGITIMATE revision was refused by `update_point`'s ABSENT arm.
-#
-# The arm itself is #10119's and is correct: an id absent from the live graph at
-# THIS read gets no journal row, no epoch delta and no `_dirty_roots` entry, so a
-# TYPO cannot strand the instance out of its dream cycle. What it cannot do is
-# tell the typo from the OTHER state that produces the same read — an id the
-# JOURNAL knows but the LIVE graph does not hold (a rebuild in flight) — and both
-# used to leave exactly nothing behind: no log line, no counter. The caller got
-# the documented `{}` and cannot tell which happened; pre-#10470 the revision was
-# at least DURABLE (a `PointRevised` a replay would pick up), post-#10470 it lands
-# nowhere.
-#
-# `reason` vocabulary, and it names WHY the read could not distinguish the two:
-#
-# * ``journal_known`` — the journal carries the id, the live graph does not. The
-#   revision is real and was dropped; a replay that has not caught up is the
-#   window (#7405's rebuild).
-# * ``graph_unavailable`` — the graph's key could not be CONFIRMED
-#   (`_graph_presence` answered False/None: a rebuild replaced it, or the probe
-#   could not run). The write cannot be judged absent-vs-present, so it is
-#   reported rather than assumed absent.
-#
-# * ``journal_unreadable`` — a journal IS configured and its read FAILED
-#   (permissions, I/O, a path removed mid-flight). "Unjudged" is not "a typo":
-#   nothing can tell what was lost, so it is reported rather than folded into
-#   silence. A journal-less lane is NOT this — with no replay source nothing can
-#   be judged lost, and that path stays silent. Nor is a journal FILE that is
-#   merely not there yet (the ordinary early-life lane): a path is only called
-#   removed mid-flight when the journal's own sidecar proves it CARRIED records,
-#   so this label counts a gone replay source rather than every typo on a lane
-#   whose journal has not been written yet (#10543 review round 7, finding 2).
-#
-# The typo path is NOT counted and NOT logged: absent from the graph AND from the
-# journal is the one shape #10119 handled, and turning it into an alarm is
-# indicator 2 of #10515.
-#
-# Single writer: `TortoiseSDK._report_absent_revision` (the #501/#3677 house
-# shape).
-SILENT_REVISION_LOSS_COUNT = Counter(
-    "tortoise_silent_revision_loss_total",
-    "update_point calls refused by the ABSENT arm for an id the journal knows, "
-    "or while the graph key could not be confirmed (#10515)",
     ["reason"],
 )
 # #9307 review F1: an armed write whose journal append SUCCEEDED but could not
@@ -1468,54 +1399,6 @@ def record_record_write_failure(reason: str) -> None:
     same reason the journal append's is: the capture already committed.
     """
     RECORD_WRITE_FAILURE_COUNT.labels(reason=reason).inc()
-    # #10185: the CUMULATIVE counter above can never answer "refusing now", so
-    # every counted refusal also stamps WHEN and WHY. `monotonic` (not wall
-    # clock) because only the AGE is published: a wall-clock read would report a
-    # negative age across an NTP step and read as "not refusing" — the one
-    # direction this signal must never fail in.
-    global _RECORD_LAST_REFUSAL
-    _RECORD_LAST_REFUSAL = (time.monotonic(), reason)
-
-
-def record_last_refusal() -> tuple[float, str] | None:
-    """``(monotonic_ts, reason)`` of the most recent counted refusal (#10185).
-
-    The RAW stamp, not a verdict — callers that want ``refusing-now`` semantics
-    use :func:`record_refusing`, which applies the window.
-    """
-    return _RECORD_LAST_REFUSAL
-
-
-def clear_record_last_refusal() -> None:
-    """Forget the refusal stamp. TEST ISOLATION ONLY — no production caller.
-
-    Production must never call this: the stamp is what makes a refusal
-    OBSERVABLE, so clearing it in-process would recreate the silent-drop shape
-    this signal exists to remove. It exists so a test leg can start from "no
-    refusal yet" without reaching into the module's private state.
-    """
-    global _RECORD_LAST_REFUSAL
-    _RECORD_LAST_REFUSAL = None
-
-
-def record_refusing() -> dict[str, object] | None:
-    """The record's CURRENT refusal state, or ``None`` if it is not refusing.
-
-    ``{"reason": <the newest counted reason>, "age_s": <seconds since it was
-    counted>}`` inside :data:`RECORD_REFUSAL_WINDOW_SECONDS`, else ``None``.
-
-    This is the signal #10185 asks for: it CLEARS on a quiet window with no
-    restart and without resetting or hiding any cumulative counter (indicator
-    2). It is read from memory only, so ``/health`` keeps collecting no I/O
-    (#2850 P0).
-    """
-    stamp = _RECORD_LAST_REFUSAL
-    if stamp is None:
-        return None
-    age = time.monotonic() - stamp[0]
-    if age > RECORD_REFUSAL_WINDOW_SECONDS:
-        return None
-    return {"reason": stamp[1], "age_s": round(age, 1)}
 
 
 def record_non_journal_skip(reason: str = "no_durable_journal") -> None:
@@ -1539,24 +1422,6 @@ def record_non_journal_skip(reason: str = "no_durable_journal") -> None:
 def record_non_journal_skip_counts() -> dict[str, int]:
     """In-process snapshot of ``RECORD_NON_JOURNAL_SKIP_COUNT``, by reason."""
     return _collect_by_label(RECORD_NON_JOURNAL_SKIP_COUNT, "reason")
-
-
-def record_silent_revision_loss(reason: str) -> None:
-    """Count one LEGITIMATE revision refused by ``update_point``'s ABSENT arm.
-
-    Called from ``TortoiseSDK._report_absent_revision`` when the target is
-    absent from the live graph but the read could not conclude "no such point".
-    ``reason`` is one of ``journal_known`` (the journal still holds the id),
-    ``graph_unavailable`` (the graph key could not be confirmed) or
-    ``journal_unreadable`` (a journal IS configured and its read failed). See
-    ``SILENT_REVISION_LOSS_COUNT`` for why this is its own counter (#10515).
-    """
-    SILENT_REVISION_LOSS_COUNT.labels(reason=reason).inc()
-
-
-def silent_revision_loss_counts() -> dict[str, int]:
-    """In-process snapshot of ``SILENT_REVISION_LOSS_COUNT``, by reason."""
-    return _collect_by_label(SILENT_REVISION_LOSS_COUNT, "reason")
 
 
 def record_position_unproven() -> None:
@@ -2115,9 +1980,7 @@ async def run_on_daemon_worker(fn, *, name: str, timeout: float | None = None):
 # construction, so every async handler that needs it bridges to a blocking
 # API. ``asyncio.to_thread`` submits to the loop's SHARED default executor
 # (``min(32, cpu+4)`` = 6 workers on the 2-vCPU production machine) which
-# ``/health``'s DB probe also uses — the #3060 lesson. (#10618 moved the
-# per-request abuse hooks OFF that pool; the lesson is unchanged, because the
-# shared pool is still 6 workers with an unbounded wait.)
+# ``/health``'s DB probe and the abuse hooks also use — the #3060 lesson.
 # The existing ``run_on_daemon_worker`` is dedicated but SINGLE-SLOT, so a
 # 2–6-round-trip-per-request auth path on it would collapse auth concurrency
 # to roughly one request and convert a stall into fail-fast 503s.
@@ -2156,33 +2019,6 @@ CONTROL_PLANE_BACKLOG = 128
 #: Best-effort backlog — larger, because best-effort submissions that are
 #: refused are simply dropped (never a user-visible failure).
 CONTROL_PLANE_TELEMETRY_BACKLOG = 256
-
-#: #10618: a DEDICATED pool for the per-request ``#308`` telemetry hooks
-#: (``hosted_api._abuse_post_auth`` and its two siblings, plus
-#: ``first_api_call``), which are awaited on EVERY authenticated request.
-#:
-#: They are not on ``telemetry`` because that pool also carries the
-#: **unrecoverable** ``billing_notify`` (its ``WebhookEvent`` marker is already
-#: committed, so a refused submission is a notification lost for good — see
-#: ``hosted_api._log_billing_notify_refused``). ``check_new_country`` holds a
-#: PROCESS-GLOBAL lock across a PostgREST round trip (``abuse.py``, a
-#: pre-existing defect), so a cold geo cache — i.e. the first request after
-#: every process restart, which #10602's own evidence shows happens every
-#: ~5–20 min in production — can stall every worker of whichever pool it rides.
-#: Putting the hooks on ``telemetry`` would have offered that stall the
-#: capacity a permanently-lost billing notify needs; on their OWN pool they can
-#: only ever starve themselves (#3060's rule).
-CONTROL_PLANE_ABUSE_WORKER_NAME = "tortoise-abuse"
-
-#: Hook pool size. Each call is microseconds of accounting plus, on a cold geo
-#: cache, one country lookup; four is the same order as the telemetry pool and
-#: keeps parked threads off a 2-vCPU machine.
-CONTROL_PLANE_ABUSE_WORKERS = 4
-
-#: Hook backlog — the same size as ``telemetry``'s. A refusal here is a real
-#: drop, so it is REPORTED (``hosted_api._log_abuse_offload_refused``) rather
-#: than swallowed.
-CONTROL_PLANE_ABUSE_BACKLOG = 256
 
 #: #3669: a THIRD pool, for the OAuth client-resolution lane. A CIMD fetch is
 #: attacker-reachable (an unauthenticated ``client_id`` URL), so sharing the
@@ -2282,10 +2118,7 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: its documented ``status: degraded`` arm **when the read-status/residency flag
 #: is on** (with both flags off, ``tortoise_fts_query`` re-raises and the route's
 #: own 500 arm answers, exactly as before) — a domain error from ``_data_sdk``
-#: propagates unchanged either way. That last clause is ENFORCED, not asserted:
-#: the construction seam raises ``hosted_api._ProjectionOpenError`` for the
-#: projection OPEN only, so the routes' impairment arm cannot absorb a fault from
-#: ``_data_sdk`` itself (#10602 review P3).
+#: propagates unchanged either way.
 #: Both costs are accepted for a construction that
 #: otherwise blocks the loop on every dashboard load; if read pressure ever
 #: saturates this lane, size it or give reads their own pool rather than
@@ -2296,136 +2129,6 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 CONTROL_PLANE_GRAPH_WORKER_NAME = "tortoise-graph"
 CONTROL_PLANE_GRAPH_WORKERS = 8
 CONTROL_PLANE_GRAPH_BACKLOG = 128
-
-#: #10602: a SIXTH pool — the READ path's own blocking round trip.
-#:
-#: The measured defect (comment 6582118507 on #10602): the app answered a search
-#: in 3.7–14.6 s while a DIRECT ``GRAPH.QUERY`` on the same graph, same second,
-#: answered in 41–80 ms — and a single-id point read moved with it. The store was
-#: never the queue; the request was WAITING FOR A WORKER SLOT on the loop's
-#: SHARED default executor (``min(32, cpu+4)`` — 6 on prod's 2 vCPU), where the
-#: module's ~180 other ``asyncio.to_thread`` sites run under an UNBOUNDED wait.
-#: #3060 gave long/stallable WORK dedicated pools and #3498/#3773 gave the graph
-#: HELPERS one, but the read path's own round trip kept riding the shared pool,
-#: so it paid every other tenant's stall and every other tenant paid its.
-#:
-#: Why a pool of its OWN and not the ``graph`` lane: the graph lane's occupancy
-#: is a PINNED contract — exactly ONE submission per read request, its SDK
-#: construction (``test_read_routes_submit_one_graph_pool_submission``) — and a
-#: read slot is a different resource class from a construction slot: a
-#: construction is a cold ~28-round-trip open, a read is the hot query. Sharing
-#: one pool would make a burst of cold opens and a burst of searches bid for the
-#: same 8 workers, which is the isolation argument #3498 review P1 used to split
-#: ``telemetry`` out, applied one layer down.
-#:
-#: Width 8 mirrors ``CONTROL_PLANE_GRAPH_WORKERS`` — the same I/O-bound class on
-#: the same production box — so the read lane can never become a NARROWER
-#: bottleneck than the lane that already carries every read request's SDK
-#: construction. The widened default executor is deliberately NOT the fix: a
-#: bigger shared pool is the same defect with a longer fuse (it still has no
-#: bound and still shares its queue with ~180 sites).
-CONTROL_PLANE_READ_WORKER_NAME = "tortoise-read"
-CONTROL_PLANE_READ_WORKERS = 8
-CONTROL_PLANE_READ_BACKLOG = 128
-
-#: #10602: the read lane's WAIT BOUND — the whole point of owning the lane.
-#:
-#: A submitted read spends its bound QUEUED OR RUNNING (``_await_future`` starts
-#: the clock at submission), so a stranded slot fails the ONE request legibly
-#: (503 ``graph_unavailable``, retryable) instead of queueing forever and
-#: breaching the TRANSPORT budget later with "the work may still complete" —
-#: which for a submission that never ran is a false statement, and which is what
-#: the ticket measured as a 504 ``-32009`` after 10–15 s.
-#:
-#: 8.0 s, not the graph lane's derived bound. What this bound MEASURES is the
-#: hot QUERY against an already-attached projection: the routes that use this
-#: lane attach their projection on the CONSTRUCTION submission
-#: (``_data_sdk_offloaded(..., attach_projection=True)``, whose ``graph``-lane
-#: bound is ``probe_setup_timeout()`` + a margin), so the cold open — and the
-#: index BUILD a restored/DR graph can trigger — never lands inside this clock
-#: (cycle-2 review: an 8 s bound over a callable that contains a 20 s cold-start
-#: allowance would refuse a HEALTHY store's first read). The measured store
-#: answer is 41–80 ms, so 8 s is a saturation gate with ~100x headroom, not a
-#: per-query timeout.
-#:
-#: ⚠️ NAMED RESIDUALS — the measurement above covers TWO of the four converted
-#: round trips (``list_points``, ``get_point``). The other two are NOT hot
-#: queries, and this bound is knowingly applied to them anyway (#10602 review
-#: P2; the reviewer's ask was a per-call bound OR a residual named here):
-#:
-#: * ``/v1/search`` (``sdk.tortoise_fts_query``) — its COLD phase IS covered now
-#:   (``hosted_api._read_offload`` re-arms once for a request-owned one-time
-#:   embedder load, #4055), but its CPU legs (query encode + the three search
-#:   legs) are still measured against this clock, and the 500 ms cap they intend
-#:   is not enforceable because ``search_engine``'s ``shutdown(wait=True)``
-#:   joins running legs — filed as #10613, not fixed here.
-#: * ``/v1/topics/{t}/summary`` (``sdk.topic_summarize``) — EP classification +
-#:   neighborhood traversal whose cost is CALLER-controlled (``max_seeds`` up to
-#:   200, ``max_hops`` up to 3). No measurement of its legitimate p99 exists in
-#:   the tracker, which is why it has no bound of its own yet rather than a
-#:   guessed one: inventing a number here would refuse work that is inside its
-#:   own budget — the exact defect the paragraphs above were written to stop.
-#:   If it bites, give it its own ``topic_summary_read_timeout_s()`` the way the
-#:   record leg got ``record_read_timeout_s()``.
-#:
-#: A bound miss on either is a 503 ``graph_unavailable`` for work that may be
-#: merely slow (retryable, and the abandoned callable keeps its slot — CPython
-#: cannot cancel a started thread), so a handful of max-parameter summaries can
-#: hold all 8 slots. That is the accepted saturation policy, not a surprise;
-#: what would be wrong is claiming this number measured them.
-#:
-#: It sits BELOW ``mcp_auth._TRANSPORT_WAIT_BOUND_S``
-#: (10 s) deliberately, so the lane's legible refusal is what the caller sees
-#: when the pool is the reason — not a transport timeout that mis-describes
-#: queued work as in-flight. The ordering is pinned by
-#: ``test_read_bound_sits_below_the_transport_wait_bound`` (the same shape as
-#: ``test_fetch_deadline_sits_below_the_offload_bound``).
-CONTROL_PLANE_READ_TIMEOUT_S = 8.0
-
-
-def read_offload_timeout_s() -> float:
-    """#10602: the read lane's wait bound, resolved at CALL time.
-
-    A function, not a frozen default argument, for the same reason
-    ``graph_offload_timeout_s`` / ``probe_setup_timeout`` are: a module-global
-    read at import time cannot be monkeypatched, and the bound a lane refuses
-    on must be the bound a test can shrink to prove the refusal path.
-    """
-    return CONTROL_PLANE_READ_TIMEOUT_S
-
-
-#: #10602 review P2: the RECORD leg's bound — a DIFFERENT resource class from
-#: the hot query above, so it gets its own bound rather than sharing one.
-#:
-#: What it must cover: ``get_point``'s armed phase submits
-#: ``record_serve.serve_point``, whose callee is a Postgres round trip bounded by
-#: ``record_serve.RECORD_STATEMENT_TIMEOUT_MS`` (15 s) — the ceiling the record
-#: itself declares legitimate. Reusing the hot-query bound (8 s, justified by a
-#: 41–80 ms measured graph answer) refused a record read that was still INSIDE
-#: its own declared budget; that is the same "a bound that does not cover its
-#: callee" error the cycle-2 review raised for the projection cold open.
-#:
-#: Why 9.0 and not ``15 s + margin``: the record's 15 s ceiling sits ABOVE
-#: ``mcp_auth._TRANSPORT_WAIT_BOUND_S`` (10 s), so no read-lane bound can cover
-#: it without breaching the transport budget and re-introducing the misleading
-#: 504 ("the work may still complete", for a submission that never ran) this
-#: lane exists to replace. So this bound takes everything the transport budget
-#: physically allows — the full 10 s minus a margin, so the lane's LEGIBLE
-#: refusal is still what a saturated caller sees — and the residual (a record
-#: read between 9 s and its 15 s ceiling is refused) is named rather than
-#: papered over. Closing it properly means moving
-#: ``RECORD_STATEMENT_TIMEOUT_MS`` below the transport budget, which is a
-#: ``record_serve`` decision, not this lane's.
-CONTROL_PLANE_RECORD_READ_TIMEOUT_S = 9.0
-
-
-def record_read_timeout_s() -> float:
-    """#10602 review P2: the record leg's bound, resolved at CALL time.
-
-    Same monkeypatch argument as :func:`read_offload_timeout_s` — the bound a
-    lane refuses on must be the bound a test can shrink to prove it.
-    """
-    return CONTROL_PLANE_RECORD_READ_TIMEOUT_S
 
 #: Margin added to the projection cold-start allowance for the DATA-PLANE graph
 #: lane (#3773). The bound is resolved at CALL time (``graph_offload_timeout_s``)
@@ -2618,25 +2321,11 @@ class ControlPlaneOffloadError(RuntimeError):
     NOT and WILL NOT run; ``False`` for a plain bound miss, where a RUNNING
     worker still completes the callable (the seam abandons only the await)
     and a non-cancellable lane keeps a QUEUED submission alive.
-
-    ``in_flight`` (#10602 review P2) carries that abandoned submission — the
-    ``concurrent.futures.Future`` — when the callable is STILL RUNNING. It is
-    ``None`` whenever ``refused`` is ``True`` (there is no work to wait on).
-    It exists so a caller that owns a COLD PHASE inside its callable can RE-AWAIT
-    the work it already paid for (``reawait_control_plane_call``) instead of
-    re-submitting it: a re-submission while the first attempt still runs
-    executes the callable TWICE concurrently, counts it twice in any ledger the
-    copied context carries (the tally is a mutable object shared by reference)
-    and holds a second slot of the lane exactly when that lane is at its bound.
     """
 
-    def __init__(self, message: str, *, refused: bool = False,
-                 in_flight=None) -> None:
+    def __init__(self, message: str, *, refused: bool = False) -> None:
         super().__init__(message)
         self.refused = refused
-        #: The abandoned submission, when it is still RUNNING (never for a
-        #: refused/cancelled one). ``concurrent.futures.Future`` or ``None``.
-        self.in_flight = in_flight
 
 
 class ContextConfinementError(RuntimeError):
@@ -2792,17 +2481,11 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
 
     ``pool="auth"`` (default) is the AUTH-CRITICAL pool; ``pool="telemetry"``
     is a SEPARATE pool for best-effort work, so telemetry can never park the
-    auth slots (#3498 review P1); ``pool="abuse"`` (#10618) is the per-request
-    ``#308`` hook lane — kept OUT of ``telemetry`` because that pool carries the
-    unrecoverable ``billing_notify``, and kept out of the shared default
-    executor (unbounded wait) entirely; ``pool="oauth"`` (#3669) is a separate
+    auth slots (#3498 review P1); ``pool="oauth"`` (#3669) is a separate pool
     for the attacker-reachable OAuth client-resolution lane, so a CIMD fetch
     flood cannot park the auth slots either; ``pool="graph"`` (#3773) is the
     graph-lane pool — FalkorDB work, data-plane AND registry reads (#3718) —
-    kept off auth capacity for the same isolation reason; ``pool="read"``
-    (#10602) is the READ path's own lane, so a search/window read can never
-    queue behind the shared default executor's other tenants (and they can
-    never queue behind it); ``pool="org"`` (#7678) keeps the
+    kept off auth capacity for the same isolation reason; ``pool="org"`` (#7678) keeps the
     org-create lane's SEQUENTIAL gate reads off auth capacity so a create-org
     request is not the sum of its queue waits behind authentication work. The graph pool's callables SET
     ContextVars (the #2600 actor bind), so it must be reached ONLY through the
@@ -2824,10 +2507,6 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
         return daemon_worker(CONTROL_PLANE_GRAPH_WORKER_NAME,
                              workers=CONTROL_PLANE_GRAPH_WORKERS,
                              max_backlog=CONTROL_PLANE_GRAPH_BACKLOG)
-    if pool == "read":
-        return daemon_worker(CONTROL_PLANE_READ_WORKER_NAME,
-                             workers=CONTROL_PLANE_READ_WORKERS,
-                             max_backlog=CONTROL_PLANE_READ_BACKLOG)
     if pool == "oauth":
         return daemon_worker(CONTROL_PLANE_OAUTH_WORKER_NAME,
                              workers=CONTROL_PLANE_OAUTH_WORKERS,
@@ -2836,10 +2515,6 @@ def control_plane_worker(pool: str = "auth") -> _SingleSlotWorker:
         return daemon_worker(CONTROL_PLANE_TELEMETRY_WORKER_NAME,
                              workers=CONTROL_PLANE_TELEMETRY_WORKERS,
                              max_backlog=CONTROL_PLANE_TELEMETRY_BACKLOG)
-    if pool == "abuse":
-        return daemon_worker(CONTROL_PLANE_ABUSE_WORKER_NAME,
-                             workers=CONTROL_PLANE_ABUSE_WORKERS,
-                             max_backlog=CONTROL_PLANE_ABUSE_BACKLOG)
     if pool == "auth":
         return daemon_worker(CONTROL_PLANE_WORKER_NAME,
                              workers=CONTROL_PLANE_WORKERS,
@@ -3093,9 +2768,6 @@ async def run_control_plane_call(fn, *, op: str,
             raise ControlPlaneOffloadError(
                 f"control-plane call {op!r} {reason}",
                 refused=refused,
-                # Only a still-RUNNING submission is re-awaitable; a refused or
-                # cancelled one has no work behind it (#10602 review P2).
-                in_flight=(None if refused or future.done() else future),
             ) from exc
         outcome = "completed"
         return result
@@ -3103,84 +2775,6 @@ async def run_control_plane_call(fn, *, op: str,
         # The AWAITING task was cancelled — neither success nor a pool failure.
         outcome = "cancelled"
         raise
-    finally:
-        record_control_plane_offload(
-            op, time.monotonic() - started, outcome=outcome, pool=pool
-        )
-
-
-async def reawait_control_plane_call(future, *, op: str, timeout: float,
-                                     pool: str = "auth"):
-    """Re-await an ALREADY-SUBMITTED callable under a fresh bound (#10602).
-
-    The counterpart of :func:`run_control_plane_call` for the one case a bound
-    miss is not the end of the work: the callable is still RUNNING and the
-    caller has drained whatever COLD PHASE it was waiting on (the #4055 embedder
-    load). Re-awaiting ``exc.in_flight`` keeps that work instead of throwing it
-    away and doing it again:
-
-    * a RE-SUBMISSION would run the callable a second time **concurrently** —
-      double the CPU on a lane that is at its bound (the abandoned attempt keeps
-      its slot until it finishes, CPython cannot cancel a started thread), and
-    * it would also count the work twice in any ledger the copied context
-      carries, because a tally is a mutable OBJECT shared by reference.
-
-    ``mcp_auth.await_under_wait_bound`` is the same shape one seam over: it
-    shields the TASK and re-awaits THAT task after draining, never a new one.
-
-    Raises :class:`ControlPlaneOffloadError` on a second bound miss (``refused``
-    is ``False`` — the work is still running, so it is abandoned, not dropped)
-    and lets a ``CancelledError`` from the awaiting task propagate, exactly as
-    ``run_control_plane_call`` does. A ``domain`` exception from the callable
-    propagates unchanged — INCLUDING a builtin ``TimeoutError`` it raised
-    ITSELF (#10602 review P2, see the discrimination below). Every terminal
-    state is recorded once, by the same single writer (#5840), so a re-armed
-    read stays visible as two attempts at the op rather than one invisible one.
-    """
-    started = time.monotonic()
-    outcome = "domain_error"
-    try:
-        try:
-            result = await _await_future(future, timeout=timeout)
-        except TimeoutError as exc:
-            # Distinguish the two sources of TimeoutError that meet here, as the
-            # sibling above does (#10602 review P2):
-            #   1. `fn` raised it       -> a DOMAIN error, propagate
-            #   2. our bound expired    -> fail closed (``bound_miss_running``)
-            # The CLASS cannot tell them apart. ``_await_future`` awaits
-            # ``asyncio.wrap_future(future)``, so the callable's own exception
-            # is re-raised unchanged, while the bound's expiry is the only
-            # ``TimeoutError`` this coroutine MINTS — and it mints it from a
-            # CancelledError inside ``wait_for``'s timeout scope (CPython
-            # ``asyncio/timeouts.py::Timeout.__aexit__``: the conversion happens
-            # only in the EXPIRING state with a ``CancelledError`` in hand). So
-            # the FUTURE is the only witness: a done, non-cancelled future
-            # carrying an exception means the work RAN and failed on its own.
-            #
-            # Filing that as a bound miss would answer 503
-            # ``graph_unavailable`` for a callable that ran HERE, and increment
-            # ``bound_miss_running`` — the saturation child — for a pool that was
-            # never saturated (a ``socket.timeout`` escaping the graph driver is
-            # the plausible route: it IS builtin ``TimeoutError`` since 3.10).
-            future_exc = (future.exception()
-                          if future.done() and not future.cancelled() else None)
-            if future_exc is not None and not isinstance(
-                    future_exc, _WorkerBacklogFull):
-                raise
-            if not future.done():
-                future.add_done_callback(_log_abandoned_outcome(op))
-            outcome = "bound_miss_running"
-            raise ControlPlaneOffloadError(
-                f"control-plane call {op!r} exceeded its {timeout}s "
-                f"re-armed bound",
-                refused=False,
-                in_flight=(None if future.done() else future),
-            ) from exc
-        except asyncio.CancelledError:
-            outcome = "cancelled"
-            raise
-        outcome = "completed"
-        return result
     finally:
         record_control_plane_offload(
             op, time.monotonic() - started, outcome=outcome, pool=pool
@@ -5608,11 +5202,6 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # keeps meaning "no record row was lost" on a healthy armed deployment —
         # every `capture_session` emits through the M2 lane.
         "record_non_journal_skips": record_non_journal_skip_counts(),
-        # #10515: `update_point`'s ABSENT arm refused a write that may have been
-        # a LEGITIMATE revision (the journal knows the id, or the graph key could
-        # not be confirmed). Zero on a healthy lane means "no revision was lost in
-        # silence" — the typo path does not touch it, by design.
-        "silent_revision_losses": silent_revision_loss_counts(),
         # #9307 review F1: a DURABLE journal whose append could not prove the
         # record's position writes no layer-1 row (a replay heals it). Its own
         # key, so neither the failure counter nor the non-journal skip counter

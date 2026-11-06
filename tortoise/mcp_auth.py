@@ -310,7 +310,6 @@ def _get_org_sdk() -> TortoiseSDK:
 from tortoise.tool_registry import (  # noqa: E402, I001
     GRAPH_ARGUMENT_DESCRIPTION as _GRAPH_ARGUMENT_DESCRIPTION,
     GRAPH_ARGUMENT_EXCLUDED as _GRAPH_ARGUMENT_EXCLUDED,
-    GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET as _GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET,
 )
 
 #: MCP tools that must NOT advertise (or honour) the `graph` argument: they
@@ -321,13 +320,6 @@ from tortoise.tool_registry import (  # noqa: E402, I001
 #: what keeps the advertised set and the honoured set from drifting.
 GRAPH_ARGUMENT_EXCLUDED = _GRAPH_ARGUMENT_EXCLUDED
 GRAPH_ARGUMENT_DESCRIPTION = _GRAPH_ARGUMENT_DESCRIPTION
-
-#: The excluded tools that still WRITE the workspace DEFAULT graph (`#10084`):
-#: they take no routing argument, but "no routing argument" is not "no graph",
-#: so the disclosure fires on these and not on the workspace/control-plane ones.
-#: Re-exported from `tortoise.tool_registry` for the same one-import-site reason
-#: as `GRAPH_ARGUMENT_EXCLUDED`.
-GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET = _GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET
 
 
 #: The bad-argument refusal for a `graph` that is not even a string. ONE

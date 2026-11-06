@@ -514,12 +514,11 @@ class TestTortoiseHealthTruth:
         depending on the FastMCP call path — handle both."""
         result = body.get("result", {}) if body else {}
         if isinstance(result, dict) and "content" in result:
-            # The PAYLOAD is `content[0]`; every other block is appended LAST by
-            # the dispatch seam (the #3883 retirement warning, #10084's graph
-            # disclosure). Joining all blocks turned a WRITE into `{"text": …}`
-            # instead of failing loudly once a disclosure block appeared.
-            blocks = [c for c in result["content"] if isinstance(c, dict)]
-            text = blocks[0].get("text", "") if blocks else ""
+            # A RETIRED tool's result carries an extra trailing block with the #3883
+            # warning; it is not part of the payload and is skipped here.
+            text = "".join(c.get("text", "") for c in result["content"]
+                           if isinstance(c, dict)
+                           and not c.get("text", "").startswith("RETIRED TOOL"))
             if text:
                 import json
                 try:

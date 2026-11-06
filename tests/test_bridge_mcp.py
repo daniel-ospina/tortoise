@@ -93,39 +93,6 @@ class TestBridgePush:
         assert result == {"status": "skipped", "reason": "tortoise_unavailable"}
 
 
-class TestPointIdExtraction:
-    """`_point_id` reads `content[0]`, the block the dispatch seam guarantees is the
-    payload (#10084). Later blocks are PROSE — the graph disclosure, a retired-name
-    warning — and must never be parsed as the answer."""
-
-    @staticmethod
-    def _result(*texts):
-        import types
-
-        return types.SimpleNamespace(
-            content=[types.SimpleNamespace(text=t) for t in texts]
-        )
-
-    def test_the_id_comes_from_the_payload_block_not_a_later_disclosure(self):
-        from integrations.crm.twenty.bridge import _point_id
-
-        result = self._result(
-            '{"id": "pt_1"}',
-            "Graph: this write targeted the workspace default graph (default).",
-        )
-        assert _point_id(result) == ("pt_1", None)
-
-    def test_a_non_dict_payload_stays_a_failure_and_never_raises(self):
-        """A non-dict payload is `unparseable_result`. The trailing prose block
-        must not turn it into an id, and must not raise out of the extractor."""
-        from integrations.crm.twenty.bridge import _point_id
-
-        result = self._result(
-            "[1, 2]", "Graph: this write targeted the workspace default graph."
-        )
-        assert _point_id(result) == (None, "unparseable_result")
-
-
 class TestNoEngineImports:
     def test_integrations_have_zero_sdk_imports(self):
         """AST gate (AC4): integrations connect via MCP — no engine imports.

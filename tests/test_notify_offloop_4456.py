@@ -11,7 +11,7 @@ The fix routes the notify through the #3498 offload seam
 (``_cp_offload`` → the dedicated ``telemetry`` daemon pool) rather than the
 issue's proposed ``asyncio.to_thread``, for the #2850 reason: the default
 executor's workers are non-daemon and joined at shutdown, and they are the
-SHARED pool the /health probe uses. ``best_effort=True``
+SHARED pool the /health probe and the abuse hooks use. ``best_effort=True``
 plus a call-site guard keep the never-raise contract at the hand-off, because
 a hand-off is a NEW failure mode the inline call did not have.
 

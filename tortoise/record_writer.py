@@ -1075,7 +1075,7 @@ class RecordWriter:
             raise RecordWriteError(
                 f"the record write failed after {len(records)} journal "
                 f"record(s) were materialized from position {first_seq} "
-                f"({type(exc).__name__}: {_bounded_cause(exc)})"
+                f"({type(exc).__name__})"
             ) from exc
 
         return RecordWrite(
@@ -1142,102 +1142,6 @@ def _close_live_breaker() -> None:
 #: "stored NOWHERE" ERROR into a WARNING. The tuple below is built from this
 #: name, so a rename lands on every consumer at once.
 NON_DURABLE_JOURNAL_REFUSAL = "no_durable_journal"
-
-
-def _bounded_cause(exc: BaseException,
-                   limit: int = record_projection.ATTRIBUTION_LINE_LIMIT) -> str:
-    """The CAUSE's own message, bounded — the half a class name never carried.
-
-    `RecordWriter.write` used to name only ``type(exc).__name__``, so every
-    wrap of a driver error read ``(InvalidTextRepresentation)`` and nothing
-    else. `record_projection.replay` now raises a
-    :class:`record_projection.RecordStatementError` whose message already names
-    the fault, the statement, its table and columns; this keeps that whole
-    message attached to the failure a caller logs, while staying short enough for
-    one log line.
-
-    ⛔ THE LIMIT IS THE PROJECTION'S OWN BUDGET, not an independent number
-    (#10648 review P2). This function keeps the HEAD of a message, so a limit
-    below what `_failure_line` composed silently amputates the TAIL — which is
-    how a wide statement's failure line lost the driver's fault clause entirely
-    (measured: a 488-char attribution plus its driver, wrapped to 400 chars in
-    which `invalid input syntax for type json` was absent). One number, in one
-    place: `_failure_line` composes to it, so a line the projection composed
-    reaches a log whole.
-    """
-    text = _bounded_text(str(exc), limit)
-    return text
-
-
-#: The payload fields a record's identity can live in, most specific first.
-#: ``eventId`` is the fold's MERGE key for a Point/Event row, so it wins over a
-#: generic ``id``; a Session keys on ``session_id``.
-_RECORD_IDENTITY_KEYS: tuple[str, ...] = (
-    "eventId", "node_key", "session_id", "event_id", "id", "name",
-)
-
-#: Identity fields whose VALUE is the user's own text rather than an id.
-#:
-#: ``name`` is last in :data:`_RECORD_IDENTITY_KEYS` on purpose: it is the only
-#: identifying field a ``source``/``object`` snapshot may hold when it has no id,
-#: so it still IDENTIFIES the row for an operator. But a source's ``name`` is its
-#: document title — the same datum `record_projection._CONTENT_COLUMNS` withholds
-#: as ``title`` — so its value is withheld exactly as that attribution withholds
-#: it, and only its presence and length are logged (#10648 review P3).
-_IDENTITY_CONTENT_KEYS: frozenset[str] = frozenset({"name"})
-
-#: How much of ONE identity value the log line carries. An ``eventId`` is bounded
-#: for the same reason every other logged value is: nothing that reaches this log
-#: may be sized by the caller.
-_IDENTITY_VALUE_LIMIT = 80
-
-
-def _record_identity(record: Mapping[str, Any], limit: int = 3) -> str:
-    """Name the entity/point id a failed record carried, for the log line.
-
-    Never for a row, and never inventing a value: it reports the FIRST identity
-    field the record actually holds, in each of its snapshot sub-dicts (a
-    ``PointAdded`` keeps its payload under ``point``). Absence is stated as
-    absence rather than left blank, because "the record had no id field" and
-    "this code could not find it" are different facts and only one of them is
-    worth chasing.
-
-    ⛔ A CONTENT-BEARING identity field is NAMED and WITHHELD
-    (:data:`_IDENTITY_CONTENT_KEYS`), and every value is bounded — this line is
-    the same log line whose attribution withholds
-    ``title``/``topics``/``summary``, so printing a source's ``name`` verbatim
-    here would put a document title in the operator's log through the column
-    next door (#10648 review P3).
-    """
-    found: list[str] = []
-    for field_name, value in record.items():
-        if not isinstance(value, Mapping):
-            continue
-        for key in _RECORD_IDENTITY_KEYS:
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate:
-                found.append(f"{field_name}.{key}="
-                             f"{_identity_value(key, candidate)}")
-                break
-    for key in _RECORD_IDENTITY_KEYS:
-        candidate = record.get(key)
-        if isinstance(candidate, str) and candidate:
-            found.append(f"{key}={_identity_value(key, candidate)}")
-            break
-    return " ".join(found[:limit]) if found else "(record carries no identity field)"
-
-
-def _identity_value(key: str, value: str) -> str:
-    """One identity field's LOGGED form: withheld if content, bounded either way."""
-    if key in _IDENTITY_CONTENT_KEYS:
-        return f"<{len(value)} chars withheld>"
-    return _bounded_text(value, _IDENTITY_VALUE_LIMIT)
-
-
-def _bounded_text(text: str, limit: int) -> str:
-    """`text`, newline-escaped and truncated — the string form of the bound."""
-    flat = text.replace("\n", "\\n")
-    return flat if len(flat) <= limit else f"{flat[:limit]}…({len(text)} chars)"
 
 
 def _count_write_failure(reason: str) -> None:
@@ -1732,8 +1636,7 @@ def write_live_record(record: Mapping[str, Any], *,
         _count_write_failure("write_failed")
         _logger.warning(
             "the record write did not happen (write_failed) — the journal has "
-            "the record and a replay heals the record: record=%s %s: %s",
-            record.get("type"), _record_identity(record), exc,
+            "the record and a replay heals the record: %s", exc,
         )
         return _refused("write_failed", seq)
     finally:

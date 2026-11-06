@@ -86,11 +86,10 @@ ONE bounded graph pass:
 
    **Turn-shape constraint.** ``pointKind``'s vocabulary is open
    (``create_point`` accepts any registered kind), so ``pointKind='event'``
-   alone does not prove a TURN: a graph seeded before #10000 by the hosted
-   demo/dashboard seed holds ``pointKind='event'`` points with NO
-   ``is_episodic`` (``hosted_api._seed_demo_graph``; since #10000 it writes no
-   turn node at all) — their body IS ``[role]``-tagged, so the ``is_episodic``
-   conjunct is what excludes them — and any SDK/API caller can mint one.
+   alone does not prove a TURN: the hosted demo/dashboard seed writes
+   ``pointKind='event'`` points with NO ``is_episodic`` — their body IS
+   ``[role]``-tagged, so the ``is_episodic`` conjunct is what excludes them
+   (``hosted_api.py:~6243``) — and any SDK/API caller can mint one.
    ``_TURN_SHAPE_FILTER`` therefore requires the shape EVERY product and
    eval turn writer emits and no non-turn ``event`` writer does:
    ``is_episodic=true`` plus a ``[...]``-prefixed body.
@@ -206,13 +205,10 @@ DEFAULT_REINJECTION_TOTAL_ITEMS = 10
 #:     `ingest.py:~207` / `ingest_v2.py:~543`) writes ``is_episodic=true``
 #:     AND a body of the deterministic form ``f"[{role}] {content}"`` — so
 #:     the body always STARTS WITH ``[``;
-#:   * ⚠️ the hosted demo/dashboard seed (`hosted_api.py` `_seed_demo_graph`)
-#:     USED to be the NON-turn ``pointKind='event'`` writer here — it wrote no
-#:     ``is_episodic``, and its body was ``[role]``-tagged, so the predicate
-#:     excluded it on the ``is_episodic`` conjunct alone. Since #10000 it
-#:     writes no turn node at all (§9.1/D1), so that clause now describes no
-#:     writer in the tree; it is kept because a graph seeded BEFORE #10000
-#:     still holds those nodes and they must stay excluded;
+#:   * the NON-turn ``pointKind='event'`` writer in the tree — the
+#:     hosted demo/dashboard seed (`hosted_api.py:~6243`) — writes no
+#:     ``is_episodic`` (its body IS ``[role]``-tagged, so the shape
+#:     predicate excludes it on the ``is_episodic`` conjunct alone);
 #:   * so this predicate excludes it and any caller-minted bare ``event``
 #:     Point, while holding for every legitimate turn.
 #:
@@ -474,7 +470,6 @@ def reinjection_merge_order(
         guard: bool = True,
         guard_window: int = DEFAULT_POOL_GUARD_WINDOW,
         per_session_cap: int = DEFAULT_POOL_SESSION_CAP,
-        floor_term: bool = False,
         max_chunks_per_session: int) -> list[dict]:
     """MERGE (pure, additive): splice each seeded session's injected group
     immediately after that session's LAST base rank in the pool, in
@@ -483,31 +478,14 @@ def reinjection_merge_order(
 
     The anchor is the session's last base rank IN THE POOL, not merely in
     the seed window — so the injected group lands after every base hit of
-    that session and the C5 re-cap keeps base chunks first. With the guard's
-    default (``floor_term=False``) an injected item can therefore never evict
-    a base item — the ``floor_term`` arm below WITHDRAWS that property. With
-    no genuinely-new id the base pool is returned unchanged (the caller's
-    ``new_ids`` gate is mirrored here for defence in depth).
+    that session and the C5 re-cap keeps base chunks first. An injected
+    item therefore can never evict a base item. With no genuinely-new id
+    the base pool is returned unchanged (the caller's ``new_ids`` gate is
+    mirrored here for defence in depth).
 
     NOTE: ``guard_and_recap_pool``'s C5 re-cap counts only ``is_raw_chunk``
     hits, so injected TURN points (the default kind) are not re-capped —
     the caller's total budget is the volume guard on that path.
-
-    ``floor_term`` (#2513) forwards to the guard's missing LOWER bound
-    unchanged (see ``coverage_loop.session_diverse_order``). It is OFF by
-    default and default-preserving. It is forwarded from HERE as well as
-    from ``guard_and_recap_pool`` because this is the second composition the
-    eval lane calls (``tools/longmem_eval/retrieve.py`` uses both): an A/B
-    that could arm the direct composition only would leave the reinjection
-    leg unmeasurable, which is the one thing the default-off seam exists to
-    make possible.
-
-    ⛔ With ``floor_term`` ON, the no-eviction property above does NOT hold:
-    an injected item from a session holding NO window slot may take a slot
-    back from a session holding more than one, and that victim can be a BASE
-    item. That spend IS the arm's measured density cost — the reason it is
-    off by default — not an artifact, so a measurement lane that trusts the
-    unqualified promise would charge it to the wrong place.
     """
     if not pool:
         return list(pool)
@@ -543,5 +521,5 @@ def reinjection_merge_order(
             merged.extend(groups.pop(sid))
     return guard_and_recap_pool(
         merged, guard=guard, session_key=key, window=guard_window,
-        per_session_cap=per_session_cap, floor_term=floor_term,
+        per_session_cap=per_session_cap,
         max_chunks_per_session=max_chunks_per_session)

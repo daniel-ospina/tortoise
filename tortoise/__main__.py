@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import re
 import sys
 from pathlib import Path
 
@@ -3072,26 +3071,6 @@ def _scrub(text: str, *secrets: object) -> str:
         # belt and braces: a zero-length fragment matches between every character
         if len(fragment) < 1:
             continue
-        if not fragment.strip():
-            # A whitespace-only value is not a credential any reader can learn
-            # from — and treating it as a replacement site rewrites EVERY space
-            # in the message: `TORTOISE_DB_URI=' '` turned the
-            # `RELATIVE_PATH_ERROR` remedy into `<redacted>` confetti, in the one
-            # verb whose whole purpose is legibility. Echoing a space is strictly
-            # better than shredding the diagnostic, so this fragment is skipped.
-            # (#10655 review: the same reasoning already guarded SHORT QUERY
-            # values above; it was not applied to the top-level secret.)
-            continue
-        if len(fragment) <= 2:
-            # A 1-2 char secret IS a credential and must still not be printed,
-            # but a bare substring sweep replaces that character everywhere
-            # (every `a` in the prose becomes `<redacted>`). Token-bounded
-            # replacement keeps both properties: the secret as a standalone
-            # token is redacted, the words that merely contain the character are
-            # not. A boundary is a non-word char on each side, so an echoed
-            # `"api_key": "a"` is still covered.
-            text = re.sub(rf"(?<!\w){re.escape(fragment)}(?!\w)", "<redacted>", text)
-            continue
         text = text.replace(fragment, "<redacted>")
     return text
 
@@ -3238,69 +3217,6 @@ def _same_path(a: Path | None, b: Path | None) -> bool:
         return _os.path.realpath(a) == _os.path.realpath(b)
     except OSError:
         return False
-
-
-def _blocking_directory(path: Path) -> Path | None:
-    """The SHALLOWEST directory that makes `path` unreachable, else None.
-
-    `_STORE_UNREADABLE` is reached TWO ways, and only one of them is about the
-    FILE's own mode: a store behind a mode-000 PARENT DIRECTORY fails
-    `Path.is_file()`, which re-raises `EACCES` out of the resolver instead of
-    reading the file (`pathlib` swallows only ENOENT/ENOTDIR/EBADF/ELOOP). In
-    that state the file's own mode is not merely unknown — it cannot be known,
-    because `stat` on the child needs search permission on the parent.
-
-    So the remedy must name the object that actually blocks. Measured on a
-    mode-000 parent, the printed `chmod 600 <dir>/credentials.json` exits 1
-    with "Permission denied" and sends the reader back to the same refusal,
-    while granting traversal on the DIRECTORY succeeds — the file is fine.
-
-    Two things make the answer non-obvious, and both are measured:
-
-    * `Path.parents` is purely LEXICAL. A store reached through a SYMLINK is
-      real practice here (a `./.tortoise` symlinked to the global store is the
-      documented sharing trick), and then every lexical ancestor of the LINK is
-      traversable while the TARGET sits behind a mode-000 directory — so the
-      real path is walked too, and it is walked FIRST because its ancestor is
-      the object to fix.
-    * Walked from the ROOT down, not by testing the nearest parent first: an
-      inaccessible NEAREST ancestor is only reachable THROUGH the shallower one
-      that blocks it, so `chmod` on the deeper path cannot run at all.
-
-    Returns None when no directory blocks — then the file's own mode is the
-    problem and the caller's `chmod 600 <file>` is the right advice.
-    """
-    import os as _os
-    chains: list[Path] = []
-    try:
-        real = Path(_os.path.realpath(path))
-        if str(real) != str(path):
-            chains.append(real)
-    except (OSError, RuntimeError):
-        pass
-    chains.append(path)
-    for chain in chains:
-        try:
-            ancestors = list(chain.parents)
-        except (OSError, RuntimeError):
-            continue
-        for cand in reversed(ancestors):            # root first, nearest last
-            try:
-                if not cand.is_dir():
-                    # Not a directory at all. `os.access` is False for ENOENT /
-                    # ENOTDIR / ESTALE too, not only EACCES, and blaming the
-                    # mode of a path that is not there would assert a fact this
-                    # verb cannot see. Reaching this candidate already PROVES
-                    # every shallower component is traversable AND a directory,
-                    # so stopping here cannot hide a real blocker.
-                    return None
-            except OSError:
-                # The environment itself cannot answer (a deleted cwd). Decline
-                # rather than repeat the guessing this verb exists to replace.
-                return None
-            if not _os.access(cand, _os.X_OK):
-                return cand
-    return None
 
 
 def _cmd_config(args) -> int:
@@ -3671,12 +3587,7 @@ def _cmd_config(args) -> int:
         if db_source == "default":
             graph_store["note_default"] = (
                 "nothing is configured — this is the resolved default")
-        # AUTHORITY FORM, not "contains a colon": `//token@host/x.db` carries a
-        # token as the user with no `:` at all. A filesystem path (`/tmp/me@work/…`)
-        # does not start with `//`, so it stays legible — which is why the
-        # predicate is written this way rather than as "any `@`".
-        userinfoish = (uri.startswith("//")
-                       and "@" in uri.split("/", 2)[-1].split("/", 1)[0])
+        userinfoish = "@" in uri and ":" in uri.rsplit("@", 1)[0]
         if is_db_uri(uri) or "://" in uri or userinfoish:
             graph_store["target"] = _mask_display_target(uri)
             if graph_store["target"].startswith("<"):
@@ -3724,15 +3635,6 @@ def _cmd_config(args) -> int:
         graph_store["cache_graph_convention"] = (
             f"org_{q_org} (org SDK) or org_{q_org}_<graph_id> (registry/ACL)"
         )
-        if cred.get("org_id_warning"):
-            # The same payload says this org id looks TRUNCATED. A paste-ready
-            # `--cache-graph`/`--org` built from it would point at a junk graph,
-            # and `record-restore` against a wrong cache graph leaves the real one
-            # stale while reporting success — the hazard the quoting above names.
-            graph_store["org_id_unverified"] = (
-                "the org id in the resolved store looks truncated, so the cache-"
-                "graph and record-scope values below name a graph that probably "
-                "does not exist — confirm the org id first")
         graph_store["record_scope"] = (
             f"--org {_shlex.quote(str(org_id))} --graph <graph_id>")
     payload["graph_store"] = graph_store
@@ -3742,7 +3644,6 @@ def _cmd_config(args) -> int:
     harness_state, harness_cfg = (_describe_store(harness_path, "apiKey")
                                   if harness_path is not None else ("home unresolvable", None))
     harness_url_raw: str | None = None
-    file_url_in_use = False
     harness: dict = {"path": (str(harness_path) if harness_path is not None
                               else "(home unresolvable)"),
                      "state": harness_state}
@@ -3787,15 +3688,12 @@ def _cmd_config(args) -> int:
         harness_url_raw = (_os.environ.get("TORTOISE_API_URL")
                            or "https://api.premiselabs.co")
         harness["api_url"] = _mask_display_target(harness_url_raw)
-        file_url_in_use = False        # the ENV chooses the host on this path
     else:
         harness["source"] = "file" if file_harness_key else "none"
         raw_url = (harness_cfg or {}).get("apiUrl")
         harness_url_raw = (raw_url if isinstance(raw_url, str) and raw_url
                            else "https://api.premiselabs.co")
         harness["api_url"] = _mask_display_target(harness_url_raw)
-        # The FILE supplies the host on this path — but only if it carries one.
-        file_url_in_use = bool(isinstance(raw_url, str) and raw_url)
     payload["harness"] = harness
     same_identity: bool | None = None
     relation: str | None = None
@@ -3877,33 +3775,9 @@ def _cmd_config(args) -> int:
             # This is a line the user is told to PASTE, and the path is
             # store-derived (a directory name can legally contain `;`/spaces/`|`),
             # so it is shell-quoted like the other two paste lines in this report.
-            # WHICH OBJECT: `unreadable` is reached both by a mode-000 FILE and
-            # by a store behind a non-traversable DIRECTORY (see
-            # `_blocking_directory`), and the file's mode is unknowable in the
-            # second state. A single `chmod 600 <file>` line asserted a fact the
-            # tool cannot see AND printed a command that fails (measured), so the
-            # object is decided from evidence at render time.
-            blocker = _blocking_directory(Path(cred["blocked_by"]))
-            if blocker is not None:
-                # `u+x`, not `700`: traversal is ALL that is missing, and the
-                # blocker can be an ancestor the reader never meant to change
-                # (a shared parent, even `HOME`) — `700` would revoke its
-                # group/other access and fix more than the diagnosis names.
-                print("   The DIRECTORY containing it is not traversable — fix "
-                      "that first (`chmod u+x "
-                      f"{_printable(_shlex.quote(str(blocker)))}`); the "
-                      "file's own mode cannot be checked until it is.")
-                # The blocker is chosen shallowest and can be a shared parent,
-                # and `chmod` needs OWNERSHIP — which the report cannot grant.
-                # Naming that here is the difference between advice that can be
-                # followed and an imperative the reader cannot obey.
-                print("   That `chmod` needs ownership of the directory — if it "
-                      "is a shared parent you do not own, ask its owner to "
-                      "grant traversal.")
-            else:
-                print("   The file is there but unreadable — fix its permissions "
-                      f"(`chmod 600 "
-                      f"{_printable(_shlex.quote(str(cred['blocked_by'])))}`).")
+            print("   The file is there but unreadable — fix its permissions "
+                  f"(`chmod 600 "
+                  f"{_printable(_shlex.quote(str(cred['blocked_by'])))}`).")
             print("   ⛔ Do NOT delete it: this store may hold the signup_token that "
                   "`tortoise recover` needs.")
         else:
@@ -3996,8 +3870,6 @@ def _cmd_config(args) -> int:
               "resolved default)")
     if graph_store.get("warning"):
         print(f"  ⚠️  {graph_store['warning']}")
-    if graph_store.get("org_id_unverified"):
-        print(f"  ⛔ {_printable(graph_store['org_id_unverified'])}")
     if graph_store.get("cache_graph_convention"):
         print(f"  cache graph   {_printable(graph_store['cache_graph_convention'])}")
         print(f"  record scope  {_printable(graph_store['record_scope'])}"
@@ -4037,23 +3909,8 @@ def _cmd_config(args) -> int:
         # shape, and telling the user to delete it would break their settings.
         print("  ·  no api-key in this file (the key comes from the environment "
               "or is simply unset)")
-    elif harness_state == _STORE_INVALID:
-        # `resolveConfig` reads `apiUrl` from this file REGARDLESS of the key's
-        # type — but only when no env key is set AND the file actually supplies one
-        # (`envKey ? TORTOISE_API_URL : fileUrl || DEFAULT`). Claiming "this file's
-        # api_url IS still in use" unconditionally was false in two reachable
-        # states: an env key (which chooses the host) and a file with no apiUrl
-        # (where the printed value is the hardcoded default).
-        print("  ⚠️  the harness apiKey here is not a string, so the hook ignores it"
-              " — repair the field.")
-        if file_url_in_use:
-            print("     This file's api_url IS still in use, so deleting the file "
-                  "would drop that endpoint too.")
-        else:
-            print("     The hook reads no endpoint from this file either (the "
-                  "environment/default host governs), so deleting it drops nothing.")
     elif harness_state in _STORE_REFUSING:
-        # A corrupt/unreadable file yields nothing the hook can use, so this is a
+        # The harness reader treats an unusable file as "unset", so this is a
         # dead file rather than a blocking one — but it is still the reason a
         # harness seam silently stopped authenticating.
         print(f"  ⚠️  unusable harness store ({harness_state}) — repair or delete it")

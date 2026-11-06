@@ -21,12 +21,10 @@ the same seam pattern as test_hosted_api.py / test_flip_gate.py.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import re
 import sys
 import tempfile
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -44,7 +42,7 @@ from tortoise import abuse
 from tortoise.abuse import ALERT_TYPES, SupabaseAbuseStore, _alert_dict
 from tortoise.auth import lookup_hash
 from tests._http_fixtures import patched_tortoise_sdk
-from tests._verdict import verdict_client, verdict_async_client
+from tests._verdict import verdict_client
 from tests.fake_control_plane import FakeControlPlane
 
 TEAM = "team-abuse-1"
@@ -135,25 +133,6 @@ def env(monkeypatch, fake, notified):
 
 def _auth(token=TOKEN_A):
     return {"Authorization": f"Bearer {token}"}
-
-
-def _await_records(predicate, *, timeout: float = 5.0,
-                   interval: float = 0.02) -> bool:
-    """Bounded wait for an offloaded abuse/activation record (#10618).
-
-    The hooks used to run on the loop's default executor under
-    ``asyncio.to_thread``, which returned only once the work was DONE. They now
-    ride a bounded, delivery-preserving offload lane, so a record can land a
-    moment after the request returns. Tests that assert on the record must poll,
-    not assume — otherwise this change introduces a new flake class in pins that
-    were deterministic before.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return True
-        time.sleep(interval)
-    return predicate()
 
 
 # ── R5: REST suspension enforcement ─────────────────────────────────────────
@@ -449,7 +428,7 @@ class TestSessionLane:
             "status": "active", "org_name": "abuse-team"}])
 
     def _ip_events(self, fake):
-        return [e for e in fake.tables.get("abuse_events") or []
+        return [e for e in fake.tables["abuse_events"]
                 if e["event_type"] == "auth_ip"]
 
     def test_session_get_records_auth_ip_and_read(self, env):
@@ -472,20 +451,12 @@ class TestSessionLane:
         })
         team = asyncio.run(_session_user_org(request, {"user_id": _U1}))
         assert team["org_id"] == TEAM
-        # #10618: the hook is now offloaded with a delivery-preserving bound, so
-        # the record can land a moment AFTER the await returns (the pre-#10618
-        # `to_thread` guaranteed-before-return semantics is deliberately gone).
-        # Poll instead of asserting the instant the coroutine finishes.
-        assert _await_records(
-            lambda: {e["country"] for e in self._ip_events(fake)} == {"MX"}), (
-            f"R4 auth_ip never landed; events={self._ip_events(fake)!r}")
-        # R4: the new-country session request notified
+        # R4: the new-country session request recorded auth_ip + notified
+        assert {e["country"] for e in self._ip_events(fake)} == {"MX"}
         geo = [c for c in env["notified"] if c[0] == "abuse_new_ip"]
         assert len(geo) == 1 and geo[0][2]["country"] == "MX"
         # R3: the session GET counted toward team read velocity
-        assert _await_records(
-            lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 1), (
-            f"R3 read never counted; tracker={abuse.READ_TRACKER._by_org!r}")
+        assert len(abuse.READ_TRACKER._by_org[TEAM]) == 1
 
     def test_key_lane_unchanged(self, env):
         """Regression: the key lane still records auth_ip (R4) + R3 reads
@@ -495,14 +466,9 @@ class TestSessionLane:
             r = tc.get("/v1/team/keys",
                        headers={**_auth(), "CF-IPCountry": "CL"})
             assert r.status_code == 200
-        # #10618: see the poll note in the sibling test above.
-        assert _await_records(
-            lambda: {e["country"] for e in self._ip_events(fake)} == {"CL"}), (
-            f"R4 auth_ip never landed; events={self._ip_events(fake)!r}")
+        assert {e["country"] for e in self._ip_events(fake)} == {"CL"}
         assert [c[0] for c in env["notified"]] == ["abuse_new_ip"]
-        assert _await_records(
-            lambda: len(abuse.READ_TRACKER._by_org.get(TEAM) or []) == 1), (
-            f"R3 read never counted; tracker={abuse.READ_TRACKER._by_org!r}")
+        assert len(abuse.READ_TRACKER._by_org[TEAM]) == 1
 
 
 class TestMcp:
@@ -1976,238 +1942,3 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "GET /v1/team answered" in message
-
-
-# ── #10618: the per-request hooks leave the SHARED default executor ─────────
-# Every authenticated request used to pay a hop on the loop's SHARED default
-# executor (`first_api_call`, then `_abuse_post_auth`) BEFORE its handler ran.
-# That pool is `min(32, cpu+4)` (6 on prod's 2 vCPU) with an UNBOUNDED wait and
-# ~180 other `to_thread` tenants, so a stalled pool parked the request before it
-# could reach its handler — the #10602 shape ("a 40–80 ms store behind a 3.7–14.6 s
-# answer"). These pin the seam, not a number: the hooks ride the bounded
-# `telemetry` control-plane lane, the short bound is DELIVERY-preserving, and a
-# refused submission is REPORTED rather than silently dropped.
-
-#: #10618: the bound an authenticated read must answer inside while every
-#: shared-pool slot is occupied. Generous next to a healthy ~50 ms answer; the
-#: point is that it is finite on a shape where the pre-fix code never returns.
-_ANSWER_BOUND_S = 10.0
-#: How long the test waits for the stall to be PROVEN established before failing
-#: with that premise rather than with an assertion (a stall that never fills the
-#: pool proves nothing).
-_STALL_ESTABLISHED_S = 30.0
-
-
-def _default_executor_width() -> int:
-    """The width the loop actually builds for ``run_in_executor(None, ...)``."""
-    return min(32, (os.cpu_count() or 1) + 4)
-
-
-def _stall_the_default_executor(loop, width: int):
-    """Occupy EVERY shared default-executor slot with one blocked callable.
-
-    Returns ``(blockers, occupied, release)``. Occupancy is proven by the
-    workers themselves (the last one sets ``occupied``) rather than by sleeping:
-    a test that only QUEUED them would pass on the defect, because the request's
-    own submission could be dequeued ahead of them.
-    """
-    import threading as _threading
-
-    release = _threading.Event()
-    occupied = _threading.Event()
-    lock = _threading.Lock()
-    state = {"running": 0}
-
-    def _block() -> None:
-        with lock:
-            state["running"] += 1
-            if state["running"] >= width:
-                occupied.set()
-        release.wait(_STALL_ESTABLISHED_S * 4)
-
-    blockers = [loop.run_in_executor(None, _block) for _ in range(width)]
-    return blockers, occupied, release
-
-
-class TestPerRequestHooksLeaveTheSharedPool:
-    def test_whole_request_path_answers_while_the_shared_pool_is_stalled(
-            self, env):
-        """#10618 acceptance: the WHOLE request path — the auth dependency
-        included, NOT stubbed — answers a read while every shared-pool slot is
-        occupied.
-
-        ⛔ RED on the pre-#10618 shape, and the RED is a TIMEOUT, not a wrong
-        number: ``get_current_org`` awaits ``first_api_call`` and
-        ``_abuse_post_auth``, both ``asyncio.to_thread`` onto the shared pool, so
-        with every slot held the request never reaches ``/v1/team/keys``.
-
-        The ``client`` fixture in ``test_read_routes_loop_responsiveness.py``
-        overrides ``get_current_org``, which is exactly why it cannot see this
-        hop — this test deliberately goes through a real API key.
-        """
-        app = env["app"]
-        width = _default_executor_width()
-        answer: dict = {}
-
-        async def _run() -> None:
-            loop = asyncio.get_running_loop()
-            blockers, occupied, release = _stall_the_default_executor(loop, width)
-            try:
-                deadline = time.monotonic() + _STALL_ESTABLISHED_S
-                while not occupied.is_set():
-                    if time.monotonic() >= deadline:
-                        raise AssertionError(
-                            f"the shared default executor never reached {width} "
-                            f"running blockers — the pool was never full, so this "
-                            f"run proves nothing about the request path (#10618)")
-                    await asyncio.sleep(0.01)
-                async with verdict_async_client(
-                        app, base_url="http://test") as ac:
-                    started = time.monotonic()
-                    try:
-                        response = await asyncio.wait_for(
-                            ac.get("/v1/team/keys", headers=_auth()),
-                            timeout=_ANSWER_BOUND_S)
-                    except TimeoutError:
-                        answer["failure"] = (
-                            f"GET /v1/team/keys did not answer within "
-                            f"{_ANSWER_BOUND_S}s while all {width} shared-"
-                            f"executor slots were occupied — a per-request hop "
-                            f"(first_api_call / _abuse_post_auth) is still "
-                            f"queued on the SHARED pool before its handler "
-                            f"(#10618)")
-                        return
-                    answer["status"] = response.status_code
-                    answer["body"] = response.text[:200]
-                    answer["elapsed"] = time.monotonic() - started
-            finally:
-                release.set()
-                for f in blockers:
-                    with contextlib.suppress(Exception):
-                        await asyncio.wait_for(f, timeout=5)
-
-        asyncio.run(_run())
-        assert "failure" not in answer, answer.get("failure")
-        assert answer["status"] == 200, (
-            f"GET /v1/team/keys answered {answer['status']}: {answer['body']}")
-
-    def test_the_hook_seam_is_bounded_delivery_preserving_and_contextconfined(
-            self, monkeypatch):
-        """#10618: the SHAPE of the hand-off, pinned.
-
-        ``cancel_on_timeout=False`` is what makes the short bound
-        DELIVERY-preserving (the bound abandons the AWAIT; a queued submission
-        still runs), the lane is the DEDICATED ``abuse`` pool (so a cold-geo
-        stall can never consume the capacity the unrecoverable ``billing_notify``
-        needs), and every invocation is wrapped in ``monitoring.confine_context``
-        so a pool thread's process-lifetime context cannot leak into the next
-        request's hook.
-        """
-        import tortoise.hosted_api as ha
-
-        calls: list[dict] = []
-
-        async def _record(fn, **kwargs):
-            calls.append({"fn": fn, **kwargs})
-            return None
-
-        monkeypatch.setattr(ha, "run_control_plane_call", _record)
-        monkeypatch.setattr(ha, "confine_context",
-                            lambda fn: ("CONFINED", fn))
-        asyncio.run(ha._telemetry_hook_off_loop(lambda: None, op="abuse.post_auth"))
-        assert len(calls) == 1, calls
-        kwargs = calls[0]
-        assert kwargs["op"] == "abuse.post_auth"
-        assert kwargs["pool"] == "abuse", (
-            "the hooks must ride their OWN pool: `telemetry` also carries the "
-            "UNRECOVERABLE billing_notify, whose refusal is a permanent loss "
-            "(#10618 review P2)")
-        assert kwargs["cancel_on_timeout"] is False, (
-            "without cancel_on_timeout=False the bound DROPS a queued "
-            "submission instead of abandoning only the await — the abuse "
-            "record would vanish rather than land late (#10618)")
-        assert kwargs["timeout"] == ha._ABUSE_OFFLOAD_TIMEOUT_S
-        assert calls[0]["fn"][0] == "CONFINED", (
-            "the callable must be wrapped in confine_context PER SUBMISSION — "
-            "a pool thread is process-lifetime, so an unwrapped callable runs "
-            "under the worker's own ambient context and a ContextVar set there "
-            "would leak into the NEXT request (#10618 review P2)")
-
-    def test_a_bound_miss_is_metered_never_logged_per_request(
-            self, monkeypatch, caplog):
-        """#10618 review P2: a BOUND MISS must not emit a line per request.
-
-        ``_cp_offload(best_effort=True)`` warns on every miss, and this hook
-        runs on EVERY authenticated request, so saturation would produce one
-        WARNING per request — burying the single attributable refusal line.
-        The seam still meters the miss (``bound_miss_running``), so nothing is
-        invisible.
-        """
-        import logging
-
-        import tortoise.hosted_api as ha
-        import tortoise.monitoring as mon
-
-        async def _bound_miss(fn, **kwargs):
-            raise mon.ControlPlaneOffloadError("hook missed its bound",
-                                               refused=False)
-
-        monkeypatch.setattr(ha, "run_control_plane_call", _bound_miss)
-        monkeypatch.setattr(ha, "_LAST_ABUSE_REFUSED_LOG", None)
-        with caplog.at_level(logging.DEBUG):
-            asyncio.run(ha._telemetry_hook_off_loop(lambda: None,
-                                                    op="abuse.post_auth"))
-        lines = [r.getMessage() for r in caplog.records
-                 if "ABUSE_OFFLOAD_REFUSED" in r.getMessage()]
-        assert lines == [], (
-            "a bound miss is NOT a drop and must not claim one was lost; "
-            f"got {lines} (#10618)")
-
-    def test_a_refused_hook_is_reported_never_silently_dropped(
-            self, monkeypatch, caplog):
-        """#10618 acceptance: a REFUSED submission is REPORTED on a named lane.
-
-        A refusal (the pool's backlog is full) is the ONE case where the record
-        genuinely does not happen, so it must be attributable: an attacker who
-        can saturate the pool must not be able to suppress their own velocity
-        accounting INVISIBLY.
-        """
-        import logging
-
-        import tortoise.hosted_api as ha
-        import tortoise.monitoring as mon
-
-        async def _refuse(fn, **kwargs):
-            raise mon.ControlPlaneOffloadError("hook refused", refused=True)
-
-        monkeypatch.setattr(ha, "run_control_plane_call", _refuse)
-        monkeypatch.setattr(ha, "_LAST_ABUSE_REFUSED_LOG", None)
-        with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
-            asyncio.run(ha._telemetry_hook_off_loop(lambda: None,
-                                                    op="abuse.post_auth"))
-        hits = [r for r in caplog.records
-                if "ABUSE_OFFLOAD_REFUSED" in r.getMessage()]
-        assert len(hits) == 1, (
-            "a REFUSED hook must emit the named ABUSE_OFFLOAD_REFUSED line — "
-            f"a silent drop is a suppression (#10618); "
-            f"records={[r.getMessage() for r in caplog.records]}")
-
-    def test_the_refusal_line_is_shed_logged(self, monkeypatch, caplog):
-        """#10618: one line per window, not one per request — the telemetry pool
-        is reachable by any tenant, so a saturation refuses a hook per request
-        for EVERY tenant (the ``operator_alert._log_shed`` rule the #4456
-        billing floor already follows)."""
-        import logging
-
-        import tortoise.hosted_api as ha
-
-        monkeypatch.setattr(ha, "_LAST_ABUSE_REFUSED_LOG", None)
-        with caplog.at_level(logging.ERROR, logger="tortoise.hosted_api"):
-            ha._log_abuse_offload_refused("abuse.post_auth")
-            ha._log_abuse_offload_refused("abuse.post_auth")
-            ha._log_abuse_offload_refused("abuse.record_points")
-        hits = [r for r in caplog.records
-                if "ABUSE_OFFLOAD_REFUSED" in r.getMessage()]
-        assert len(hits) == 1, (
-            f"the refusal floor must shed within its window; got {len(hits)} "
-            f"lines (#10618)")

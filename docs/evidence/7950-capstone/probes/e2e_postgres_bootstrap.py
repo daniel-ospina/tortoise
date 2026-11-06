@@ -87,16 +87,6 @@ MIGRATIONS = [
     # of a column. What the file's re-declaration buys is that the tier is a
     # DECLARED column (dropped by name on the way out) rather than an unknown one.
     "20261029000001_record_point_cache_tier.sql",
-    # #10620: `public.point.search_keys` narrows `jsonb` → `text`, the form its
-    # only producer emits (`flatten_search_keys_prop`'s space-joined string).
-    #
-    # ⛔ Omitted, this probe does not merely stand up a narrower schema — it
-    # REPRODUCES the drop it exists to disprove. The shipped write path binds the
-    # flat STRING (`_record_column_value`), and a `jsonb` column answers that with
-    # `InvalidTextRepresentation` (22P02): every point row carrying search keys is
-    # refused and DROPPED, which is the 302-row incident. A probe that measured
-    # that schema would certify a record the shipped writes cannot fill.
-    "20261102000002_record_point_search_keys_text.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

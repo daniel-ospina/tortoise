@@ -1091,51 +1091,6 @@ def test_emit_manifest_pins_confcutdir_to_an_out_of_tree_selection(tmp_path):
     assert pins == [f"--confcutdir={case}"], pins
 
 
-def test_emit_manifest_pins_confcutdir_to_the_running_cwd_not_the_callers(tmp_path):
-    # #10636 review P2: `tools/embedded_evidence.py` spawns the collect-only
-    # child with `cwd=REPO_ROOT` while it may itself be invoked from anywhere.
-    # The pin was computed from the CALLER's cwd, so it described a tree the
-    # child never ran in and pruned the wrong ancestry. `cwd` is threaded
-    # through to the helper, and this pins that it WINS over the process cwd.
-    captured = {}
-
-    def fake_runner(cmd):
-        captured["cmd"] = list(cmd)
-        return 0, "tests/test_a.py::test_x\n1 tests collected in 0.00s\n"
-
-    out = tmp_path / "expected-nodeids.txt"
-    rc = _skip_guard.emit_manifest(["tests/test_a.py"], "not track_b", out,
-                                   runner=fake_runner, cwd=str(tmp_path))
-    assert rc == 0
-    pins = [a for a in captured["cmd"] if a.startswith("--confcutdir=")]
-    assert pins == [f"--confcutdir={os.path.abspath(tmp_path)}"], pins
-
-
-def test_emit_manifest_resolves_a_repo_relative_selection_against_the_running_cwd(
-    tmp_path,
-):
-    # Behavioural half of the same finding: the child runs in `cwd`, so the pin
-    # must prune THAT directory's ancestry. `tmp_path/conftest.py` is the
-    # shared-ancestor shape (the local stand-in for the leaked `/tmp`
-    # conftest): if the pin is computed from THIS process's cwd (the repo
-    # root), `tmp_path` is not in `confcutdir.parents`, the raising conftest is
-    # imported and the collect-only dies with rc=4 — no manifest.
-    (tmp_path / "conftest.py").write_text(
-        "raise RuntimeError('a conftest above the running cwd must not be "
-        "imported')\n",
-        encoding="utf-8")
-    repo = tmp_path / "repo"
-    (repo / "tests").mkdir(parents=True)
-    (repo / "tests" / "test_ok.py").write_text(
-        "def test_ok():\n    assert True\n", encoding="utf-8")
-    out = tmp_path / "expected-nodeids.txt"
-    rc = _skip_guard.emit_manifest(["tests/test_ok.py"], "not track_b", out,
-                                   cwd=str(repo))
-    assert rc == 0, rc
-    assert out.exists(), "the collection completed — the manifest must be written"
-    assert "test_ok.py::test_ok" in out.read_text(encoding="utf-8")
-
-
 def test_the_confcutdir_pin_does_not_bound_a_selection_spanning_trees(tmp_path):
     # A LIMIT, asserted so the docstring and the code cannot drift apart. The
     # pin is ONE directory and pytest loads a `conftest.py` sitting AT it
@@ -1176,7 +1131,6 @@ def test_the_confcutdir_pin_does_not_bound_a_mixed_in_and_out_of_tree_selection(
     pin = _skip_guard._selection_confcutdir(
         ["tests/test_a.py", str(other / "test_b.py")])
     assert pin == str(tmp_path), pin
-
 
 
 def test_emit_manifest_does_not_inherit_a_conftest_above_the_selection(tmp_path):

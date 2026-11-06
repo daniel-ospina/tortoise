@@ -176,21 +176,16 @@ Run 2026-10-24 against `tests/test_record_serve.py` (53 tests, re-derived with `
   impairments: (a) a credential that resolves no record tenant — a permanent
   PER-CREDENTIAL fact, not a fault: `record` mode answers **500** because it has no
   cache branch, while `prefer` mode falls back and names it
-  (`record-tenant-unresolved`, the third of the FIVE reasons — the other two are
-  conditions of the READ LANE rather than of the record: `record-read-lane-refused`, the
-  submission never ran so the record was never asked, and `record-read-bound-miss`, the
-  submission ran and did not answer inside the lane's bound); (b) a
+  (`record-tenant-unresolved`, the third of the three reasons); (b) a
   role/GUC misconfiguration, which refuses **structurally** (500) in both armed
   modes instead of being counted as `record-unavailable` — an ops reason for a
   value problem.
 * **`prefer` never lets the cache's availability decide whether the record is
-  asked.** It constructs NO cache handle up front (#10602 review): the handle is
-  built on the CONSTRUCTION lane only once the record has not answered, and a
-  record-served read therefore opens no projection at all — a stopped graph
-  cannot answer `403 GRAPH_NOT_FOUND` before the record is consulted, and a cold
-  open never sits in front of the record consult (`_get_proj()` is reached only
-  on the fallback arm). `off` keeps constructing eagerly, because there the cache
-  IS the only answer.
+  asked.** Its handle is constructed through the #3498 seam, but a construction
+  failure is CAPTURED and re-raised only when the cache is actually needed —
+  otherwise a stopped graph would answer `403 GRAPH_NOT_FOUND` before the record
+  was consulted, making the lenient mode less able to answer than `record`. `off`
+  keeps propagating the failure, exactly as before.
 * **"Armed but no DSN" is a misconfiguration, not an outage.** An armed serve mode
   with no `TORTOISE_RECORD_DSN` never becomes armed by retrying, so it refuses
   structurally (500) like a malformed DSN — `prefer`'s "still incomplete" case is

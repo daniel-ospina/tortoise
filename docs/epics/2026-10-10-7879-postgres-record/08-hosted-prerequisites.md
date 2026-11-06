@@ -158,7 +158,7 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 79
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 78
 migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
 appears in prose only — e.g. this document, §12.1c's open question, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which is
@@ -188,7 +188,7 @@ idempotent, total, and stores no EP scalar`.
 | **the record, in the hosted deployment** | ⛔ **NOT ARMED** *at the census point below* — **superseded on the live deployment, 2026-11-02** ⛔ **and superseded as a task by the owner ruling: DO NOT PROVISION IT** (quoted at R1 below). ⚠️ **Other live-state statements in this file — `:193`, `:589`, `:593`, `:596`, `:718`, `:1016`, and `09-record-tenancy-decision.md` — were written at the census point below and read as `NOT_ARMED`; they describe the tree that was, not the deployment now.** The live app reports `armed: true` with `record_write_failures: {"write_failed": 32}` (measured 2026-11-02, recorded on `#9548`) — so *"the remaining half is the secret itself"* is **no longer outstanding**: the secret is set and the app is armed, which is a state to report, not a step to finish. `TORTOISE_RECORD_DSN` appeared **nowhere** in `fly.toml`, `entrypoint.sh` or `.github/workflows/deploy-hosted.yml`; the runbook **documented** it (its Secrets Matrix row and the "connecting role" example, #9600) and never provisioned it — documented, not provisioned. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — so the record path **was** inert at the census point and its behaviour **was** unchanged then. **#9548 (2026-10-23) landed the arming surfaces** (deploy stages it from its own GitHub secret, manifest declares it, runbook + `fly.toml` document it) — at the census tree the remaining half was the secret itself; it is now set and the app is armed (see the opening of this cell), so that clause is history, not the live state. ⚠️ A future arming (only after the ruling lifts) must name R6's application role (`tortoise_record_app`, `NOBYPASSRLS`) — never `postgres`/`service_role`, which bypass RLS and would make the tenancy boundary false for the only path that writes customer data ([`09-record-tenancy-decision.md`](09-record-tenancy-decision.md)). | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → **5 lines at `ff6379eb2`** — the `origin/main` this branch merges, i.e. what "immediately before #9548" means — not empty and not one: `docs/infra-runbook.md:382` and `:528` (#9557/R9's `record-backup` documentation), `:2774` (#9556/R8's §9 `record-restore` operator example — an **invocation**), and `:2971`/`:3004` (#9600's Secrets Matrix row and its §"The record's connecting role" example — the name **documented**, not provisioned). ⚠️ **The count is per tree:** **0** at this branch's start point `d5c71a470`, **1** at `473ff8a6f0`/`7761252f` (after #9556/R8, before #9600), **3** at `c5cbcbb4f` (#9600/#9554), **5** at `ff6379eb2` — see the supersession note under the census commands, which is the one place the series is maintained. Line numbers are `ff6379eb2`'s and drift as the runbook grows. No hit in `fly.toml`, `entrypoint.sh` or `.github/workflows/`. |
 | **the end-to-end proof, in CI** | ✅ **ARMED by #9551** (PR #9772). The dedicated `test-record-postgres` job provisions a throwaway `postgres:16` on an ephemeral loopback port (`.github/actions/postgres-provision`), sets `TEST_RECORD_DB_URI`, installs the `[postgres]` extra and asserts **zero** skips from the junit XML — so the two Postgres legs run instead of skipping, and an armed-but-skipping job cannot read as green. It is a REQUIRED leg of `python-ci-gate`. | measured on the arming tree (the collection is **70** — 61 record legs + the 9 CI-leg tests this change adds): unarmed → `68 passed, 2 skipped`; armed → **`70 passed, 0 skipped`**, the record migrations applied inside that run |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert` (`record_projection`)), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
-| **the `session` record** | ✅ **FIXED (#9264).** `capture_redactions` was `jsonb` while the producer emits an **integer**, so the `SessionRecorded` carrying it was refused (`DatatypeMismatch`) and counted on `record_write_failures`; the module refuses to coerce (`record_projection._jsonb_or_scalar`), which is what kept it visible. The forward migration `20261022000001_record_session_capture_redactions_integer.sql` narrows the column to `integer` (every other `public.session` counter was already `integer`), and the tolerance entry for it is deleted — and #10620 narrowed `point.search_keys` to `text` — the `_SCHEMA_DISAGREEMENTS` vocabulary AND its detector were DELETED in #10620, so no allowance remains (both halves of R4 fixed). | migrations `20261022000001`, `20261102000002`; `tests/test_9078_record_written_by_production_path.py` (the vocabulary and its detector are DELETED, #10620) |
+| **the `session` record** | ✅ **FIXED (#9264).** `capture_redactions` was `jsonb` while the producer emits an **integer**, so the `SessionRecorded` carrying it was refused (`DatatypeMismatch`) and counted on `record_write_failures`; the module refuses to coerce (`record_projection._jsonb_or_scalar`), which is what kept it visible. The forward migration `20261022000001_record_session_capture_redactions_integer.sql` narrows the column to `integer` (every other `public.session` counter was already `integer`), and the tolerance entry for it is deleted — `_SCHEMA_DISAGREEMENTS` now carries `search_keys` only, which is the remaining half of R4. | migration `20261022000001`; `tests/test_9078_record_written_by_production_path.py` `_SCHEMA_DISAGREEMENTS = {"search_keys": …}` |
 | **rebuild the graph from the record** | ✅ **The operator half exists now** — `python -m tortoise record-restore` (`tortoise/record_restore.py`, #9556/R8), with `docs/infra-runbook.md` §9 and its drill table (the drill's *armed-record* row is still **NOT MEASURED**, #9548/#9551). ⛔ **The production door is still blocked**: the wipe runs #2944's L2 name guard and the disposable-graph registry that would admit `org_*` graphs is not landed, so today only a `test_`-named graph can be restored. | `grep -rn 'rebuild_from_record' tortoise/__main__.py` → 1 (the verb's docstring); `grep -rn 'rebuild_from_record(' tortoise/ \| grep -v 'def '` → 1 (`record_restore.py`, the verb's caller) |
 | **RLS as the tenancy boundary** | ✅ **SHIPPED by R6 (#9554) — the GUC is set by the shipped code, and the connecting role is the non-bypass one.** `record_projection.scope_connection()` is the single prologue both record doors install *before their first plan statement* — the write door (`replay()`) and the cache read door (`cache_projection.read_record_view()`) — and it (a) sets `set_config('app.current_org_id', $1, true)` transaction-locally, then (b) on ONE statement reads that GUC back AND reads the connecting role's posture `pg_roles`/`pg_has_role` — **refusing** a superuser, `BYPASSRLS`, a member of either, or the owner of a record table (`RecordProjectionError: … BYPASSES RLS`), and refusing a GUC that did not take. The role is `tortoise_record_app` (`NOBYPASSRLS NOSUPERUSER`), created by `20261025000001_record_tenancy_role_and_guc.sql`; it is **`NOLOGIN` until ops grants LOGIN + a password** (R1, `docs/infra-runbook.md` → "The record's connecting role"), so until R1 lands no production traffic exercises the boundary — it is proven in PGlite, not yet by production writes. The old reading below is kept because it is what the census said before R6: §4's bypass rule fires for the table owner and for `service_role` (the record migrations' own comment still says the write path connects as `service_role`, which R6 superseded). | `grep -n 'def scope_connection' tortoise/record_projection.py` → 1; `grep -rn 'set_config(' tortoise/record_projection.py` → the `TENANT_GUC_SQL` prologue; pins `tests/test_record_tenancy_guc.py` + PGlite `supabase/tests/20261022000001_record_tenancy_posture.sql` |
 | **the record's durability** | ✅ **R9's mechanism is on main — the record now HAS a backup module.** `tortoise/record_backup.py` and its one trigger, `python -m tortoise record-backup`: `pg_dump --data-only` over the record's ten tables → AES-256-GCM → R2 under `record-backups/`, with a restore **drill** that compares per-table counts. Documented in `docs/infra-runbook.md` §3.5, with a row of its own in `docs/durability-posture.md`. The graph archives (`tortoise/backup.py` — RDB/BGSAVE plus a local copy of the journal's `events.jsonl` — `hosted_backup.py`, `backup_sweep.py`, the self-hosted sweep `selfhost_backup.py`) still copy **the graph**, and are not this. ⚠️ **Two gaps remain, and neither is a missing module**: no cron invokes the verb yet (the window is the operator's manual cadence — `docs/durability-posture.md` states it as UNBOUNDED), and the drill has not been run against the **hosted** Supabase record, so *"the artifact restores, verified per table"* is measured while *"the hosted record has been restored"* is not. ⚠️ It reads the **same** `TORTOISE_RECORD_DSN` and **refuses a pooler DSN** (`record_backup.require_direct_dsn`, exit 2): a dump/restore session needs the **direct** connection (`db.<ref>.supabase.co:5432`), so it is invoked with `--record-dsn <direct DSN>` — the app's pooler value is not usable here. Whether the Supabase plan's own PITR also covers the record stays an owner question; the tree's statements about it are plan-level and about the **control plane** (`docs/plans/2026-08-08-669-align.md:21`, `docs/ops/registry-backup-dr.md:1051`). §R9's checklist item below was written **pre-landing** and still reads as unbuilt — its mechanism half is what landed. | `grep -n 'def require_direct_dsn' tortoise/record_backup.py` → 1; runbook §3.5; `docs/durability-posture.md` (the record row); §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
@@ -272,37 +272,27 @@ loopback-bound container (`tests/test_runner_ports_6673.py` forbids a `services:
 workflow) — `TEST_RECORD_DB_URI` pointed at it, and the `postgres` extra in the test env.
 **What it blocks:** every item below **regressing silently**. This is not hypothetical — it is the
 mechanism by which a **new** #9264-class schema↔producer disagreement would hide: until #9551 armed it,
-the leg that would catch it **skipped**, twice over (§G run 1 vs run 2). ⚠️ There is NO tolerated pin left: the `_SCHEMA_DISAGREEMENTS` vocabulary AND its detector were DELETED (#9264 closed `capture_redactions`; #10620 narrowed `point.search_keys` to `text`), so arming this leg reddens any new schema/producer disagreement instead of tolerating it.
+the leg that would catch it **skipped**, twice over (§G run 1 vs run 2). ⚠️ What survives there now is *one* tolerated pin, `point.search_keys` (`_SCHEMA_DISAGREEMENTS`, A8) — #9264's own entry is deleted — so arming this leg does not turn that one red; **R4** deletes the remainder.
 **Was the cheapest item in the list, and the one that made the rest verifiable** — armed by #9551
 (PR #9772): `test-record-postgres` provisions the database, installs the extra, and asserts zero
 skips, as a required leg of `python-ci-gate`.
 
-### R4 — Fix the two schema↔producer disagreements (#9264, #10620) · **M** · schema or code + decision · **DONE**
+### R4 — Fix the two schema↔producer disagreements (#9264) · **M** · schema or code + decision · **HALF DONE**
 
-> **Both halves are FIXED.** `session.capture_redactions` was narrowed to `integer` by
-> `20261022000001` (#9264). `point.search_keys` was narrowed to `text` by
-> `20261102000002_record_point_search_keys_text.sql` (#10620), and the `_SCHEMA_DISAGREEMENTS`
-> vocabulary and its detector were DELETED in #10620 — this row's own guidance ("prefer the schema side") is what both fixes followed.
-> ⚠️ **The second half cost 302 dropped point records on the hosted deployment, and `/health`
-> reported `ok: true` throughout** (32 at ~14:24Z → 302 by ~19:17Z on #10620's measurement). The
-> drops are recoverable from the journal: replayed through the fixed projection the same records
-> land (measured on a throwaway `postgres:16`: 0/5 rows before the column narrowed, 5/5 after).
-> The `relation` = 0 figure above is a PRE-FIX measurement and must be re-taken.
+> **`session.capture_redactions` is FIXED** (forward migration `20261022000001`, the column narrowed to
+> `integer`, tolerance entry deleted). What remains here is `point.search_keys`.
 
 **What:** `session.capture_redactions` was `jsonb`, the producer emits an **integer** — so the `SessionRecorded` carrying
 `capture_redactions` was **refused** (`DatatypeMismatch`, counted on `record_write_failures`) and the
-row kept the column **NULL**; `point.search_keys` WAS `jsonb` (now `text`, #10620), the producer emits a flattened
+row kept the column **NULL**; `point.search_keys` is `jsonb`, the producer emits a flattened
 **string**. #9200's sibling class. Decide per field which side is authoritative and fix it;
-the tolerance vocabulary in `tests/test_9078…` (`_SCHEMA_DISAGREEMENTS`) and its detector are
-DELETED (#10620). It WAS held by a **self-reddening assertion** (a **schema-side** fix failed the
-test until the entry was deleted, while a **producer-side** fix left the entry green-but-dead), and
-the ruling that assertion existed to enforce is the one that closed both halves: **prefer the schema
-side**. Every refusal in that loop is now a HARD FAILURE — there is no allowance left to widen.
+the tolerance entries in `tests/test_9078…` (`_SCHEMA_DISAGREEMENTS`, now `search_keys` only) are
+held by a **self-reddening assertion**: a **schema-side** fix fails the test until the entry is deleted, while a
+**producer-side** fix leaves the entry green-but-dead — so prefer the schema side, or delete the
+entry as part of that fix.
 **What it blocks:** a **complete** session record (the redaction count was lost until #9264's
-migration) and any Point that carries extracted `search_keys` — that one was refused for **302
-rows in 5 h** before #10620 narrowed `point.search_keys` to `text` (the producer's form), so both
-halves are now carried. Both were silent losses the journal heals, which is why they were
-invisible without R3.
+migration) and any Point that carries extracted `search_keys` (still refused ⇒ still lost). Both
+are silent losses the journal heals, so they are invisible without R3.
 
 ### R5 — Materialise the point-property edge family into `relation` · **L** · code · **BLOCKER**
 
@@ -461,10 +451,9 @@ rebuild = record-sourced rebuild, **1 : 1 : 1** for `ownedBy`, `dependsOn`, `has
 one row each (the zero re-measured on the same harness before the change: `relation` = 3 rows total, `CONTAINS` 2 and `extractedFrom` 1). A `capture_session` on that harness leaves one residual mismatch —
 `aboutObject` and
 `extractedFrom` short by the captured turns — and it is NOT this family: the captured Point itself never reaches
-the record, because its `search_keys` string met `point.search_keys jsonb`. That was **R4**'s remaining
-half, FIXED by #10620 (the column is now `text`; the `tests/test_9078_…` tolerance vocabulary is
-DELETED with it), so the edges that Point carried have no endpoint to resolve only on a deployment
-that has not applied `20261102000002`. Named here so it is not read as an edge defect.
+the record, because its `search_keys` string meets `point.search_keys jsonb` (**R4**'s pinned
+`_SCHEMA_DISAGREEMENTS` entry, `tests/test_9078_…`), so the edges that Point carried have no endpoint to
+resolve. Named here so it is not read as an edge defect.
 
 **What is still not carried, with why** — this is the "0 families without a stated reason" answer: TWO families
 and ONE shape.
@@ -612,7 +601,7 @@ exactly this question and the tree cannot answer it today.
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 79 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
+65 migrations returned **0** (at this head, 78 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
 tenant policy for that very table), 36 in `20261023000001_record_session_narrative.sql` and 19 in
 `20261024000001_record_session_narrative_carrier.sql` — the table this
 item's DECIDED block adds);
@@ -857,7 +846,7 @@ Postgres, and §17.4 already prices both stores.
 2. **R2** land the schema → *R1 without R2 writes nothing, counted on `record_write_failures` and
    never raised*
 3. **R3** CI proof → *so items 4–9 cannot regress silently; measured, this is how a NEW #9264-class disagreement would hide*
-4. **R4** the schema↔producer disagreements (**DONE** — #9264 + #10620) → *so the session/point record is complete*
+4. **R4** the schema↔producer disagreements (*one* left: `point.search_keys`) → *so the session/point record is complete*
 5. **R6** tenancy enforced → *the bypass rule must be answered before the first hosted customer's data
 exists*
 6. **R5** the edge/operator family → *before the "destroy the graph" claim can be made*

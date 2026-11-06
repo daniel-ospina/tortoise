@@ -820,7 +820,7 @@ run, no re-scoring).** `capstone-measured-e0fc940b.log`'s `E3 census` block repo
 **⇒ The narrowing does not rescue the bar, and that is the honest result — reported, not adjusted.**
 The residual is a *second* contradiction inside `Point`, already measured in the same log and **not**
 resolved by #9736: of the 338 `Point`s, 159 are mechanical **turn rows** (no `extractedFrom` link by
-construction — `_TURN_WRITE_CYPHER` in `tortoise/sdk.py`) and 29 are **operator Points** (written by
+construction — `_TURN_WRITE_CYPHER`, `tortoise/sdk.py:2408`) and 29 are **operator Points** (written by
 `create_operator`, which never writes `extractedFrom`); 188 of 338 `Point`s are therefore *structurally
 incapable* of carrying the anchor this row demands, and no denominator can make `= 1.000` reachable
 while they are counted as derivations. The same log computes the writer-class figure — anchored / the

@@ -4233,7 +4233,6 @@ jobs:
             tests/test_9078_record_written_by_production_path.py \
             tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
-            tests/test_record_searchkeys_10620.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
             --junitxml="$SCRATCH/junit.xml" -o junit_family=xunit1 \

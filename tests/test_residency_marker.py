@@ -449,13 +449,6 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def _get_proj(self):
-                # #10602 review P1: the read routes construct their SDK with the
-                # projection ALREADY attached (the cold open rides the
-                # construction lane, never the read lane's 8 s bound), so a
-                # fake standing in for `_data_sdk` must model the attach.
-                return object()
-
             def tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
@@ -526,13 +519,6 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _DownSDK:
-            def _get_proj(self):
-                # #10602: the construction attaches, and an attaching fake that
-                # RAISED would be a different case (a store that will not OPEN,
-                # covered in test_read_status.py). This one models a store that
-                # opens and then cannot answer.
-                return object()
-
             def tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
@@ -561,10 +547,6 @@ class TestHostedSearchRoute:
         import tortoise.hosted_api as hosted_api
 
         class _DownSDK:
-            def _get_proj(self):
-                # #10602: see the sibling `_DownSDK` above.
-                return object()
-
             def tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:

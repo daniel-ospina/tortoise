@@ -7,7 +7,6 @@ teardown having run).
 from __future__ import annotations
 
 import errno
-import inspect
 import logging
 import os
 import re
@@ -25,21 +24,16 @@ from tests._tmpdir_hygiene import (
     _ZERO_CLIENT_STATE_PATH_ENV,
     HOST_TMPDIR,
     ROOT_BASE,
-    SessionRedisResidue,
     SharedTmpdirScanError,
     TrackedTempfileArtifacts,
     _discard_tolerated_leaks,
     _is_shared_temp_scope,
     _live_server_in_root,
     _marker_owner_provably_dead,
-    _pid_running,
     _protected_reason,
     _read_marker,
-    _redis_residue_snapshot,
-    _terminate_pid,
     install_scan_guard,
     scan_root,
-    session_redis_pids,
     session_tmpdir,
     sweep_stale_session_roots,
     tolerated_cleanup_leaks,
@@ -1304,247 +1298,3 @@ def test_actions_typing_matches_the_runner_not_yaml_1_1():
     assert yaml.load("if: true", Loader=loader)["if"] is True
     assert yaml.load("if: false", Loader=loader)["if"] is False
     assert yaml.load("if: always()", Loader=loader)["if"] == "always()"
-
-
-# ── #7522: the teardown KILL is session-scoped, like #3752's scan ─────────
-# The two embedded modules' autouse teardown fixtures snapshot the live
-# redislite servers before a test and kill the delta after it (#493/#1365).
-# The population they snapshotted was HOST-WIDE `pgrep`, so on the fleet's
-# shared self-hosted runner the delta also held every server a CONCURRENT
-# CI job started while that test ran — and the teardown SIGTERMed them.
-# Measured 2026-11-03 on PR #10640's shard `test-carve-out (c)`:
-# ``Error 2 connecting to .../redis.socket. No such file or directory`` in
-# tests/test_10122_point_name_not_indexed.py (x2) and
-# tests/test_cli_extraction.py, plus
-# ``test_parallel_single_writer_multi_reader`` missing every key because its
-# writer's server was killed mid-write (that test never checks the writer's
-# exit code). Both fixtures now use `SessionRedisResidue`.
-
-
-def _fake_argv_probe(cmds, monkeypatch, probed=None):
-    """Install a fake host-wide pid population + argv table on the reaper.
-
-    `probe` stays HOST-WIDE on purpose — it is the real `pgrep` shape, so the
-    assertions below exercise the filter rather than a pre-filtered stub.
-
-    `probed` (optional list) records the pids whose argv the helper was
-    actually ASKED to read. A non-vacuity claim about what the filter excluded
-    has to be about what the helper did; asserting it against `cmds` — the very
-    dict the test just wrote — is a tautology that cannot fail on any code,
-    pre- or post-fix.
-    """
-    from tortoise import embedded_reaper
-
-    def _batch(pids):
-        if probed is not None:
-            probed.extend(pids)
-        return {pid: cmds[pid] for pid in pids}
-
-    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
-                        lambda: list(cmds))
-    monkeypatch.setattr(embedded_reaper, "_batch_cmdlines_or_none", _batch)
-    return cmds
-
-
-def test_session_redis_pids_are_scoped_to_this_sessions_root(monkeypatch):
-    """A sibling run's server is NOT attributed to us, and the filter is
-    load-bearing: the same population unfiltered contains it."""
-    root = os.path.realpath(scan_root())
-    probed: list[int] = []
-    cmds = _fake_argv_probe({
-        101: f"/x/redislite/bin/redis-server unixsocket:{root}/tmpaaaa/redis.socket",
-        102: "/x/redislite/bin/redis-server unixsocket:/tmp/tt_other/tmpbbbb/redis.socket",
-        # a DIFFERENT root that merely shares the prefix — a path-prefix test
-        # without the trailing separator would call this one ours
-        103: f"/x/redislite/bin/redis-server unixsocket:{root}_sibling/redis.socket",
-        104: "/usr/bin/postgres -D /var/lib/postgres",
-    }, monkeypatch, probed=probed)
-
-    assert session_redis_pids() == {101}
-    # non-vacuity, asserted against what the helper PROBED rather than against
-    # the literal above: the argv read was asked about the whole host-wide
-    # population, so 102 (a concurrent run's server) and 103 (a sibling root
-    # sharing our prefix) really were candidates — the filter, not a
-    # pre-filtered stub, is what excluded them.
-    assert set(probed) == {101, 102, 103, 104}, (
-        f"the argv probe was asked only about {sorted(probed)}; the filter is "
-        "then untested for the pids the host-wide population contributes"
-    )
-    assert cmds  # the population is what `probed` was drawn from
-
-
-def test_session_redis_pids_is_unmeasured_when_the_session_root_is_unresolvable(
-        monkeypatch):
-    """An unresolvable session root is UNMEASURED — None, never "all ours".
-
-    `scan_root()` raises `SharedTmpdirScanError` when the isolation is not
-    installed or the root is not private (#3752). That raise used to escape
-    from the UNGUARDED half of `_redis_residue_snapshot` (`session_redis_pids`
-    opens with `os.path.realpath(scan_root())`), i.e. out of a fixture
-    FINALISER — and `FixtureDef.finish` re-raises a finaliser's exception as a
-    teardown error on the test, so a hygiene sweep would have ERRORed every
-    test in the module instead of reaping nothing.
-    """
-    import tests._tmpdir_hygiene as hygiene
-
-    def _boom() -> str:
-        raise SharedTmpdirScanError("no session temp isolation installed")
-
-    monkeypatch.setattr(hygiene, "scan_root", _boom)
-    assert session_redis_pids() is None
-    assert _redis_residue_snapshot() is None, (
-        "the reviewed guard covered the dirs read but not the pid read; both "
-        "halves must report 'unmeasurable' rather than raise out of teardown"
-    )
-
-
-def test_session_redis_pids_is_unmeasured_when_a_probe_fails(monkeypatch):
-    """None — never an empty set: a delta against an unmeasured baseline is
-    the whole process table (the fail-open that made the old test_reaper
-    fixture degenerate into the host-wide pkill its docstring forbids)."""
-    from tortoise import embedded_reaper
-
-    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
-                        lambda: None)
-    assert session_redis_pids() is None
-
-    root = os.path.realpath(scan_root())
-    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
-                        lambda: [7])
-    monkeypatch.setattr(embedded_reaper, "_batch_cmdlines_or_none",
-                        lambda pids: None)
-    assert session_redis_pids() is None
-
-    # a COMPLETED probe that found nothing is a measurement, not a failure
-    monkeypatch.setattr(embedded_reaper, "_pgrep_redis_servers_or_none",
-                        lambda: [])
-    assert session_redis_pids() == set()
-    assert root  # the private root is what the filter is keyed on
-
-
-def test_session_residue_reaps_only_this_sessions_servers(monkeypatch):
-    """End-to-end through the fixture's own path (`_redis_residue_snapshot`,
-    which goes through `session_redis_pids`): a FOREIGN pid that appeared
-    during the test is not signalled, even though the host-wide delta holds it."""
-    root = os.path.realpath(scan_root())
-    population = {
-        101: f"/x/redislite/bin/redis-server unixsocket:{root}/tmpbefore/redis.socket",
-    }
-    _fake_argv_probe(population, monkeypatch)
-    killed: list[int] = []
-    residue = SessionRedisResidue(
-        kill=killed.append,
-        alive=lambda pid: False,
-    )
-    assert residue.measurable
-    population.update({
-        201: f"/x/redislite/bin/redis-server unixsocket:{root}/tmpours/redis.socket",
-        202: "/x/redislite/bin/redis-server unixsocket:/tmp/tt_other/tmptheirs/redis.socket",
-    })
-    residue.reap()
-    assert killed == [201], (
-        "only pid 201 (this session's new server) may be signalled — 202 is a "
-        "concurrent run's server that appeared in the same window, and 101 "
-        "predates the test. The pre-fix host-wide delta signalled {201, 202}."
-    )
-
-
-def test_session_residue_reaps_nothing_when_the_baseline_is_unmeasured():
-    """An unmeasurable baseline cleans NOTHING (fail-CLOSED).
-
-    The pre-fix test_reaper fixture swallowed the probe error into an empty
-    baseline, so a `pgrep` timeout on a loaded runner turned that test's
-    teardown into a SIGTERM of every redislite server on the host.
-    """
-    killed: list[int] = []
-    residue = SessionRedisResidue(
-        snapshot=lambda: None,
-        kill=killed.append,
-        alive=lambda pid: False,
-    )
-    assert not residue.measurable
-    residue.reap()
-    assert killed == []
-
-
-def test_session_residue_reaps_nothing_when_the_reread_is_unmeasured():
-    """A failed AFTER read must not be read as "everything went away"."""
-    reads = [({1}, set()), None]
-    killed: list[int] = []
-    residue = SessionRedisResidue(
-        snapshot=lambda: reads.pop(0),
-        kill=killed.append,
-        alive=lambda pid: False,
-    )
-    residue.reap()
-    assert killed == []
-
-
-def test_session_residue_teardown_never_raises():
-    """`reap()` runs in a fixture FINALISER, so it must never propagate.
-
-    pytest's `FixtureDef.finish` collects a finaliser's exception and
-    re-raises it as a teardown error attached to the test, so an escalatable
-    read failure here errors EVERY test in the module — the exact consequence
-    `SessionRedisResidue`'s own docstring names for a mismatched hook arity,
-    and the reason both pre-PR teardown bodies ended in
-    `except Exception: pass`. The contract is unchanged: an unmeasurable read
-    reaps NOTHING.
-    """
-    reads = [({1}, set()), KeyError("the argv table vanished mid-teardown")]
-
-    def _snapshot():
-        value = reads.pop(0)
-        if isinstance(value, Exception):
-            raise value
-        return value
-
-    killed: list[int] = []
-    residue = SessionRedisResidue(
-        snapshot=_snapshot, kill=killed.append, alive=lambda pid: False)
-    residue.reap()  # must NOT raise out of the finaliser
-    assert killed == [], "an unmeasurable re-read must reap nothing"
-
-
-def test_session_residue_invokes_the_kill_hook_with_exactly_one_argument(
-        monkeypatch):
-    """The hook contract is ``kill(pid)``, pinned with a STRICT one-parameter
-    callable — the shape both real injections have.
-
-    Why this is not pedantry: `reap()` runs from a fixture's FINALISER, so a
-    mismatched arity is not a skipped cleanup — it raises `TypeError` after
-    every test in the module, turning the whole file into errors. And why the
-    hook is a plain `def` rather than a `lambda pid, sig: ...`: a permissive
-    two-parameter lambda would ACCEPT a two-argument caller and hide exactly
-    the breakage this pins.
-    """
-    root = os.path.realpath(scan_root())
-    population = {
-        101: f"/x/redislite/bin/redis-server unixsocket:{root}/tmpbefore/redis.socket",
-    }
-    _fake_argv_probe(population, monkeypatch)
-    calls: list[tuple[int, ...]] = []
-
-    def kill(*args):  # records the arity the caller used
-        calls.append(args)
-
-    residue = SessionRedisResidue(kill=kill, alive=lambda pid: False)
-    population[201] = (
-        f"/x/redislite/bin/redis-server unixsocket:{root}/tmpours/redis.socket")
-    residue.reap()
-    assert calls == [(201,)], (
-        f"reap() called the kill hook as {calls}; the contract both real "
-        "injections implement is kill(pid) — one positional argument"
-    )
-
-    # the DEFAULT hook must satisfy the same contract, or the two fixtures that
-    # take the default (test_reaper, and any future caller) break the same way
-    for hook in (_terminate_pid, _pid_running):
-        params = [
-            p for p in inspect.signature(hook).parameters.values()
-            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-        ]
-        assert len(params) == 1, (
-            f"{hook.__name__} must take exactly one positional argument "
-            f"(got {[p.name for p in params]}) so it fits reap()'s contract"
-        )

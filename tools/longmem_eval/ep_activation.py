@@ -154,8 +154,7 @@ _COUNT_POINTS_WITH_EP = (
 # additional exclusion power" — here it would do the opposite, absorbing legacy
 # turn EVIDENCE into the belief denominator (review cycle 2, P1).
 # Residual, named rather than absorbed: a kind-``event`` point with NEITHER flag
-# (a demo-seeded graph populated before #10000,
-# ``tortoise/hosted_api.py::_seed_demo_graph``) is counted as belief-eligible.
+# (the demo seed, ``tortoise/hosted_api.py:12173``) is counted as belief-eligible.
 # Excluding it needs the content-shape decision the repo owns in
 # ``_TURN_SHAPE_FILTER``, not a second predicate here.
 _SUBSTRATE_PREDICATE = (

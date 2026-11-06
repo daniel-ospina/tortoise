@@ -1029,42 +1029,6 @@ def test_a_backlogged_queue_has_no_action_so_it_exits_0_and_is_warned_not_red():
     assert health.starves_pr is False
 
 
-def test_delays_pr_is_the_superset_a_per_pr_repair_must_ask():
-    """⭐ P1 (review): one flag cannot answer two questions, so there are two.
-
-    `starves_pr` must stay FALSE for `PR-BACKLOGGED` — it asserts the absence of any
-    executing PR run, and this state has PR CI running. But a caller deciding whether a
-    per-PR action could SHORTEN the wait (`tools/ci_check_repair.py`'s cancel-then-rerun)
-    is asking about congestion, which `PR-BACKLOGGED` witnesses: the wait is the queue's,
-    and a cancel discards the queue position the run had reached. Keying that decision
-    on `starves_pr` left the destructive act available in exactly the state the repair
-    tool's own report cites (`CI: OK(queued=60, pr_running=2, pr_queued=56)`).
-    """
-    backlogged = classify(starving_pr_runs(20, age_seconds=9000),
-                          in_progress=serving_pr_runs(1))
-    assert backlogged.verdict == Q.PR_BACKLOGGED
-    assert backlogged.starves_pr is False, "PR CI IS executing — the absence is false"
-    assert backlogged.delays_pr is True, "... and PR work IS waiting behind the queue"
-
-    # The two starvation verdicts are in both.
-    flood = classify(flood_queued(12) + starving_pr_runs(9))
-    assert flood.verdict == Q.FLOOD and flood.delays_pr is True
-    assert flood.starves_pr is True
-    # A quiet queue, an unmeasured one, and an unreadable one are in NEITHER: an
-    # unmeasured wait is not a measured-congested one.
-    assert classify(flood_queued(4)).delays_pr is False
-    assert classify(flood_queued(4), truncated=True).delays_pr is False
-    unknown = Q.QueueHealth(
-        verdict=Q.UNKNOWN, queued_total=0, in_progress_total=0,
-        dominant_workflow=None, dominant_queued=0, pr_running=0, pr_queued=0,
-        oldest_pr_queued_age_seconds=None,
-    )
-    assert unknown.delays_pr is False
-    assert Q.PR_BACKLOGGED not in Q.STARVING_VERDICTS, (
-        "folding it into the starvation set would make the per-PR report claim CI is "
-        "not running about a repo where it demonstrably is")
-
-
 def test_a_pr_backlog_inside_the_wait_budget_is_ok():
     """The false-alarm bound: a busy queue that starts PR work promptly is healthy."""
     health = classify(starving_pr_runs(20, age_seconds=1800),

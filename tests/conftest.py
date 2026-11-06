@@ -716,64 +716,6 @@ def _no_ambient_record_arming(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_record_refusal():
-    """#10648 review P2: the record's refusal STATE is process state, never ambient.
-
-    `_record_health` folds ``monitoring.record_refusing()`` into `record.ok`, so
-    ``health()``'s ``status`` reads ``degraded`` for ``RECORD_REFUSAL_WINDOW_
-    SECONDS`` (300 s — longer than a whole shard) after ANY counted refusal in
-    the same process. Two files that COUNT a refusal and four legs in
-    ``tests/test_backup_watcher_health.py`` that assert ``status == "ok"`` through
-    the REAL block are registered on the same ``api``/``core`` surfaces, so
-    before this fixture existed those legs asserted "no earlier test tripped the
-    seam" — an ordering dependency between test FILES, not a property of the
-    watcher block.
-
-    Three pieces of process state are cleared, and they are different facts:
-
-    * the REFUSAL STAMP the window verdict is read from (#10185) — clearing a
-      counter does NOT clear it;
-    * the CUMULATIVE counter, per reported reason through the public
-      ``remove(reason)``, so a reason added later is cleared too rather than
-      silently re-introducing the bleed;
-    * …on BOTH sides, because a leg that stamps a refusal must not hand it to the
-      next one either (the per-file copies this replaces cleared at setup only
-      in ``test_9548``, which is exactly how the stamp outlived its file).
-
-    Production never calls ``clear_record_last_refusal`` (test-only by contract):
-    the stamp is what makes a refusal observable. Resolved through
-    ``sys.modules``, so an un-imported monitoring module costs nothing — and if
-    it is not imported, no refusal can exist.
-    """
-    _clear_record_refusal_state()
-    yield
-    _clear_record_refusal_state()
-
-
-def _clear_record_refusal_state() -> None:
-    """Clear the record seam's process-global refusal state (both facts)."""
-    import contextlib
-    import sys
-
-    monitoring = sys.modules.get("tortoise.monitoring")
-    if monitoring is None:
-        return
-    monitoring.clear_record_last_refusal()
-    # The snapshot is READ to enumerate the reasons, and one leg deliberately
-    # patches it to raise (`test_a_failing_counter_snapshot_does_not_fail_open`).
-    # Isolation hygiene must never be the thing that errors: this teardown runs
-    # before a later-created `monkeypatch` is undone, and a raise here would
-    # report that leg as an ERROR for a reason unrelated to what it asserts.
-    try:
-        reasons = list(monitoring.record_write_failure_counts())
-    except Exception:  # a snapshot this test broke on purpose
-        return
-    for reason in reasons:
-        with contextlib.suppress(KeyError):  # already gone — nothing to do
-            monitoring.RECORD_WRITE_FAILURE_COUNT.remove(reason)
-
-
-@pytest.fixture(autouse=True)
 def _fresh_commit_ingest_budget():
     """#4051: start every test with an empty per-org commit ingest window.
 

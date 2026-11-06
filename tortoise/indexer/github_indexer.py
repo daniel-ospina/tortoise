@@ -70,13 +70,11 @@ _PAGE_SIZE = 100
 #: writes that ``hosted_api._run_indexing`` used to run on the loop.
 #:
 #: Why a DEDICATED pool and not ``asyncio.to_thread``: that seam submits to the
-#: loop's SHARED default executor, where ~160 other ``to_thread`` sites run. A
-#: walk holds a worker almost continuously for a whole job, and prod's 2 vCPU
-#: gives that pool ``min(32, cpu+4) == 6`` workers — so a multi-repo run starves
-#: every other tenant of the pool. (#10618 removed the auth path's per-request
-#: hooks — ``first_api_call`` and ``_abuse_post_auth`` — from that pool, which
-#: removes the sharpest example, not the starvation path: the pool is still
-#: ``min(32, cpu+4)`` with an unbounded wait.) The doctrine is the one stated at
+#: loop's SHARED default executor, where the auth middleware's abuse hooks
+#: (``_abuse_post_auth`` et al.) and ~160 other ``to_thread`` sites run. A walk
+#: holds a worker almost continuously for a whole job, and prod's 2 vCPU gives
+#: that pool ``min(32, cpu+4) == 6`` workers — so a multi-repo run starves
+#: every other tenant of the pool. The doctrine is the one stated at
 #: ``hosted_api._CAPTURE_EXECUTOR`` (#3060): long or stallable work gets its
 #: OWN pool, so it can only ever starve itself.
 #:

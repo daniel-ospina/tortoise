@@ -183,7 +183,7 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
         f"[{mode}] the extraction ran on {seen['thread']!r}, not the dedicated "
         f"capture pool — long stalls there would occupy the SHARED default "
         f"executor's workers and starve every other ``to_thread`` caller out "
-        f"of it (#3060)")
+        f"of it (the auth middleware's abuse hooks among them) (#3060)")
 
 
 def test_capture_points_estimate_reads_off_the_event_loop(client, monkeypatch):

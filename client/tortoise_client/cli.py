@@ -148,30 +148,11 @@ def _cmd_call(args: argparse.Namespace) -> int:
     if getattr(result, "is_error", None):
         print(json.dumps({"is_error": True, "result": str(result)}, indent=2))
         return _EXIT_ERR
-    # The PAYLOAD is `content[0]`, and extra blocks are appended LAST by the
-    # dispatch seam (a retired-name warning, the #10084 graph disclosure). Joining
-    # EVERY block and parsing the result is not a contract: it turns valid JSON
-    # into "Extra data: line 1 …" for every scripted caller of a write tool.
-    #
-    # `content[0]` and NOT `structured_content`: for a tool declaring
-    # `x-fastmcp-wrap-result` the structured payload is the ENVELOPE
-    # (`{"result": …}`) while `content[0]` is the tool's own answer — preferring
-    # the former would silently change this command's output shape for 12 read
-    # tools that never receive a disclosure block at all.
-    blocks = list(getattr(result, "content", None) or [])
-    text = getattr(blocks[0], "text", "") if blocks else ""
+    text = "".join(getattr(b, "text", "") for b in (result.content or []))
     try:
         print(json.dumps(json.loads(text), indent=2))
     except json.JSONDecodeError:
         print(text)
-    # Every block AFTER the payload is a disclosure the caller must not lose —
-    # a retired-name warning (#3883), the #10084 graph resolution. stdout stays
-    # payload-only so `| jq` keeps working; the rest goes to stderr, which is
-    # what a human reads and what a pipeline can still capture with 2>&1.
-    for extra in blocks[1:]:
-        tail = getattr(extra, "text", "")
-        if tail:
-            print(tail, file=sys.stderr)
     return _EXIT_OK
 
 

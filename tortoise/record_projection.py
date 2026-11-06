@@ -170,7 +170,6 @@ __all__ = [
     "TURNS_SNAPSHOT_OPTIONAL_KEYS",
     "TURNS_SNAPSHOT_UNATTESTABLE_KEYS",
     "RecordProjectionError",
-    "RecordStatementError",
     "RefusedJournalOperation",
     "ReplayReport",
     "UnknownJournalRecordType",
@@ -262,14 +261,6 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # post-move one.
     "20261027000001_record_semantic_id_key.sql",
     "20261029000001_record_point_cache_tier.sql",
-    # #10620 — R4's remaining half: `public.point.search_keys` NARROWED to
-    # `text`, because the producers emit the graph's flat space-joined STRING
-    # and a `jsonb` column refused every record carrying one (302 rows dropped
-    # while /health read ok). It contributes no COLUMN and no refusal, and it is
-    # listed anyway, per the registry rule above: `pyproject.toml`'s
-    # `*_record_*.sql` glob ships it, so an unlisted file is invisible to
-    # `tests/test_9231_record_migrations_trigger.py`'s reverse direction.
-    "20261102000002_record_point_search_keys_text.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -679,33 +670,6 @@ JOURNAL_EVENT_TYPES: frozenset[str] = frozenset({
 
 class RecordProjectionError(Exception):
     """Base class — a record projection failure is loud, never a warning."""
-
-
-class RecordStatementError(RecordProjectionError):
-    """One PLAN statement failed to execute — naming WHICH one, and why (#10620).
-
-    ``replay()`` used to let the driver's exception escape unadorned, and the
-    only consumer that logs it (`record_writer.RecordWriter.write`) formatted
-    ``type(exc).__name__`` — so a live deployment reported
-    ``the record write failed … (InvalidTextRepresentation)`` and nothing else.
-    That is exactly enough information to know a row was lost and NOT enough to
-    know which one or why: 302 point records were dropped by ONE column
-    (``public.point.search_keys`` declared ``jsonb``, producer emitting a flat
-    string) over five hours, and the deployment's own log could not name it.
-
-    The message therefore carries, all of it derived from the statement that
-    actually ran rather than from a guess: the driver's own ``str(exc)``
-    verbatim, the statement's ordinal, its verb and table, and the columns it
-    wrote with their (bounded) values. ``str(exc)`` is the half that names the
-    FAULT (``invalid input syntax for type json``); the columns are the half that
-    names the SUBJECT. Neither alone answers "which column, which row, why".
-
-    ⛔ THE LINE IS COMPOSED TO FIT THE WRAPPING CONSUMER'S BUDGET
-    (:func:`_failure_line`), because `record_writer._bounded_cause` keeps the
-    HEAD of a message: a line over its limit loses the TAIL, which is where this
-    method puts the driver's fault clause — the half that says what went wrong
-    (#10648 review P2).
-    """
 
 
 class UnknownJournalRecordType(RecordProjectionError):
@@ -1642,15 +1606,6 @@ class Statement:
     sql: str
     params: tuple[Any, ...]
 
-    #: The columns this statement writes, in `params` order — or ``None`` when
-    #: they cannot be paired off positionally. The upsert's key may be a
-    #: database-computed :class:`_SqlExpr` (#9956): a scalar subquery carrying its
-    #: OWN parameter inside the `VALUES` list, which keeps the COUNT equal while
-    #: shifting every later pairing by one. A builder that knows this therefore
-    #: declines to state the pairing (#10620, `_statement_attribution`), and a
-    #: failure line names the columns without inventing their values.
-    columns: tuple[str, ...] | None = None
-
     def render(self) -> str:
         """A readable one-liner for logs and hover-less debugging."""
         return f"{self.sql} -- {self.params!r}"
@@ -1764,11 +1719,7 @@ def _split_properties(
             # failure Interface A forbids.
             tail[prop] = value
         elif column in cols:
-            resolved = _record_column_value(table, column, value)
-            if resolved is _OMIT:
-                # A blank derived form contributes no column — see `_OMIT`.
-                continue
-            col_values[column] = resolved
+            col_values[column] = value
         elif prop in refused_here or column in refused_here:
             # DERIVED/VOLATILE — the carve-out. Dropping is the correct
             # mutation; storing it would make a recomputed value authority.
@@ -1776,64 +1727,6 @@ def _split_properties(
         else:
             tail[prop] = value
     return col_values, tail
-
-
-#: `public.point.search_keys` is TEXT, and the graph's canonical form for it is
-#: the flat space-joined STRING (`projection/entities.py::flatten_search_keys_prop`,
-#: the ONE flattener the write path runs — `PointAdded` journal snapshots carry
-#: its output). A snapshot taken from a RAW graph value can still carry a LIST
-#: (`sparse.py`: "raw graph values may still be arrays"), and once #10620 narrowed
-#: the column to `text` a list would otherwise reach `_jsonb_or_scalar` and be
-#: serialized into it as `["a", "b"]` — storing a SECOND representation of a datum
-#: whose one form is `a b`. That is exactly the failure #10620 exists to end, so
-#: the record boundary flattens with the same rule instead of serializing.
-#: The rule is restated here (not imported) because this module deliberately has
-#: NO imports beyond the standard library — it must be loadable without the graph
-#: stack — and
-#: `tests/test_record_searchkeys_10620.py::test_the_record_flattener_agrees_with_the_graph_flattener`
-#: pins the two implementations together, presence included, so they cannot drift.
-class _Omit:
-    """A property with no column value at all — writes NOTHING, not NULL.
-
-    Distinct from ``None``, which is a VALUE: the upsert's
-    ``ON CONFLICT … SET search_keys = EXCLUDED.search_keys`` would copy a NULL
-    over a value an earlier record landed, while the graph's fold MERGES props
-    (`SET n += $props`) and the graph's own flattener POPS a blank key — so the
-    two stores would disagree exactly where this module exists to keep them
-    equal (#10620 review P2).
-    """
-
-
-_OMIT = _Omit()
-
-
-def _record_column_value(table: str, column: str, value: Any) -> Any:
-    """The value the RECORD's column takes, for the one property that has a rule."""
-    if table == "point" and column == "search_keys" and isinstance(value, Mapping):
-        # ⚠️ A DELIBERATE DIVERGENCE from the graph, and it is stated rather than
-        # hidden: `flatten_search_keys_prop` has no Mapping arm (it flattens only
-        # list/tuple), so the fold stores a dict-valued `search_keys` AS-IS while
-        # this boundary REFUSES the record. The reasons are asymmetric on purpose
-        # — `_jsonb_or_scalar` would `json.dumps` the dict into the now-`text`
-        # column, which is the SECOND representation #10620 exists to remove, and
-        # this module's standing rule is that a disagreement stays visible rather
-        # than being coerced. A dict-valued `search_keys` is unreachable from
-        # every producer today (the extractor emits a list, the fold a string);
-        # the refusal is the guard for the day that stops being true.
-        raise RecordProjectionError(
-            "point.search_keys arrived as a MAPPING — the graph's form is the flat "
-            "space-joined string (projection/entities.py::"
-            "flatten_search_keys_prop flattens list/tuple only and leaves a dict "
-            "as-is, which this boundary will not copy into a text column as JSON). "
-            "Refusing rather than serializing a second representation."
-        )
-    if table == "point" and column == "search_keys" and isinstance(value, (list, tuple)):
-        flat = " ".join(str(item).strip() for item in value if str(item).strip())
-        # The graph POPS a blank list (`flatten_search_keys_prop`: "an empty/blank
-        # list pops the key … so a blank list never clears an existing value"),
-        # and its fold merges. So a blank form contributes NO column here either.
-        return flat if flat else _OMIT
-    return value
 
 
 def _node_table(node: Node, columns: Mapping[str, frozenset[str]]) -> str:
@@ -2006,13 +1899,7 @@ def _upsert_statement(
         f"VALUES ({placeholders}) "
         f"ON CONFLICT (org_id, graph_id, node_key) DO UPDATE SET {updates}"
     )
-    # A `_SqlExpr` anywhere in the VALUES list adds its own placeholders, so the
-    # column list no longer pairs off against `params` positionally. Stating a
-    # pairing then would name the WRONG column's value on a failure line, which
-    # is worse than naming none (#10620).
-    exact = not isinstance(key, _SqlExpr) and not any(
-        isinstance(value, _SqlExpr) for value in col_values.values())
-    return Statement(sql, tuple(params), tuple(columns) if exact else None)
+    return Statement(sql, tuple(params))
 
 
 def _patch_statement(
@@ -2044,7 +1931,7 @@ def _patch_statement(
         f"UPDATE public.{node.table} SET {', '.join(sets)} "
         f"WHERE org_id = %s AND graph_id = %s AND {predicate}"
     )
-    return Statement(sql, tuple(params), tuple(col_values) + (("props",) if tail else ()))
+    return Statement(sql, tuple(params))
 
 
 def _delete_statement(
@@ -4984,185 +4871,6 @@ def scope_connection(conn: Any, org_id: str) -> Any:
     return cursor
 
 
-#: How much of ONE parameter a failure line carries. Long enough to identify a
-#: value (a node key, a space-joined search-key string, a small object), short
-#: enough that a `content` or `props` parameter cannot fill the log line.
-_ATTRIBUTION_VALUE_LIMIT = 80
-
-#: Columns whose VALUE is the user's own content, withheld from a failure line.
-#: The record's log is an application warning log; the DSN posture on the same
-#: seam is "fingerprinted, never printed", and the same reasoning applies to a
-#: conversation turn. The COLUMN NAME is still printed — that is what names the
-#: subject of the failure — with its length instead of its text (#10620 review
-#: P2: a failing point insert logged the first 80 characters of `content` and
-#: the whole `props` JSON).
-#: Every one of these is a REAL column of a record table (`table_columns()`),
-#: asserted by `tests/test_record_searchkeys_10620.py::test_content_columns_are_
-#: real_record_columns` so the next content column cannot be left out of it.
-_CONTENT_COLUMNS: frozenset[str] = frozenset({
-    "content", "quote", "props", "narrative", "summary", "story_arc",
-    "embedding", "embedding_verbatim",
-    # `source._search_text` — the derived summary of a captured session or a
-    # document's title+summary+topics: the SAME datum as `summary`, which is
-    # already withheld, so printing it here would leak the value through the
-    # column next door (#10620 review cycle 3, P2).
-    "_search_text",
-    # …and the other two components of that same datum. Naming `summary` while
-    # printing `title`/`topics` would withhold nothing: the source row's indexed
-    # text is built from all three (#10620 review cycle 4, P2).
-    "title", "topics",
-    # `point.search_keys` is the SAME datum one table over, and it is the user's
-    # own words: `commit_schema` declares it E3's "2-4 aliases + verbatim
-    # tokens", and `point_identifier_aliases` derives it from `content`
-    # ∪ `search_keys`. So the attribution withholding `content` while printing
-    # this column leaks the turn through the column next door — the incident's
-    # own line (`search_keys=err4032 release`) is extracted content tokens in an
-    # operator log (#10620 review cycle 5, P2). The line still NAMES the column
-    # and its length, which is what makes a refusal diagnosable.
-    "search_keys",
-})
-
-#: How much of the DRIVER's message a failure line carries. The driver names the
-#: fault in the first clause and then quotes a LINE of our own SQL, which the
-#: attribution already states far better than a truncated excerpt can.
-_ATTRIBUTION_EXC_LIMIT = 200
-
-#: The WHOLE failure line's budget in characters, and the number
-#: ``record_writer._bounded_cause`` uses as its own default — ONE number, in one
-#: place, because the two halves have to be budgeted TOGETHER (#10648 review P2).
-#:
-#: The wrap's limit used to be independent of what the projection composed, and
-#: `_bounded_cause` keeps the HEAD of a message. With the driver's text at the
-#: TAIL, a wide statement (a point upsert populates 21 columns — a measured
-#: 488-char attribution) produced a line over the wrap's 400, and the first thing
-#: truncated away was the FAULT: the wrap returned 400 chars in which `invalid
-#: input syntax for type json` was absent, which is the one half this attribution
-#: exists to deliver. The line is now COMPOSED to fit this budget — the driver
-#: clause is bounded on its own, the statement/columns take what is left, and a
-#: long column list is shortened (with an explicit `…` marker) rather than the
-#: fault — so the wrap never truncates a line the projection composed.
-ATTRIBUTION_LINE_LIMIT = 600
-
-#: Between the two halves of a failure line.
-_FAILURE_SEP = " — "
-
-
-def _failure_line(attribution: str, driver: str) -> str:
-    """``<subject> — <driver>``, composed to FIT the wrap's own budget.
-
-    Both halves are bounded here, together, against
-    :data:`ATTRIBUTION_LINE_LIMIT`: the driver clause on its own
-    (:data:`_ATTRIBUTION_EXC_LIMIT`), then the statement/columns against what is
-    left. Nothing downstream has to re-budget a line this function produced, and
-    a column list longer than the room left for it is cut with a `…` marker
-    instead of the fault clause disappearing (#10648 review P2).
-    """
-    driver = _bounded(driver, _ATTRIBUTION_EXC_LIMIT)
-    budget = ATTRIBUTION_LINE_LIMIT - len(driver) - len(_FAILURE_SEP)
-    if len(attribution) > budget:
-        # One character of the budget is the truncation marker itself.
-        attribution = f"{attribution[:max(budget - 1, 0)]}…"
-    return f"{attribution}{_FAILURE_SEP}{driver}"
-
-#: The three shapes the plan emits (`_upsert_statement`, `_patch_statement`,
-#: `_delete_statement`). Anything else is named by index rather than
-#: mis-attributed to a table it does not write.
-_STATEMENT_HEAD_RE = re.compile(
-    r"^(?P<verb>INSERT INTO|UPDATE|DELETE FROM)\s+public\.(?P<table>\w+)")
-_INSERT_COLUMNS_RE = re.compile(
-    r"^INSERT INTO\s+public\.\w+\s*\((?P<columns>[^)]*)\)")
-_UPDATE_SETS_RE = re.compile(
-    r"^UPDATE\s+public\.\w+\s+SET\s+(?P<sets>.*?)\s+WHERE\s", re.S)
-#: One `column = <expression>` item of an UPDATE's SET list — the LHS only.
-#: A value may be a quoted literal holding a comma, which splits into a part
-#: that matches nothing and is dropped rather than mis-named.
-_SET_ASSIGNMENT_RE = re.compile(r"\s*(?P<column>\w+)\s*=")
-
-
-def _bounded(text: str, limit: int) -> str:
-    """`text`, newline-escaped and truncated to `limit` characters."""
-    flat = text.replace("\n", "\\n")
-    if len(flat) <= limit:
-        return flat
-    return f"{flat[:limit]}…({len(text)} chars)"
-
-
-def _column_pair(column: str, value: Any) -> str:
-    """`column=value` for an identifying column, `column=<N chars>` for content.
-
-    The VALUE is what makes a failure line diagnosable (a node key, a short
-    search-key string, a boolean) — but a conversation turn is not this log's to
-    print, and neither is the `props` tail. Those are named, never quoted.
-    """
-    if column in _CONTENT_COLUMNS:
-        try:
-            length = len(value) if hasattr(value, "__len__") else len(str(value))
-        except Exception:  # pragma: no cover — a value whose len() raises
-            return f"{column}=<withheld>"
-        return f"{column}=<{length} chars withheld>"
-    return f"{column}={_bounded(str(value), _ATTRIBUTION_VALUE_LIMIT)}"
-
-
-def _statement_attribution(statement: Statement, index: int, total: int) -> str:
-    """Name what a failed statement TARGETED: verb, table, columns, entity key.
-
-    Derived from the statement that actually ran, never from the record that
-    produced it — the two can differ (one record emits several statements, a
-    patch emits a different column set than the upsert before it), and the
-    question an operator is answering is "which statement refused the row".
-
-    Columns are paired with their parameters ONLY when the BUILDER said the
-    pairing is exact (`Statement.columns`, which the upsert declines to state
-    when its key is a database-computed `_SqlExpr`). A count comparison is not
-    enough: a scalar-subquery key adds its own placeholder inside the `VALUES`
-    list, so the counts stay equal while every later value shifts by one — a
-    mis-paired line would report the WRONG column's value, which is worse than
-    reporting none (#10620).
-    """
-    head = _STATEMENT_HEAD_RE.match(statement.sql)
-    if head is None:
-        return (f"record statement {index}/{total} (unrecognised shape; "
-                f"{_bounded(statement.sql.strip().splitlines()[0] if statement.sql.strip() else '', 120)})")
-    verb, table = head.group("verb"), head.group("table")
-    parts = [f"record statement {index}/{total}: {verb} public.{table}"]
-    params = statement.params
-    if statement.columns is not None and len(statement.columns) <= len(params):
-        parts.append("columns(" + ", ".join(
-            _column_pair(column, params[offset])
-            for offset, column in enumerate(statement.columns)) + ")")
-    else:
-        # A `_SqlExpr` (or a shape no builder declared): name the columns the SQL
-        # itself spells, and the parameter count, and pair NOTHING.
-        #
-        # Both verbs are covered. `_UPDATE_SETS_RE` was added with the INSERT arm
-        # and left UNREFERENCED, so an unattributed UPDATE fell through to a bare
-        # `params=N` — no column names at all — which is exactly the case the
-        # regex was written for (#10620 review, finding 3).
-        #
-        # ⛔ The UPDATE arm is REACHABLE, not speculative: `_tier_demote_statement`
-        # (the record's half of a graph-tier removal) emits
-        # `UPDATE public.point SET cache_tier = %s …` and states NO `columns`,
-        # because that statement has no builder-declared pairing to state. So a
-        # failed tier demotion in the delete path was the one shape that named
-        # no column at all; `test_an_unattributed_update_names_its_set_column`
-        # drives that real builder, not a hand-built statement.
-        names: list[str] = []
-        if verb == "INSERT INTO":
-            inserted = _INSERT_COLUMNS_RE.match(statement.sql)
-            if inserted is not None:
-                names = [c.strip().strip('"')
-                         for c in inserted.group("columns").split(",")]
-        elif verb == "UPDATE":
-            updated = _UPDATE_SETS_RE.match(statement.sql)
-            if updated is not None:
-                names = [assignment.group("column")
-                         for part in updated.group("sets").split(",")
-                         if (assignment := _SET_ASSIGNMENT_RE.match(part))]
-        parts.append(f"columns({', '.join(names)}) params={len(params)}"
-                     if names else f"params={len(params)}")
-    return " ".join(parts)
-
-
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
            position: bool = True) -> ReplayReport:
@@ -5269,22 +4977,8 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     # context the plan is applied in — plus the role gate that decides whether
     # the context can mean anything at all.
     cursor = scope_connection(conn, org_id)
-    total = len(plan)
-    for index, statement in enumerate(plan, start=1):
-        try:
-            cursor.execute(statement.sql, statement.params)
-        except Exception as exc:
-            # ⛔ ATTRIBUTION, NOT A BARE RE-RAISE (#10620). The caller's wrap
-            # (`RecordWriter.write`) used to name only the exception CLASS, so
-            # the record's own log could not say which statement, table or
-            # column refused a row. Raised here, where the failing statement is
-            # still in hand, and chained so the driver's traceback survives.
-            raise RecordStatementError(
-                _failure_line(
-                    _statement_attribution(statement, index, total),
-                    f"{type(exc).__name__}: {exc!s}",
-                )
-            ) from exc
+    for statement in plan:
+        cursor.execute(statement.sql, statement.params)
     report = ReplayReport(events=len(records), statements=0)
     for statement in plan:
         if _JOURNAL_INSERT_PREFIX in statement.sql:

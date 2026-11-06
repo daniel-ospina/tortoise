@@ -17,12 +17,7 @@ Sections
                 wording included: the name the served onboarding document
                 MENTIONS and its advertised replacement), vs TOOL_REGISTRY
   onboarding  — the canonical step ids, the completion gates, and what the
-                server can OBSERVE (vs. what only a client can record).
-                Imports `hosted_api` with the hosted `TORTOISE_API_KEY`
-                cleared (`_hosted_startup_guard_cleared`): that key is a
-                server-STARTUP precondition, and leaving it set (without a
-                `TORTOISE_SECRET_PEPPER`) made this section unmeasurable on
-                every box that exported it without a pepper
+                server can OBSERVE (vs. what only a client can record)
   packs       — step 2's "the default is catalog union + core": the THREE
                 resolution arms of `pack_state.resolved_pack_set` (driven
                 through the real function), the starter-set/catalog relation,
@@ -60,49 +55,6 @@ unmeasured: list[str] = []
 
 def row(step: str, premise: str, measured: str) -> None:
     rows.append((step, premise, measured))
-
-
-@contextlib.contextmanager
-def _hosted_startup_guard_cleared():
-    """Import `tortoise.hosted_api` as a LIBRARY, never as a server.
-
-    `tortoise/auth.py:28-38` raises at **import** time when `TORTOISE_API_KEY`
-    is set and `TORTOISE_SECRET_PEPPER` is unset. That is a STARTUP guard for
-    the hosted server (#67) — and a fleet cell exports exactly that key for its
-    MCP client, so the onboarding section's `from tortoise.hosted_api import
-    _CHECKPOINT_STEPS` raised there, the `onboarding` section was UNMEASURED
-    (rows 1 and 5a-5e never printed) and this probe exited 3. The documented
-    recipe (README.md → "Re-running the measurable half") therefore could not
-    reproduce `25 premises, 0 unmeasured sections` on any box that exports the key
-    without a pepper; the pins in `tests/test_9664_premise_census.py` were green
-    over it only because `tests/conftest.py:18` supplies a pepper the recipe does
-    not.
-
-    The remedy is the one `auth.py`'s own message prescribes for a non-server
-    process ("For local stdio, UNSET TORTOISE_API_KEY"), applied for the import
-    and restored in `finally`. The key is cleared UNCONDITIONALLY rather than
-    under a copy of the guard's condition: a copy is a second home for that
-    invariant, and when `auth.py`'s rule changes the copy goes stale silently
-    and this defect returns. Nothing measured reads the key — the step ids, the
-    three gates and `_CHECKPOINT_STEPS` are module constants, and measured
-    output is byte-identical with and without it.
-
-    Side effect, deliberate: on a box with no `TORTOISE_SECRET_PEPPER` — the box
-    that used to raise — `tortoise.auth` is imported on the dev-pepper fallback
-    and stays cached for the rest of the process (with a pepper set this import
-    is unchanged, since only the key is popped). No section reads `auth`, but a
-    future row that measures key hashing must run in its own process.
-
-    The class this only papers over at one call site — every other
-    `from tortoise.hosted_api import …` in a non-server process on such a box
-    still raises — is tracked in #10661, not fixed here.
-    """
-    key = os.environ.pop("TORTOISE_API_KEY", None)
-    try:
-        yield
-    finally:
-        if key is not None:
-            os.environ["TORTOISE_API_KEY"] = key
 
 
 # ── tools: the tool names the capstone's steps name ────────────────────────
@@ -165,8 +117,7 @@ def gates_containing(step_id: str) -> list[str]:
 
 
 def census_onboarding() -> None:
-    with _hosted_startup_guard_cleared():
-        from tortoise.hosted_api import _CHECKPOINT_STEPS
+    from tortoise.hosted_api import _CHECKPOINT_STEPS
     from tortoise.onboarding import state
 
     # Both clauses of row 1, measured separately: the org-create init fragment

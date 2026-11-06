@@ -10638,21 +10638,16 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                            for section in _failure_policy.LEG_BY_SECTION)
         _reason = f" ({_id['reason']})" if _id["reason"] else ""
         if _id["unresolved_total"]:
-            # ⛔ One sentence per FACT — two below, plus the residual arm — for a
-            # state nobody wrote one for, OR whose own sentence its counters
-            # refuse (three facts in all, this one counted)
-            # — and NONE of them asserts what a
-            # candidate's own `link_before_create` says: a candidate whose query
-            # was cut can still be folded onto a prior by S5 (`found: true`), so
-            # a sentence claiming its "record says UNRESOLVED" is a claim about a
-            # record this block never read. That wording was rejected in review
-            # and never shipped (#5095 review round 3), so do not reintroduce it
-            # and do not test for it as though it existed.
+            # ⛔ Two sentences, never one generalised over both, and NEITHER
+            # asserts what a candidate's own `link_before_create` says: a
+            # candidate whose query was cut can still be folded onto a prior by
+            # S5 (`found: true`), so "their record says UNRESOLVED" was a false
+            # claim about that candidate's record (#5095 review round 3).
             result.setdefault("warnings", []).append(
                 f"S3 identity {_id['state']}{_reason}: the existing-item lookup "
                 f"did not run for {_id['unresolved_total']} of {_denominator} "
                 f"candidate(s)")
-        elif _id["state"] == _failure_policy.LOOKUP_PARTIAL:
+        else:
             # The other shape, and it is ordinary rather than broken: the budget
             # can cut only the trailing STORY-TOPIC queries, which follow every
             # candidate query. Saying "the lookup did not run over the candidate
@@ -10662,77 +10657,6 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 f"S3 identity {_id['state']}{_reason}: part of the lookup did "
                 f"not run or did not complete, but every candidate's own query "
                 f"ran — no candidate was left unchecked")
-        elif (_id["state"] == _failure_policy.LOOKUP_UNRESOLVED
-                and _denominator == 0):
-            # ⛔ The guard is the SENTENCE's own precondition, not merely the
-            # state: the sentence claims this run "proposed no candidate whose
-            # identity it could have established", so it may only fire when
-            # there was no checkable candidate — `_denominator == 0`, i.e. none
-            # was admitted past S5's `if not raw: continue`. Without that clause
-            # a `degraded` search that still carried a per-candidate query log
-            # would reach this arm with a NON-zero denominator and assert a
-            # vacancy that is not there — the same claim-about-an-unrun-check
-            # defect, one input over (#10633 review, P2). No such producer
-            # exists today (`extract_session_v2` takes no `search`, and every
-            # `search_graph` degrade path pins `query_results: {"ran": [],
-            # "failed": []}`), so this is the invariant held locally rather than
-            # a behaviour change: every reachable arm-3 run already has a zero
-            # denominator, which the arm's own tests assert. A contradictory
-            # input now falls to the residual arm, which claims the state, the
-            # counter, and that no arm covers that state with those counters.
-            #
-            # ⛔ `unresolved` with a ZERO numerator is a THIRD fact, and it is
-            # reachable on the main path: the lookup did not run AT ALL (no graph
-            # client, an embedded backend, a first query that raised) and the run
-            # proposed no candidate whose own identity it could have established —
-            # an empty S2/S4 list, a list carrying only operators/retractions, or
-            # one whose entities/events/points all carry blank or whitespace-only
-            # text (`_identity_report` does not count those: `if not raw: continue`
-            # at :3135, S5's own admission test, so the most reachable SHAPE of
-            # this arm is a run that did propose candidates and had none of them
-            # checkable; omit that shape from this list and the comment reads as
-            # though only an empty run can get here — #10633 review, P3).
-            # The `partial` sentence above would then assert two things that
-            # never happened — that the budget cut something, and that a
-            # candidate's own query ran — i.e. exactly the
-            # claim-about-a-check-that-did-not-happen defect this change exists
-            # to remove, in the one channel an operator reads (#5095 review
-            # round 3).
-            result.setdefault("warnings", []).append(
-                f"S3 identity {_id['state']}{_reason}: the lookup did not run, "
-                f"and this run proposed no candidate whose identity it could "
-                f"have established")
-        else:
-            # ⛔ Deliberately NOT a catch-all that reuses one of the three
-            # sentences above: a state added to `failure_policy.LOOKUP_STATES`
-            # later would inherit a claim about a check nobody wrote for it, with
-            # nothing to notice it — the defect class this whole change removes.
-            # This arm claims only what it was handed, PLUS the fact that no arm
-            # covers it, and is LOUD rather than silent, per I2.
-            # ⛔ The counter is reported as PROVENANCE, never as coverage. Arm 1
-            # above consumes every non-zero numerator, so reaching this arm
-            # IMPLIES `unresolved_total == 0` — a "0 of N were not checked
-            # against the graph" clause would therefore assert UNIVERSAL coverage
-            # about a check this block never ran, for a state that is by
-            # construction not `resolved`. For a state nobody wrote a sentence
-            # for, a zero can equally mean "nothing was computed", so the number
-            # is printed as the value that was handed in and nothing more — the
-            # same distinction Prometheus/Grafana draw between a measured `0` and
-            # *no data* (#10633 review, P3).
-            # ⛔ The clause says "for THAT STATE WITH THESE COUNTERS", not "for
-            # that state": this arm serves TWO populations — a state nothing was
-            # written for, and a state whose own sentence exists but whose
-            # counters contradict it (`unresolved` with a zero numerator over a
-            # NON-zero denominator, which arm 3's guard refuses). Saying "no
-            # sentence for that state" is false for the second, because arm 3 IS
-            # that state's sentence and both artifacts this PR edits say so — a
-            # false claim about the code itself, in the arm written to avoid
-            # false claims (#10633 review round 9, P2).
-            result.setdefault("warnings", []).append(
-                f"S3 identity {_id['state']}{_reason}: this warning describes no "
-                f"sentence for that state with these counters; the run carries "
-                f"unresolved_total={_id['unresolved_total']} of "
-                f"{_denominator} candidate(s)")
     result["errors"] = errors
     if resolution_records:
         result["resolution"] = resolution_records   # D3 evidence surface

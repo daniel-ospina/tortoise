@@ -1209,8 +1209,8 @@ class TestServedContractCarriesTheRequiredCaveats:
 
 class TestRetentionReadsDoNotShareTheDefaultExecutor:
     """#3060 doctrine: long or stallable blocking work must NOT ride the loop's
-    shared default executor (it carries ~80 other `to_thread` sites). The fleet
-    walk and each per-org walk are
+    shared default executor (it carries ~80 other `to_thread` sites and the auth
+    middleware's abuse hooks). The fleet walk and each per-org walk are
     paginated control-plane HTTP round trips, so both go to the dedicated
     `_RETENTION_EXECUTOR` — the `_SCORECARD_EXECUTOR` precedent. The pool SIZE
     is also what bounds live threads, since cancelling the await does not stop

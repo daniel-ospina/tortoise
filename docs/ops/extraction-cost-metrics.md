@@ -102,15 +102,11 @@ carries the `[NOT additive]` marker.
   `invalid_token_captures` (a negative or non-integral stored count — rejected
   rather than truncated or sign-flipped, the reader half of `#5854`).
   `lower_bound` is true when any capture's figure is a floor.
-- **The durable per-team-per-month figure NOW has a reader (`#4051`; before it, none).**
+- **The durable per-team-per-month figure is written but not yet readable.**
   `metering_records.capture_tokens_in` / `capture_tokens_out` carry the extraction
-  token workload per org per metering window (`#5045`), and `metering.get_capture_usage(org_id)`
-  reads them back on BOTH substrates — `capture_calls`, `capture_tokens_in`,
-  `capture_tokens_out`, `capture_cost_usd` — degrading to a zero view and never raising.
-  The month-vs-window caveat still applies to the LABEL: the returned `period` is a
-  DERIVED `"YYYY-MM"` string, and the metering window it is derived from is not
-  necessarily a calendar month — read the returned `period_start` / `period_end` when
-  the distinction matters.
+  token workload per org per metering window (`#5045`), but no production reader
+  exposes them — `get_current_usage` reads write-ops only. Until a reader exists,
+  the per-team-per-month figure in a report is a window total, not a month.
 - **The percentiles are per SESSION, not per row.** `analytics_events` is
   append-only and a retried capture writes a second row for the same
   `session_id`; rows are summed per session first, so one capture is one sample.

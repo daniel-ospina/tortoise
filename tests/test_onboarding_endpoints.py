@@ -189,7 +189,7 @@ class TestPublicDemo:
 
     def test_demo_seed_records_write_ops(self, client):
         """#1922 metering: a successful demo seed records one write op with
-        the seeded :Point count (9 points + the _demo_sentinel). Uses a
+        the seeded node count (12 points + the _demo_sentinel). Uses a
         per-test unique team id so the docker-lane redirect derives a fresh
         per-path server graph (see test_demo_seed_402_at_cap)."""
         import uuid
@@ -213,13 +213,7 @@ class TestPublicDemo:
         assert rows, "expected a MeteringRecord after demo seed"
         write_ops, nodes_written = int(rows[0][0]), int(rows[0][1])
         assert write_ops == 1
-        # The metered value is the `:Point` census the seed actually wrote.
-        # ⛔ Was 13 (12 + _demo_sentinel) before #10000; the three `epi_turn*`
-        # turn nodes are gone (§9.1/D1 — the demo's episodic layer is its
-        # Session, and `_seed_demo_graph` reports `points` as the `:Point`
-        # count it writes, precisely so this meter cannot bill nodes that do
-        # not exist).
-        assert nodes_written == 10  # 9 seeded points + _demo_sentinel
+        assert nodes_written == 13  # 12 seeded points + _demo_sentinel
 
 
 # ── Session recording toggle ────────────────────────────────────

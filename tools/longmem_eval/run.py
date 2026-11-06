@@ -146,7 +146,6 @@ from .retrieve import (
     DEFAULT_EVIDENCE_BOOST_SOURCE,
     DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
-    DEFAULT_POOL_SESSION_CAP,
     DEFAULT_REINJECTION_TOTAL_ITEMS,
     DEFAULT_RETRIEVAL_BUDGET_MS,
     DEFAULT_TR_SESSION_COMPLETION_PER_SESSION,
@@ -545,64 +544,6 @@ def _resolve_reinjection_total_cap(arm_on: bool,
         return _clamp_int(explicit, DEFAULT_REINJECTION_TOTAL_ITEMS)
     return _env_int("TORTOISE_LME_REINJECTION_TOTAL_CAP",
                     DEFAULT_REINJECTION_TOTAL_ITEMS)
-
-
-def _resolve_floor_term(explicit: bool | None = None) -> bool:
-    """#2513 (#10629 review): the resolved ``floor_term`` (the guard's LOWER
-    bound) — explicit flag > ``TORTOISE_LME_FLOOR_TERM`` env > OFF.
-
-    OFF is the fail-safe default (only 1/true/yes/on enables), the same
-    contract as the sibling C-arms: arming it changes the graded top-k, so
-    the sealed #2513 A/B decides adoption and nothing arms by accident.
-
-    Resolution lives HERE and is called from both the driver and the
-    evaluator, so the CLI path and a programmatic caller cannot resolve the
-    knob differently (the ``coverage_loop`` precedent).
-    """
-    if explicit is not None:
-        return bool(explicit)
-    return (os.environ.get("TORTOISE_LME_FLOOR_TERM") or "").strip().lower() \
-        in _TRUTHY
-
-
-def _resolve_guard_per_session_cap(pool_order_arm_on: bool,
-                                   explicit: int | None = None) -> int | None:
-    """#2513 (#10629 review): the guard's per-session UPPER cap, resolved
-    ONCE — the twin of ``_resolve_reinjection_total_cap``.
-
-    The cap is the other half of the same window rule the floor term lives
-    in, so it is results-affecting whenever a pool-order arm runs: resolution
-    is explicit > ``TORTOISE_LME_GUARD_PER_SESSION_CAP`` env > the product
-    constant, clamped through ``rerank._clamp_int`` (garbage / non-integer /
-    <1 falls back to ``retrieval.DEFAULT_POOL_SESSION_CAP``), and the value
-    is stamped on the fingerprint and the methodology so a cap-2 checkpoint
-    can never be resumed by a cap-1 run — two window compositions must not
-    blend into one artifact that declares one config. An arm-OFF run
-    resolves ``None``: the guard is never called there, so no inert value is
-    read or recorded.
-    """
-    if not pool_order_arm_on:
-        return None
-    if explicit is not None:
-        return _clamp_int(explicit, DEFAULT_POOL_SESSION_CAP)
-    return _env_int("TORTOISE_LME_GUARD_PER_SESSION_CAP",
-                    DEFAULT_POOL_SESSION_CAP)
-
-
-def _pool_order_arm_on(coverage_loop: bool, session_reinjection: bool,
-                       session_reinjection_guard: bool) -> bool:
-    """Is a composition that runs the session-diverse guard armed?
-
-    #2513 (#10629 review): the floor term and the guard cap act on the guard,
-    which is called from inside exactly two compositions — the coverage loop's
-    merge (always guarded) and the re-injection MERGE (guarded only while
-    ``session_reinjection_guard`` is ON; ``--no-session-reinjection-guard`` is
-    the injection-only ablation and skips the reorder). Anything else (the
-    baseline path, the vector arm, a reinjection run with the guard ablated)
-    calls no guard at all, so both knobs are INERT there.
-    """
-    return bool(coverage_loop) or bool(session_reinjection
-                                       and session_reinjection_guard)
 
 
 # R3 (#1542): the embedder pinned for the eval pre-flight — now derived from
@@ -1605,17 +1546,6 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # the fingerprint gate; the 2×2 with #2518 stays
                        # reconstructable).
                        coverage_loop: bool | None = None,
-                       # #2513 (#10629 review): the guard's LOWER bound —
-                       # ALWAYS present as a resolved bool (the
-                       # ``session_reinjection_guard`` convention), so a
-                       # checkpoint produced with the floor term armed can
-                       # never be resumed with it OFF, and a pre-feature
-                       # checkpoint refuses on resume (the safe direction).
-                       floor_term: bool = False,
-                       # …and the guard's per-session cap — CONDITIONAL
-                       # presence (absent while no pool-order arm runs; the
-                       # knob is inert there).
-                       guard_per_session_cap: int | None = None,
                        # C4 (#2517/#2568, #2513): the source-session
                        # re-injection arm + its guard ablation — ALWAYS
                        # present as resolved bools (the sibling-arm
@@ -1815,11 +1745,6 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         # the guard flipped either way.
         "session_reinjection": session_reinjection,
         "session_reinjection_guard": session_reinjection_guard,
-        # #2513 (#10629 review): the guard's LOWER bound — ALWAYS present
-        # (the arm/guard-bool convention): an armed checkpoint can never be
-        # resumed with the floor term OFF, and a pre-feature checkpoint
-        # refuses on resume under the new default (the safe direction).
-        "floor_term": floor_term,
         # #8486: ALWAYS present, so a fingerprint-bearing pre-arm checkpoint
         # refuses on resume under the new defaults (safe direction) and an
         # armed checkpoint can never be resumed without the arm.
@@ -1842,10 +1767,6 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("entity_key_expansion", entity_key_expansion),
             ("time_aware_qe", time_aware_qe),
             ("coverage_loop", coverage_loop),
-            # #2513 (#10629 review): the guard's cap — conditional presence
-            # like ``session_reinjection_total_cap`` (absent while no
-            # pool-order arm runs, so no inert value is stamped).
-            ("guard_per_session_cap", guard_per_session_cap),
             # C4 (#2513): the resolved injection total budget — conditional
             # presence like the sibling knobs (absent for an arm-OFF run:
             # the knob is inert there, so no inert value is recorded). This
@@ -4161,15 +4082,6 @@ def run_evaluation(
     # methodology — a looped checkpoint resumed without the arm is refused
     # by the fingerprint gate (same contract as evidence_boost).
     coverage_loop: bool | None = None,
-    # #2513 (#10629 review): the guard's LOWER bound + its per-session UPPER
-    # cap — the two knobs the sealed A/B varies. ``floor_term`` is tri-state
-    # (explicit > ``TORTOISE_LME_FLOOR_TERM`` env > OFF); both are resolved
-    # ONCE at arm resolution, REFUSED when no pool-order arm is armed (the
-    # guard is not called on the baseline path, so either would be a silent
-    # no-op), stamped on the fingerprint + methodology, and threaded into the
-    # guard through BOTH compositions the eval lane runs.
-    floor_term: bool | None = None,
-    guard_per_session_cap: int | None = None,
     # C4 (#2517/#2568, #2513): source-session re-injection — tri-state
     # (explicit flag > ``TORTOISE_LME_SESSION_REINJECTION`` env > OFF, the
     # #1745 fail-safe default), plus the guard ablation
@@ -4400,29 +4312,6 @@ def run_evaluation(
             "coverage_loop (C3-1) and session_reinjection (C4) both re-order "
             "the retrieval pool — arm them separately (this run refuses the "
             "combination at arm resolution)")
-    # #2513 (#10629 review): resolve the floor-term arm + the guard's cap ONCE,
-    # before the loop, and REFUSE them on a run that arms no pool-order
-    # composition. The guard is called only from inside those two arms, so
-    # arming the lower bound on the baseline path is a silent no-op — and a
-    # measurement lane reading its own receipt would report the OFF leg as the
-    # armed one. Refusing is the only honest answer: the knob exists to be
-    # measured, and it cannot be measured here.
-    floor_term = _resolve_floor_term(floor_term)
-    pool_order_arm_on = _pool_order_arm_on(
-        bool(coverage_loop), bool(session_reinjection),
-        bool(session_reinjection_guard))
-    if (floor_term or guard_per_session_cap is not None) \
-            and not pool_order_arm_on:
-        raise ArmConflictError(
-            "floor_term / guard_per_session_cap act on the session-diverse "
-            "guard, which only runs inside a pool-order arm — arm either "
-            "--coverage-loop, or --session-reinjection WITH its guard ON "
-            "(#2513: on the baseline path the flag would arm nothing while "
-            "the receipt says it did)")
-    # The cap is resolved AFTER the arm gate, so an arm-OFF run records None
-    # (inert) rather than a value the guard never saw.
-    guard_per_session_cap = _resolve_guard_per_session_cap(
-        pool_order_arm_on, guard_per_session_cap)
     # #8486: the BELIEF LAYER arm. Refused on a deterministic graph for the
     # same reason the CLI refuses it — a deterministic ingest writes turn
     # points + raw chunks and NO operators, so there is nothing to promote
@@ -4572,22 +4461,6 @@ def run_evaluation(
         # fingerprint — a looped checkpoint resumed without the arm is
         # refused by the fingerprint gate (2×2 arm isolation with #2518).
         coverage_loop=bool(coverage_loop),
-        # #2513 (#10629 review): the floor-term arm ALWAYS rides the
-        # fingerprint (the arm/guard-bool convention): a checkpoint produced
-        # with the lower bound armed must never be resumed with it OFF, or
-        # two window compositions would blend into one artifact.
-        floor_term=bool(floor_term),
-        # #2513 (#10629 review ISSUE 1): the guard's per-session UPPER cap —
-        # the sub-knob of the same window rule, forwarded here so the value
-        # `_resolve_guard_per_session_cap` resolved (and `retrieve_for_question`
-        # serves) is the value a resume is gated on. Omitted from this call,
-        # the knob was RESOLVED, SPENT and RECORDED but never FINGERPRINTED:
-        # `_fingerprint_diffs` key-unions, so absent-vs-absent is no diff and a
-        # cap-3 checkpoint was silently resumed by a cap-1 run — the exact
-        # false-PASS class the sibling `reinjection_total_cap` forward closed.
-        # Conditional presence (``None`` while no pool-order arm runs) keeps
-        # an inert value off the fingerprint, as documented at the parameter.
-        guard_per_session_cap=guard_per_session_cap,
         # C4 (#2517/#2568, #2513): the resolved re-injection arm + guard
         # ablation ride the fingerprint as ALWAYS-PRESENT resolved bools
         # (the sibling-arm convention) — a fingerprint-bearing pre-feature
@@ -5118,13 +4991,6 @@ def run_evaluation(
                             # loop arm (resolved above; OFF by default — the
                             # sealed A/B decides adoption).
                             coverage_loop=coverage_loop,
-                            # #2513 (#10629 review): the guard's LOWER bound
-                            # + cap, resolved ONCE above — the value the
-                            # fingerprint and the methodology carry is the
-                            # value the guard serves (both compositions get
-                            # it through ``_floor_arm_guard_kwargs``).
-                            floor_term=floor_term,
-                            guard_per_session_cap=guard_per_session_cap,
                             # C4 (#2517/#2568, #2513): the source-session
                             # re-injection arm + guard ablation (resolved
                             # above; OFF by default — the sealed A/B
@@ -5914,17 +5780,6 @@ def run_evaluation(
             # which of the 2×2 arms produced them; the §5 gate deltas are
             # denominated on the recorded arm).
             "coverage_loop": bool(coverage_loop),
-            # #2513 (#10629 review): the guard's LOWER bound + its cap —
-            # recorded so a published number carries the arm and the window
-            # composition it was produced under. The product default is
-            # recorded when no pool-order arm runs (the
-            # ``session_reinjection_total_cap`` precedent: an inert knob never
-            # lets a stray env value into the methodology).
-            "floor_term": bool(floor_term),
-            "guard_per_session_cap": (
-                guard_per_session_cap
-                if guard_per_session_cap is not None
-                else DEFAULT_POOL_SESSION_CAP),
             # C4 (#2517/#2568, #2513): the source-session re-injection arm
             # + its guard ablation — recorded verbatim in the methodology
             # (published numbers carry which arm produced them; the guard
@@ -6830,41 +6685,6 @@ def _build_parser() -> argparse.ArgumentParser:
                           "applies through the same shared contract — it "
                           "binds injected CHUNKS, not the default turn "
                           "grain)")
-    # #2513 (#10629 review): the guard's LOWER bound (the floor term) —
-    # tri-state --floor-term / --no-floor-term (None default so the
-    # TORTOISE_LME_FLOOR_TERM env still applies; OFF by default in code —
-    # the sealed #2513 A/B decides adoption). It acts on the session-diverse
-    # guard, so it rides whichever pool-order arm is armed (--coverage-loop,
-    # or --session-reinjection with its guard ON) and the run REFUSES it when
-    # neither is: the guard is not called there, so the flag would arm
-    # nothing while the receipt said it did.
-    ft = p.add_mutually_exclusive_group()
-    ft.add_argument("--floor-term", dest="floor_term",
-                    action="store_true", default=None,
-                    help="arm the guard's LOWER bound (#2513): an item from a "
-                         "session holding NO window slot takes a slot back "
-                         "from a session holding more than one, evicting that "
-                         "session's lowest-ranked windowed item; requires a "
-                         "pool-order arm (--coverage-loop, or "
-                         "--session-reinjection with its guard ON); default: "
-                         "env TORTOISE_LME_FLOOR_TERM — OFF by default in "
-                         "code, the sealed #2513 A/B decides adoption")
-    ft.add_argument("--no-floor-term", dest="floor_term",
-                    action="store_false", default=None,
-                    help="disable the guard's LOWER bound even when "
-                         "TORTOISE_LME_FLOOR_TERM is set (tri-state: explicit "
-                         "flags beat the env)")
-    # #2513 (#10629 review): the guard's per-session UPPER cap — the other
-    # half of the same window rule, and the knob the published A/B command
-    # passes. Reachable from the CLI now (the guard runs the product default
-    # otherwise); resolved once and stamped on the fingerprint + methodology.
-    p.add_argument("--guard-per-session-cap", dest="guard_per_session_cap",
-                   type=int, default=None, metavar="N",
-                   help="the session-diverse guard's per-session cap (#2513) "
-                        "— no session may hold more than N of the window "
-                        "ranks; requires a pool-order arm; default: env "
-                        "TORTOISE_LME_GUARD_PER_SESSION_CAP — "
-                        "retrieval.DEFAULT_POOL_SESSION_CAP (2)")
     # C5 (#2521, #2513): aggregative-intent detection + per-facet coverage
     # check — tri-state --aggregative-flag / --no-aggregative-flag (None
     # default so the TORTOISE_LME_AGGREGATIVE_FLAG env still applies; OFF
@@ -7501,16 +7321,6 @@ def _run_main(parser: argparse.ArgumentParser, args,
         session_reinjection_guard = args.session_reinjection_guard
     else:
         session_reinjection_guard = True
-    # #2513 (#10629 review): the guard's LOWER bound — tri-state (CLI flag >
-    # TORTOISE_LME_FLOOR_TERM env > OFF; fail-safe, only 1/true/yes/on
-    # enables). Resolved once and threaded into run_evaluation, which REFUSES
-    # it on a run that arms no pool-order composition (the refusal lives
-    # there, next to the both-arms-ON check, so it cannot diverge from the
-    # driver's own resolution). The guard cap is forwarded as the CLI gave it
-    # (`None` = the product default) and resolved with the arm inside
-    # run_evaluation — one resolver, not two.
-    floor_term = _resolve_floor_term(args.floor_term)
-    guard_per_session_cap = args.guard_per_session_cap
     # §0.2: the both-arms-ON refusal is raised by ``run_evaluation`` at arm
     # resolution (before the question loop) and caught in ``_run_main`` —
     # kept in ONE place so the check cannot diverge from the driver's env
@@ -7823,14 +7633,6 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 # (tri-state resolved above; OFF by default — the sealed
                 # #2519 A/B decides adoption).
                 coverage_loop=coverage_loop,
-                # #2513 (#10629 review): the guard's LOWER bound + cap — the
-                # arm the sealed A/B varies (resolved above; OFF by default).
-                # Together with the two forwards inside the eval-lane
-                # compositions, these are what make the seam ARMABLE: without
-                # them the documented A/B command died at argparse and the
-                # arm was never selected at all.
-                floor_term=floor_term,
-                guard_per_session_cap=guard_per_session_cap,
                 # C4 (#2517/#2568, #2513): the source-session re-injection
                 # arm + guard ablation (tri-state resolved above; OFF by
                 # default — the sealed A/B decides adoption).

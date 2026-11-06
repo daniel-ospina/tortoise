@@ -244,16 +244,8 @@ def _point_id(result) -> tuple[str | None, str | None]:
         if getattr(result, "is_error", False):
             return None, "engine_error"
         if hasattr(result, "content"):
-            # The PAYLOAD is `content[0]`; later blocks are appended LAST by the
-            # dispatch seam (the #10084 graph disclosure, a retired-name warning)
-            # and are PROSE, never JSON. So read the payload block by position
-            # instead of `json.loads`-ing whatever a later block happens to hold.
-            # (Not a bug fix: the previous whole-list loop reached the same answer
-            # on every shape this function can see — it just got there by parsing
-            # prose.)
-            blocks = list(result.content or [])
-            if blocks:
-                text = getattr(blocks[0], "text", None)
+            for block in result.content:
+                text = getattr(block, "text", None)
                 if text:
                     parsed = _json.loads(text)
                     if isinstance(parsed, dict):

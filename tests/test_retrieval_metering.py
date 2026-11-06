@@ -356,25 +356,17 @@ class TestMiddleware:
         assert calls[0]["queries"] == 1
 
     def test_an_empty_tally_pays_no_thread_hop(self, monkeypatch):
-        # Mutation: dropping the is_empty() guard → the offload hop runs (and is
-        # spent) before flush_tally discovers there is nothing to write.
-        #
-        # #10602: the spied seam is the one the middleware ACTUALLY uses —
-        # ``monitoring.run_control_plane_call`` on the best-effort lane. It used
-        # to be ``asyncio.to_thread``; spying on that after the flush moved made
-        # this test VACUOUS (measured by review: removing the is_empty() guard
-        # still passed, because an empty tally's ``flush_tally`` writes nothing
-        # either way, so ``calls == []`` held regardless).
+        # Mutation: dropping the is_empty() guard → the to_thread hop runs (and
+        # is spent) before flush_tally discovers there is nothing to write.
         calls = _capture_writer(monkeypatch)
         hops: list = []
-        import tortoise.monitoring as _monitoring
-        real = _monitoring.run_control_plane_call
+        real = asyncio.to_thread
 
-        async def _spy(fn, **kw):
+        async def _spy(fn, *a, **kw):
             hops.append(fn)
-            return await real(fn, **kw)
+            return await real(fn, *a, **kw)
 
-        monkeypatch.setattr(_monitoring, "run_control_plane_call", _spy)
+        monkeypatch.setattr(asyncio, "to_thread", _spy)
         self._run({"type": "http", "method": "POST",
                    "state": {"org_id": ORG}}, note=False)
         assert calls == []
@@ -738,101 +730,3 @@ class TestMigrationContract:
         # ``metering_increment_retrieval`` sends p_-prefixed keys (PostgREST RPC
         # argument names), so the comparison is against the raw key set.
         assert set(sent[0]) == declared
-
-
-# ════════════════════════════════════════════════════════════════════════════
-# #10602 review P1 — the DROP REPORTER must never run on the event loop
-# ════════════════════════════════════════════════════════════════════════════
-
-class TestTheDropReporterStaysOffTheLoop:
-    """``_report`` is BLOCKING (alert store + the durable LEG 2 write).
-
-    The refused-flush arm of ``RetrievalMeteringMiddleware.__call__`` is the one
-    place in this module that ran it from inside ``async def`` — i.e. on the
-    event loop. It fires on ``exc.refused``, which means the ``telemetry`` lane
-    is at its ceiling: exactly the saturation the read lane exists to survive.
-    A synchronous block there is not converted into a refusal by
-    ``WaitBoundMiddleware`` (its own note: the block finishes before the timer
-    callback can run), so it would defeat the transport bound for EVERY
-    concurrent request — re-creating #10602 at the moment it is most likely.
-
-    So the assertion is THREAD IDENTITY, not timing: the reporter must not run
-    on the loop's thread. Timing would be a flaky proxy for the same fact.
-    """
-
-    @staticmethod
-    def _drive(monkeypatch, *, refused: bool, settle_s: float = 10.0):
-        """Run one armed request whose flush is refused; return (loop_tid, calls).
-
-        ``settle_s`` is the grace this arm gives the reporter to land. The
-        POSITIVE arm needs the long one (the report is queued on a daemon lane
-        and is not awaited). The NEGATIVE arm asserts NOTHING was reported, so
-        no event it could wait on will ever fire — it must not pay the full
-        settle to prove a negative (it used to burn 10 s per run, #10602
-        review P3); a short grace is enough to catch a report that was queued.
-        """
-        from tortoise import monitoring as mon
-
-        calls: list[tuple[int, bool]] = []
-        done = threading.Event()
-
-        def _fake_report(lane, org_id, error):
-            calls.append((threading.get_ident(), True))
-            done.set()
-
-        async def _refuse(*_a, **_kw):
-            raise mon.ControlPlaneOffloadError(
-                "probe: telemetry backlog full", refused=refused)
-
-        monkeypatch.setattr(mon, "run_control_plane_call", _refuse)
-        monkeypatch.setattr(metering, "report_unmetered_increment", _fake_report)
-
-        async def _app(scope, receive, send):
-            rm.note_query(wall_ms=2.0)
-
-        mw = rm.RetrievalMeteringMiddleware(_app)
-        loop_tid: list[int] = []
-
-        async def _receive():
-            return {"type": "http.request"}
-
-        async def _send(msg):
-            return None
-
-        async def _go():
-            loop_tid.append(threading.get_ident())
-            await mw({"type": "http", "state": {}}, _receive, _send)
-
-        asyncio.run(_go())
-        done.wait(settle_s)   # the reporter is queued on a daemon lane, not awaited
-        return loop_tid[0], calls
-
-    def test_a_refused_flush_never_reports_the_drop_on_the_event_loop(
-            self, monkeypatch):
-        """RED before the fix: ``_report`` ran inline, so the reporter's thread
-        WAS the loop's thread."""
-        loop_tid, calls = self._drive(monkeypatch, refused=True)
-        assert calls, (
-            "a REFUSED flush left no drop report at all — the loss must stay "
-            "attributable, not silent")
-        reporter_tids = {tid for tid, _ in calls}
-        assert loop_tid not in reporter_tids, (
-            "the drop reporter ran ON THE EVENT LOOP — `_report` does a "
-            "blocking alert-store write and a durable LEG 2 control-plane "
-            "round trip, so at telemetry-lane saturation it blocks the loop "
-            "for every concurrent request and defeats the transport wait "
-            "bound, which is the #10602 shape one layer down (#10602 review P1)")
-
-    def test_a_bound_miss_that_still_runs_is_not_reported_as_a_drop(
-            self, monkeypatch):
-        """The other direction, so 'report always' cannot satisfy the test
-        above: a NON-refused bound miss leaves a RUNNING submission, so its row
-        IS written and reporting it would manufacture a durable
-        ``unmetered_increments`` row for a flush that landed."""
-        _loop_tid, calls = self._drive(monkeypatch, refused=False,
-                                       settle_s=0.5)
-        assert calls == [], (
-            "a delivery-preserving bound miss was reported as a DROP — the row "
-            "is written by the still-running submission, so this manufactures "
-            "a durable unmetered-increments row plus an operator alert for a "
-            "flush that landed")

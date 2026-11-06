@@ -81,24 +81,6 @@ def _search(**overrides) -> dict:
     return base
 
 
-def _identity_line(ident: dict, body: str) -> str:
-    """The WHOLE `S3 identity` warning line, from the report's own fields.
-
-    Exact equality is the only pin that bites on a changed state, reason,
-    numerator or denominator — or on a clause APPENDED to an arm: a substring
-    plus a list of negatives lets a false clause through (#10633 review, P3),
-    which is why every arm's sentence is compared this way.
-    """
-    reason = f" ({ident['reason']})" if ident["reason"] else ""
-    return f"S3 identity {ident['state']}{reason}: {body}"
-
-
-def _denominator(ident: dict) -> int:
-    """The ATTRIBUTED candidate count an `N of M candidate(s)` sentence prints."""
-    return sum(ident["candidates"].get(section, 0)
-               for section in fp.LEG_BY_SECTION)
-
-
 # ── 1. the state ───────────────────────────────────────────────────────────
 
 
@@ -547,106 +529,21 @@ class TestTheReportCannotContradictItself:
                       if str(r["searched_for"]).startswith("point ")]
         assert point_recs and point_recs[0]["found"] is None, point_recs
 
-    def test_a_counted_lookup_does_not_claim_what_the_candidates_record_says(self):
-        """The COUNTED sentence, for candidates the lookup never reached.
-
-        Split out of `test_a_partial_lookup_with_nothing_unchecked_says_so`, whose
-        former first half asserted this — a `unresolved` run with a NON-zero
-        numerator — and not the shape its name described (#5095 review round 1,
-        residual 1).
-
-        ⛔ It must NOT claim what the candidate's own record says: a candidate
-        whose query was cut can still be folded onto a prior by S5
-        (`found: true`), so a sentence saying its "record says UNRESOLVED" — the
-        wording rejected in #5095 review round 3, never shipped — would be false
-        about that record. The assertion below pins the sentence exactly, which
-        forbids that by construction.
-        """
+    def test_a_partial_lookup_with_nothing_unchecked_says_so(self):
         out = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
-        ident = out["identity"]
-        assert ident["unresolved_total"] >= 1
+        assert out["identity"]["unresolved_total"] >= 1
         messages = [w for w in out["warnings"] if "S3 identity" in w]
         assert messages, out["warnings"]
-        # Pin the WHOLE sentence, built from the report's own numbers, rather than
-        # a paraphrase of the prohibition. A cut candidate can still be folded onto
-        # a prior by S5 (`found: true`), so nothing may be claimed about any
-        # candidate's record; exact equality forbids that by construction, and it
-        # bites on a changed numerator, denominator, state or added clause. The
-        # former body closed with `assert "their record says" not in messages[0]`
-        # — redundant for that same reason, NOT because the phrase is
-        # unemittable: a pre-merge revision of this lane DID emit it
-        # (`docs/plans/2026-10-31-issue-5095-s3-hold.md`, P2·R4), and a
-        # reintroduction would trip that absence check rather than slip past it,
-        # so it is exact equality — which forbids any added clause — that makes
-        # the absence assertion unnecessary (the inert-assertion class removed
-        # from the arm-3 test in round 5; #10633 review, P2).
-        assert messages[0] == _identity_line(
-            ident,
-            f"the existing-item lookup did not run for "
-            f"{ident['unresolved_total']} of {_denominator(ident)} "
-            f"candidate(s)"), messages[0]
-
-    def test_a_partial_lookup_with_nothing_unchecked_says_so(self, monkeypatch):
-        """`partial` with a ZERO numerator gets the `partial` sentence — end to end.
-
-        The budget cuts only the trailing story-topic queries, so this is the
-        ORDINARY shape, and "says so" is a claim about the SENTENCE. The former
-        body read `plan_identity`'s counters and asserted no message at all, so
-        the sentence its name promised was pinned by nothing here (#5095 review
-        round 1, residual 1).
-
-        ⛔ The load-bearing property is that the branch keys on the STATE, not on
-        the counter: both runs below carry `unresolved_total == 0` and must still
-        get DIFFERENT sentences — `partial` (bounded; every candidate's own query
-        ran) and `unresolved` (nothing ran at all).
-        """
-        cover = {"derived": {"object": 1, "point": 3},
-                 "ran": {"object": 1, "point": 2}, "failed": {"object": 0, "point": 0}}
-        keys = [v2._query_key("object", "ACME Corp"),
-                v2._query_key("point", "the budget is 40k")]
-        # `monkeypatch` is the restorer here: it re-records the second patch and
-        # puts the original back at teardown, so neither patch can leak into a
-        # sibling test (the former body carried an unused `monkeypatch` parameter
-        # and restored by hand in a `try:`/`finally:` — #10633 review,
-        # non-blocking observation 2).
-        monkeypatch.setattr(v2, "search_graph", lambda *a, **k: _search(
-            query_coverage=cover,
-            query_results={"ran": [q for q in keys if q], "failed": []}))
-        partial = v2.extract_session_v2(_FakeModel(), _conv(), session_id="s1")
-        monkeypatch.setattr(v2, "search_graph", lambda *a, **k: _search(
-            degraded=True, reason="S3 skipped: no graph client"))
-        unrun = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
-
-        assert partial["identity"]["state"] == fp.LOOKUP_PARTIAL, partial["identity"]
-        assert partial["identity"]["unresolved_total"] == 0, partial["identity"]
-        assert unrun["identity"]["state"] == fp.LOOKUP_UNRESOLVED, unrun["identity"]
-        assert unrun["identity"]["unresolved_total"] == 0, unrun["identity"]
-
-        messages = [w for w in partial["warnings"] if "S3 identity" in w]
-        assert len(messages) == 1, partial["warnings"]
-        assert messages[0] == _identity_line(
-            partial["identity"],
-            "part of the lookup did not run or did not complete, but every "
-            "candidate's own query ran — no candidate was left unchecked"), (
-            messages[0])
-
-        other = [w for w in unrun["warnings"] if "S3 identity" in w]
-        assert len(other) == 1, unrun["warnings"]
-        # ⛔ BOTH lines are pinned EXACTLY and separately: one zero counter, two
-        # states, and they must not collapse onto one sentence — branching on the
-        # counter instead of the state is the defect this PR removes. The two
-        # whole lines already differ by the `(reason)` suffix an `unresolved`
-        # lookup carries, so a `!=` between THEM would pass even with both states
-        # collapsed; comparing each to its OWN expected line is what bites.
-        assert other[0] == _identity_line(
-            unrun["identity"],
-            "the lookup did not run, and this run proposed no candidate whose "
-            "identity it could have established"), other[0]
-
-        # the shape witness, independent of the extraction rig: coverage in,
-        # counters out.
+        assert "did not run for" in messages[0]
+        # ⛔ and it must NOT claim what the candidate's own record says: a
+        # candidate whose query was cut can still be folded onto a prior by S5
+        # (`found: true`), so "their record says UNRESOLVED" was a false claim
+        # about that record (#5095 review round 3).
+        assert "their record says" not in messages[0]
+        # the zero-numerator shape is a DIFFERENT sentence, never the one above
         partial_zero = fp.plan_identity(
-            _search(query_coverage=cover),
+            _search(query_coverage={"derived": {"point": 13},
+                                    "ran": {"point": 12}, "failed": {"point": 0}}),
             candidates={"points": 3}, unresolved={"points": 0})
         assert partial_zero["state"] == fp.LOOKUP_PARTIAL
         assert partial_zero["unresolved_total"] == 0
@@ -828,35 +725,6 @@ class _FakeModel:
                 '"link_before_create": []}')
 
 
-class _NoCandidates(_FakeModel):
-    """Same adapter, no candidate at all — the `unresolved` + zero-numerator shape."""
-
-    def complete(self, *, system, user, max_tokens=None):
-        self.last_finish_reason = "stop"
-        if "STORY SUMMARIZER" in system:
-            return "A narrative."
-        return ('{"entities": [], "events": [], "operators": [], '
-                '"points": [], "chain_notes": [], '
-                '"link_before_create": []}')
-
-
-class _BlankCandidates(_FakeModel):
-    """Same adapter, candidates that all carry blank/whitespace-only text.
-
-    Arm 3's most REACHABLE shape (#10633 review, P3): the run proposed candidates
-    and not one of them has an identity a query could establish, because
-    `_identity_report` applies S5's own admission test (`if not raw: continue`).
-    """
-
-    def complete(self, *, system, user, max_tokens=None):
-        self.last_finish_reason = "stop"
-        if "STORY SUMMARIZER" in system:
-            return "A narrative."
-        return ('{"entities": [{"name": "   "}], "events": [], "operators": [], '
-                '"points": [{"content": "  ", "pointKind": "statement"}], '
-                '"chain_notes": [], "link_before_create": []}')
-
-
 def _conv():
     return [{"role": "user", "content": "the budget is 40k"},
             {"role": "assistant", "content": "noted"}]
@@ -908,154 +776,9 @@ class TestIdentityOnTheResult:
         assert out["identity"]["unresolved_total"] == 0, out["identity"]
         messages = [w for w in out["warnings"] if "S3 identity" in w]
         assert messages, out["warnings"]
-        assert messages[0] == _identity_line(
-            out["identity"],
-            "part of the lookup did not run or did not complete, but every "
-            "candidate's own query ran — no candidate was left unchecked"), (
-            messages[0])
-
-    def test_an_unrun_lookup_with_no_candidate_never_claims_the_budget_cut(self):
-        """`unresolved` with a ZERO numerator is a third fact (#5095 review round 5).
-
-        The lookup did not run AT ALL and there was no candidate whose own query
-        could have — and the `partial` sentence asserted both of those falsely:
-        "part of the lookup did not run or did not complete, but every
-        candidate's own query ran — no candidate was left unchecked". The
-        pre-fix code reached that sentence because the block branched on
-        `unresolved_total` alone, so this run carried a warning that contradicted
-        the reason it printed in the same line.
-
-        ⛔ The discriminating assertion is the sentence's OWN text: an earlier
-        draft of this test asserted `"budget" not in message`. No arm emits that
-        word at this revision, and a reintroduction would trip the check rather
-        than slip past it — a pre-merge revision (`0b3b9366d`) DID emit `the
-        query budget cut part of the lookup` from the `partial` arm, so the draft
-        was not inert against the defect it named; what makes it unnecessary is
-        exact equality, which forbids any added clause (review round 5).
-        """
-        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
-        block = out["identity"]
-        assert block["state"] == fp.LOOKUP_UNRESOLVED, block
-        assert block["unresolved_total"] == 0, block
-        messages = [w for w in out["warnings"] if "S3 identity" in w]
-        assert len(messages) == 1, out["warnings"]
-        # Pinned by EXACT equality, from the report's own fields: the `partial`
-        # sentence is what must NOT be reachable here, and a substring pin with a
-        # list of negatives would let a false clause APPENDED to this arm pass
-        # (#10633 review, P3).
-        assert messages[0] == _identity_line(
-            block,
-            "the lookup did not run, and this run proposed no candidate whose "
-            "identity it could have established"), messages[0]
-
-    def test_candidates_with_no_checkable_text_are_not_counted(self):
-        """Arm 3's most REACHABLE shape, pinned (#10633 review, P3).
-
-        The run DID propose candidates — two of them — and not one has text a
-        query could be built from, so `_identity_report` applies S5's own
-        admission test (`if not raw: continue`, `extractor_v2.py:3135`) and counts
-        none of them. `unresolved` with a zero numerator is still the third fact,
-        so the third sentence is the right one; counting these instead would hand
-        the `partial` or the counted sentence a claim about a lookup that never
-        ran. The arm's comment enumerated only an empty list and an
-        operators-only list, which reads as though this shape could not arise.
-        """
-        out = v2.extract_session_v2(_BlankCandidates(), _conv(), session_id="s1")
-        block = out["identity"]
-        assert block["state"] == fp.LOOKUP_UNRESOLVED, block
-        assert block["candidates"]["entities"] == 0, block
-        assert block["candidates"]["points"] == 0, block
-        assert block["unresolved_total"] == 0, block
-        assert _denominator(block) == 0, block
-        messages = [w for w in out["warnings"] if "S3 identity" in w]
-        assert len(messages) == 1, out["warnings"]
-        assert messages[0] == _identity_line(
-            block,
-            "the lookup did not run, and this run proposed no candidate whose "
-            "identity it could have established"), messages[0]
-
-    def test_an_unresolved_state_with_a_checkable_candidate_cannot_claim_vacancy(
-            self, monkeypatch):
-        """Arm 3's guard is the SENTENCE's precondition, not only the state.
-
-        `unresolved` + a zero numerator normally means no candidate was
-        checkable, which is exactly what arm 3's sentence asserts. Guarding on the
-        state ALONE is weaker than the sentence: a `degraded` search that still
-        carried a per-candidate query log answers `unresolved` while covering the
-        candidate, so a state-only guard prints "this run proposed no candidate
-        whose identity it could have established" over a run that proposed one
-        and CHECKED it — the claim-about-a-check-that-did-not-happen defect, one
-        input over (#10633 review, P2).
-
-        No shipped producer emits that pair today (`extract_session_v2` takes no
-        `search`; both `search_graph` degrade paths pin `query_results` empty), so
-        this pins the INVARIANT rather than a live failure: `_denominator == 0`
-        is in the guard, and a contradictory input falls to the residual arm,
-        which claims the state, the counter, and that no arm covers that state
-        with those counters. Without this test the clause would be protected by
-        a comment alone — the shape this file exists to remove.
-        """
-        contradictory = {
-            "state": fp.LOOKUP_UNRESOLVED,
-            "reason": "degraded",
-            "unresolved_total": 0,
-            "candidates": {"entities": 1, "events": 0, "points": 0,
-                           "operators": 0, "retractions": 0},
-        }
-        monkeypatch.setattr(v2, "_identity_report",
-                            lambda *a, **k: dict(contradictory,
-                                                 candidates=dict(contradictory["candidates"])))
-        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
-        block = out["identity"]
-        assert block["state"] == fp.LOOKUP_UNRESOLVED, block
-        assert block["unresolved_total"] == 0, block
-        assert _denominator(block) == 1, block
-        messages = [w for w in out["warnings"] if "S3 identity" in w]
-        assert len(messages) == 1, out["warnings"]
-        # The vacancy sentence is NOT reachable here; the residual arm names the
-        # state and the counter, and its clause is scoped to "this state WITH
-        # these counters" precisely so it stays TRUE here — `unresolved` does have
-        # a sentence (arm 3); what is missing is a sentence for `unresolved` with a
-        # non-zero denominator over a zero numerator (#10633 review round 9, P2).
-        assert messages[0] == _identity_line(
-            block,
-            "this warning describes no sentence for that state with these "
-            "counters; the run carries "
-            f"unresolved_total={block['unresolved_total']} of "
-            f"{_denominator(block)} candidate(s)"), messages[0]
-
-    def test_a_state_the_warning_does_not_describe_claims_no_coverage(self, monkeypatch):
-        """The residual arm's only protection is this test (#5095 review round 6).
-
-        A state added to `failure_policy.LOOKUP_STATES` later must not INHERIT the
-        `partial` or the counted sentence — that is the defect class this whole
-        change removes, and without this pin the arm would be protected by a
-        comment alone. The arm states the state, the counter, and that no arm
-        covers that state with those counters — the last of those is DERIVED from
-        no earlier arm matching, not handed in, which is why it can go stale when
-        the arm partition changes and why this pin is what catches that.
-        """
-        monkeypatch.setattr(fp, "lookup_state", lambda search: "future_state")
-
-        out = v2.extract_session_v2(_NoCandidates(), _conv(), session_id="s1")
-        messages = [w for w in out["warnings"] if "S3 identity" in w]
-        assert len(messages) == 1, out["warnings"]
-        block = out["identity"]
-        # EXACT, and the counter is pinned as PROVENANCE — the number the run was
-        # HANDED — never as a coverage claim: reaching this arm implies
-        # `unresolved_total == 0`, so a "0 of N were not checked" clause would
-        # assert universal coverage about a check this arm cannot know happened,
-        # for a state that is by construction not `resolved` (#10633 review, P3).
-        # The exact pin above is the whole guard: it forbids any appended clause,
-        # so a negative substring assertion beside it could never bite and would
-        # be the inert-assertion class this file removed in round 5 (#10633
-        # review, P3).
-        assert messages[0] == _identity_line(
-            block,
-            f"this warning describes no sentence for that state with these "
-            f"counters; the run carries "
-            f"unresolved_total={block['unresolved_total']} of "
-            f"{_denominator(block)} candidate(s)"), messages[0]
+        assert "part of the lookup did not run or did not complete" in messages[0], messages[0]
+        assert "no candidate was left unchecked" in messages[0], messages[0]
+        assert "did not run over the whole candidate set" not in messages[0]
 
     def test_a_resolved_run_reports_resolved_and_does_not_warn(self):
         """The flag-side of R1: the disposition must not fire on a healthy run.

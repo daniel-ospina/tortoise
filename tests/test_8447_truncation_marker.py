@@ -211,12 +211,6 @@ class TestHostedResponseCarriesIt:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def _get_proj(self):
-                # #10602 review P1: `/v1/search` builds its SDK with the
-                # projection attached on the construction lane, so a fake that
-                # substitutes `_data_sdk` must model the attach.
-                return object()
-
             def tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if _truncation_out is not None:
