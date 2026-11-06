@@ -2452,20 +2452,25 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the bar states no presence requirement — name the reading that must "
         "EXIST after a capture before the reason breakdown means anything"
     )
-    # The presence LIST must be the five qualifying readings, in one clause — not
+    # The presence LIST must be the six qualifying readings, in one clause — not
     # merely a lead-in that some other, always-true reading could be appended to.
+    # (`record_writes_applied` is the POSITIVE witness added by #9548: without it
+    # required here, deleting that clause from the runbook left this pin green —
+    # the one reading the bar exists to add would have been the one reading the
+    # pin did not demand.)
     # ⛔ Read the FLAT copy, like its siblings above: this pin used to read `section`,
     # and its pattern spells the sentence out with literal single spaces, so a
     # wording-identical refill at widths 76/78/82 broke that clause across a line
     # boundary and reded it — measured here after the F3 fix, i.e. the file still
     # reds a reflow F3 exists to make harmless (#10083 review P2). Normalizing is
-    # NOT a relaxation: the five readings are still required verbatim below.
+    # NOT a relaxation: the six readings are still required verbatim below.
     presence = re.search(
         r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:(.*?)\.\s",
         flat,
     )
     assert presence, "the presence requirement does not enumerate its readings"
-    for reading in ("record_write_failures", "record_non_journal_skips",
+    for reading in ("record_writes_applied", "record_write_failures",
+                    "record_non_journal_skips",
                     "record_position_unproven", "journal_event", "point"):
         assert reading in presence.group(1), (
             f"the presence list omits {reading!r} — an armed deployment whose only "

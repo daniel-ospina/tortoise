@@ -6299,7 +6299,7 @@ def _record_health() -> dict:
         serves exactly ONE record tenant (#9192). Multi-tenant (``False``) is
         the fail-closed default the hosted app MUST stay on; it is what makes
         the process-global org/graph env pair be refused instead of misused.
-      * the three record counters, under the SAME names ``metrics()`` publishes
+      * the record counters, under the SAME names ``metrics()`` publishes
         (#9188/#9231/#9307) — the hosted app has no ``/metrics`` route, so
         without them indicator (b) of #9548 (``record_write_failures`` = 0) has
         no reader at all on the deployment it is claimed about. Each is
@@ -6307,11 +6307,31 @@ def _record_health() -> dict:
         a zero are different facts, and the obvious consumer
         (``counts.get("write_failed", 0)``) would read the second from the first
         (#9548 review P2).
-        ⚠️ All three are FAILURE/decline channels — there is no positive
-        ``record_writes`` counter anywhere in ``monitoring.py``, so a zero here
-        does NOT evidence that a row was written. An armed-and-writing
-        deployment and one that has never written both read ``{}``; indicator
-        (b) needs the runbook's SQL row count beside it.
+        ⚠️ All three are FAILURE/decline channels, so a zero here does NOT by
+        itself evidence that a row was written: an armed-and-writing deployment
+        and one that has never written both read ``{}``. That is why the
+        POSITIVE pair below rides beside them — and why the runbook's SQL row
+        count names a second, independent witness.
+      * ``record_writes_applied`` / ``record_last_write_at`` — the POSITIVE
+        channel (#9548). The count of live writes THIS PROCESS committed since
+        it started, and the instant of the last one (ISO-8601 UTC, or ``None``).
+        ⚠️ The two ``None`` values MEAN DIFFERENT THINGS and ``counters_error`` is
+        what separates them: for ``record_writes_applied``, ``None`` = the
+        counter could not be READ (never ``0`` — ``0`` is precisely the value a
+        never-writing deployment reports, so an unread counter published as
+        ``0`` would manufacture the finding this field exists to make), while
+        for ``record_last_write_at``, ``None`` = this process has not committed
+        a write since it started, AND it is also ``None`` on an unread snapshot.
+        Its absence is the defect it fixes — every other
+        record counter is a failure/decline channel, so ``record_write_failures:
+        {}`` was offered as evidence for indicator (b) of #9548 while indicator
+        (a) (a captured session writes ``journal_event`` + ``point`` rows) had no
+        reader on the deployment at all, and this P0 was closed on an empty
+        object and reopened. It remains an in-process counter: it resets on
+        restart (``record_last_write_at`` is how an operator dates it), and a
+        NON-ZERO value is the claim "a transaction committed here", not a row
+        count — the runbook's SQL read is still the witness for how many rows
+        landed.
       * ``counters_error`` — why the counter snapshot could not be read, or ``None``.
         Kept distinct from ``error`` so the documented pairing
         (*``error`` non-null ⇔ set-but-unusable value*) stays true.
@@ -6366,9 +6386,11 @@ def _record_health() -> dict:
     try:
         from tortoise import record_writer
         from tortoise.monitoring import (
+            record_last_write_at,
             record_non_journal_skip_counts,
             record_position_unproven_count,
             record_refusing,
+            record_write_applied_count,
             record_write_failure_counts,
         )
     except Exception as exc:  # liveness must answer, always
@@ -6382,6 +6404,9 @@ def _record_health() -> dict:
                 "record_write_failures": None,
                 "record_non_journal_skips": None,
                 "record_position_unproven": None,
+                # The POSITIVE pair is present-and-null here for the same reason:
+                # a consumer must not read a missing key as "no writes" (#9548).
+                "record_writes_applied": None, "record_last_write_at": None,
                 "degraded": None, "degraded_reasons": None,
                 # No ``refusing``: nothing was evaluated, so the key is ABSENT
                 # rather than ``None`` (#10648 review P3).
@@ -6401,6 +6426,12 @@ def _record_health() -> dict:
         "record_write_failures": None,
         "record_non_journal_skips": None,
         "record_position_unproven": None,
+        # The POSITIVE pair (#9548): committed writes, and when. Seeded ``None``
+        # for the same reason as the three above — an unread counter is not a
+        # zero, and a ``0`` here is exactly what a never-writing deployment
+        # reports, so inventing one would fabricate the finding.
+        "record_writes_applied": None,
+        "record_last_write_at": None,
         # ⛔ WHETHER THE RECORD IS LOSING ROWS RIGHT NOW (#10185/#10620). ``None``
         # is "not evaluated" (the counter snapshot could not be read); ``False``
         # is "no armed write was refused inside the window"; ``True`` is "rows
@@ -6439,16 +6470,31 @@ def _record_health() -> dict:
         "fetched_at": datetime.now(UTC).isoformat(),
     }
     try:
-        block["record_write_failures"] = record_write_failure_counts()
+        # Read EVERY counter into a local FIRST, then publish the whole set at
+        # once: a snapshot that fails half-way must not leave the earlier keys
+        # holding values while the later ones read ``None`` — a consumer that
+        # treats a partially-read block as a complete one reads a stale number
+        # as a current fact (#9548 review cycles 3-4). The published shape is
+        # therefore all-read or all-``None``, and ``counters_error`` names which.
+        failures = record_write_failure_counts()
         # The sibling keys, not folded into the counter above: a
         # `no_durable_journal` decline is the HEALTHY M2 lane and a
         # `position_unproven` append is healed by a replay, so neither may
         # move the zero that means "no record row was lost" (#9231/#9307).
-        block["record_non_journal_skips"] = record_non_journal_skip_counts()
-        block["record_position_unproven"] = record_position_unproven_count()
+        skips = record_non_journal_skip_counts()
+        unproven = record_position_unproven_count()
+        # The POSITIVE pair (#9548) rides the SAME snapshot for the same reason.
+        applied = record_write_applied_count()
+        last_write_at = record_last_write_at()
     except Exception as exc:  # liveness must answer, always
         block["counters_error"] = str(exc)[:200]
         block["ok"] = False
+    else:
+        block["record_write_failures"] = failures
+        block["record_non_journal_skips"] = skips
+        block["record_position_unproven"] = unproven
+        block["record_writes_applied"] = applied
+        block["record_last_write_at"] = last_write_at
     # ⛔ THE VERDICT, not just the number (#10185/#10620). The full vocabulary
     # this counter carries — SIX values, documented at
     # ``monitoring.record_record_write_failure`` — is not uniformly
@@ -6626,7 +6672,7 @@ async def health():
     place the acknowledgement can be made.
 
     Record check (#9548): ``record`` reports whether the Postgres record is
-    ARMED on this deployment, plus the three record counters — the same class as
+    ARMED on this deployment, plus the record counters — the same class as
     ``change_feed`` (state that lives inside the process, or in an env var only
     the process can resolve) and the same class as ``backup_watcher`` (a
     durability seam whose "off" state must be distinguishable from "on"). See
