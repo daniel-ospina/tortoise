@@ -346,8 +346,10 @@ def scan_cache_view(g: Any, *, labels: Iterable[str] | None = None,
             out[declared] = props
             # §9.1/D1 (#10853): the projection DECLINES this pair for an
             # episodic Source, so a cache node that still carries it holds what
-            # the projection will not write — cache-owned, the #9196 precedent,
-            # and counted as `graph_only` instead of as a divergence against a
+            # the projection will not write — CACHE-HELD, not "cache-owned"
+            # (`graph_only_total`'s retraction: the record DOES hold this pair, so
+            # the repair is a record-sourced clear, #11070), counted as
+            # `graph_only` instead of as a divergence against a
             # record that is correct. Without this the reconciler would report
             # every session the current capture writes as divergent forever,
             # which is the "signal indistinguishable from noise" the module's own

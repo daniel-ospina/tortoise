@@ -156,9 +156,16 @@ to have none.
     no read that could decide what to project — every statement is a `MERGE`,
     asserted over the plan's cypher (the endpoint `MATCH` inside a relation
     upsert is the one read, and it resolves a RECORD coordinate).
-  * **rebuild == record**: re-projecting the plan writes exactly the record's
-    key set and field set — **no extra field, no extra node** — asserted over
-    the plan's `Statement.params['props']`, not over the input model. ⚠️ The
+  * **rebuild == record VIEW**: re-projecting the plan writes exactly the record
+    **VIEW's** key set and field set — **no extra node**, and no field the view
+    does not carry — asserted over the plan's `Statement.params['props']`, not
+    over the input model. ⛔ "the VIEW's", not "the record's": against the
+    record's PRIMARY COLUMN set the plan carries the names the widening classes
+    mint (`objectKind`/`subjectKind`, class (2); class (3)'s `status`), which have
+    no column of their own, while `_props_from_row` SKIPS a `None` column — so the
+    plan is neither a superset nor a subset of P, and reading "no extra field"
+    against P would have an implementer DELETE a derived name the terminal row
+    needs (#9974: a `status`-less superseded Object answers LIVE). ⚠️ The
     assertion reads the VIEW, so it cannot see any class that is materialised in
     the VIEW-BUILDING path; the bound on those is a drift pin, not this
     assertion. ⛔ **The census is ONE, stated in full at

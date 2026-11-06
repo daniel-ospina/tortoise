@@ -824,11 +824,13 @@ def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
     properties the record has NO COLUMN for (class (2)/(3) mint `status`), so
     against the record's PRIMARY COLUMN set the plan carries a name that set does
     not have. ⛔ It is a WIDENING, not a superset, and the difference is not
-    pedantry: `_props_from_row` SKIPS a column whose value is `None`, so a sparse
-    row's plan also lacks most of P — measured on the suite's own sparse fixture,
-    `props - P == {'status', 'objectKind', 'supersededAt', 'supersededBy'}` while
-    `P - props` holds 13 of 16 names, i.e. the plan is neither a superset nor a
-    subset. The assertion below compares `written` against `set(node.props)` —
+    pedantry — it is measurable on this file's own `_view()`: its `:Object` row is
+    `{"id", "name", "props"}`, so the plan carries `objectKind`, a name P does not
+    have, while `P - props` holds 13 of its 16 names (`_props_from_row` SKIPS a
+    column whose value is `None`). A row that also carries a supersession carrier
+    adds `status` (class (2)/(3)) and its own spellings, and STILL lacks the same
+    13 — i.e. the plan is never a superset of P, and never a subset either. The
+    assertion below compares `written` against `set(node.props)` —
     the view — which is the identity that DOES hold, and §17.2 states the same
     distinction by direction.
 

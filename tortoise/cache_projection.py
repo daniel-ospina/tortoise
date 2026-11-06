@@ -142,8 +142,11 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
      its truth side HOLDS `_searchText` for a post-#10000 row, and
      `_partition_cache_owned` keeps every name the record side holds — so a
      drifted `_searchText` is COMPARED and reds. `summary`, and a legacy row's
-     whole pair, remain CACHE-OWNED (:func:`episodic_source_prose_properties`,
-     consumed by `record_reconcile.scan_cache_view`) and are counted under their
+     whole pair, stay CACHE-HELD — ⛔ NOT "cache-owned": that term is §17.5's for
+     the scalars the record CANNOT hold, and this pair the record DOES hold
+     (`record_reconcile.ReconciliationResult.graph_only_total` is the retraction)
+     — via :func:`episodic_source_prose_properties`,
+     consumed by `record_reconcile.scan_cache_view`, counted under their
      own `graph_only` bucket — visible, and not a divergence against a record that
      is correct. ⛔ The repair for a legacy node is NOT a re-capture: re-capturing
      an already-captured session id is the #1727 no-op replay, so
@@ -1383,13 +1386,14 @@ def _scalar(value: Any) -> Any:
 #: `field_mismatch` that is the class the reconciler's own docstring grades P1
 #: (*"a signal indistinguishable from noise is not observability"*), so
 #: :func:`episodic_source_prose_properties` and
-#: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
+#: `record_reconcile.scan_cache_view` mark the pair CACHE-HELD for an episodic
 #: Source and count it under `graph_only` — visible, and not a divergence against
 #: a record that is correct. ⭐ And the partition stays provenance-correct without
 #: a second predicate: `_partition_cache_owned` KEEPS every name the RECORD side
 #: holds, so on a post-#10000 row — where the record door now projects
 #: `_searchText` — the value is COMPARED (a drifted `_searchText` reds), while
-#: `summary`, and a legacy row's whole pair, stay cache-owned.
+#: `summary`, and a legacy row's whole pair, stay cache-held (≠ "cache-owned",
+#: §17.5's term for what the record cannot hold at all).
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })
@@ -1752,9 +1756,11 @@ def episodic_source_prose_properties() -> frozenset[str]:
     """The narrowing in the CACHE's vocabulary — the GRAPH property names.
 
     What :func:`tortoise.record_reconcile.scan_cache_view` must treat as
-    cache-owned for an episodic Source, so the reconciler reports it under
+    cache-held for an episodic Source, so the reconciler reports it under
     `graph_only` instead of counting it as a `field_mismatch` against a record
-    that is correct.
+    that is correct. ⛔ The term is CACHE-HELD, never "cache-owned": the record
+    holds this pair (post-#10000 it even projects `_searchText`), so the repair
+    is a record-sourced clear (#11070), not nothing.
 
     Derived, never typed: `canonical_property` is the one declaration of a
     column's property name, so a hand-written `"_searchText"` here could drift
