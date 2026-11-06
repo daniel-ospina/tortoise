@@ -625,15 +625,24 @@ def test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention():
 
     ⛔ WHY THE ARM ABOVE DOES NOT COVER THIS. It hands the RAW row to
     ``cache_props`` and the projector's map to ``record_props`` — the direction a
-    legacy cache node produces. The INVERSION is what an audit of a production
-    pair is actually handed (the record read its own row; the cache answer is the
-    projector's map), and the ``invented`` loop said *"a record field the cache
-    lacks ⇒ the record path made up a field"* without asking either declaration.
-    Measured before this arm existed: ``invented: ['story_arc']``,
-    ``clean: False`` — i.e. this rule reported the exact state the projection
-    exists to create as a RED, and the only sanctioned repair for ``invented`` is
-    a re-projection, which re-opens the door. A declaration that explains one
-    direction has to explain both, or it is a rule that forbids the fix.
+    legacy cache node produces. The INVERSION is what a RAW-SQL audit of a
+    production pair is handed (the record read with the auditor's own SQL; the
+    cache answer is the projector's map), and the ``invented`` loop said *"a
+    record field the cache lacks ⇒ the record path made up a field"* without
+    asking either declaration. Measured before this arm existed: ``invented:
+    ['story_arc']``, ``clean: False`` — i.e. this rule reported the exact state
+    the projection exists to create as a RED, and the only sanctioned repair for
+    ``invented`` is a re-projection, which re-opens the door. A declaration that
+    explains one direction has to explain both, or it is a rule that forbids the
+    fix.
+
+    ⚠️ DEFENSIVE for the SANCTIONED shape, and operative for that raw-SQL one
+    (#11184 review, P3): `read_node`'s map is the projector's `node_from_row`
+    map (plus the event-stream `status` fold for the labels that have one), so a
+    caller using the module's own reader cannot produce `story_arc` in this
+    loop at all. Stated so the arm is not read as evidence that the `read_node`
+    path needs it — it does not, and a raw row also drags the record's COLUMN
+    spellings in (the false reds the module's contract sentence warns about).
 
     The control arm is the other half: a genuinely made-up name still reddens, so
     this is one declared class and not a blanket amnesty on the record side.
@@ -675,6 +684,30 @@ def test_the_DECLINED_prose_in_the_RECORD_is_not_an_invention():
     reddens, and the SAME name on a NON-episodic (document) Source is still
     explained by nothing — the decline is scoped by the node's identity, so
     blanket-explaining the pair here would decouple this arm from that scoping.
+
+    ⚠️ DEFENSIVE for the `summary` spelling only — and MEASURED twice over
+    (#11224's review, P2/P3). (1) ⛔ THIS PIN DOES NOT EXERCISE THE DENY:
+    emptying `cache_projection.CACHE_FORBIDDEN_COLUMNS` leaves every assertion
+    below green (MEASURED), because this pin's record side carries the DECLINE
+    pair only; the deny's mirror direction has its own pin,
+    `test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention` (ABOVE).
+    (2) ⛔ And the mirror BRANCH it pins is NOT "defensive for the sanctioned
+    shape" either: `summary` is absent from `read_node`'s map by construction,
+    but `_searchText` is NOT — a post-#10000 row derives it from the topic
+    lexicon, so `node_from_row` PROJECTS it (`#10965`; MEASURED: props
+    `['_searchText', 'sourceKind', 'topics', 'url']`). On that population the
+    SANCTIONED path reaches this branch and it FORGIVES a real gap: a cache
+    answer that lost `_searchText` — the one field the Source FTS index is
+    declared on — reads `clean` with `explained_missing {'_searchText'}`
+    (MEASURED). That false GREEN is `#11233`'s, not this pin's; the pin's job is
+    the `summary` half, where the record keeps the prose and the projection
+    declines it. ⚠️ The mirror is the right SHAPE for a caller that hands the
+    record side RAW (an audit that opened the record with its own SQL), exactly
+    as the sibling arm ABOVE is for the deny; this pin does not feed that shape —
+    its record side is the projection's own vocabulary (`{**served, …}`),
+    whereas a raw row would additionally red on the record's COLUMN spellings
+    (`source_kind` vs `sourceKind`, measured) — so the arm pins the decline
+    MIRROR, not the raw-row contract.
     """
     from tortoise.cache_projection import episodic_source_declined_properties, node_from_row
 
