@@ -1429,33 +1429,48 @@ _RESIDUAL_OPENNESS = (
     # forms are unanchored (#11258 review round 5 `P1`, measured). See
     # `_RESIDUAL_CLOSED_VERDICT`.
     r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
-    # ⛔ THE PARTICIPLE, SUBJECT-GATED, and the gate is split by TENSE because the
-    # honest shapes are historical. The `no longer` arm above carries only the 3sg
-    # `fuses`, so "the ADJACENCY half is no longer fused" — the row's OWN register
-    # (`the unit word IS fused`, `THE FUSION ITSELF MULTIPLIES`) — stayed GREEN
-    # while "… is no longer judged" RED: the arm was reached and only the
+    # ⛔ THE PARTICIPLE, SUBJECT-GATED. The `no longer` arm above carries only the
+    # 3sg `fuses`, so "the ADJACENCY half is no longer fused" — the row's OWN
+    # register (`the unit word IS fused`, `THE FUSION ITSELF MULTIPLIES`) — stayed
+    # GREEN while "… is no longer judged" RED: the arm was reached and only the
     # inflection was missing (#11258 review round 3, MEASURED). It cannot simply
-    # join the arm: this arm is UNANCHORED, so an ungated participle FALSE-BLOCKS
-    # the row's own honest `(d)` prose — "`percent`/`pct` is no longer fused:
-    # fusing it REFUSED the truthful pair" and "`miles` was no longer fused at
-    # that revision" both RED (measured, and both are must-stay-GREEN proof
-    # statements below, so the gate has a falsifier).
-    # ⛔ TWO GATES, because one gate cannot be both wide enough for the row's own
-    # closed-class vocabulary and narrow enough for its historical disclosures: an
-    # earlier revision gated `units?` with NO tense requirement, which let
-    # "`minute` is no longer fused" through GREEN (the same inflection asymmetry
-    # this arm exists to close, still open for every SPACING the row enumerates —
-    # measured) while FALSE-BLOCKING "the units were no longer fused at
-    # `origin/main` `525fde4a9`" (measured). So:
-    #   (a) the non-unit class words, tense-free — the row never discloses their
-    #       fusion historically in this shape;
-    #   (b) the unit vocabulary, PRESENT copula only — which is what the row's
-    #       historical disclosure (`were` / `was`) is excluded by.
+    # join the arm: this arm is UNANCHORED, so an ungated participle reds an honest
+    # `no longer fused` about ANY subject — `percent`/`pct` is no longer fused: …`
+    # RED (measured, and it is a must-stay-GREEN proof statement below, so the gate
+    # has a falsifier).
+    # ⛔ WHAT IS TRUE ABOUT THE ROW, stated because an earlier revision of this
+    # comment claimed otherwise (#11258 review round 4 `P2`, MEASURED): the row's
+    # real prose is "`miles` was not fused there" and "fusing `percent` REFUSED
+    # the truthful pair" — `grep -c "no longer fus"` over the whole registry is
+    # **0**, and `git log -S"no longer fused" -- config/v4-mechanisms.yml` is
+    # empty. So the honest shapes below are HYPOTHETICAL (what a future lane might
+    # write about the same graph), not the row's own sentences, and an ungated
+    # participle leaves the real row GREEN. That is why the gate may be — and is —
+    # widened to the past tense: it costs no real disclosure.
+    # ⛔ TWO GATES because one cannot be both wide enough for the row's own
+    # closed-class vocabulary and narrow enough for a generic subject:
+    #   (a) the non-unit class words of the CLOSED gap — no subject gate can be
+    #       narrower than the vocabulary the row itself names;
+    #   (b) the unit vocabulary the row enumerates plus its conventional siblings,
+    #       with an explicit copula so a bare unit token elsewhere cannot arm it.
+    # ⛔ TENSE IS NOT A DISCRIMINATOR (#11258 review round 4 `P2`, MEASURED): the
+    # first revision of (b) admitted only a PRESENT copula, which left the
+    # dangerous direction open — `the units were no longer fused in this revision`
+    # and `\`minute\` was no longer fused after the widen` were GREEN (a reopening
+    # in the past tense) — while (a) refused honest past-tense prose one vocabulary
+    # class over. Since the row writes no `no longer fused` at all, the honest
+    # past-tense shapes are hypothetical, so BOTH arms admit `was|were` and the
+    # leak closes on both sides.
+    # ⛔ ONE WINDOW FOR BOTH ARMS: a 20-char bound on (b) made the same sentence
+    # RED on the class-word side and GREEN on the unit side once it carried the
+    # row's own `, after the widen, ` register (MEASURED: `\`minute\` is, after the
+    # widen landed, no longer fused` → GREEN at 20, RED at 80).
     r"\b(?:adjacency|the\s+half|carve-?out|value\s+class|numeric\s+side|"
     r"time[- ]unit)\b[^.;]{0,80}?\bno\s+longer\s+(?:fused|fusing)\b",
     r"\b(?:units?|unit\s+word|second|seconds|minute|minutes|hour|hours|day|days|"
-    r"week|weeks|month|months|year|years|mile|miles|millisecond|milliseconds|"
-    r"min|ms|km)\b[^.;]{0,20}?\b(?:is|are|remains?|stays?)\b[^.;]{0,20}?"
+    r"week|weeks|month|months|mos|year|years|mile|miles|mi|millisecond|"
+    r"milliseconds|millisec|millisecs|min|mins|ms|sec|secs|hr|hrs|km|kg|m|s)"
+    r"\b[^.;]{0,80}?\b(?:is|are|remains?|stays?|was|were)\b[^.;]{0,80}?"
     r"\bno\s+longer\s+(?:fused|fusing)\b",
     r"\bunclosed\b",
     # ⛔ NEGATION IS NOT A REOPENING, and this arm is the UNANCHORED one — so it is
@@ -1647,17 +1662,18 @@ def _residual_region(text: str) -> str:
     # ⛔ ANTI-SILENT-NARROWING: the region must still carry the row's load-bearing
     # literals, or a `  - id: ` written into the row's PROSE truncates this region
     # early while every assertion above still passed. MEASURED reach: a decoy at
-    # row+200 / +8,000 / +12,900 REDs here, so this assert covers truncation up to
-    # `(e) the` (row+24,386) — a decoy LATER in the row (+20,000 / +40,000) passes
-    # it, and is caught by the append fixture in
+    # row+200 / +8,000 / +12,900 / +20,000 / +24,000 / +24,300 REDs here, so this
+    # assert covers truncation UP TO `(e) the` (row+24,386); a decoy AFTER it
+    # (+30,000 / +40,000 / +50,000) passes this assert and is caught by the append
+    # fixture in
     # `test_the_residual_region_is_scanned_WHERE_a_lane_appends` instead, which
     # inserts at the row's `_RESIDUAL_ROW_END` literal and asserts the sentence is
     # inside the region. Two anchors rather than one because the row is 50,850
     # chars and a single early literal leaves the tail unguarded here.
     assert (_RESIDUAL_MARKER in region and "(d) a RATE unit" in region
             and "(e) the" in region), (
-        "the scanned region does not run from the residual marker through "
-        f"residual (e) — it truncated early at {len(region)} chars (prose inside "
+        "the scanned region does not run from the row's start through residual "
+        f"(e) — it truncated early at {len(region)} chars (prose inside "
         "the row containing `  - id: `?), so the scan would silently cover less "
         "than the row it claims to guard")
     return region
@@ -2025,8 +2041,14 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # MEASURED: only 2 of the gate's 7 alternatives were exercised by any
     # mutation, so an alternative could be deleted and its shape SUBSTITUTED for
     # one of the four membership-pinned ones — `len` and uniqueness both held and
-    # the test stayed GREEN). These close the remaining five; with them, every
-    # alternative in the gate is pinned by a shape that REDs through it.
+    # the test stayed GREEN). These close the remaining five class-word
+    # alternatives. ⛔ NOT EVERY alternative is pinned — measured by deleting one at
+    # a time: the 6 class words, `units?`, `minute`, `km`, and (round 4) `kg`,
+    # `mi`, `mos`, `millisec`, `m` each lose a RED; the remaining plain-English
+    # spellings (`second(s)`, `hour(s)`, `day(s)`, `week(s)`, `month(s)`,
+    # `year(s)`, `mile(s)`, `millisecond(s)`, `min`, `ms`) do NOT, so a tidying
+    # pass that collapses `second|seconds` still gets no signal. Said here rather
+    # than implied (#11258 review round 4 `P2`).
     "the half is no longer fused",
     "the carve-out is no longer fused",
     "the value class is no longer fused",
@@ -2038,6 +2060,21 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # this arm exists to close, still open for the ten spellings the row names).
     "`minute` is no longer fused",
     "`km` is no longer fused",
+    # ⛔ THE REST OF THE ROW'S OWN UNIT FAMILY (#11258 review round 4 `P2`,
+    # MEASURED: `km` was caught while its row-sibling `kg` was GREEN — the same
+    # vocabulary asymmetry one spelling list narrower), and the PAST-TENSE
+    # reopenings the present-copula-only revision let through.
+    "`kg` is no longer fused",
+    "`mi` is no longer fused",
+    "`mos` is no longer fused",
+    "`millisec` is no longer fused",
+    "`m` is no longer fused",
+    "the units were no longer fused in this revision",
+    "`minute` was no longer fused after the widen",
+    # ... and the row's own `, after the widen, ` register inside the window,
+    # which the 20-char bound read as GREEN on the unit side and RED on the
+    # class-word side.
+    "`minute` is, after the widen landed, no longer fused",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -2112,10 +2149,19 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     # present-copula half of the gate exists to admit: a first revision gated
     # `units?` with no tense requirement and FALSE-BLOCKED both (measured).
     "`percent`/`pct` is no longer fused: fusing it REFUSED the truthful pair",
-    "`miles` was no longer fused at that revision",
-    "the units were no longer fused at `origin/main` `525fde4a9`, which is why "
-    "that pair was refused",
-    "the unit word was no longer fused in the revision the widen replaced",
+    # ⛔ THREE DELIBERATE OVER-BLOCKS, recorded rather than silently satisfied
+    # (#11258 review round 4 `P2`, MEASURED): the past tense is admitted on BOTH
+    # arms because leaving it out let a past-tense REOPENING through
+    # (`the units were no longer fused in this revision` was GREEN — the dangerous
+    # direction), and no tense rule can separate that from the honest historical
+    # phrasing below without also admitting the reopening. Since the row writes
+    # `no longer fused` NOWHERE (measured: `grep -c "no longer fus"` over the whole
+    # registry is 0), these shapes are hypothetical — a lane that writes one in a
+    # HISTORICAL sense will be asked to rephrase — so the over-block costs no real
+    # disclosure and closes the leak:
+    #   "`miles` was no longer fused at that revision"
+    #   "the units were no longer fused at `origin/main` `525fde4a9`, …"
+    #   "the unit word was no longer fused in the revision the widen replaced"
 )
 
 
@@ -2159,7 +2205,8 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     # reverting the participle and duplicating two existing entries keeps
     # `len == N` and stays GREEN — and this branch's lists are still GROWING, so an
     # equality pin also drops one side's proofs in a merge conflict). So: pin
-    # UNIQUENESS (substitution cannot pay for a deletion), pin MEMBERSHIP for the
+    # UNIQUENESS rejects duplicate padding ONLY; MEMBERSHIP is the only thing
+    # that blocks SUBSTITUTION, and it pins the shape each arm exists for.
     # shape each arm exists for, and use a `>=` FLOOR for size.
     assert len(set(_RESIDUAL_REOPENING_MUTATIONS)) == len(
         _RESIDUAL_REOPENING_MUTATIONS), (
@@ -2169,14 +2216,14 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 68, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 78, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ The floor is "
         "kept within ONE arm's proof set of the current length on purpose: at a "
         "#11258 round-6 reviewer-measured 49, twenty-one deletions were permitted "
         "while `_RESIDUAL_CLOSED_VERDICT` is six shapes, so the whole arm plus every "
         "proof of it could be deleted with both tests GREEN.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 22, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 32, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage")
     for required in (
