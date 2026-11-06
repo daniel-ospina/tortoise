@@ -52,10 +52,20 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   REFUSES by name and so can never hold — the one §17.5 owns. ⚠️ ONE refused
   name the record's own derivation DOES supply: ``status`` (``Object``/
   ``Subject``) is refused as a record ``props`` KEY, but ``DERIVED_FROM_RECORD``
-  and the ``EVENT_STREAM_FOLDS`` synthesise it on the record side, so wherever
+  and ``EVENT_STREAM_FOLDS`` synthesise it on the record side, so wherever
   the record carries a carrier the name is COMPARED and a mismatch reds; only a
   ``status`` the record cannot corroborate (no carrier on the record side)
-  reaches this bucket, and that is a lifecycle value, not "nothing to repair";
+  reaches this bucket, and that is a lifecycle value, not "nothing to repair".
+  ⛔ Its repair door is LABEL-DEPENDENT: on an ``:Object``
+  ``update_entity(…, status=None)`` is applied as ``SET n += {status: null}``, a
+  REMOVAL; on a ``:Subject`` the SAME call is REFUSED — ``sdk._update_entity``'s
+  Subject status door validates against ``_SUBJECT_STATUS_VALUES``, and ``None``
+  is not one of them — measured,
+  `#11252`'s review; the missing SDK door is `#11271`), so a ``:Subject``'s clear
+  is the graph-side ``REMOVE n.status`` or the wipe below. ⛔ Never a
+  record-sourced re-projection, which is ADDITIVE
+  (``MERGE … SET n += $props``, no REMOVE pass) and would leave the value in
+  place;
   (b) any property a
   SECOND WRITER put on a placed node, OR on a node the record does not own at
   all (``scan_cache_view`` fills ``placed`` for every cache node it reads, so
@@ -83,7 +93,8 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   three DECLARED ones differ in what repairs them: §17.5's cache-owned scalars,
   which the record schema REFUSES by name (a record read cannot produce them,
   nothing to repair — bar ``status``, which the record's own derivation makes
-  COMPARABLE wherever the record carries the carrier, see (a) above); the
+  COMPARABLE wherever the record carries the carrier, and whose form the record
+  cannot corroborate has a DESTRUCTIVE CLEAR, see (a) above); the
   projection-DECLINED pair an EPISODIC Source's
   ``summary``/``_searchText`` make
   (``cache_projection.episodic_source_prose_properties()``) — which the record's
@@ -536,10 +547,13 @@ def reconcile_record_and_cache(
     a ``graph_only`` name has one repair per population: none (schema-refused —
     bar ``status``: where the record carries a carrier the name is COMPARED, and
     its uncorroborated form — a value the record cannot place — is cleared by an
-    explicit caller clear (``update_entity(…, status=None)``,
-    ``SET n += {status: null}``, a REMOVAL) or the destructive wipe, ⛔ NOT by a
-    record-sourced re-projection, which is ADDITIVE and leaves the value in
-    place — measured, see the module docstring's (5)),
+    explicit caller clear that is LABEL-DEPENDENT: ``update_entity(…,
+    status=None)``, ``SET n += {status: null}``, a REMOVAL, on an ``:Object``;
+    on a ``:Subject`` that call is REFUSED (#1423's status door accepts only
+    ``SUBJECT_STATUS_VALUES``, and ``None`` is not one of them), so a Subject's
+    clear is the graph-side ``REMOVE n.status``. That, or the destructive wipe,
+    is the repair — ⛔ NOT a record-sourced re-projection, which is ADDITIVE and
+    leaves the value in place — measured, see the module docstring's (5)),
     a record-sourced clear IN PLACE for the declined pair —
     ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
     ⛔ NOT a re-projection, which is additive and leaves an existing pair on the

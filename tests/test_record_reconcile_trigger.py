@@ -421,8 +421,10 @@ def test_the_UNDECLARED_second_writer_population_is_reported_never_a_mismatch():
 
     ⛔ This pin feeds ONE of that population's TWO shapes — a property a SECOND
     WRITER put on a **placed** node — and that shape's pair reads ``clean``. The
-    other shape, the same kind of property on a **cache-only node the record does
-    not own at all**, is an ``extra_in_cache`` divergence and reads DIVERGENT
+    other shape, the same kind of property on a **node the record does not own
+    at all** ("cache-only" is not used here — it also names a different
+    population, a *property* only the cache holds on a PLACED node), is an
+    ``extra_in_cache`` divergence and reads DIVERGENT
     (measured; the census in ``record_reconcile``'s module docstring states both,
     and the pin name says only what is true of both: bucketed, never compared).
 
