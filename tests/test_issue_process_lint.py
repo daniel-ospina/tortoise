@@ -2482,3 +2482,40 @@ def test_one_character_after_the_auxiliary_does_not_turn_a_subject_into_a_gloss(
         "Refs #100 (2026-11-05) — not closing it.\n",
     ):
         assert L.classify_pr(honest, 1) == [], honest
+def test_a_task_list_SOMEWHERE_is_not_a_satisfies_checklist():
+    """Measured at `05585de08` (review round 25, P1) — the FALSE PASS direction, arm 2.
+
+    `has_satisfies_checklist` was `any(headings) and any(boxes)` across the WHOLE population, so a
+    task list anywhere — most often a `## Verification` list in the issue's own BODY — satisfied the
+    checklist half for a `## Satisfies` comment with no criteria at all:
+
+        [body with `- [ ]`s, IN FLIGHT, "## Satisfies\\n\\nTo be derived."]  -> NOTHING FLAGGED, rc 0
+        [body WITHOUT them,   IN FLIGHT, same comment]                       -> wip-no-satisfies
+
+    The only difference is a list written BEFORE scoping happened, so the arm cleared exactly the
+    defect it exists to report ("work started before the completion criteria existed"). Measured live
+    at the head: 8 of the 40 newest open issue bodies carry a line-start `- [ ]`.
+    """
+    inv = "IN FLIGHT: 3.2c — branch feat/census — box cell-4 — since 2026-11-05T09:00Z"
+    body_list = "## Verification\n\n- [ ] the guard holds\n- [ ] the census writes nothing\n"
+    numbered = "## Satisfies\n\n1. `3.2a` — tools/surface-target-check.py prints 76\n"
+    empty = "## Satisfies\n\nTo be derived.\n"
+    for satisfies in (empty, numbered):
+        assert [f.arm for f in L.classify_issue([body_list, inv, satisfies], 1)[0]] == \
+            [L.ARM_ISSUE], satisfies
+        # …and the same comment WITHOUT the unrelated body list behaves identically, which is what
+        # makes this a false pass rather than a second rule.
+        assert [f.arm for f in L.classify_issue([inv, satisfies], 1)[0]] == [L.ARM_ISSUE], satisfies
+    assert L.has_satisfies_checklist([body_list, empty]) is False
+
+
+def test_the_checklist_must_belong_to_the_heading_but_a_LATER_tick_still_counts():
+    """The two sides the fix must keep apart: a box in the HEADING's own comment clears the arm, and
+    a TICK in a follow-up comment still does (criteria are ticked once proved — requiring
+    co-location would re-flag every finished issue, which is why the original predicate was loose)."""
+    inv = "IN FLIGHT: 3.2c — branch feat/census"
+    assert L.classify_issue([inv, "## Satisfies\n\n- [ ] a\n- [ ] b\n"], 1)[0] == []
+    assert L.classify_issue([inv, "## Satisfies\n\n- [ ] a\n- [ ] b\n", "- [x] a\n"], 1)[0] == []
+    # An UNticked list in a later comment is some other checklist, not this one's criteria.
+    assert [f.arm for f in L.classify_issue([inv, "## Satisfies\n\nTo be derived.\n",
+                                            "- [ ] unrelated\n"], 1)[0]] == [L.ARM_ISSUE]

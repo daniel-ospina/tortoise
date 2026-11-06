@@ -528,6 +528,9 @@ SATISFIES_HEADING_RE = re.compile(r"^[ \t]{0,3}#{2,3}[ \t]*Satisfies\b", re.IGNO
 # scoping). Not imported verbatim because that pattern also requires trailing whitespace after the
 # bracket, which would miss a bare `- [ ]` at end of line.
 CHECKBOX_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\]", re.MULTILINE)
+# The TICKED subset, for the follow-up comment that proves a criterion. Derived from the same marker
+# class on purpose: a second spelling of "is this a task item" is how the two readers drift.
+TICKED_RE = re.compile(r"^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[xX]\]", re.MULTILINE)
 IN_FLIGHT_RE = re.compile(
     r"^[ \t]*(?:[-*+][ \t]+)?[\s*_`]*IN[ -]FLIGHT\s*:\s*(?P<rest>.*)$", re.IGNORECASE
 )
@@ -881,17 +884,41 @@ def claim_issues(body: str, own_number: int | None = None) -> list[int]:
 
 
 def has_satisfies_checklist(comment_bodies: list[str]) -> bool:
-    """A `## Satisfies` heading in any comment, plus at least one checkbox in ANY comment.
+    """A `## Satisfies` heading, plus a checklist THAT BELONGS TO IT.
 
-    Deliberately not "both in the same comment": criteria are often ticked in a follow-up comment
-    once they are proved, and requiring co-location would re-flag an issue the moment it finishes.
+    ⛔ ONE POPULATION-WIDE PREDICATE PAIR WAS A FALSE PASS (review round 25, P1). It was
+    `any(headings) and any(boxes)` over the whole population, so a task list ANYWHERE — most often a
+    `## Verification` check-list in the issue's own BODY, which 8 of the 40 newest open issue bodies
+    carry — satisfied the checklist half for a `## Satisfies` comment that had NO criteria at all:
+
+        [body with `- [ ]`s, IN FLIGHT, "## Satisfies\n\nTo be derived."]     -> NOTHING FLAGGED, rc 0
+        [body WITHOUT them, IN FLIGHT, "## Satisfies\n\nTo be derived."]     -> wip-no-satisfies, rc 3
+
+    The only difference is a task list written BEFORE scoping happened — i.e. the arm cleared exactly
+    the defect it exists to report ("work started before the completion criteria existed"), which is
+    the false-PASS direction this module ranks worst.
+
+    The predicate is now: a box in the HEADING's own comment, OR a TICKED box in a LATER comment.
+    The second arm is the original justification for not requiring co-location and it survives intact
+    — criteria are ticked in a follow-up comment once proved, and that must not re-flag a finished
+    issue (`test_a_tick_in_a_later_comment_still_counts`). An UNticked box after the heading is some
+    other checklist, not this one.
     """
     # Read through `strip_code`, exactly as `in_flight_markers` does. A comment that SHOWS the
     # format inside a fence is an example, not a checklist: matched against the raw bodies it
     # silently cleared the arm it exists to raise, on an issue with WIP and no real criteria (F2).
-    headings = [SATISFIES_HEADING_RE.search(strip_code(b)[0]) for b in comment_bodies]
-    boxes = [CHECKBOX_RE.search(strip_code(b)[0]) for b in comment_bodies]
-    return any(headings) and any(boxes)
+    stripped = [strip_code(b)[0] for b in comment_bodies]
+    headings = [bool(SATISFIES_HEADING_RE.search(s)) for s in stripped]
+    boxes = [bool(CHECKBOX_RE.search(s)) for s in stripped]
+    ticked = [bool(TICKED_RE.search(s)) for s in stripped]
+    for i, has_heading in enumerate(headings):
+        if not has_heading:
+            continue
+        if boxes[i]:
+            return True
+        if any(ticked[i + 1:]):
+            return True
+    return False
 
 
 def _marker_rest(line: str) -> str:
