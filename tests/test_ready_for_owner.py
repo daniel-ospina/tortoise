@@ -3753,3 +3753,156 @@ def test_an_explicit_empty_head_runs_still_defers() -> None:
     gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
     assert gates.passed is True, gates.raw
     assert "DEFERRED(merge-time)" in gates.raw
+
+
+# ── round-12 review (P3): the deferred COUNT, and a config error's LABEL ────
+
+
+def _two_merge_time_fixture(*, aggregate_reports: bool) -> dict[str, Any]:
+    """Two DECLARED merge-time contexts, at most one of them measured on this head."""
+    groups: list[dict[str, Any]] = [
+        {
+            "job": "docs",
+            "state": ci_verdict.GROUP_GREEN,
+            "status": "completed",
+            "conclusion": "success",
+            "check_id": 1000,
+        }
+    ]
+    if aggregate_reports:
+        groups.append(
+            {
+                "job": "aggregate",
+                "state": ci_verdict.GROUP_GREEN,
+                "status": "completed",
+                "conclusion": "success",
+                "check_id": 1001,
+            }
+        )
+    return {
+        "pr": 10999,
+        "head": HEAD,
+        "tree": True,
+        "required": ["docs"],
+        "required_deferred": ["aggregate", "nightly"],
+        # `aggregate` is emitted by `python-ci.yml`; `nightly` by a workflow that never
+        # ran on this head, so `nightly` is the only context that can be DEFERRED.
+        "merge_emit_files": {
+            "aggregate": ["python-ci.yml"],
+            "nightly": ["nightly.yml"],
+        },
+        "head_runs": [{"path": ".github/workflows/python-ci.yml", "event": "pull_request"}],
+        "groups": groups,
+    }
+
+
+def test_the_ready_line_counts_the_deferrals_it_made_not_the_declared_contexts() -> None:
+    """★ ISSUE 1 (P3): `deferred=` must count DEFERRALS, not declared merge-time contexts.
+
+    `len(probe.required_deferred)` is how many `merge_conditions` names the config
+    DECLARES. That is not how many deferrals the verdict MADE: when a merge-time check
+    also reported on this head it is measured, and the READY line then asserted a
+    deferral of a check the same line reports as `completed/success#…`. The raw is the
+    provenance a lane debugging NOT-READY reads, so a count that misstates what the PASS
+    rests on is the one thing this raw exists not to do.
+
+    The fixture declares TWO merge-time contexts and measures one, so `len(...)` and the
+    real count differ — the only shape that separates them. The converse below pins that
+    the count can reach 0, so a constant cannot satisfy this test.
+    """
+    probe = rfo.probe_from_dict(_two_merge_time_fixture(aggregate_reports=True))
+    assert probe.required_deferred == ("aggregate", "nightly")
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    # The evidence, side by side: one context measured green, one genuinely deferred.
+    assert "aggregate=completed/success#1001" in gates.raw, gates.raw
+    assert "nightly=DEFERRED(merge-time)" in gates.raw, gates.raw
+    # Declared = 2. Deferred = 1. Pre-fix this line read `deferred=2`.
+    assert "deferred=1 " in gates.raw, gates.raw
+    assert "deferred=2" not in gates.raw, gates.raw
+
+    # Converse: nothing is absent, so nothing is deferred — `deferred=0`, not `1`/`2`.
+    measured = rfo.probe_from_dict(_two_merge_time_fixture(aggregate_reports=True))
+    measured = dataclasses.replace(measured, required_deferred=("aggregate",))
+    gates = next(c for c in rfo.evaluate(measured).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "deferred=0 " in gates.raw, gates.raw
+
+    # Converse the other way: neither context reported, and neither emitter's workflow
+    # ran here ("read it, zero runs"), so BOTH are deferred — the count tracks the
+    # verdict, not a constant 0.
+    both_deferred = dataclasses.replace(
+        rfo.probe_from_dict(_two_merge_time_fixture(aggregate_reports=False)),
+        head_runs=(),
+    )
+    gates = next(c for c in rfo.evaluate(both_deferred).checks if c.name == "gates")
+    assert gates.passed is True, gates.raw
+    assert "deferred=2 " in gates.raw, gates.raw
+
+
+def test_a_required_set_config_error_is_a_FAIL_not_a_retryable_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ ISSUE 2 (P3): a CONFIG error must not be labelled `FAIL(unreadable)` ("retry").
+
+    `RequiredSetConfigError` is a VERDICT about the repo's contract — the committed
+    record names a context `.mergify.yml` no longer derives, or the record's own
+    `live_result` is `DIVERGED` (the #3016 regression this module exists to catch).
+    `_read_required_contexts` collapsed it into a plain `ReadError`, so `check_gates`
+    reported `FAIL(unreadable)` — this module's token for "could not be read, RETRY",
+    which sends a lane to re-run a read that no retry can fix. The same file keeps the
+    split 20 lines below (`every required check is merge-time` ⇒ `FAIL`, not
+    `FAIL(unreadable)`) and `--required-set` keeps it too
+    (`REQUIRED-SET-CONFIG-ERROR` vs `REQUIRED-SET-UNREADABLE`).
+    """
+
+    def diverged(cwd: Any, ref: Any = None, **kw: Any) -> Any:
+        raise rfo_required.RequiredSetConfigError(
+            "required-contexts record names 'python-ci-gate' and .mergify.yml no longer "
+            "derives it"
+        )
+
+    probe, _ = _collect(monkeypatch, _gh_payloads(), derive=diverged)
+    # Both still REFUSE — the set is unread, and nothing guesses it.
+    assert probe.required is None
+    assert probe.required_deferred is None
+    assert probe.required_config_error, "the class must survive the read boundary"
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False, gates.raw
+    assert gates.unreadable is False, f"pre-fix this was {gates.status}"
+    assert gates.status == "FAIL"
+    assert gates.reason.startswith("required-set-config-error:"), gates.reason
+    assert "no longer derives it" in gates.reason, gates.reason
+
+    # The `--fixture` door carries the same field, so a fixture can express the state.
+    fixture = _check(
+        "gates",
+        required=None,
+        required_deferred=None,
+        required_config_error="record and config disagree",
+    )
+    assert fixture.unreadable is False and fixture.status == "FAIL", fixture.status
+    assert fixture.reason.startswith("required-set-config-error:"), fixture.reason
+
+
+def test_an_unreadable_required_set_still_reads_FAIL_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The counterpart: a set that could not be READ keeps the retryable label.
+
+    Without this, the fix above could be satisfied by deleting the `unreadable` arm —
+    trading a wrong label for a lost distinction, since "I could not read it" IS
+    retryable and a lane does need to be told so.
+    """
+
+    def unreadable(cwd: Any, ref: Any = None, **kw: Any) -> Any:
+        raise rfo_required.RequiredSetUnreadable(".mergify.yml could not be read")
+
+    probe, _ = _collect(monkeypatch, _gh_payloads(), derive=unreadable)
+    assert probe.required is None
+    assert probe.required_config_error == ""
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert gates.unreadable is True, gates.status
+    assert gates.status == "FAIL(unreadable)", gates.status
+    assert not gates.reason.startswith("required-set-config-error:"), gates.reason

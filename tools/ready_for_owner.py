@@ -1113,6 +1113,24 @@ class ReadError(RuntimeError):
     """An input could not be read. NEVER a verdict, and never green."""
 
 
+class RequiredConfigReadError(ReadError):
+    """The required set was not derivable because the repo's CONTRACT is wrong.
+
+    A subclass of `ReadError` so every existing handler still REFUSES, and its own class
+    so the distinction survives the read boundary: `tools.required_set.RequiredSetConfigError`
+    says the repo's two sources of truth disagree (a `check-success=` line dropped while
+    the committed record still names the context, or a record whose own `live_result` is
+    `DIVERGED`) — the #3016 regression this module exists to catch. That is a VERDICT
+    about configuration, never an I/O failure: `FAIL(unreadable)` means "could not be
+    read, RETRY" in this module's vocabulary, and retrying will not change a config.
+
+    ⛔ The `RequiredSetConfigError` docstring states the same rule from the other side:
+    *"What must never happen is that this class is caught and treated as a retryable read
+    failure."* Collapsing it into `ReadError` at `_read_required_contexts` is exactly that
+    collapse, one frame later.
+    """
+
+
 class RateLimited(ReadError):
     """GitHub refused the read for rate-limit reasons (403/429)."""
 
@@ -1229,6 +1247,12 @@ class Probe:
     #: ``None`` = unreadable, and it is kept SEPARATE from ``required`` because
     #: conflating the two is the permanent false NOT-READY this split exists to end.
     required_deferred: tuple[str, ...] | None = None
+    #: Set only when the required set was not derivable because the repo's CONTRACT is
+    #: wrong (a ``RequiredSetConfigError``: the committed record and ``.mergify.yml``
+    #: disagree, or the record's own ``live_result`` is not clean). ``check_gates`` turns
+    #: it into a plain ``FAIL`` — never ``FAIL(unreadable)``, which means "could not be
+    #: read, RETRY" and would point a lane at the wrong subsystem. Empty = no config error.
+    required_config_error: str = ""
     #: ``merge-time context -> workflow FILES that emit it`` (the record's ``emitters``
     #: projection, via `tools.required_set.RequiredSet.emit_files`). An empty answer for a
     #: required name means the emission is UNATTRIBUTABLE, which fails the gate rather than
@@ -1447,6 +1471,19 @@ def check_gates(probe: Probe) -> Check:
     # Every arm below carries it, the check-runs-unreadable one included.
     source = probe.required_raw or "required-set: not read"
     if probe.required is None or probe.required_deferred is None:
+        if probe.required_config_error:
+            # The repo's own contract is violated (record ↔ config divergence, or a record
+            # whose `live_result` is not clean). This is a CONFIGURATION fact, so it refuses
+            # as `FAIL`, NOT `FAIL(unreadable)`: `unreadable` means "could not be read,
+            # RETRY" here, and no retry repairs a config. Same split the every-required-
+            # check-is-merge-time arm below states, and the same split `--required-set`
+            # keeps (`REQUIRED-SET-CONFIG-ERROR` vs `REQUIRED-SET-UNREADABLE`).
+            return Check(
+                "gates",
+                False,
+                probe.required_raw or "required context set is empty",
+                f"required-set-config-error:{probe.required_config_error}",
+            )
         # An EMPTY required set is not "nothing is required" — it is a set that was not
         # read. Zero contexts, a truncated payload, or a hand-written fixture must never
         # read as an unconditional pass. (`is None` is the UNREADABLE case precisely so
@@ -1542,6 +1579,7 @@ def check_gates(probe: Probe) -> Check:
     # PR-triggered run of the EMITTING WORKFLOW happened on this head; a FAIL when it
     # did (its aggregate is pending or never posted — both are non-green), and a FAIL
     # when the emission cannot be attributed at all.
+    deferred = 0
     for context in probe.required_deferred or ():
         groups = by_job.get(context) or []
         if not groups:
@@ -1549,6 +1587,9 @@ def check_gates(probe: Probe) -> Check:
             seen.append(note)
             if token:
                 failed.append(f"{token}:{context}")
+            else:
+                # `_merge_time_absence` answers `("", …)` on exactly one arm: DEFERRED.
+                deferred += 1
             continue
         for group in sorted(groups, key=lambda g: g.check_id or 0, reverse=True):
             seen.append(f"{context}={group.status}/{(group.conclusion or 'null')}#{group.check_id}")
@@ -1567,8 +1608,14 @@ def check_gates(probe: Probe) -> Check:
     return Check(
         "gates",
         True,
+        # `deferred=` is a count of the DEFERRALS THIS VERDICT ACTUALLY MADE, not of the
+        # declared merge-time contexts: those are two different numbers whenever a
+        # merge-time check also reported on this head, and printing the declared count
+        # asserted a deferral of a check the same line reports as measured green. The
+        # declared count is still visible — one `seen` note per context below — so nothing
+        # is hidden by counting the real thing.
         f"entry={len(probe.required)} all/{REQUIRED_CONCLUSION} "
-        f"deferred={len(probe.required_deferred or ())} {raw} [{source}]",
+        f"deferred={deferred} {raw} [{source}]",
     )
 
 
@@ -2275,7 +2322,14 @@ def _read_required_contexts(workdir: Path) -> tuple[RequiredSet, str]:
     """
     try:
         required = derive_from_ref(workdir, f"origin/{PROTECTED_BRANCH}", timeout=GIT_TIMEOUT)
-    except (GuardUnreadable, RequiredSetUnreadable, RequiredSetConfigError) as exc:
+    except RequiredSetConfigError as exc:
+        # A config error is a VERDICT about the repo's contract, an unreadable config is
+        # "I could not read it". Both REFUSE; neither may fall back to a guessed set.
+        # ⛔ They are carried as DIFFERENT classes across this boundary, because the
+        # caller has to LABEL them differently: `FAIL(unreadable)` tells a lane to retry
+        # the read, and no retry repairs a config/record divergence.
+        raise RequiredConfigReadError(str(exc)) from None
+    except (GuardUnreadable, RequiredSetUnreadable) as exc:
         # A config error is a VERDICT about the repo's contract, and an unreadable
         # config is "I could not read it". Both REFUSE; neither may fall back to a
         # guessed set.
@@ -2756,6 +2810,15 @@ def collect_probe(
     probe.tree, probe.tree_raw = _try_tree(gh, pr, head, workdir)
     try:
         required, probe.required_raw = _read_required_contexts(workdir)
+    except RequiredConfigReadError as exc:
+        # A CONFIGURATION verdict, not a read failure: the set is still unread (so the
+        # gate still REFUSES), but the class is carried through so `check_gates` can label
+        # it `FAIL` instead of `FAIL(unreadable)`. Must be caught BEFORE `ReadError`, of
+        # which it is a subclass.
+        probe.required = None
+        probe.required_deferred = None
+        probe.required_config_error = str(exc)
+        probe.required_raw = f"required-set: {exc}"
     except ReadError as exc:
         # `_read_required_contexts` touches no `Gh`: it shells `git` and converts every
         # failure to `ReadError` (a `RateLimited` is a `ReadError` too, so it would land
@@ -3174,6 +3237,7 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
             if "required_deferred" in data and data["required_deferred"] is None
             else tuple(data.get("required_deferred") or ())
         ),
+        required_config_error=str(data.get("required_config_error") or ""),
         required_raw=str(data.get("required_raw", "")),
         review_token=data.get("review_token"),
         review_exit=data.get("review_exit"),
