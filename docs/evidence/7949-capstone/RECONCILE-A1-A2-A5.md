@@ -102,7 +102,10 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:17465`). What is missing is the *declared part-whole* edge, not
+   the capture path at `tortoise/sdk.py:17472`). ⚠️ **`probes/capstone_measure.py:279`'s docstring says
+   `sdk.py:17465`, which is stale** — line 17465 is `summary=stored_summary,`; the call is 17472, at the
+   measured head too. Corrected here rather than propagated; the probe's docstring is a follow-up, not
+   this record's to edit. What is missing is the *declared part-whole* edge, not
    every structural edge — and saying otherwise would send a lane off to build a writer the graph already
    has (the "second producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2238-2243`
@@ -149,8 +152,14 @@ deictics, generic heads**. Its scope is explicitly *not* A2's population:
 - and the reason, from `test_the_25_row_label_set_is_the_ARBITERS_class_not_this_cue_s`: the owner's
   25-row `not_an_entity` set is **15 definite descriptions + 10 identifier/pointer rows, with no
   pronoun/deictic/generic row at all**, so this cue's hit count on it is **0 by construction**.
-- A2's mechanism is exactly the definite-description population: `#4894`'s audit found **62.3 % of
-  Objects are `^(the )<X>`**. `#11211` does not touch one of them.
+- A2's mechanism is exactly the definite-description population: **62.3 % of Objects are `^(the )<X>`**
+  (**4,900 / 7,859**, enumerated **2026-09-24** —
+  `docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md:192,314`). ⛔ **`#4894` is the
+  *mechanism* audit (50 real instances), NOT the ratio** — the epic's own research brief says so
+  explicitly (`docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md:45`) and records
+  attributing the ratio to `#4894` as a DEFECT it fixed in review round 1. `#11211` does not touch one
+  of those Objects. ⚠️ The ratio is carried from a 7,859-Object population; today's is ~5,314 and has not
+  been re-enumerated (`#10995`).
 - `#11211` also ships **flag OFF** (`TORTOISE_REFERENTIALITY`), because plan R1 says measure before
   arming.
 
@@ -201,8 +210,9 @@ nothing else. Which is why the 0.0 pp above is the **armed** result, not an unar
 
 > `Subject` count above 26 on a corpus the fleet actually captured, with the four edge families non-zero.
 
-None of `#11213`, `#11212`, `#11211` touches the Subject path. Nothing at all in the three merges names
-`subject_binding`, `aboutSubject`, `memberOf`, `ownedBy` or `managedBy`. And the measurement the child
+None of `#11213`, `#11212`, `#11211` touches the Subject path. Nothing at all in **the three
+changesets** names `subject_binding`, `aboutSubject`, `memberOf`, `ownedBy` or `managedBy` ("changesets",
+not "merges" — `#11212` is a branch, §0). And the measurement the child
 asks for **already exists**, and reads below the bar — on the C1 pre-registered corpus
 (`capstone-measured-9152448d.log:265-311`, `9152448d7`):
 
@@ -284,6 +294,7 @@ git grep -n apply_hierarchy_edges                            # tests + definitio
 grep -c -E 'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py   # 0
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
+sed -n '17472p' tortoise/sdk.py                              # the call itself (the probe's `:17465` is stale)
 git grep -in 'rollup' -- '*.py' '*.md'                       # no graph rollup query anywhere
 # ⚠️ self-matching once this record lands — exclude it, then the answer is 0:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
