@@ -838,12 +838,20 @@ jobs:
         # `fetch-depth: 0` (see the checkout above), so this is where the ancestry
         # claim is actually proved. `--check` is verify-only; stdlib only, so it
         # needs nothing from the `pip install` above (kept for its siblings).
+        # #11084: the surface map's own guard (`tools/test_design_map_check.py`,
+        # pinning `docs/epics/2026-11-04-5090-vector-layer/TEST-DESIGN-surface-map.md`)
+        # joins for the same reason again — a docs-only edit of the map selects no
+        # surface — and for one that is specific to it: the map EXISTS to be a
+        # checklist for the #5090 capstone (#11089), and a checklist that silently
+        # loses a row is the failure the artifact was written to prevent. The tool
+        # is stdlib only, reads one file, touches no DB and no network.
         run: |
           pip install -e . --quiet
           python3 tools/bridge_table.py --check
           python3 tools/mcp_rename_table.py --check
           python3 tools/sdk_surface.py --check
           python3 tools/substrate_map_check.py --check
+          python3 tools/test_design_map_check.py
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
