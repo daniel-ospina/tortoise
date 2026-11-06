@@ -12869,7 +12869,7 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     check on a diff that never touched this job.
 
     Nothing is lost by not saving here: the key is SHARED
-    (`pip-<os>-<hash uv.lock>`) and on EVERY run by `test-d14-hosted-api`
+    (`pip-<os>-<hash uv.lock>`), written on EVERY run by `test-d14-hosted-api`
     (unconditional, PR + push) and by `test-slow` only under `slow_run`, so this
     job only ever READ it. The ~90 MB HF embedding cache in the same job is
     deliberately left alone (measured 1m38s to save, and it is the leg's

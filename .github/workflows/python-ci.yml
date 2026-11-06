@@ -3474,13 +3474,13 @@ jobs:
         # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
         # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
         # (floor-clamped, `carve_shards: 3`) + a 10m embedder cap + ~1m setup
-        # ≈ 30m — no headroom before a save, and none at all against a slow
-        # one. Raising the cap instead would re-open #3239's stale-head
+        # + the 1m38s HF POST ≈ 31.6m — already ~1.6m PAST the 30m cap, and worse
+        # against a slow one. Raising the cap instead would re-open #3239's stale-head
         # exposure (the cap IS that exposure) and buy finite headroom under an
         # UNBOUNDED term — the save has no timeout of its own.
         #
         # Nothing is lost by not saving here: the key is SHARED
-        # (`pip-<os>-<hash uv.lock>`), and on EVERY run by `test-d14-hosted-api`
+        # (`pip-<os>-<hash uv.lock>`), written on EVERY run by `test-d14-hosted-api`
         # (unconditional, PR + push) and by `test-slow` only under `slow_run`.
         # This job only ever READ it.
         #
@@ -4646,8 +4646,8 @@ jobs:
         # withheld a REQUIRED check on a diff that never touched this job.
         #
         # Nothing is lost by not saving here: the key is SHARED
-        # (`pip-<os>-<hash uv.lock>`) and is written by ONLY `test-slow` (60m) and
-        # `test-d14-hosted-api` (50m) — both have the headroom this job does not.
+        # (`pip-<os>-<hash uv.lock>`) and is written by ONLY `test-d14-hosted-api`
+        # (50m, headroom this job does not have) and `test-slow` (60m, at its cap).
         # ⛔ NOT `test`: restore-only on this path since #11063, it saves
         # `.pytest_cache` and `~/.cache/uv`. This job only ever READ the key.
         uses: actions/cache/restore@v4

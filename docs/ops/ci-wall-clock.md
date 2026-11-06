@@ -180,15 +180,15 @@ stated there once, not restated here, which is how this pair drifted apart in th
 ⚠ **The `~9 m` save term the saving rows use is not re-measured here.** That figure comes from the
 `test-d14-hosted-api` incident (#10182). The 15.9 m above was measured on this job *before* #11063
 stood its save down, on a different runner and day, and shows a 3.6 GB save can cost TWICE that.
-The rows derived from `~9 m` (`test-slow`'s 60 m, the `test-d14-hosted-api` headroom
-statements below, and `test-track-b`'s save arm (`python-ci.yml:3222`, `cache: pip`) — ⛔ **`test` is NOT one of them at this head:** #11063 has since re-derived
-its SUM on a MEASURED ~7.3 m startup plus an 8 m cache-write term, and split its payload so
-that job no longer writes the 3.6 GB archive at all — see its row below, which is the
-authority for it. Nor is `test-carve-out`, whose pip step has been
-`actions/cache/restore@v4` since #10182) are optimistic by ~7 m against the censored 15.9 m
-and by ~11 m against the completed ~20 m. Re-deriving them is owed and is deliberately NOT
-done here: nothing has measured any row carrying that term being cancelled, and this
-document's rule is to move a cap from a measurement, not from a comparison of two samples.
+The rows derived from `~9 m` (`test-slow`'s 60 m, the `test-d14-hosted-api` headroom statements
+below, and `test-track-b`'s save arm — `python-ci.yml:3222`, `cache: pip`) are optimistic by ~7 m
+against the censored 15.9 m and by ~11 m against the completed ~20 m. ⛔ **`test` is NOT one of
+them:** #11063 re-derived its SUM on a MEASURED ~7.3 m startup plus an 8 m cache-write term and
+split its payload, so it no longer writes the 3.6 GB archive at all (its row below is the
+authority). Nor is `test-carve-out`, whose pip step has been `actions/cache/restore@v4` since
+#10182. Re-deriving them is owed and is deliberately NOT done here: the two cancellations that DID
+move a cap (`test-d14-hosted-api`, `test-track-b` — both worked below) were sized WITH this `~9 m`
+figure rather than from a fresh save measurement, and this document's rule is to move a cap from a measurement, not from a comparison of two samples.
 
 ⚠ `test-d14-hosted-api` moved 20 → 40 (#10182), and the reason is a blind spot in the table
 itself: the sample above counts only jobs whose conclusion is `success` or `failure`, so a job
@@ -262,8 +262,8 @@ cap (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at
 `timeout-minutes: 10` embedder provision** — ≈ 21 m of IN-STEP caps (10 + 10 + ~1 m), and it installs
 `install-cpu-torch` + `.[test,embeddings]` (`python-ci.yml:2941-2946`). The ~30 m this row used to
 carry also counted a `~/.cache/pip` save #11063 stood down (`python-ci.yml:2934-2938` is
-`actions/cache/restore@`), and it still pays an unconditional `actions/cache@v4` POST on
-`~/.cache/huggingface` (`python-ci.yml:2977-2979`), so its SUM needs a measurement: `15 → 50` is VOID.
+`actions/cache/restore@`), and it still carries an ungated `actions/cache@v4` POST on `~/.cache/huggingface`
+(`python-ci.yml:2977-2979`) that uploads on a MISS, so its SUM needs a measurement: `15 → 50` is VOID.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 
