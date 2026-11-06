@@ -20,6 +20,23 @@ _log = logging.getLogger("tortoise.sentry")
 _enabled = False
 _service = "tortoise-hosted-api"
 
+# Exceptions that are NOT application errors and must never become Sentry events.
+# #11092: a peer hanging up is routine (a health probe timing out, a browser tab
+# closed, a dropped fetch). Routing it through the unhandled-exception handler
+# built a full event — including the per-frame source read that
+# `include_source_context=False` now removes — for EVERY disconnect, and under a
+# probe storm that starved the event loop into a customer-visible outage.
+#
+# ⛔ THIS IS THE ONLY COPY OF THE SET. `init()` derives its `ignore_errors` from
+# it (review round 3, P2): the two used to be written out separately, which is
+# one silent drift away from re-opening the storm — shrink this and the SDK
+# delivers an event the helper already called benign; grow only the SDK list and
+# the helper captures one the SDK drops. `test_ignore_errors_agrees_with_the_
+# benign_names` pins them equal.
+BENIGN_EXCEPTION_NAMES = frozenset(
+    {"ClientDisconnect", "BrokenResourceError", "BrokenPipeError", "ConnectionResetError"}
+)
+
 
 def init() -> bool:
     """Initialize Sentry iff SENTRY_DSN is set. Returns whether enabled.
@@ -84,13 +101,16 @@ def init() -> bool:
             # there — measured (review round 2, P3): a subclass delivered 1 event
             # while `is_benign_exception` said benign. Starlette raises the base
             # class itself, so nothing in this tree is in that gap; the names are
-            # exact on purpose, and the helper's MRO match is the stricter half.
-            ignore_errors=[
-                "ClientDisconnect",
-                "BrokenPipeError",
-                "ConnectionResetError",
-                "BrokenResourceError",
-            ],
+            # exact on purpose. Round 3 (P3) made the HELPER exact by name too: its
+            # MRO walk was the BROADER half, and broader here means silencing real
+            # faults — `http.client.RemoteDisconnected` ("the upstream we called
+            # reset the connection") SUBCLASSES `ConnectionResetError`, so it was
+            # classified benign and never captured. The `isinstance` arm in
+            # `is_benign_exception` still covers genuine subclasses of starlette's
+            # `ClientDisconnect`, which is the re-wrap case the MRO walk was for.
+            #
+            # ⛔ DERIVED, never re-typed — one source of truth (round 3, P2).
+            ignore_errors=sorted(BENIGN_EXCEPTION_NAMES),
         )
         _enabled = True
         _log.info("sentry enabled for %s", _service)
@@ -105,26 +125,25 @@ def enabled() -> bool:
     return _enabled
 
 
-# Exceptions that are NOT application errors and must never become Sentry events.
-# #11092: a peer hanging up is routine (a health probe timing out, a browser tab
-# closed, a dropped fetch). Routing it through the unhandled-exception handler
-# built a full event — including the per-frame source read that
-# `include_source_context=False` now removes — for EVERY disconnect, and under a
-# probe storm that starved the event loop into a customer-visible outage.
-BENIGN_EXCEPTION_NAMES = frozenset(
-    {"ClientDisconnect", "BrokenResourceError", "BrokenPipeError", "ConnectionResetError"}
-)
-
-
 def is_benign_exception(exc: BaseException) -> bool:
     """True for exception types that are client-side events, not server faults.
 
     Two checks, and the identity one is the load-bearing half:
 
     * `isinstance` against starlette's own `ClientDisconnect`, imported lazily so
-      this module stays importable without starlette;
-    * a NAME match as the fallback, which covers the re-wrapped/re-exported
-      classes an integration can raise and costs nothing when idle.
+      this module stays importable without starlette. This is the half that
+      covers SUBCLASSES (a server that re-wraps or re-exports the class);
+    * an EXACT type-name match against `BENIGN_EXCEPTION_NAMES`, which is the
+      fallback for a class that cannot be `isinstance`d here because its library
+      is absent, and which deliberately does NOT walk the MRO.
+
+    ⛔ The name match is EXACT on purpose (review round 3, P3). Walking the MRO
+    makes this helper broader than the SDK's own `ignore_errors` — and broader is
+    the harmful direction: it silences real faults. `http.client.
+    RemoteDisconnected` is a `ConnectionResetError` subclass that means "the
+    UPSTREAM reset the connection", so an MRO walk classified a dependency
+    outage as a client hang-up and the handler logged it at DEBUG and captured
+    nothing. Subclass coverage is the `isinstance` arm's job, not this one's.
     """
     try:
         from starlette.requests import ClientDisconnect as _ClientDisconnect
@@ -133,7 +152,7 @@ def is_benign_exception(exc: BaseException) -> bool:
             return True
     except Exception:  # noqa: BLE001, RUF100 — starlette absent is not a failure here
         pass
-    return any(cls.__name__ in BENIGN_EXCEPTION_NAMES for cls in type(exc).__mro__)
+    return type(exc).__name__ in BENIGN_EXCEPTION_NAMES
 
 
 def capture_exception(exc: BaseException, tags: dict[str, Any] | None = None) -> None:

@@ -1,4 +1,4 @@
-"""#10892 — a client hang-up must not build a Sentry event.
+"""#11092 — a client hang-up must not build a Sentry event.
 
 The 2026-11-04 outage: every aborted request (a health probe timing out, a closed
 tab, a dropped fetch) reached ``_unhandled_exception_handler`` as an "unhandled"
@@ -34,9 +34,10 @@ import pytest
 import tortoise.sentry as tsentry
 
 
-# A stand-in for starlette.requests.ClientDisconnect: the guard matches by NAME
-# (tortoise/sentry.py deliberately does not import starlette), so the real class'
-# identity is not what is under test — the name is.
+# A stand-in for starlette.requests.ClientDisconnect: this module exercises the
+# NAME arm (tortoise/sentry.py resolves starlette's class lazily), so the real
+# class' identity is not what is under test here — the exact name is. A genuine
+# starlette subclass is covered by the isinstance arm, pinned separately.
 class ClientDisconnect(Exception):
     pass
 
@@ -74,10 +75,19 @@ def test_init_turns_source_context_off(enabled_sentry: dict[str, list]) -> None:
         "sentry init must pass include_source_context=False — with the default "
         "(True) every captured event re-reads and tokenizes the source file of "
         "every stack frame on the calling thread, which on the hosted API is the "
-        "asyncio event loop (#10892)"
+        "asyncio event loop (#11092)"
     )
     # The #2863 credential fix must survive alongside it.
     assert kwargs.get("include_local_variables") is False
+    # REVIEW ROUND 3 (P2): the SDK-side list must be DERIVED from the helper's
+    # constant, never re-typed. Two hand-written copies are one silent drift from
+    # re-opening the storm — the handler would call a class benign while the SDK
+    # still delivered an event for it (or the reverse), and every other test here
+    # would stay green. Mutating either side alone reddens this.
+    assert set(kwargs.get("ignore_errors") or ()) == set(tsentry.BENIGN_EXCEPTION_NAMES), (
+        "init()'s ignore_errors and BENIGN_EXCEPTION_NAMES must be the SAME set — "
+        "init derives it, so a difference means one of them was re-typed by hand"
+    )
 
 
 def test_capture_exception_refuses_a_client_disconnect(
@@ -86,7 +96,7 @@ def test_capture_exception_refuses_a_client_disconnect(
     tsentry.capture_exception(ClientDisconnect())
     assert enabled_sentry["exc"] == [], (
         "a client disconnect is a client-side event, not an application error — "
-        "capturing it is what built an event per aborted request (#10892)"
+        "capturing it is what built an event per aborted request (#11092)"
     )
 
 
@@ -100,13 +110,47 @@ def test_capture_exception_still_reports_a_real_error(
 
 
 def test_benign_matching_survives_a_rewrapped_subclass() -> None:
-    """uvicorn/starlette re-raise through wrappers; the name is what we match."""
+    """A re-wrapped SUBclass of starlette's own ClientDisconnect must stay benign.
 
-    class _Rewrapped(ClientDisconnect):
+    ⚠️ This must use the REAL ``starlette.requests.ClientDisconnect``, not the
+    module-level stand-in above: the stand-in exists to exercise the NAME arm,
+    and a subclass of it matches nothing (its own name is not in the set, and
+    dropping the MRO walk removed the walk that used to reach the stand-in's
+    name). Subclass coverage is the ``isinstance`` arm's job, so the test has to
+    hand it the class that arm compares against.
+    """
+    from starlette.requests import ClientDisconnect as RealClientDisconnect
+
+    class _Rewrapped(RealClientDisconnect):
         pass
 
     assert tsentry.is_benign_exception(_Rewrapped()) is True
     assert tsentry.is_benign_exception(_OtherError()) is False
+
+
+def test_benign_matching_is_exact_by_name_not_by_mro() -> None:
+    """Review round 3 (P3): the name arm must NOT walk the MRO.
+
+    A bare MRO walk makes this helper BROADER than the SDK's `ignore_errors`,
+    and broadening here silences real faults. ``http.client.RemoteDisconnected``
+    is the measured instance: it subclasses ``ConnectionResetError`` but means
+    "the UPSTREAM we called reset the connection", so an MRO walk classified a
+    dependency outage as a client hang-up — logged at DEBUG, captured nowhere.
+
+    Subclass coverage is ``isinstance(exc, starlette.requests.ClientDisconnect)``'s
+    job (see the test above); this one pins the fallback to exact names.
+    """
+
+    class _UpstreamHungUp(ConnectionResetError):
+        pass
+
+    assert tsentry.is_benign_exception(_UpstreamHungUp()) is False, (
+        "a SUBCLASS of a benign name is not itself benign — that is how an "
+        "upstream reset gets silenced as if the client had hung up"
+    )
+    # The exact classes still match, by name, with no starlette import involved.
+    assert tsentry.is_benign_exception(ConnectionResetError()) is True
+    assert tsentry.is_benign_exception(BrokenPipeError()) is True
 
 
 def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
@@ -116,8 +160,6 @@ def test_unhandled_handler_logs_a_disconnect_below_error_and_captures_nothing(
     import tortoise.hosted_api as hapi
 
     captured: list = []
-    monkey_import = hapi  # keep the reference readable
-    monkey_import  # noqa: B018 - documentation of what is patched below
     import tortoise.sentry as sentry_mod
 
     real_capture = sentry_mod.capture_exception

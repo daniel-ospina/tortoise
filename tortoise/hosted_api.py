@@ -3144,9 +3144,17 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     # module's helpers. `ignore_errors` in `tortoise/sentry.py::init` is the
     # guard that stops THAT path; uvicorn still logs its own
     # `ERROR: Exception in ASGI application` (round 1, P2 — not fixable here).
-    from tortoise.sentry import is_benign_exception as _is_benign
+    # ⛔ CLASSIFICATION CANNOT BREAK THE 500 (review round 3, P3). This import and
+    # call used to sit outside any `try`, in an exception HANDLER — an error here
+    # would have escaped the handler and produced no response at all, instead of
+    # the guaranteed 500 below. Failing to `False` is the safe direction: a real
+    # error still gets logged at ERROR and captured, which is the pre-#11092 shape.
+    try:
+        from tortoise.sentry import is_benign_exception as _is_benign
 
-    _benign = _is_benign(exc)
+        _benign = _is_benign(exc)
+    except Exception:  # noqa: BLE001, RUF100 — classification never breaks the 500 response
+        _benign = False
     # P2 (code review): sanitize the path before logging — Starlette's
     # URL.path is percent-decoded, so an unauthenticated request to
     # /foo%0d%0a[forged-line] could write CRLF-decoded control chars into
