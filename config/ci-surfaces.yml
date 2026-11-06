@@ -5173,11 +5173,12 @@ surfaces:
   # (`tortoise/pack_hierarchy.py`, `tortoise/pack_registry.py`) match no
   # `SOURCE_PATTERNS` row and fall through to the `core` fallback; hermetic —
   # manifest YAML plus the two modules, no DB, no graph, no network.
-  # (#11001: this file is ALSO registered above, beside the pack suites. Removed
-  # here — #11210, #11211 and #11222 each registered it independently while repairing
-  # the same `main` drift, so `origin/main` `eee753b48` carried three rows and
-  # `--integrity` reds on the duplicate. The `core` row beside the pack suites is
-  # the survivor; NOT a removal of the registration.)
+  # ⛔ THIS ROW IS THE SINGLE SURVIVOR OF A THREE-ROW DUPLICATE, and it survived
+  # TWO independent dedupes that each kept a different row: this branch's
+  # (`#10032`) and `main`'s own (`80c912244`, #11212's review P0). The tree at
+  # the merge base `af864a42a` carried three identical `core` entries; each side
+  # reduced that to one, and this merge therefore had to choose between the two
+  # survivors — it keeps THIS one, and the note below records the append class.
   # ⛔ THREE LANES REGISTERED THIS SAME ROW and the manifest only takes one:
   # #11210 (`7bfbc4669`) and #11222 (`eee753b48`) each added the identical entry
   # while this one was in flight, so `--integrity` reported
