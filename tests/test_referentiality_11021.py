@@ -1844,9 +1844,11 @@ def test_a_deduped_pair_keeps_the_entry_that_carries_the_ADDRESS():
     (review at `b791a3eb2`, P3)."""
     from tortoise.extractor_v2 import _clamped_mention, _dedupe_mentions
 
-    spanless = _clamped_mention({"surface": "it", "claim_ref": "c"})
-    verified = _clamped_mention({"surface": "it", "claim_ref": "c", "quote": "x it y",
-                                 "span_source": "quote", "span_start": 2, "span_end": 4})
+    account = "the budget is 40k"
+    spanless = _clamped_mention({"surface": "it", "claim_ref": account})
+    verified = _clamped_mention({"surface": "it", "claim_ref": account,
+                                 "quote": "x it y", "span_source": "quote",
+                                 "span_start": 2, "span_end": 4})
     assert "span_start" not in spanless and verified.get("span_start") == 2
     kept = _dedupe_mentions([spanless, verified])
     assert len(kept) == 1
@@ -1855,3 +1857,60 @@ def test_a_deduped_pair_keeps_the_entry_that_carries_the_ADDRESS():
     # …and the preference does not reorder anything else: the first entry still
     # wins when neither (or both) carry a pair.
     assert _dedupe_mentions([spanless, dict(spanless)]) == [spanless]
+
+    # ⛔ THE SHAPE THAT WAS ACTUALLY BROKEN: `_mention_record` ALWAYS emits both
+    # keys (`None` when it could not locate the surface) while `_clamped_mention`
+    # POPS them, so a presence test was inert on the builder the defect was
+    # observed on — the row above used only `_clamped_mention` products and was
+    # green over a no-op rule (review at `9561959ed7`, P2). And the ADDRESS is
+    # merged into the first record, not swapped with it: the cue's `rule_id` must
+    # survive taking the duplicate's address.
+    from tortoise.extractor_v2 import _mention_record
+
+    cue = _mention_record(surface="it", claim={"content": account},
+                          kind_guess=None, rule_id=ref.RULE_PRONOUN,
+                          reason="cue derived", narrative="", quote="")
+    assert cue.get("span_start") is None and "span_start" in cue
+    addr = _mention_record(surface="it", claim={"content": account},
+                           kind_guess=None, rule_id=ref.RULE_CHANNEL,
+                           reason="carried", narrative="", quote="x it y",
+                           span={"span_start": 2, "span_end": 4,
+                                 "span_source": "quote"})
+    assert addr["span_start"] == 2
+    merged = _dedupe_mentions([cue, addr])
+    assert len(merged) == 1
+    assert merged[0]["span_start"] == 2 and merged[0]["span_source"] == "quote", (
+        f"the address was dropped on a `_mention_record` pair: {merged!r}")
+    assert merged[0]["rule_id"] == ref.RULE_PRONOUN and merged[0]["reason"] == "cue derived", (
+        f"the cue's provenance was replaced by the duplicate's: {merged!r}")
+
+
+def test_an_over_cap_claim_is_not_reported_as_CLAIMLESS():
+    """⛔ `claims_by_ref` is keyed on the CUT identity (`_mention_ref`), but the
+    channel loop compared the model's RAW `claim_ref` against it, so an entry whose
+    claim is present over `_MAX_CONTENT` was counted `channel_refused_no_claim` and
+    named in `channel_refused_surfaces` — an evidence surface whose own comment
+    reads "a mention with no resolvable claim is not a record" — while the run held
+    it, recorded it and attached it. The same window must be used on every lookup
+    (review at `9561959ed7`, P3)."""
+    long_claim = ("the budget is 40k and " * 90).strip()
+    el = {"entities": [], "events": [],
+          # ⛔ NO carrier names the surface: the claim link is the ONLY thing that can
+          # hold it, so this row sees the claim window itself. With a carrier the
+          # `_claims_naming` fallback masks a raw-vs-cut mismatch (measured: the
+          # gate mutant stays green with one).
+          "points": [{"content": long_claim, "pointKind": "statement"}],
+          "operators": [],
+          "mentions": [{"surface": "it", "claim_ref": long_claim,
+                        "quote": "it", "rule_id": ref.RULE_PRONOUN}]}
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 1, (
+        f"the mention-only shape was not held: {held['mention_stats']!r}")
+    assert held["mention_stats"].get("channel_refused_no_claim", 0) == 0, (
+        "a claim the run HELD and recorded was reported claimless: "
+        f"{held['mention_stats']!r}")
+    assert not held["mention_stats"].get("channel_refused_surfaces"), (
+        f"a held surface was named refused: {held['mention_stats']!r}")
+    payload, _ = _mint(copy.deepcopy(el))
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"], (
+        f"the record was lost: {_mentions_of(payload)!r}")

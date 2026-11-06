@@ -10920,7 +10920,13 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         # `about_entities` and 422'd the session (review at `40a0a81e6`, P1).
         # The refusal is a fact about the PAYLOAD — "no claim can carry it" — so
         # that is what is asked below, and the model's string is not.
-        if (_norm(str(m.get("claim_ref") or "")) not in claims_by_ref
+        # ⛔ The ref is compared THROUGH the write's window (`_mention_ref`), like
+        # every other lookup since the last door was fixed: `claims_by_ref` is keyed
+        # on the CUT identity, so a raw over-cap ref matched nothing and an entry
+        # whose claim is present was refused as claimless (review at `9561959ed7`,
+        # P3). A paraphrase still matches nothing — only the window changed.
+        if (_norm(_mention_ref({"content": str(m.get("claim_ref") or "")}))
+                not in claims_by_ref
                 and not _claims_naming(surface)):
             continue                       # no claim to carry it — refused below
         verdict = _referentiality.judge(surface)
@@ -11106,7 +11112,12 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         if verdict is None or verdict[0] != rule_in:
             continue                       # not this module's record
         ref = str(entry.get("claim_ref") or "").strip()
-        if surface in candidate_surfaces or _norm(ref) not in claims_by_ref:
+        # ⛔ Same window as the record's own `claim_ref` — the MEMBERSHIP test and the
+        # SUBSCRIPT below are the same key, or an over-cap claim passes the test and
+        # `claims_by_ref[...]` raises KeyError on the raw string (review at
+        # `9561959ed7`, P3; the first cut of this fix moved only the test).
+        claim_key = _norm(_mention_ref({"content": ref}))
+        if surface in candidate_surfaces or claim_key not in claims_by_ref:
             continue                       # the entity wins / the claim is gone
         # ⛔ CARRIED, but still CONSTRUCTED: `dict(entry)` copied a model-supplied
         # `span_start`/`span_end`/`span_source` verbatim, so an entry that guessed
@@ -11118,7 +11129,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         # exists for, while clamping the quote first and demoting an unverified
         # declaration to `"model"`.
         records.append(_mention_record(
-            surface=surface, claim=claims_by_ref[_norm(ref)],
+            surface=surface, claim=claims_by_ref[claim_key],
             kind_guess=str(entry.get("kind_guess") or "").strip() or None,
             rule_id=rule_in,
             reason=(str(entry.get("reason") or "").strip()
@@ -11126,6 +11137,11 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             narrative=narrative,
             quote=str(entry.get("quote") or ""),
             span=entry))
+        # ⚠️ Left on the RAW ref on purpose: aligning it to `_mention_ref` changes
+        # nothing observable (the trailing `_dedupe_mentions` removes the duplicate
+        # this set exists to prevent), and a change no row can discriminate is the
+        # unpinned shape reviews keep rejecting. Re-align it with the channel loop
+        # only if the final dedupe is ever removed (review at `9561959ed7`, P3).
         seeded.add((surface, _norm(ref)))
 
     for entry in channel:
@@ -11140,9 +11156,10 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             stats["channel_entry_is_entity"] += 1
             continue
         claim_ref = str(entry.get("claim_ref") or "").strip()
-        if (surface, _norm(claim_ref)) in seeded:
+        claim_key = _norm(_mention_ref({"content": claim_ref}))
+        if (surface, claim_key) in seeded:
             continue                       # carried verbatim above
-        claim = claims_by_ref.get(_norm(claim_ref))
+        claim = claims_by_ref.get(claim_key)
         if claim is None:
             # A mention with no resolvable claim is not a record (contract row).
             stats["channel_refused_no_claim"] += 1
@@ -11532,10 +11549,23 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
             # ⛔ FIRST-IN-LIST is not the right winner: a spanless duplicate listed
             # first replaced a VERIFIED address listed second, so the shipped record
             # had no address while one was available — and the address is the
-            # record's whole point (review at `b791a3eb2`, P3). The
-            # entry that carries a pair wins; otherwise the first one stands.
-            if "span_start" not in out[at[key]] and "span_start" in m:
-                out[at[key]] = m
+            # record's whole point (review at `b791a3eb2`, P3).
+            # ⛔ And the test is `is None`, NOT key presence: `_mention_record`
+            # ALWAYS emits `span_start`/`span_end` (`None` when it could not locate
+            # the surface) while `_clamped_mention` POPS them, so a presence test was
+            # inert on the builder where the defect was observed and the rule did
+            # nothing on the normal path (review at `9561959ed7`, P2).
+            # ⛔ The ADDRESS is merged into the FIRST record rather than swapping the
+            # record: a whole-record swap replaced the cue's `rule_id`/`reason` with
+            # the duplicate's channel-labelled ones, i.e. it fixed the address by
+            # losing the provenance that says the cue derived it.
+            kept = out[at[key]]
+            if kept.get("span_start") is None and m.get("span_start") is not None:
+                for field in ("span_start", "span_end", "span_source"):
+                    if m.get(field) is not None:
+                        kept[field] = m[field]
+                if not kept.get("quote") and m.get("quote"):
+                    kept["quote"] = m["quote"]
             continue
         at[key] = len(out)
         out.append(m)
