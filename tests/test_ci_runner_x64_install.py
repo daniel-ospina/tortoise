@@ -3958,9 +3958,10 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     # ── The TWO CITING FILES this pin never read (#11032 review) ───────────────────────────────
     # `.github/workflows/ci.yml:1506` and `.github/actionlint.yaml:32` both cite the same refusal
     # paragraph, and both were exactly right on `main` (`python-ci.yml:1891`). The +70-line insert
-    # into the `test` job's `strategy` block moved it to `:1961`, and neither file is read by any
-    # gate — the identical "no gate reads it, so it drifts green" hole that put
-    # `batch-integration.md` in this pin one round earlier. Both sentences are load-bearing:
+    # into the `test` job's `strategy` block moved that line to `:1961` at the pre-rebase head
+    # (`:1967` here), and neither file is read by any gate — the identical "no gate reads it, so it
+    # drifts green" hole that put `batch-integration.md` in this pin one round earlier. Both
+    # sentences are load-bearing:
     # `ci.yml:1506` is why the #10237 canary exists at all (the required legs CANNOT be routed to
     # the pool), and `actionlint.yaml:32` is the only record of why declaring a label is not a way
     # to make a required leg schedulable.
