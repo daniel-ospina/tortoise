@@ -11635,37 +11635,35 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
             # shipped `"quote"` address must index its own surface in its own quote,
             # whichever entry won.
             kept = out[at[key]]
-            if kept.get("span_start") is None and m.get("span_start") is not None:
-                # ⛔ AND THE ADDRESS NAMES *THIS* SURFACE, character for character.
-                # The dedupe key is `_norm(surface)` — case-folded — so two entries
-                # for one claim can disagree on the spelling the offsets index
-                # (`The Thing` vs `the thing`). Adopting the duplicate's pair then
-                # shipped offsets that land on the RIGHT BYTES of a DIFFERENT
-                # spelling than the record's own `surface`, which `_mention_span`
-                # would never have produced and an exact comparison reads as an
-                # address for another phrase (review at `ea790070d`, P3). An
-                # explicit `model` label asserts nothing verified, so it is copied
-                # regardless.
-                label = str(m.get("span_source") or "")
-                if label == "model" or m.get("surface") == kept.get("surface"):
-                    for field in ("span_start", "span_end", "span_source"):
-                        if m.get(field) is not None:
-                            kept[field] = m[field]
-                    # ⛔ A `quote`-space address travels WITH its quote: the offsets
-                    # were verified against the DUPLICATE's text, so filling the
-                    # quote only "when absent" shipped `span_source: "quote"` beside
-                    # the survivor's different quote — offsets that index bytes the
-                    # record does not name, which is the forgery the whole clamp
-                    # exists to refuse, and no later clamp can catch it because every
-                    # published surface clamps BEFORE deduping (review at
-                    # `2a1153519`, P2; found independently as the round-7 blocker at
-                    # `d59000f10`). ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY
-                    # INDEX: the shipped quote is the one that indexes the shipped
-                    # pair; the survivor's own quote is kept when it already indexes
-                    # it.
-                    if m.get("quote") and (kept.get("span_source") == "quote"
-                                           or not kept.get("quote")):
-                        kept["quote"] = m["quote"]
+            # ⛔ The ADDRESS is only adoptable for the SAME SPELLING of the surface: the
+            # key folds case and whitespace runs (`_norm`) while `_mention_span` is
+            # case-SENSITIVE, so a pair verified for `it` would otherwise ship under
+            # a survivor named `It` — an address that indexes a variant of the
+            # surface the record names (review at `1bc5847b4`, P3). The survivor
+            # keeps its (cue-derived) form and no address, which is the honest state;
+            # the published surfaces would demote such a pair to `"model"` anyway,
+            # one round later and only after disagreeing with the producer channel.
+            same_spelling = str(kept.get("surface") or "") == str(m.get("surface") or "")
+            if (same_spelling and kept.get("span_start") is None
+                    and m.get("span_start") is not None):
+                for field in ("span_start", "span_end", "span_source"):
+                    if m.get(field) is not None:
+                        kept[field] = m[field]
+                # ⛔ A `quote`-space address travels WITH its quote: the offsets were
+                # verified against the DUPLICATE's text, so filling the quote only
+                # "when absent" shipped `span_source: "quote"` beside the survivor's
+                # different quote — offsets that index bytes the record does not
+                # name, which is the forgery the whole clamp exists to refuse, and
+                # no later clamp can catch it because every published surface
+                # clamps BEFORE deduping (review at `2a1153519`, P2; found
+                # independently as the round-7 blocker at `d59000f10`).
+                # ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX: the shipped
+                # quote is therefore the one that indexes the shipped pair, and the
+                # surviving record's own quote is kept when it already indexes it.
+                if m.get("quote") and (kept.get("span_source") == "quote"
+                                       or not kept.get("quote")):
+                    kept["quote"] = m["quote"]
+
             continue
         at[key] = len(out)
         out.append(m)
