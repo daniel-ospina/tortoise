@@ -123,6 +123,25 @@ def _rearm_stranded_probe(selfhost_mod) -> None:
 #: healthy still fails — it just fails after a budget a loaded box can meet.
 _HEALTH_VERDICT_WAIT_S = 90.0
 
+#: How long ``test_the_health_wait_releases_a_starved_probe_slot``'s holder keeps
+#: the ONE process-lifetime probe slot occupied. It MUST OUTLAST the wait's own
+#: budget, or that test stops proving what it is named for.
+#:
+#: The test's subject is the wait's RE-ARM of a stranded slot
+#: (``_rearm_stranded_probe``, #3396). A hold SHORTER than the budget un-starves
+#: itself: the holder times out, its worker drains, the next refresh MEASURES on
+#: the freed slot, and the assertion passes with the remedy never called. That is
+#: exactly what the 30 s hold against this 90 s default did, measured on PR #11023:
+#: GREEN as-is and GREEN with ``_rearm_stranded_probe`` monkeypatched to a no-op.
+#: With the hold above the budget the no-op run FAILS at the deadline, so the test
+#: discriminates again.
+#:
+#: ⚠️ The OBSTACLE is what grows here, never the deadline: shrinking
+#: ``_HEALTH_VERDICT_WAIT_S`` back below the documented harness tolerance is what
+#: red-ed a required check on a HEALTHY daemon (CI run 42186465222, job
+#: 127800485941, ``test (d)``), and is not an option.
+_STARVED_SLOT_HOLD_S = _HEALTH_VERDICT_WAIT_S + 5.0
+
 
 def _wait_for_ready(tc, timeout: float = _HEALTH_VERDICT_WAIT_S):
     """Block until ``/health/ready`` answers 200, or fail naming its own 503.
@@ -619,16 +638,26 @@ class TestHealth:
 
         def _block():
             started.set()
-            release.wait(60)
+            # ⛔ THE HOLD OUTLASTS THE WAIT BUDGET, the same two-part treatment
+            # `_STARVED_SLOT_HOLD_S` gives the sibling leg: a hold SHORTER than
+            # the budget un-starves itself and the leg passes with the remedy
+            # deleted. The OBSTACLE grows here; the documented tolerance does
+            # not shrink. (A 60 s hold against a 15 s ad-hoc budget was that
+            # shape inverted — the budget, not the hold, was the margin, and
+            # 15 s sits 10 s BELOW the tolerance this module documents for a
+            # loaded runner. Measured: the recovery is ~2–4 s when the remedy
+            # works, so this costs nothing on the green path.)
+            release.wait(_STARVED_SLOT_HOLD_S)
 
         occupied = mon._probe_worker()
         occupied.submit(_block)
         assert started.wait(30), "the shared probe worker never ran the blocker"
         try:
             with tc:
-                # 15 s: pre-fix this exhausts (strand never clears) and FAILS;
-                # with the re-arm the verdict lands in ~2-4 s.
-                _wait_for_probe(selfhost, timeout=15.0)
+                # Pre-fix this exhausts (the strand never clears) and FAILS; with
+                # the re-arm the verdict lands in ~2-4 s. The DEFAULT budget, not
+                # an ad-hoc literal — see `_HEALTH_VERDICT_WAIT_S`.
+                _wait_for_probe(selfhost)
                 body = tc.get("/health").json()
                 assert body["status"] == "ok"
                 assert body["db"]["ok"] is True
@@ -698,7 +727,10 @@ class TestHealth:
             assert first.status_code == 503, (
                 "the transient fault did not take effect — this test cannot "
                 f"prove the wait retries: {first.status_code} {first.text!r}")
-            r = _wait_for_ready(tc, timeout=15.0)
+            # The retry is immediate; what the budget pays for is the cold DB
+            # behind it, so it is the file's tolerance — not a 15 s literal a
+            # cold start can outrun on a loaded runner (#10790).
+            r = _wait_for_ready(tc)
             assert r.status_code == 200
             assert r.json()["status"] == "ready"
 
@@ -969,7 +1001,21 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
     The slot is held here exactly as a wedged/overrunning probe holds it, and
     the ONE refresh period is shortened so the recovery is a couple of seconds
     rather than the shipped 15 s cadence.
+
+    ⛔ **The hold OUTLIVES the wait's budget, and the re-arm is COUNTED** — both
+    are load-bearing, and both were added because the leg had stopped pinning
+    the property it is named for (#11023 review, measured). At a 30 s hold
+    against the module's 90 s tolerance the holder gave up ~60 s BEFORE the
+    deadline: the slot un-starved itself, a later cycle MEASURED, and the final
+    `ok is True` passed with `_rearm_stranded_probe` never running — so a
+    deleted remedy left this leg green. Holding past the deadline removes that
+    escape, and the counter makes the requirement explicit rather than inferred
+    from timing: with the slot held the ONLY path to a measured `ok=True` is a
+    re-arm (`_stranded_slot_error` classifies every queued refresh as
+    discardable). The `finally: release.set()` ends the abandoned holder, which
+    is never joined.
     """
+    import sys
     import threading
 
     from tortoise import monitoring as mon
@@ -980,7 +1026,31 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
 
     def _hold_the_one_shared_slot():
         held.set()
-        release.wait(30.0)  # abandoned, never joined: the wait must not block on it
+        # abandoned, never joined: the wait must not block on it. It outlasts
+        # the wait's own budget on purpose — see `_STARVED_SLOT_HOLD_S`, and
+        # `test_the_starved_slot_hold_outlasts_the_wait_budget` pins the coupling.
+        release.wait(_STARVED_SLOT_HOLD_S)
+
+    #: ⛔ The re-arm is COUNTED. What that catches is a deleted CALL SITE — and
+    #: nothing more, which is what this comment used to over-claim. A NEUTERED
+    #: BODY (`_rearm_stranded_probe` monkeypatched to a no-op) still increments,
+    #: because the only thing that distinguishes a real re-arm from a no-op is
+    #: its EFFECT — the next refresh MEASURING — and that is the `snapshot()["ok"]
+    #: is True` assertion below. With the hold past the budget the no-op body
+    #: fails at the deadline instead, and the `except` below re-raises that
+    #: failure with the count in it, so the diagnosis is never lost.
+    #: Same idiom as `test_the_strand_remedy_is_bounded`.
+    calls = {"rearms": 0}
+    real_rearm = _rearm_stranded_probe
+
+    def _counting_rearm(selfhost_mod):
+        # ⛔ AFTER the delegation, not before: a remedy that RAISES was never a
+        # re-arm, and counting it first reported one that did not happen.
+        real_rearm(selfhost_mod)
+        calls["rearms"] += 1
+
+    monkeypatch.setattr(sys.modules[__name__], "_rearm_stranded_probe",
+                        _counting_rearm)
 
     tc = _client_for_env(monkeypatch, tmp_path)
     from tortoise import selfhost
@@ -989,10 +1059,131 @@ def test_the_health_wait_releases_a_starved_probe_slot(monkeypatch, tmp_path):
     assert held.wait(5.0), "the slot holder never started"
     try:
         with tc:
-            _wait_for_probe(selfhost, timeout=25.0)
+            # ⚠️ NOT the ad-hoc `25.0` this call carried: the wait bound is the
+            # module's documented HARNESS tolerance for a loaded runner, which
+            # is what `_HEALTH_VERDICT_WAIT_S` (90 s, raised from 40 s after a
+            # loaded box expired it on a HEALTHY daemon) exists for. 25 s sat
+            # BELOW that documented tolerance and red-ed a required check on a
+            # healthy daemon — CI run 42186465222, job 127800485941, `test (d)`:
+            # the failure reported `strand re-arms used 2/2` with the snapshot
+            # still `{'ok': False, … 'probe in flight (0.0s)'}`, i.e. a probe was
+            # MEASURING at the deadline. Two queued cycles (2 × the 2.0 s
+            # acquisition budget) plus ONE cold embedded-FalkorDB start is
+            # already ~26 s before the runner's own load is counted.
+            #
+            # ⛔ The budget is NOT the only half of this test's discrimination: a
+            # slot held for LESS than the budget un-starves itself, so the wait
+            # never has to re-arm and this passes with the remedy deleted — it did,
+            # at the 30 s hold this test used to install (PR #11023 review). The
+            # hold (`_STARVED_SLOT_HOLD_S`) therefore exceeds this budget, and
+            # `test_the_starved_slot_hold_outlasts_the_wait_budget` pins that
+            # coupling so it cannot silently drift back. The re-arm COUNT below
+            # is the direct form of the same requirement.
+            #
+            # The remedy's BOUNDEDNESS is pinned where that property belongs —
+            # `test_the_strand_remedy_is_bounded`, on its own 3.0 s bound.
+            #
+            # ⛔ THE DEADLINE IS WHERE A BODY-DELETED RUN FAILS, so the count is
+            # re-raised THROUGH it: at `_STARVED_SLOT_HOLD_S` (95 s) the deadline
+            # fires first (90 s), and the bare `assert calls["rearms"] >= 1`
+            # after this block was therefore UNREACHABLE on exactly the run it was
+            # written to diagnose (measured: failed in 94.55 s, inside the wait).
+            try:
+                _wait_for_probe(selfhost)
+            except AssertionError as expired:
+                raise AssertionError(
+                    f"{expired}\n⛔ the wait expired with re-arms used "
+                    f"{calls['rearms']} — with the slot held past the deadline the "
+                    f"ONLY path to a measured `ok=True` is `_rearm_stranded_probe`; "
+                    f"0 means the remedy was never called, >0 means it was called "
+                    f"and did not free the slot (a neutered body)") from expired
     finally:
         release.set()
+    assert calls["rearms"] >= 1, (
+        "the wait recovered WITHOUT re-arming the stranded slot — with the slot "
+        "held past the deadline the only way to a measured `ok=True` is "
+        "`_rearm_stranded_probe`, so this leg would pass even if the remedy "
+        "were deleted, which is exactly the vacuity #11023's review found")
     assert selfhost._HEALTH_PROBE.snapshot()["ok"] is True
+
+
+def test_the_starved_slot_hold_outlasts_the_wait_budget():
+    """Non-vacuity coupling for `test_the_health_wait_releases_a_starved_probe_slot`.
+
+    That test proves the wait RE-ARMS a stranded slot. It can only do that while
+    the slot it installs is STILL HELD at the moment the wait would otherwise
+    expire: with `hold < budget` the holder returns first, the next refresh
+    MEASURES on the freed slot, and the assertion passes with
+    `_rearm_stranded_probe` never called.
+
+    Measured on PR #11023 (fresh-context review): at the 30 s hold this test
+    used to install against the 90 s default, the assertion was GREEN as-is AND
+    GREEN with the remedy monkeypatched to a no-op — green without its subject.
+    This pin holds the coupling, so an edit that re-creates that vacuity goes RED
+    here instead of merging silently green.
+
+    ⛔ THREE mutations can break the coupling, and the first cut of this pin saw
+    only the third (review at `10fc020353`):
+      1. **a LITERAL hold** — `_STARVED_SLOT_HOLD_S = 95.0` stops tracking the
+         budget, so a later budget raise silently re-creates the vacuity. Caught
+         by requiring the assignment to DERIVE from `_HEALTH_VERDICT_WAIT_S`.
+      2. **an explicit `timeout=` at the CALL SITE** — the wait would then be
+         bounded by that literal and not by the budget the hold is sized
+         against. Caught by requiring the call in that test to take the default.
+      3. **raising the budget without the hold** — the ratio test below. ⚠️ This
+         is the one that CANNOT happen while the hold is derived (raising the
+         budget raises the hold with it), which is why 1 and 2 are the load-
+         bearing halves and this is the backstop.
+    """
+    import ast
+    import inspect
+    import sys
+
+    assert _STARVED_SLOT_HOLD_S > _HEALTH_VERDICT_WAIT_S, (
+        f"the starved-slot hold ({_STARVED_SLOT_HOLD_S}s) must outlast the health "
+        f"wait budget ({_HEALTH_VERDICT_WAIT_S}s) — a shorter hold un-starves "
+        "itself, and test_the_health_wait_releases_a_starved_probe_slot then "
+        "passes with the re-arm remedy deleted (vacuous, not green)"
+    )
+    #: 1 — the hold is DERIVED, not a literal. A literal is the mutation that
+    #: survives every runtime assertion until a later edit moves the budget.
+    hold_assignment = None
+    for node in ast.parse(inspect.getsource(sys.modules[__name__])).body:
+        if (isinstance(node, ast.Assign)
+                and any(getattr(t, "id", None) == "_STARVED_SLOT_HOLD_S"
+                        for t in node.targets)):
+            hold_assignment = node
+    assert hold_assignment is not None, (
+        "`_STARVED_SLOT_HOLD_S` is no longer a module-level assignment, so the "
+        "derivation this pin reads cannot be found")
+    assigned_names = {n.id for n in ast.walk(hold_assignment.value)
+                      if isinstance(n, ast.Name)}
+    assert "_HEALTH_VERDICT_WAIT_S" in assigned_names, (
+        f"`_STARVED_SLOT_HOLD_S` no longer DERIVES from "
+        f"`_HEALTH_VERDICT_WAIT_S` (it assigns {ast.unparse(hold_assignment.value)}) "
+        f"— a literal hold stops tracking the budget, so the next budget raise "
+        f"silently re-creates the vacuity this pin exists to prevent")
+    #: 2 — the COUPLE, not the default: that test must take the DEFAULT budget,
+    #: so an explicit `timeout=` at its call site is the mutation to refuse.
+    holder_source = inspect.getsource(
+        test_the_health_wait_releases_a_starved_probe_slot)
+    wait_calls = [n for n in ast.walk(ast.parse(holder_source))
+                  if isinstance(n, ast.Call)
+                  and getattr(n.func, "id", None) == "_wait_for_probe"]
+    assert len(wait_calls) == 1, (
+        f"expected ONE `_wait_for_probe` call in the starved-slot test, found "
+        f"{len(wait_calls)} — re-derive this pin before trusting it")
+    assert not wait_calls[0].keywords, (
+        "the starved-slot test passes its own budget at the call site "
+        f"({ast.unparse(wait_calls[0])}) — the hold is sized against "
+        "`_HEALTH_VERDICT_WAIT_S`, so the DEFAULT is the bound, not a copy of it")
+    #: 3 — the backstop ratio, plus the default the hold is sized against.
+    default = inspect.signature(_wait_for_probe).parameters["timeout"].default
+    assert default == _HEALTH_VERDICT_WAIT_S, (
+        f"_wait_for_probe's default timeout is {default}, not the "
+        f"{_HEALTH_VERDICT_WAIT_S}s budget the hold is sized against — re-derive "
+        "_STARVED_SLOT_HOLD_S, or pass the budget explicitly in that test"
+    )
 
 
 class TestHealthTruthMCP:

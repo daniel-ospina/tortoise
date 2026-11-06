@@ -527,8 +527,15 @@ response_fields:
     route that does revise a dead claim deliberately. The journaled provenance retrofit (#7704) still folds, so
     an evidence-bearing re-run keeps its source. All of these codes ride the SAME key on the dedup-hit return, so
     a re-run reports them together rather than dropping one'
-  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
-    whose fold actually applied, so that response stays byte-identical
+  unchanged_when_off: n/a — not flag-gated; the key is PRESENT on EVERY one of the FOUR codes `emitted_when` lists
+    above, and each is a presence condition in its own right rather than a single "no source" rule — (1) `no_source` —
+    the write carries no source and no authored word (a materialized `extractedFrom`, or an authored `credibility=`,
+    makes it absent); (2) `temporal_not_applied` — a temporal prop arrived on a dedup target that is already a
+    TERMINAL claim, which reports REGARDLESS of source and of an authored word, because the whole fold is dropped and
+    nothing was applied; (3) `kind_other_layer` — the declared kind is declared only on another layer; (4)
+    `terminal_fold_refused` — the fold DEDUP-hits a TERMINAL claim and would write anything else (a caller prop and/or
+    an authored word) with NO temporal prop, which is why a word-bearing write is not absent by itself. A write that
+    trips none of the four codes keeps its byte-identical response
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,

@@ -2435,6 +2435,102 @@ def test_the_8171_alias_doors_record_the_advisory():
         )
 
 
+def test_the_create_point_advisory_absence_clause_does_not_deny_the_word_bearing_refusal():
+    """#10368 review P3: the absence clause must not promise the shape the FOURTH code reports.
+
+    ``unchanged_when_off`` is the field a caller/integration reads to decide whether it has to
+    handle ``advisories`` at all, so a WRONG absence condition is read as a promise. Before this
+    repair the ``tortoise_create_point`` / ``advisories`` row said "the key is ABSENT on a sourced
+    or word-bearing write", while the row's OWN ``emitted_when`` (and the code) emit
+    ``terminal_fold_refused`` on a word-bearing write: ``tortoise/sdk.py`` computes
+    ``_terminal_fold_refused = _terminal is not None and (props or cred_prior is not None)``, i.e.
+    an authored ``credibility=`` on a terminal dedup target is REPORTED, never silent. A client
+    that believed the old sentence would drop the one signal telling it its word was not applied.
+
+    The behavioural half is pinned where it can be executed —
+    ``tests/test_10368_terminal_create_fold.py`` drives ``create_point(..., dedup=True,
+    credibility="gold")`` against a retracted target and asserts the code — so this test pins only
+    the CONTRACT half (this file is deliberately database-free). It is non-vacuous: the pre-repair
+    manifest mentions ``word-bearing`` with no ``terminal`` scoping anywhere in the sentence, so it
+    reds there and passes on the repaired row.
+    """
+    row = next(rf for rf in _manifest()["response_fields"]
+               if rf["response"] == "tortoise_create_point" and rf["field"] == "advisories")
+    absence = row["unchanged_when_off"]
+    # The fourth code's own condition, as the row states it: an authored word participates.
+    assert "an authored word" in row["emitted_when"]
+    # So a `word-bearing`/`sourced` absence claim is only true when it is scoped away from a
+    # terminal dedup target — which is the one thing the pre-repair sentence never did.
+    lowered = absence.lower()
+    for shape in ("word-bearing", "sourced"):
+        if shape in lowered:
+            assert "terminal" in lowered, (
+                f"the `advisories` absence clause names a {shape!r} write but not the TERMINAL "
+                "dedup target that makes it FALSE (the fourth code, `terminal_fold_refused`, "
+                f"fires on exactly that write): {absence!r}"
+            )
+    # The rendered list the owner reviews must carry the same, corrected sentence — the doc is a
+    # render of this manifest (tools/surface_manifest.py), so a hand-edit cannot satisfy this.
+    assert absence in RENDERED.read_text(encoding="utf-8"), (
+        "the corrected `tortoise_create_point` / `advisories` absence clause is not in the "
+        "rendered doc — re-run `python tools/surface_manifest.py render`"
+    )
+
+
+#: Every code the row says rides the `advisories` key — `emitted_when` names each one and
+#: `unchanged_when_off` is the field a caller reads to decide whether it must handle the key at
+#: all, so a clause that enumerates a SUBSET of them promises an absence the code breaks.
+_ADVISORY_CODES = (
+    "no_source", "temporal_not_applied", "kind_other_layer", "terminal_fold_refused")
+
+
+def test_the_create_point_absence_clause_enumerates_EVERY_code_the_row_lists():
+    """#10833 review P3: the absence clause promised an absence TWO of the four codes break.
+
+    The row says four codes ride the one `advisories` key, but its `unchanged_when_off` read
+    "the key is PRESENT only when the write carries no source and no authored word, when its
+    dedup target is a TERMINAL claim the fold **would write to** …, or when the declared kind is
+    declared only on another layer" — which is neither of the dedup-hit codes' conditions.
+
+    * `temporal_not_applied` fires on a temporal prop meeting a TERMINAL dedup target
+      REGARDLESS of source and of an authored word (`tortoise/sdk.py`: `if _temporal and
+      _terminal is not None:`), so a write carrying BOTH an `extractedFrom` and a `validFrom`
+      onto a settled claim reports the key while clause 1 is false — the exact client-facing
+      hazard ``test_the_create_point_advisory_absence_clause_does_not_deny_the_word_bearing_
+      refusal`` names, on the axis that pin does not read.
+    * `terminal_fold_refused` is scoped to the fold that "WOULD write to" a terminal target, so
+      a clause that states it as "when its dedup target is a terminal claim the fold would
+      write to" reads as "any terminal dedup hit reports" — the opposite error, on the SAME
+      sentence.
+
+    So the clause must ENUMERATE the codes: one condition per code the row names, each a
+    presence condition in its own right. Non-vacuous by construction — the pre-repair sentence
+    backticks none of the four code names (it says "the FOURTH code above"), so this reds there.
+    """
+    row = next(rf for rf in _manifest()["response_fields"]
+               if rf["response"] == "tortoise_create_point" and rf["field"] == "advisories")
+    absence = row["unchanged_when_off"]
+    missing = [code for code in _ADVISORY_CODES
+               if f"`{code}`" not in row["emitted_when"]]
+    assert not missing, (
+        "this pin derives the code set from the row's own `emitted_when`; it no longer names "
+        f"{missing}, so re-derive `_ADVISORY_CODES` before trusting this leg")
+    unenumerated = [code for code in _ADVISORY_CODES if f"`{code}`" not in absence]
+    assert not unenumerated, (
+        "the `advisories` absence clause enumerates a SUBSET of the codes the row says ride "
+        f"that key — {unenumerated} can be PRESENT on a write the clause calls absent, and a "
+        "client that believed it would drop the only signal telling it its write was not "
+        f"applied: {absence!r}")
+    lowered = absence.lower()
+    assert "regardless" in lowered, (
+        "the temporal code's condition must say it reports REGARDLESS of source and authored "
+        "word — that is the half of it the old clause over-promised: " f"{absence!r}")
+    assert absence in RENDERED.read_text(encoding="utf-8"), (
+        "the corrected `tortoise_create_point` / `advisories` absence clause is not in the "
+        "rendered doc — re-run `python tools/surface_manifest.py render`"
+    )
+
+
 def test_the_response_fields_block_is_the_UNION_not_one_side_of_a_union_merge():
     """A `merge=union` duplicate silently drops a whole side (#5373, PR #8221 review).
 
