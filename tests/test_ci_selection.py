@@ -3072,6 +3072,36 @@ def test_worktree_report_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_gh_read_cache_tool_change_selects_core_not_tier1():
+    """A change to the read cache must run the invariants it pins (#11052 review P0).
+
+    `tests/test_gh_read_cache.py` is registered on the `core` surface and owns the tool's
+    whole load-bearing property — a declared-invariant read is served stale only when the
+    freshness is PROVEN, the mutable denylist refuses every call-spending route, the
+    identity covers host + account + argv, and a refresh failure fails closed. That
+    registration is INERT for a tool-only diff: `tools/` is a flat NON_PYTHON_PREFIXES
+    entry and no SOURCE_PATTERNS row matches `tools/gh_read_cache.py`, so `select()`
+    returns NO surface, takes the docs-only early return and falls back to the tier-1
+    smoke set, which does not contain the file. Weakening the refusal denylist (or
+    dropping the `--jq` projection, or dropping an identity field) would then be the one
+    PR that never ran the cases pinning it — and this tool is what every lane's declared
+    reads route through, so a wrong fresh answer is served fleet-wide.
+
+    Mutation check: removing the CORE_ALSO entry fails the first TWO asserts
+    (`"core" in r["surfaces"]` and `"test_gh_read_cache.py" in r["test_files"]`);
+    only the third (`r["full"] is False`) survives, unexercised. MEASURED both ways:
+    with the entry `surfaces=['core']`, `full=False`, file present; without it
+    `surfaces=[]`, `full=False`, 73 tier-1 files and the pin ABSENT. Stated as two
+    because the tier-1 fallback genuinely does not carry this file — the very premise
+    three lines above — so an earlier cut of this docstring that claimed only the
+    FIRST assert fails understated the pin and mis-described its own failure mode.
+    """
+    r = _sel(["tools/gh_read_cache.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_gh_read_cache.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_ci_catch_history_tool_change_selects_core_not_tier1():
     """A change to the catch-history instrument must run the rules it pins (#10131 review P1).
 

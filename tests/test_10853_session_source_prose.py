@@ -1,9 +1,21 @@
-"""#10853 — the session `:Source` carries no turn prose, on the RECOVERY door.
+"""#10853 — the session `:Source` carries no turn prose, on the RECOVERY door
+(except a space-less (CJK) run, which arrives whole — the residual the
+`_session_source_metadata` docstring names).
 
-The capture writes the transcript's first substantive utterance as the session
-`Source`'s `summary`, and derives `_searchText` from that same value (#1352,
-`_source_search_text(summary=…)` — the capture path has no title). #10000's
-ruling (§9.1/D1) is that captured turn text does not live on a graph node.
+A PRE-#10000 capture wrote the transcript's first substantive utterance as the
+session `Source`'s `summary` and derived `_searchText` from that same value
+(#1352, `_source_search_text(summary=…)` — the capture path has no title).
+#10000's ruling (§9.1/D1) is that captured turn text does not live on a graph
+node.
+
+⭐ #10000 REPLACED THAT DERIVATION, and the door's rule has to follow it
+(#10965). The capture now writes a topic LEXICON: `summary` is a display
+descriptor over it and `_searchText` is `", ".join(topics)`, both from the same
+`topics` the record keeps. So the drop is decided per ROW, from the row's own
+values — a lexicon `_searchText` is projected (it is the only field the Source
+FTS index is declared on, so dropping it un-indexes a restored session — #3518),
+a prose one is still declined. See
+`cache_projection._episodic_source_search_text_is_the_lexicon`.
 
 ⛔ THE DOOR THIS FILE PINS IS NOT THE CAPTURE. Every record-sourced read and
 rebuild goes through `cache_projection.node_from_row`: `tortoise record-restore`
@@ -13,11 +25,10 @@ is that a served node and a rebuilt node cannot drift. So a row written by a
 build that still placed the key either re-creates the prose on the graph or makes
 the served answer disagree with the rebuild — and nothing reds either way.
 
-The property pinned is a PAIR, because they are one datum: the capture derives
-`_searchText` from the summary (`_source_search_text`), so dropping only
-`summary` would leave the identical sentence on the node under the column next
-door — the #10620-review naming, `_CONTENT_COLUMNS` calls them *"the SAME
-datum"*.
+The prose halves are pinned as a PAIR, because a pre-#10000 capture derived them
+from one datum (`_source_search_text`), so dropping only `summary` would leave the
+identical sentence on the node under the column next door — the #10620-review
+naming, `_CONTENT_COLUMNS` calls them *"the SAME datum"*.
 
 ⛔ **THE HALF OF THIS FILE THAT MATTERS MOST IS THE NEGATIVE LEGS.** The
 predicate has two identity arms (a `session:` url; a pre-#4005 bare-filename
@@ -45,6 +56,13 @@ import pytest
 
 from tortoise import record_projection as rp
 from tortoise.cache_projection import node_from_row
+from tortoise.projection import _FULLTEXT_INDEX_LABEL_FIELDS
+from tortoise.sdk import (
+    _SESSION_SOURCE_SUMMARY_PREFIX,
+    SOURCE_SEARCH_TEXT_FIELD,
+    _session_source_metadata,
+    _source_search_text,
+)
 
 #: The transcript slice a pre-fix capture left on the row.
 UTTERANCE = "We decided the weekly rebuild happens on Fridays."
@@ -58,7 +76,7 @@ def _source_row(**overrides: object) -> dict[str, object]:
 
 
 def _captured_session_row(**overrides: object) -> dict[str, object]:
-    """The row a legacy capture wrote: a session Source whose column holds prose."""
+    """The row a PRE-#10000 capture wrote: a session Source whose columns hold prose."""
     row = _source_row(
         url="session:s-10853",
         id="s-10853",
@@ -126,7 +144,8 @@ def test_the_drop_is_narrow_the_session_metadata_still_projects():
     assert node.props["sessionId"] == "s-10853"
     assert node.props["topics"] == ["fridays", "rebuild"], (
         "`topics` is the capture's word LEXICON (its most frequent content "
-        "words), not a transcript slice — it is the metadata #10000 keeps"
+        "words) — not a CHOSEN transcript slice (a space-less CJK run arrives "
+        "whole, so it can be one; see `_session_source_metadata`'s residual)"
     )
 
 
@@ -265,10 +284,9 @@ class _FakeGraph:
 def test_the_reconciler_counts_the_declined_pair_as_cache_owned_not_divergence():
     """Review cycle 3, P1: the third cost, repaired instead of merely declared.
 
-    At this head the capture STILL writes and journals the prose, so the
-    reconciler's record side (built through `node_from_row`) omits it while the
-    cache holds it — for EVERY session this build captures, not only legacy
-    rows. Left as a `field_mismatch` that is permanent non-clean on healthy
+    A PRE-#10000 row still holds the prose pair, so the reconciler's record side
+    (built through `node_from_row`) omits it while a cache written by that build
+    holds it. Left as a `field_mismatch` that is permanent non-clean on healthy
     data: the class the reconciler's own docstring grades P1 ("a signal
     indistinguishable from noise is not observability"). So `scan_cache_view`
     marks the pair CACHE-OWNED for an episodic Source, and the run reports it
@@ -404,6 +422,260 @@ def test_the_reconciler_exclusion_is_scoped_to_the_Source_label():
         "the exclusion fired on a non-Source label: `Event`'s own `summary` was "
         "treated as the declined Source pair"
     )
+
+
+# ── THE PROVENANCE LEG (#10965): a post-#10000 pair is METADATA, not a CHOSEN utterance ──
+
+#: The transcript a post-#10000 capture derives its metadata from. Deliberately
+#: NOT the same string as :data:`UTTERANCE`: the two rows these legs discriminate
+#: differ only in WHICH derivation wrote their pair, so the identity, the
+#: `topics` and the column set must stay equal.
+POST_10000_TRANSCRIPT = "User: the weekly rebuild happens on Fridays."
+
+
+def _post_10000_session_row(**overrides: object) -> dict[str, object]:
+    """The row #10000's capture writes — built from the LIVE derivation.
+
+    ⭐ Not a hand-typed shape: `_session_source_metadata` and `_source_search_text`
+    are the capture's own functions (the single writer of the pair), so this row
+    tracks a change to the derivation instead of staling against it. `summary` is
+    the §4.4 display DESCRIPTOR and `_searchText` is the bare lexicon, and both
+    come from the SAME `topics` list in one statement — which is exactly what
+    makes the pair's provenance decidable from a record row.
+    """
+    summary, topics = _session_source_metadata(POST_10000_TRANSCRIPT)
+    assert topics, "the fixture transcript must derive a lexicon"
+    row = _source_row(
+        url="session:s-10000",
+        id="s-10000",
+        name="s-10000",
+        title="session:s-10000",
+        canonical_url="session:s-10000",
+        source_kind="agentSession",
+        session_id="s-10000",
+        topics=list(topics),
+        summary=summary,
+        _search_text=_source_search_text(topics=topics),
+    )
+    row.update(overrides)
+    return row
+
+
+def test_a_post_10000_session_row_keeps_the_field_its_fts_index_is_declared_on():
+    """#10965 RED-FIRST: the record door dropped the ONE indexed Source field.
+
+    `record-restore` / `rebuild_from_record` MATERIALISE through `node_from_row`,
+    so dropping `_searchText` left a restored session `:Source` with no searchable
+    text at all — `tortoise_fts_query(entity_type='source')` never returns it
+    (#3518), silently, on the door this file pins. The pair is no longer a CHOSEN
+    utterance here: it is the topic lexicon (a space-less CJK run arrives whole, so
+    for such a turn the run IS the member — the documented residual), and the
+    lexicon is the whole point of the capture-side change (#10000).
+    """
+    row = _post_10000_session_row()
+    topics = row["topics"]
+    assert isinstance(topics, list)
+    node = node_from_row("Source", row)
+
+    # Name the field through the constant the index reads, and prove the index
+    # really is declared on it — a rename must not leave this leg asserting a
+    # dead name while the FTS leg stays broken.
+    assert SOURCE_SEARCH_TEXT_FIELD in dict(_FULLTEXT_INDEX_LABEL_FIELDS)["Source"]
+    assert node.props.get(SOURCE_SEARCH_TEXT_FIELD) == ", ".join(topics), (
+        "a record-restored session `:Source` lost "
+        f"{SOURCE_SEARCH_TEXT_FIELD!r} — the only field the Source FTS index is "
+        "declared on — so the restored session is unfindable through "
+        f"`tortoise_fts_query(entity_type='source')`: {node.props!r}"
+    )
+    # `derived == replay(row)`: the restored value IS the value the capture
+    # wrote, so a served node and a rebuilt node cannot disagree on it.
+    assert node.props[SOURCE_SEARCH_TEXT_FIELD] == _source_search_text(topics=topics)
+
+    # ⛔ AND THE KEEP IS NOT A PROSE LEAK in this fixture: what lands is the bag of
+    # words, never the turn. (A space-less (CJK) run is the one shape where the run
+    # IS the field — `_session_source_metadata`'s residual — so this leg's English,
+    # word-delimited transcript is what makes the absence assertion meaningful.)
+    # The transcript's own phrase must not appear in the restored field, which is
+    # the property this file's sibling guard (`test_10000_source_prose.py`) scans
+    # every node's strings for.
+    needle = POST_10000_TRANSCRIPT.split(": ", 1)[1].rstrip(".")
+    assert needle.lower() not in node.props[SOURCE_SEARCH_TEXT_FIELD].lower(), (
+        "the record door put the transcript's own phrase back on the node"
+    )
+
+
+def test_the_drop_is_decided_by_the_rows_own_provenance_not_by_the_column_name():
+    """The narrowing is EXACT equality with the lexicon join — not a shape guess.
+
+    Same identity, same `topics`, same column; only the provenance differs:
+    `_captured_session_row` above carries the pre-#10000 prose and is still
+    dropped. A `startswith`/`in`/"looks like a word list" implementation would
+    pass the keep leg above while silently re-indexing a legacy sentence, which is
+    the #3518 findability paid for with §9.1/D1 prose — so the near-misses are
+    pinned here, not left to the implementation's good behaviour.
+    """
+    topics = _post_10000_session_row()["topics"]
+    assert isinstance(topics, list)
+    joined = ", ".join(topics)
+
+    for near_miss in (f"{joined} and that is all", f" {joined}", joined.upper(),
+                      joined.replace(", ", ",")):
+        node = node_from_row("Source",
+                             _post_10000_session_row(_search_text=near_miss))
+        assert SOURCE_SEARCH_TEXT_FIELD not in node.props, (
+            f"{near_miss!r} is not the lexicon derivation (it merely looks like "
+            "one) and it reached the graph as the session's indexed text")
+
+    # And the legacy prose row is still dropped — the control that makes the
+    # keep leg above a DISCRIMINATION rather than the guard being off.
+    legacy = node_from_row("Source", _captured_session_row())
+    assert SOURCE_SEARCH_TEXT_FIELD not in legacy.props
+
+
+def test_a_list_shaped_legacy_utterance_is_not_mistaken_for_the_lexicon():
+    """#10852 review P2 — exact equality ALONE re-indexed a legacy sentence.
+
+    The pre-#10000 capture wrote `summary` = the transcript's first substantive
+    utterance and derived `_searchText` FROM that same value, so a legacy row
+    holds `summary == _search_text == <the utterance>`. When the utterance IS a
+    comma-space list, `_search_text` coincides with `", ".join(topics)` WORD FOR
+    WORD and the join test alone cannot tell it from the post-#10000 lexicon —
+    the prose is projected, lands in the Source FTS index, and nothing reds (the
+    exact cost `_EPISODIC_SOURCE_PROSE_COLUMNS` says a false POSITIVE has).
+
+    A shopping list, a tag list, a comma-separated set of names: all reach it.
+    The second term is the WITNESS — the post-#10000 `summary` carries
+    `SESSION_SOURCE_SUMMARY_PREFIX` and a prose utterance does not.
+
+    NON-VACUITY (measured, not asserted): with the witness removed from
+    `_episodic_source_search_text_is_the_lexicon`, this leg fails on its first
+    assertion (`_searchText` reached the node) while the legacy control in
+    `test_the_drop_is_decided_by_the_rows_own_provenance_not_by_the_column_name`
+    still passes — i.e. every pre-existing legacy leg was blind to this shape.
+    """
+    #: The legacy derivation, by construction: the utterance is the list, and the
+    #: legacy `topics` are its first-encounter word order (`Counter.most_common`),
+    #: which for an all-count-1 list IS this order.
+    utterance = "milk, eggs, bread, cheese, apples, oranges"
+    legacy = _source_row(
+        url="session:s-list",
+        id="s-list",
+        name="s-list",
+        title="session:s-list",
+        canonical_url="session:s-list",
+        source_kind="agentSession",
+        session_id="s-list",
+        topics=["milk", "eggs", "bread", "cheese", "apples", "oranges"],
+        summary=utterance,
+        _search_text=utterance,
+    )
+    # The hole, stated as the premise it is: this row's pair IS the join.
+    assert legacy["_search_text"] == ", ".join(legacy["topics"])
+
+    node = node_from_row("Source", legacy)
+    assert SOURCE_SEARCH_TEXT_FIELD not in node.props, (
+        "a legacy utterance that happens to be a comma-space list satisfied the "
+        "join test and its PROSE was projected as the session's indexed text — "
+        "§9.1/D1 prose in the Source FTS index, and nothing reds")
+    assert "summary" not in node.props, (
+        "the pair is one datum; declining one half re-created the sentence under "
+        "the column next door")
+
+    # ⛔ AND THE LEG IS A DISCRIMINATION, not the guard switched off: the same
+    # `topics`, the same join, differing only in the display prefix, is kept.
+    post = node_from_row("Source", dict(legacy, summary=(
+        _SESSION_SOURCE_SUMMARY_PREFIX + utterance)))
+    assert post.props.get(SOURCE_SEARCH_TEXT_FIELD) == utterance, (
+        "the witness is not a shape test on the IDENTITY — a post-#10000 row "
+        "with identical `topics`/`_searchText` must still project the lexicon, "
+        "or the fix has un-indexed every restored session (#3518)")
+
+
+def test_the_witness_fails_closed_on_every_unprovable_summary():
+    """The second term is FAIL-CLOSED: no `summary` ⇒ no keep, never a guess.
+
+    `summary` is the witness, so it is also a new way to lose the keep: a row
+    whose display column is absent, empty, or carries the join WITHOUT the
+    declared prefix cannot prove the post-#10000 derivation and stays declined.
+    That direction is the acceptable one (an un-indexed session until it is
+    re-captured, visible and named at the table) — the opposite direction is
+    prose on a node, which nothing reds.
+
+    Pinned so a later lane cannot "simplify" the witness into a truthiness test
+    (`if summary:`) — an empty string is falsy and a non-prefixed sentence is
+    truthy, and both are the wrong answer.
+    """
+    row = _post_10000_session_row()
+    joined = row["_search_text"]
+    assert isinstance(joined, str)
+
+    for summary, why in (
+        (None, "the display column is absent"),
+        ("", "the display column is empty"),
+        (joined, "the legacy shape: the join with no display prefix"),
+        (f" {_SESSION_SOURCE_SUMMARY_PREFIX}{joined}",
+         "a prefix that is not the declared one"),
+        (f"{_SESSION_SOURCE_SUMMARY_PREFIX}{joined} and that is all",
+         "the prefix followed by more than the lexicon"),
+    ):
+        node = node_from_row("Source", dict(row, summary=summary))
+        assert SOURCE_SEARCH_TEXT_FIELD not in node.props, (
+            f"{why} was accepted as proof of the post-#10000 derivation — the "
+            "witness is not fail-closed")
+
+    # The control: the LIVE derivation's own row still keeps the field, so the
+    # loop above is a discrimination rather than a blanket drop.
+    assert SOURCE_SEARCH_TEXT_FIELD in node_from_row("Source", row).props
+
+
+def test_the_display_summary_stays_declined_and_the_residual_is_named():
+    """The residual, pinned so it cannot become an accident (#10965).
+
+    `_searchText` is restored because its value is mechanically decidable from the
+    row — `_search_text == ", ".join(topics)` AND the display column carries that
+    join behind `SESSION_SOURCE_SUMMARY_PREFIX`, both of which the capture writes
+    from one list in one statement. `summary` itself stays DECLINED on every row:
+    restoring it would put the whole descriptor on the node for no retrieval gain
+    (the index reads `_searchText`), so the column is read as a WITNESS and never
+    projected. Cost, stated rather than implied: a record-restored session
+    `:Source` carries no `summary` while a live one does.
+    """
+    node = node_from_row("Source", _post_10000_session_row())
+
+    assert SOURCE_SEARCH_TEXT_FIELD in node.props
+    assert "summary" not in node.props, (
+        "`summary` was restored without a way to tell the descriptor from the "
+        "prose — that is not a relaxation this guard may take on its own"
+    )
+
+
+def test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row():
+    """The partition must stay PROVENANCE-correct — not "the pair is never judged".
+
+    A post-#10000 row's `_searchText` is now projected by the record door, so the
+    cache-owned exclusion has nothing left to shield it: `_partition_cache_owned`
+    keeps every name the RECORD side holds, which means a DRIFTED restored
+    `_searchText` reds instead of hiding in `graph_only`. Without this leg the
+    narrowing could be satisfied by an implementation that also stops comparing
+    the field — a guard that stops guarding without reddening.
+    """
+    from tortoise import record_reconcile as rr
+
+    row = _post_10000_session_row()
+    truth = node_from_row("Source", row).props
+    key = f"Source:{row['url']}"
+    drifted = dict(truth, **{SOURCE_SEARCH_TEXT_FIELD: "stale, lexicon"})
+    scan = rr.scan_cache_view(_FakeGraph([(drifted,)]), labels=["Source"])
+
+    result = rr.reconcile_record_and_cache(
+        {key: dict(truth)}, {key: drifted}, placed=scan.placed)
+
+    assert result.report.field_mismatches == 1, (
+        "a restored session's indexed text drifted from the record and the "
+        "reconciler did not red — the cache-owned exclusion swallowed a field "
+        "the record door now PROJECTS"
+    )
+    assert not dict(result.graph_only).get(SOURCE_SEARCH_TEXT_FIELD)
 
 
 def test_the_placement_reads_stay_at_CALL_time():
