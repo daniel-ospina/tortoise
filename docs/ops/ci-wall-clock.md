@@ -173,13 +173,15 @@ killed at its own cap — conclusion `cancelled` — is **invisible here by cons
 uploading a 3.6 GB `~/.cache/pip` archive in the `actions/cache` save POST-step and was cancelled
 at 20 m, which `python-ci-gate` reads as red (#5219). `max 8.03` therefore never saw it. The
 binding term is the job's own in-step `timeout … 15m` plus a ~9 m cold save, not the 8.03 m norm —
-read the cap against the SUM of the job's caps, not against its median. ⚠ **Both terms moved again on
-2026-11-06** — the `15m` and the `~9 m` in the sentence above are the SUPERSEDED values; derive this
-row from the block below, which works the move.
+read the cap against the SUM of the job's caps, not against its median. ⚠ Only the FIRST of those
+terms moved on 2026-11-06: the in-step `15m` in the sentence above is SUPERSEDED (it is `20m` now,
+sized from the COLLECT measurement), while the `~9 m` cold save did NOT move and is the value the
+block below still uses. Derive this row from that block, which works the move.
 
-⚠ **Both of those numbers moved again on 2026-11-06, on a measurement that closes the loop the
-paragraph above opens.** Run 42154769896 (PR #11032, head `8f32c5255`) reddened **two** required
-checks with no failing test in either artifact, and both terms are the ones this section names:
+⚠ **The two job caps below moved on 2026-11-06, on a measurement that closes the question the
+paragraph above leaves open.** Run 42154769896 (PR #11032, head `8f32c5255`) reddened **two** required
+checks with no failing test in either artifact, and each caps exactly one of the terms this section
+names:
 
 - `test-d14-hosted-api` (job 127701854811) — the in-step `15m` was eaten by **COLLECTION**: 11 m 10 s
   (04:23:22 → 04:34:32) over `collected 47070 items`, against 4 m 59 s for the 46,906-item

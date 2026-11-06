@@ -3744,7 +3744,7 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
 
 
 #: Files OUTSIDE the two runbooks that cite `python-ci.yml:<line>` for the `test-slow` header's
-#: refusal paragraph. Both were exactly right on `main` (`:1891`) and #6744's +70-line insert in the
+#: refusal-cost paragraph. Both were exactly right on `main` (`:1891`) and #6744's +70-line insert in the
 #: `test` job's `strategy` block moved the paragraph to `:1961` — and NOTHING read either file, so the
 #: drift shipped green: a reader (or a fixer) sent to `:1891` lands one job earlier on the `test`
 #: job's FalkorDB-teardown comment and never finds the refusal it was sent to read. (`origin/main`
@@ -3787,7 +3787,14 @@ _REFUSAL_ANCHOR = "Cost when GitHub-hosted is healthy"
 
 
 def _refusal_citation_problems(text: str, workflow: list[str]) -> list[str]:
-    """Every `python-ci.yml:<n>` in `text` that does not land on the refusal paragraph."""
+    """Every `python-ci.yml:<n>` in `text` that misses the `test-slow` refusal-cost paragraph.
+
+    The anchor is that paragraph's FIRST line — the one that states the outage consequence the
+    refusal rests on. The literal prohibition (`Do NOT change it back …`) is a SEPARATE line 30
+    further down, and it is pinned by its own reference in the runbook; a citation of the
+    prohibition is therefore a miss here. The message says so plainly instead of calling the
+    prohibition "not the refusal paragraph", which the tree would contradict.
+    """
     problems: list[str] = []
     for m in re.finditer(r"python-ci\.yml:(\d+)", text):
         n = int(m.group(1))
@@ -3796,8 +3803,8 @@ def _refusal_citation_problems(text: str, workflow: list[str]) -> list[str]:
             continue
         if _REFUSAL_ANCHOR not in workflow[n - 1]:
             problems.append(
-                f"cites python-ci.yml:{n}, which is {workflow[n - 1].strip()!r} — not the "
-                f"`test-slow` refusal paragraph"
+                f"cites python-ci.yml:{n}, which is {workflow[n - 1].strip()!r} — not the first "
+                f"line of the `test-slow` header's refusal-cost paragraph"
             )
     return problems
 
