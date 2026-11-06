@@ -3632,9 +3632,9 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     post-`#10978`) onward NEITHER retired string is present, and neither is
     present at `78161a50a` — the merge-base at `83c4129a9`, and no longer the
     base: successive main-merges moved it — `6b1d697193` → `acfebd81f5`, then
-    `5d806d69a` → `af36e9240` (the merge-base at `5d806d69a`; ⚠️ **not** at THIS
-    head, whose merge-base is `bc5a26436` — the last main-merge into
-    `b328e65db` moved it again) — and neither string
+    `5d806d69a` → `af36e9240`, then `b328e65db` → `bc5a26436`, then
+    `fc09823bae` → `5dc22c19a1` (each arrow is a HEAD → *its* merge-base pair,
+    never a claim about a later head) — and neither string
     is present at any of them (measured 0 and 0 on every tree named) — nor at
     any commit of THIS branch: both of this branch's earlier bases already carried
     `#10978`'s correction (`b748df7d0` before the rebase, `e2584e2cb` after it).
@@ -3643,6 +3643,17 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     the pin reds if either section drifts back, which is the only thing that
     would catch it. "Measured on origin/main" would have been FALSE within the
     hour, which is why the sha is named.
+
+    ⛔ **The CURRENT merge-base is deliberately NOT named above, and each arrow
+    is a (head → merge-base) pair, not a claim about this tree.** A literal for
+    today's merge-base is the same drift class this branch spent cycles 18–22
+    closing: it has already been FIVE different shas on this branch, so a sha
+    written as "the" merge-base is stale before the next reader — and a stale
+    one reads as
+    *verified* (it IS an ancestor, it is just no longer the base). Anything that
+    needs the merge-base must ask `git merge-base origin/main <head>`; this
+    docstring's claim is about the trees measured above, and each stays a real
+    per-tree measurement whether or not it is still a merge-base.
     *Does the test reach it?* Yes — the document is read from the tree; §9.4's
     deciding sentence is anchored document-wide and then asserted to lie INSIDE
     §9.4, with the pointer and the negation checked on that sentence; the
@@ -4064,8 +4075,8 @@ def test_the_CHANGELOG_calls_the_LANDED_topic_lexicon_landed():
     offenders = _lines_claiming_unlanded(changelog, "`#10852`")
     assert not offenders, (
         f"the record calls `#10852` unlanded on {len(offenders)} line(s): "
-        f"{offenders} — it merged as `ba87797c4` (2026-11-06T02:36:52Z), 36 "
-        f"minutes before this head, and BOTH files state the lexicon as landed: "
+        f"{offenders} — it merged as `ba87797c4` (2026-11-06T02:36:51Z) and is "
+        f"an ANCESTOR of this head, and BOTH files state the lexicon as landed: "
         f"§9.4 says it in the present tense and `_RETIRED_FUTURE_DERIVATION` is "
         f"pinned absent for the same reason. A record that says \"still-open\" "
         f"beside a document that says \"is\" is the two-answers defect this PR "
