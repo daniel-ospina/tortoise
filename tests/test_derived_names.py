@@ -730,20 +730,60 @@ def _non_owned_handles(block: str) -> list[str]:
     the leak the journal exists to close was still open (#11217 review P1).
 
     Matched on the RAW block (the prefix lives inside string material, which
-    masking would erase) and only for the `name = f"<prefix>{os.urandom(...)}"`
-    shape: a name built by a CALL is not guessed at, so this arm cannot invent a
-    prefix it did not read.
+    masking would erase) and only where the literal is read from code: an
+    assignment or a journal call that sits in a COMMENT is prose, and prose must
+    neither satisfy this census nor red it (#11182), so every match is validated
+    against the MASKED block at the same offset.
+
+    TWO shapes carry that f-string, and the second one had no assignment line for
+    the first to read (#11217 re-review, measured at `c84c3d68`): a site can hand
+    the f-string STRAIGHT to the journal —
+
+        _journal_append(f"evict_{os.urandom(6).hex()}")   # read NO violation
+
+    which journals the same inert record and stays GREEN, i.e. the exact false
+    PASS this arm exists to close, in the shape that skips its matcher. Both are
+    read here.
+
+    DECLARED fail-open on a prefix that could still COMPLETE into an owned one
+    (`te` → `test_`): the built name starts with the prefix, so an unownable
+    prefix of an owned prefix is undecidable from the literal alone, and this arm
+    must not turn that into a violation on a site it cannot judge (it was one
+    before this note, measured at `c84c3d68`: `f"te{hex}"` read as a violation
+    before its interpolation was known). An EMPTY prefix fails both tests and is
+    clean by construction. Note the boundary is exact — `te_` is NOT ambiguous,
+    because `"test_".startswith("te_")` is false, so it is still reported.
     """
     from tests._embedded import _SWEEP_OWNED_PREFIXES
 
+    masked = _mask_strings_and_comments(block)
+    exprs: list[str] = []
+    # shape 1: `name = f"<prefix>{os.urandom(...)}"`
+    for m in re.finditer(
+            r"(?m)^[ \t]*(?P<name>\w+)\s*=\s*f([\"'])(?P<rhs>[^\n]*)", block):
+        if masked[m.start("name")] == " ":
+            continue  # inside a comment or a string literal
+        exprs.append(m.group("rhs"))
+    # shape 2: the f-string handed STRAIGHT to the journal
+    for call in re.finditer(r"_journal_append\(", masked):
+        line_start = masked.rfind("\n", 0, call.start()) + 1
+        if re.fullmatch(r"\s*(?:async\s+)?def\s+", masked[line_start:call.start()]):
+            continue  # a definition of the symbol, not a use of it
+        m = re.match(r"_journal_append\(\s*f([\"'])(?P<rhs>[^\n]*)",
+                     block[call.start():])
+        if m:
+            exprs.append(m.group("rhs"))
+
     out: list[str] = []
-    for m in re.finditer(r"(?m)^[ \t]*\w+\s*=\s*f([\"'])([^\n]*)", block):
-        rhs = m.group(2)
+    for rhs in exprs:
         if "os.urandom" not in rhs:
             continue
         prefix = rhs.split("{", 1)[0]
-        if not prefix.startswith(_SWEEP_OWNED_PREFIXES):
-            out.append(prefix)
+        if prefix.startswith(_SWEEP_OWNED_PREFIXES):
+            continue
+        if any(p.startswith(prefix) for p in _SWEEP_OWNED_PREFIXES):
+            continue  # ambiguous: the name may still complete into an owned prefix
+        out.append(prefix)
     return out
 
 
@@ -867,6 +907,71 @@ def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
     assert not _raw_detach_violations(root=tmp_path), (
         "the SAME site with a `test_` prefix must be clean — an owned prefix is "
         "what makes the journal record authorise a drop")
+
+    # SHAPE 2 (#11217 re-review, measured at `c84c3d68`): the f-string handed
+    # STRAIGHT to the journal has no assignment line, so the arm above read NO
+    # violation — the same inert record, one shape over, still GREEN.
+    site.write_text(
+        "def test_evictor_lane():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    _journal_append(f\"evict_{os.urandom(6).hex()}\")"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n",
+        encoding="utf-8",
+    )
+    bad = _raw_detach_violations(root=tmp_path)
+    assert bad and "'evict_'" in bad[0], (
+        f"an INLINE-journaled non-owned handle was accepted as a record: {bad}")
+
+    site.write_text(
+        site.read_text(encoding="utf-8").replace('f"evict_', 'f"test_evict_'),
+        encoding="utf-8",
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        "the inline shape with an owned prefix must be clean")
+
+    # PROSE is not a site in either direction (#11182): a comment showing an
+    # unowned handle must not make the census red, exactly as it must not make it
+    # green.
+    site.write_text(
+        "def test_evictor_lane():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    name = f\"test_evict_{os.urandom(6).hex()}\""
+        "\n    _journal_append(name)"
+        "\n    # never do this: name = f\"evict_{os.urandom(6).hex()}\""
+        "\n    # nor this: _journal_append(f\"evict_{os.urandom(6).hex()}\")"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n",
+        encoding="utf-8",
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        f"a COMMENT naming an unowned handle red the census: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # AMBIGUOUS prefix is declared fail-open: `f"te{hex}"` starts with `te`, and
+    # `"test_".startswith("te")` — the name may still complete into an owned
+    # prefix, so a site the arm cannot judge is not a violation. Measured at
+    # `c84c3d68` it WAS one, a false block on a legitimate handle. (`te_` is NOT
+    # ambiguous — `"test_".startswith("te_")` is false — so it stays reported,
+    # which the arm above pins with `evict_`.)
+    site.write_text(
+        "def test_evictor_lane():"
+        "\n    import os"
+        "\n    from falkordb import FalkorDB"
+        "\n    name = f\"te{os.urandom(6).hex()}\""
+        "\n    _journal_append(name)"
+        "\n    c = FalkorDB(host=\"h\")"
+        "\n    c.query(\"MATCH (n) DETACH DELETE n\")"
+        "\n",
+        encoding="utf-8",
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        f"an undecidable prefix was reported as a violation: "
+        f"{_raw_detach_violations(root=tmp_path)}")
 
 
 def _block_end(masked: str, start: int, indent: int) -> int:
