@@ -1827,16 +1827,18 @@ _NEGATION_CUE = (
     r"|\w+n['’]t\b)"
 )
 
-#: Cues that negate only what FOLLOWS them: in *"X rather than Y"* the negated
-#: term is Y, never X. They are admitted in the LEADING arm alone.
-#:
-#: ⛔ Adding them to `_NEGATION_CUE` instead would refuse CORRECT prose —
-#: *"the vector's text is the S1 narrative read from `public.session_narrative`
-#: rather than the summary"* negates the SUMMARY, not the home, and the trailing
-#: arm would bind it to the home and report *"NEGATES the pointer"* (measured).
-#: The trailing arm exists to catch an object used as the SUBJECT of a negation;
-#: for these two cues the object is always the negated TERM.
-_NEGATION_CUE_LEADING_ONLY = r"(?:\brather\s+than\b|\binstead\s+of\b)"
+#: ⛔ `rather than` / `instead of` are NOT cues here, and the reason is measured.
+#: They negate only what FOLLOWS them, so in the `cue + span + object` shape every
+#: guard here uses, admitting them binds the negation ACROSS the term they negate:
+#: *"rather than the narrative the vector reads `:Source.summary`"* was read as
+#: negating `:Source.summary` (pin GREEN on a sentence asserting the trap) and
+#: *"and rather than the narrative the vector embeds the summary"* as negating the
+#: narrative (§12.1b GREEN on an inversion). A tight per-cue arm was measured too
+#: and re-opens the second: for the narrative the required negation is a NEGATED
+#: NOUN, so any cue that really negates it satisfies the guard whatever follows.
+#: The cost of leaving them out is a FALSE RED — *"…rather than `:Source.summary`"*
+#: is refused with "no longer states the NEGATION" — which is fail-CLOSED, so it is
+#: declared and pinned (`_DECLARED_OVER_BLOCK_CUE`) instead of being admitted.
 
 #: Adversative conjunctions. What FOLLOWS one is the ASSERTED term, so a negation
 #: must not reach across it — *"not the bare summary but `public.session_narrative`"*
@@ -1884,6 +1886,9 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
                        trailing: bool = True) -> bool:
     r"""Is a negation cue bound to `object_regex` — in EITHER direction?
 
+    (`trailing=False` restricts it to the LEADING direction; §12.1b's object
+    needs that, and the reason is in `_negates_the_narrative`.)
+
     ⛔ **DIRECTION IS HALF THE CLAIM, and it was missing.** Both object-bound
     guards used to match ONE word order — cue → span → verb/object → object —
     which is the order every phrasing in the corpus happens to use. The mirror
@@ -1895,9 +1900,9 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
     So the cue is bound to the object from either side, each side carrying the
     stop set that makes the binding mean something:
 
-      • **LEADING** — cue, then `_NEG_CLAUSE_SAFE{0,40}`, then (for `home`) a
+      • **LEADING** — cue, then `_neg_span(40)`, then (for `home`) a
         read/embed verb and a further `_NEG_CLAUSE_SAFE{0,30}`, then the object.
-      • **TRAILING** — the object, then `_NEG_CLAUSE_SAFE{0,30}`, then the cue,
+      • **TRAILING** — the object, then `_neg_span(30)`, then the cue,
         then `_NEG_TRAILING_SUBJECT` (so a cue introducing ANOTHER backticked
         name is that name's negation, not this object's).
 
@@ -1936,7 +1941,7 @@ def _negation_bound_to(line: str, object_regex: str, *, read_verb: bool,
     is supposed to pin (measured — the pin stayed GREEN with that sentence
     transplanted into the REAL footnote).
     """
-    leading = f"(?:{_NEGATION_CUE_LEADING_ONLY}|{_NEGATION_CUE})" + _neg_span(40)
+    leading = _NEGATION_CUE + _neg_span(40)
     if read_verb:
         leading += rf"{_NEG_READ_VERB}\b{_neg_span(30)}"
     pattern = f"(?:{leading}{object_regex})"
@@ -2045,21 +2050,33 @@ def _negates_the_narrative(line: str) -> bool:
     own pointer from being read as the negated object.
 
     Bound by `_negation_bound_to` with `trailing=False` — LEADING ONLY, unlike
-    the other two guards: a cue, a clause-stopped span with no backtick and no
-    adversative conjunction, then `narrative`. ⚠️ The span is clause-stopped,
-    which is what lets *"…is §4.6 metadata, not the narrative"* be accepted (the
-    comma precedes the CUE, not the object).
+    the other two guards: a cue, then `_neg_span(40)` (clause-stopped, no
+    backtick, and stopped at the adversative conjunctions `_NEG_ADVERSATIVE`),
+    then `narrative`. ⚠️ The span is clause-stopped, which is what lets
+    *"…is §4.6 metadata, not the narrative"* be accepted (the comma precedes the
+    CUE, not the object).
 
-    ⛔ Why leading-only is the RIGHT scope here and not a convenience: the
-    narrative is the text the vector DOES embed, so a cue placed AFTER it makes
-    the narrative the subject of a negation and necessarily states the inverse —
-    *"the narrative is never what gets embedded"*, *"the narrative is not the
-    vector's text"*. Those are in `_NARRATIVE_NEGATION_INVERSIONS`, and the real
-    footnote is mutated into each of them to prove the guard refuses them. The
-    mirror-order DECLARED OVER-BLOCK is a correct trailing form that this scope
-    refuses on purpose — *"the narrative is never the summary"* — see
-    `_DECLARED_OVER_BLOCK_NARRATIVE`; the direction that would be lost by
-    admitting it is the FAIL-OPEN one.
+    ⛔ Why leading-only: the narrative is the text the vector DOES embed, so a
+    cue placed AFTER it makes the narrative the subject of a negation and states
+    the INVERSE — *"the narrative is never what gets embedded"*, *"the narrative
+    is not the vector's text"*. Both are in `_NARRATIVE_NEGATION_INVERSIONS`, and
+    the real footnote is mutated into every listed inversion to prove the guard
+    refuses them. The mirror-order DECLARED OVER-BLOCK is a correct trailing form
+    this scope refuses on purpose — *"the narrative is never the summary"* — see
+    `_DECLARED_OVER_BLOCK_NARRATIVE`.
+
+    ⛔ **POSITION IS NOT ENOUGH, AND THE EARLIER WORDING HERE CLAIMED IT WAS.**
+    "A cue placed after the object necessarily inverts it" is TRUE, but its
+    converse — a cue BEFORE the object is therefore the claim — is FALSE, and it
+    is not what this guard checks. A leading cue that negates a DIFFERENT
+    predicate of the same clause still inverts §12.1b and is still ACCEPTED:
+    *"a session's `summary` is §4.6 metadata and the vector never embeds the
+    narrative"* (measured: `_negates_the_narrative` → True, the document-level
+    assertion stays GREEN). That residual is PRE-EXISTING — it is not reachable
+    from this direction change — it is declared rather than denied, and it is
+    pinned by `test_the_declared_leading_cue_residual_is_the_measured_one` so
+    that closing it is a visible, deliberate change. Closing it needs the claim's
+    PREDICATE ("`summary` … is never|not … narrative"), not its word order.
 
     ⚠️ It does NOT accept a line that merely NAMES the narrative with no cue:
     *"a session's `summary` is §4.6 metadata and the narrative."* is REFUSED —
@@ -2446,9 +2463,11 @@ def test_the_declared_fail_CLOSED_over_block_is_the_documented_one():
 #: passed and red nothing: **4 of the 5** are the measured reds — the count the
 #: test's own docstring below always carried, and which this header used to
 #: contradict (*"Each went RED"*, corrected after the review at `e457c2aa15`).
-#: ⚠️ Two cases were added after that measurement — the `rather than` cue, and its
-#: own RED-before-admission replay — so the list is now six: one control, four
-#: original reds, one later red.
+#: ⚠️ The list stayed FIVE after cycle 19: a `rather than` case was added and then
+#: WITHDRAWN, because admitting the cue is a fail-open (see `_NEGATION_CUE`). Its
+#: cost — a false red on correct prose — is declared in `_DECLARED_OVER_BLOCK_CUE`
+#: and pinned by `test_the_declared_rather_than_over_block_is_the_documented_one`.
+#: So: one control, four measured reds.
 _SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     ("the head document's own wording", "never from `:Source.summary`"),
     ("and not from", "and not from `:Source.summary`"),
@@ -2458,11 +2477,6 @@ _SUMMARY_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     #: the same ruling, and the leading-only guard REFUSED it (measured).
     ("the trap as the subject of the negation",
      "`:Source.summary` is never what the vector reads"),
-    #: `rather than` / `instead of`: the same ruling in ordinary prose, and a
-    #: LEADING-ONLY cue — *"X rather than Y"* negates Y. Measured RED before the
-    #: cue was admitted, on the REAL deciding sentence.
-    ("rather than, cue before the trap",
-     "rather than `:Source.summary`"),
 ]
 
 #: Lines that NAME the trap with NO negation cue applied to it, or apply one to
@@ -2482,7 +2496,7 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
 @pytest.mark.parametrize(
     "why,clause", _SUMMARY_NEGATION_REWORDINGS,
     ids=["head-document-wording", "and-not-from", "must-not-be",
-         "never-the-field", "trap-as-negated-subject", "rather-than-cue"])
+         "never-the-field", "trap-as-negated-subject"])
 
 
 def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str):
@@ -2557,12 +2571,12 @@ _NARRATIVE_NEGATION_REWORDINGS: list[tuple[str, str]] = [
     #: did not carry — the same widening `_SUMMARY_NEGATION_INVERSIONS` pins for
     #: the other object, read in the ACCEPT direction here.
     ("cannot, cue before the object", "cannot be the narrative"),
-    #: `rather than` / `instead of` are the same ruling in ordinary prose
-    #: (`X rather than Y` == `X, not Y`) and are admitted as LEADING-ONLY cues.
-    #: Measured RED before they were admitted, with the message *"no longer
-    #: states the NEGATION"* about a sentence that states it.
-    ("rather-than, cue before the object", "rather than the narrative"),
-    ("instead-of, cue before the object", "instead of the narrative"),
+    #: ⛔ `rather than` / `instead of` belong HERE in spirit and are NOT admitted:
+    #: see `_NEGATION_CUE`. In this guard's `cue + span + object` shape they bind
+    #: the negation across the term they negate, and the shape
+    #: *"and rather than the narrative the vector embeds the summary"* was MEASURED
+    #: accepted — a §12.1b inversion certified. The price is a declared FALSE RED
+    #: (`_DECLARED_OVER_BLOCK_CUE`), and it is the fail-CLOSED direction.
 ]
 
 #: Lines that NAME the narrative with NO cue bound to it, or bind the cue to
@@ -2595,9 +2609,11 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     #: narrative is the text the vector DOES embed, so making it the subject of a
     #: negation states the INVERSE of §12.1b's footnote (*"the vector's TEXT is
     #: the S1 narrative read from `public.session_narrative`"*, one sentence
-    #: above). MEASURED on the REAL footnote: with either transplanted into it,
-    #: the whole pin stayed GREEN — the fail-open these two cases close, and the
-    #: reason the binding is `trailing=False`.
+    #: above). MEASURED on the REAL footnote: the guard the pin reads (the
+    #: document-level assertion) stayed GREEN with either transplanted into it —
+    #: the fail-open these two cases close, and the reason the binding is
+    #: `trailing=False`. ⚠️ Only a SPELLING anchor in the real-footnote control
+    #: noticed, which is not the claim.
     ("the narrative as the subject of a trailing cue",
      "the narrative is never what gets embedded"),
     ("a copula form, narrative as subject",
@@ -2607,8 +2623,9 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
 
 @pytest.mark.parametrize(
     "why,clause", _NARRATIVE_NEGATION_REWORDINGS,
-    ids=["head-document-wording", "not-no-conjunction", "cannot-cue",
-         "rather-than-cue", "instead-of-cue"])
+    ids=["head-document-wording", "not-no-conjunction", "cannot-cue"])
+
+
 def test_the_narrative_negation_ACCEPTS_a_correct_rewording(
         why: str, clause: str):
     """*What value makes this test fail?* The phrase lock this replaced, on four
@@ -2660,6 +2677,27 @@ def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         f"another name or in another clause does not reach it")
 
 
+#: The `and … narrative` clause of the REAL footnote, DERIVED rather than
+#: spelled. The two real-footnote controls below used to hard-assert the literal
+#: `"and never the narrative"`, so re-wording the document into ANOTHER form its
+#: own accept list requires (`and not the narrative`) failed BOTH with *"the
+#: footnote no longer carries …"* while the document-level assertion passed — a
+#: pin reding a correct re-wording and reporting a drift the document does not
+#: contain. The em dash is excluded so the match cannot run from an earlier
+#: `and` across a clause boundary into this one.
+_FOOTNOTE_CLAUSE_RE = re.compile(r"\band\b[^.;:—]*?\bnarrative\b[^.;:—]*")
+
+
+def _footnote_negation_clause(footnote: str) -> str:
+    """The footnote's own `and … narrative` clause; refuses an absent one."""
+    matches = _FOOTNOTE_CLAUSE_RE.findall(footnote)
+    assert matches, (
+        f"§12.1b's footnote carries no `and … narrative` clause at all, so the "
+        f"controls that mutate it have nothing to mutate — that IS the drift "
+        f"they exist to catch: {footnote!r}")
+    return matches[-1]
+
+
 def test_the_REAL_footnote_LOSES_the_negation_when_it_is_dropped():
     """The control the case lists cannot give: the REAL §12.1b footnote mutated.
 
@@ -2677,11 +2715,7 @@ def test_the_REAL_footnote_LOSES_the_negation_when_it_is_dropped():
     mistaken for the negated object.
     """
     footnote = _source_vector_footnote(_storage_doc_text())
-    head_clause = "and never the narrative"
-    assert head_clause in footnote, (
-        f"§12.1b's footnote no longer carries {head_clause!r} — this control "
-        f"mutates THAT clause, so a re-wording of the document must update this "
-        f"anchor or the control silently skips")
+    head_clause = _footnote_negation_clause(footnote)
     assert _negates_the_narrative(footnote), (
         "`_negates_the_narrative` REFUSED the REAL §12.1b footnote — the guard "
         "reds the document it exists to certify")
@@ -2730,11 +2764,7 @@ def test_the_REAL_footnote_REFUSES_each_listed_inversion():
     entry in the inversions list is applied to the footnote a reader lands on.
     """
     footnote = _source_vector_footnote(_storage_doc_text())
-    head_clause = "and never the narrative"
-    assert head_clause in footnote, (
-        f"§12.1b's footnote no longer carries {head_clause!r} — this control "
-        f"mutates THAT clause, so a re-wording of the document must update this "
-        f"anchor or the control silently skips")
+    head_clause = _footnote_negation_clause(footnote)
     for why, clause in _NARRATIVE_NEGATION_INVERSIONS:
         mutated = footnote.replace(head_clause, "and " + clause)
         assert mutated != footnote, (
@@ -2765,6 +2795,62 @@ def test_the_declared_narrative_over_block_is_the_documented_one():
         f"REFUSED by the leading-only scope, and it is ACCEPTED: {line!r} — "
         f"either the scope was widened (which re-opens the subject-form "
         f"fail-open) or the docstring names a check the code does not perform")
+
+
+#: The false red that NOT admitting `rather than` / `instead of` as cues costs, and
+#: it is the price of the fail-CLOSED direction. Admitting them was MEASURED to
+#: bind the negation ACROSS the term they negate — *"rather than the narrative the
+#: vector reads `:Source.summary`"* was certified as negating the trap, and *"and
+#: rather than the narrative the vector embeds the summary"* as negating the
+#: narrative — so the pin would certify two inversions to avoid one false red.
+_DECLARED_OVER_BLOCK_CUE = (
+    "the vector's embedded text is the S1 narrative read from `{home}` rather "
+    "than `:Source.summary`")
+
+
+def test_the_declared_rather_than_over_block_is_the_documented_one():
+    """*What value makes this test fail?* A declared limit with no code behind it.
+
+    This line states §9.4's claim in ordinary prose (`rather than` == `, not`),
+    and `_negates_the_summary` does not see it, so §9.4's "must NEGATE the trap"
+    assertion REFUSES it. That is the cost of keeping `rather than` out of
+    `_NEGATION_CUE`, and it is pinned so the trade cannot be undone silently: a
+    future cycle that admits the cue must re-open `_NEGATION_CUE`'s measured
+    fail-open AND update this case.
+    """
+    line = _DECLARED_OVER_BLOCK_CUE.format(home=_HOME)
+    assert f"read from `{_HOME}`" in line, (
+        f"the declared cue over-block no longer carries the home phrase, so it "
+        f"would be refused for the WRONG reason: {line!r}")
+    assert _negates_the_home(line, _HOME) is False, (
+        f"the declared cue over-block is now read as negating the HOME, which "
+        f"is not the declared reason for its refusal: {line!r}")
+    assert _negates_the_summary(line) is False, (
+        f"`rather than` was admitted as a negation cue, and this line — which "
+        f"never mentions the trap's negation in the shape the guard needs — is "
+        f"now accepted: {line!r}. That is the trade `_NEGATION_CUE` refuses; if it "
+        f"is being revisited, the two measured fail-opens must be replayed first")
+
+
+def test_the_declared_leading_cue_residual_is_the_measured_one():
+    """*What value makes this test fail?* A docstring claiming a closure it lacks.
+
+    `_negates_the_narrative` says LEADING POSITION is the scope that closes the
+    subject-form fail-open. It is not sufficient, and the docstring says so: a
+    leading cue that negates a DIFFERENT predicate of the same clause still
+    inverts §12.1b. That residual is PRE-EXISTING (it is not reachable from the
+    direction change), so it is declared and pinned rather than denied, and
+    closing it is a visible change that reds this test.
+    """
+    line = ("a session's `summary` is §4.6 metadata and the vector never "
+            "embeds the narrative")
+    assert _negates_the_narrative(line) is True, (
+        f"the declared pre-existing residual is now CLOSED — `_negates_the_"
+        f"narrative` refuses {line!r}. That is an improvement, not a regression: "
+        f"delete this case, tighten the docstring, and record the scope change")
+    assert "summary" in line, (
+        f"the residual case must be a SENTENCE about the summary, so its "
+        f"inversion is visible against §12.1b's own claim: {line!r}")
 
 
 def test_the_pin_ACCEPTS_a_reworded_negation_on_the_REAL_deciding_sentence():
@@ -3003,8 +3089,10 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
     # half had already been moved to `_negates_the_summary` for exactly the defect
     # that shape produces — a correct re-wording red with a message naming the
     # inverse of what the sentence said. `_negates_the_narrative` binds the cue to
-    # the OBJECT `narrative` in both directions instead, and its accept/refuse
-    # lists (plus the REAL-footnote control) are what keep that binding honest.
+    # the OBJECT `narrative` in the LEADING direction (the narrative is the text
+    # the vector DOES embed, so a cue after it states the inverse — see its
+    # docstring), and its accept/refuse lists (plus the REAL-footnote control) are
+    # what keep that binding honest.
     _assert_vector_reads_the_narrative(footnote, "§12.1b's `:Source` footnote", home)
     assert _negates_the_narrative(footnote), (
         "§12.1b's `:Source` footnote no longer states the NEGATION (*\"a "
