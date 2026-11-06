@@ -27,7 +27,12 @@ Rules (the map's own §8 states them; this file is the enforcement):
 * **R4** every surface row is touched by at least one child (the issue's
   "no surface is listed that no child touches"), and every child `#11084`–`#11089`
   appears in the child table.
-* **R5** every seam named by `04-plan.md` §5–§6 appears in the crosswalk.
+* **R5** every seam named by `04-plan.md` §5–§6 appears in the crosswalk, and
+  every surface a crosswalk row names has a row in the surface table.
+
+A surface row is refused (exit 2) unless it has exactly 7 cells: an escaped pipe
+(`\\|`) inside a cell shifts every column after it, so a width the parser cannot
+interpret is an unreadable map, not a map that happens to be tidy.
 
 **Exit codes:** `0` clean · `1` violations (printed, one per line) · `2` the map
 could not be read or a required section is missing (an unparseable map is not a
@@ -133,10 +138,19 @@ def parse_surface_rows(section: str) -> dict[str, dict[str, str]]:
         if not match:
             continue
         row = cells(line)
-        if len(row) < 7:
+        if len(row) != 7:
+            # EXACT, not a floor. `cells()` splits on every `|` with no escape
+            # handling, so an escaped `\|` inside a cell (which markdownlint's
+            # MD056 does NOT flag — it creates no extra markdown cell) makes an
+            # 8-cell row, and `row[4]`/`row[6]` then read the WRONG columns: R2
+            # and R3 grade a shifted row and report clean while the real failure
+            # cell is never read. Measured before this arm existed: an 8-cell row
+            # scored CLEAN. A width the parser cannot interpret is an unreadable
+            # map (exit 2), the same posture as the short-row arm.
             raise Refusal(
-                f"{match.group(1)} has {len(row)} column(s); the table needs 7 "
-                "(SF · surface · type · flow · layer · contract · failure)"
+                f"{match.group(1)} has {len(row)} column(s); the table needs exactly 7 "
+                "(SF · surface · type · flow · layer · contract · failure) — a "
+                "`|` inside a cell shifts every column after it"
             )
         sf = match.group(1)
         if sf in rows:
@@ -252,16 +266,29 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
             f"R4 {sf}: no child touches it — the issue forbids a surface no child touches"
         )
 
-    # R5 — the plan's seams are all crosswalked.
+    # R5 — the plan's seams are all crosswalked, AND each crosswalk row's surface
+    # cell resolves to a real surface row. The second half was missing in the
+    # first version: R1 and R4 both referentially check what they read, so a
+    # seam bound to `SF99` (or to a surface number typed a digit off) was the one
+    # referential hole left in the map — a typo that produces a checklist row
+    # pointing at nothing.
     crosswalk = sections["5"]
-    present = {
-        seam
-        for seam in PLAN_SEAMS
-        if re.search(r"^\|\s*" + re.escape(seam), crosswalk, re.MULTILINE)
-    }
+    present: set[str] = set()
     for seam in PLAN_SEAMS:
-        if seam not in present:
+        row = next(
+            (
+                line
+                for line in crosswalk.splitlines()
+                if re.match(r"^\|\s*" + re.escape(seam), line)
+            ),
+            None,
+        )
+        if row is None:
             violations.append(f"R5 {seam}: missing from the §5/§6 crosswalk")
+            continue
+        present.add(seam)
+        for sf in sorted(surface_tokens(row) - set(surfaces)):
+            violations.append(f"R5 {seam}: names {sf}, which has no surface row")
 
     stats: dict[str, object] = {
         "surfaces": len(surfaces),
@@ -287,6 +314,22 @@ def _rewrite_row(text: str, sf: str, column: int, value: str) -> str:
         out.append(line)
     if not hit:
         raise AssertionError(f"self-test mutation target {sf} not found")
+    return "".join(out)
+
+
+def _rewrite_crosswalk_row(text: str, seam: str, value: str) -> str:
+    """Point one crosswalk row's surface cell somewhere else — the mapping primitive."""
+    out: list[str] = []
+    hit = False
+    for line in text.splitlines(keepends=True):
+        if line.startswith(f"| {seam}"):
+            row = line.strip().strip("|").split("|")
+            row[2] = f" {value} "
+            line = "|" + "|".join(row) + "|\n"
+            hit = True
+        out.append(line)
+    if not hit:
+        raise AssertionError(f"self-test mutation target {seam!r} not found")
     return "".join(out)
 
 
@@ -340,8 +383,17 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         "violation",
     ),
     (
+        # The DELETE is the point: `.replace("SF13", "SF1")` — what this case
+        # did first — RENAMES the remaining mentions instead of removing them,
+        # so the document it built was not the consistent shrink its own label
+        # (and the map's §8 record) claims. Measured: 13 mentions renamed.
         "delete the SF13 row AND every mention of it (a consistent shrink)",
-        lambda t: _drop_line(t, "| **SF13**").replace("SF13", "SF1"),
+        lambda t: re.sub(r"\bSF13\b", "", _drop_line(t, "| **SF13**")),
+        "violation",
+    ),
+    (
+        "retype a crosswalk surface as one that has no row",
+        lambda t: _rewrite_crosswalk_row(t, "§6.4", "**SF99**"),
         "violation",
     ),
     (
