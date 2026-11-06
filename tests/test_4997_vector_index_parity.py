@@ -503,9 +503,11 @@ def test_unmeasured_pair_is_none_in_both_halves(caplog):
     proj = _bare(raise_on_indexes=True)
     with caplog.at_level(logging.DEBUG):
         proj._ensure_indexes()  # must not raise
-    assert proj._vector_indexed_labels is None
-    assert proj._vector_index_served_labels is None
-    assert not _pair_records(caplog), "an unmeasured pair must not be reported"
+        assert proj._vector_indexed_labels is None
+        assert proj._vector_index_served_labels is None
+        assert not _pair_records(caplog), (
+            "a FAILED read must not be reported as a pair"
+        )
 
     proj2 = _bare()
 
@@ -517,9 +519,17 @@ def test_unmeasured_pair_is_none_in_both_halves(caplog):
             return super().query(cypher, params=params, timeout=timeout)
 
     proj2.g = _NoneGraph()
-    proj2._ensure_indexes()
-    assert proj2._vector_indexed_labels is None
-    assert proj2._vector_index_served_labels is None
+    # ⛔ The INFO capture must WRAP the call and the negative assertion must
+    # follow it: the not-measured lane is exactly where a regression would
+    # report `serves=[] indexes=[]` (the misreading warned of above), and an
+    # assertion taken before the call cannot see that record at all.
+    with caplog.at_level(logging.INFO):
+        proj2._ensure_indexes()
+        assert proj2._vector_indexed_labels is None
+        assert proj2._vector_index_served_labels is None
+        assert not _pair_records(caplog), (
+            "an unmeasured pair must not be reported"
+        )
 
 
 def test_distinct_graphs_each_report_once(caplog):
