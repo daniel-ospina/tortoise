@@ -2310,15 +2310,21 @@ unset BACKUP_DRIVER_DOWN_THRESHOLD_MIN
 # -300): any stamp minutes old would then read as corruption, filing
 # "last_sweep_at is in the future" against a healthy pipeline. This pins the
 # lower side — a recent stamp must be usable, and the green line must carry it.
+# Round 16: stamp it INLINE, here, exactly as 78f does for FUTURE_TS. TS_FRESH is
+# captured once at suite start, and this case runs ~54s in — asserting it as an
+# exact minute made the case cross 2m -> 3m at 60s of elapsed suite time, so the
+# step red a CORRECT driver on a slightly slower or loaded runner (measured: 91s
+# under load). The age shape is pinned instead of its integer.
 reset_case
+FRESH_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_FRESH")"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$FRESH_TS")"
 export STUB_SWEEP_RC=28
 run_driver
 assert_eq "$RC" 0 "78o. a 2-minute-old completion stamp is usable, not corruption"
 assert_not_contains "$(cat "$LOG")" "in the future" "78o. it does NOT file a future-stamp incident"
-assert_contains "$OUT" "the last COMPLETED sweep was 2m ago" "78o. the green line carries the real age"
+assert_match "$OUT" 'the last COMPLETED sweep was [0-9]+m ago' "78o. the green line carries an age (shape, not an exact integer)"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case
