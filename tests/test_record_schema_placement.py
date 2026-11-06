@@ -717,52 +717,60 @@ def test_the_routing_index_census_matches_the_record_migrations():
 # So the label requirement is now per occurrence AND adjacent: every occurrence
 # needs a `SUPERSEDED` **label** before it with no sentence boundary in between,
 # i.e. the marker must label the same sentence the retired text sits in. "Label"
-# is not "mention": the marker counts only where it is a standalone token CLOSED
-# by the label's own terminator — `SUPERSEDED,` / `SUPERSEDED:` / `SUPERSEDED.` /
-# `**SUPERSEDED** —` — and never where it merely modifies a following noun
-# (`the SUPERSEDED note`) or sits inside a parenthetical pointer (`(see
-# SUPERSEDED)`, `[SUPERSEDED]`). Writing that split down was not enough: three
-# further mutants beat the first cut of it (#11064 round-9 review, P3), and the
-# constructor is now shaped by them rather than by the spellings that happened to
-# be in front of it:
+# is not "mention": the marker counts only where it is a standalone token closed
+# by punctuation (`SUPERSEDED,` / `SUPERSEDED:` / `**SUPERSEDED** —`), never where
+# it merely modifies a following noun (`the SUPERSEDED note`). Without that split
+# the guard was still beaten by a sentence that MENTIONS the label and re-asserts
+# the premise in the same breath — *"Per the SUPERSEDED note, because R1 has still
+# not armed the DSN, nothing lands."* — which passed, and which is the most
+# plausible way a lane re-introduces the stale premise while sounding careful
+# (#11064 round-8 review, P3).
 #
-#   * a label whose own FULL STOP was consumed by the match read as "same
-#     sentence" across a sentence break — `SUPERSEDED. In short, <retired>` passed,
-#     and that is the strongest boundary a writer uses. The terminator is therefore
-#     a LOOKAHEAD: it stays in `gap`, so `_SENTENCE_BOUNDARY_RE` sees it.
-#   * `)` and `]` were accepted as closers, so `(see SUPERSEDED) and, as before,
-#     <retired>` — the exact anaphoric "see the label above" mention the round-8
-#     mutant exists to reject, with the noun dropped — passed. A bracket means a
-#     parenthetical, i.e. a mention; it is no longer a closer.
-#   * the docstrings advertised `**SUPERSEDED** —`, which the regex refused (an
-#     over-block: a fixer told to use the documented bold form would get a red and
-#     might weaken the guard instead of relabelling). A trailing emphasis run is
-#     now a closer, so the documented form works.
+# Three more shapes survived that sentence rule, all measured GREEN on the real
+# row before this round and all of them the same false PASS (#11064 round-9):
 #
-# Non-vacuity is per CLAIM, not per fault class: each clause of the property below
-# has a mutant that kills it, including one that must stay GREEN so the documented
-# label forms remain usable. See
-# `test_the_retired_sentence_guard_rejects_its_own_regressions`.
+#   * **the label closes its OWN sentence.** `SUPERSEDED.` consumes the period as
+#     part of the label token, so a boundary scan over the *gap* can never see it:
+#     *"The earlier note was SUPERSEDED. Because R1 has still not armed the DSN,
+#     nothing lands."* passed on a label that labelled the PREVIOUS sentence. A
+#     label that closed its own sentence or clause (`;`) cannot cover what follows.
+#   * **the label is in a different table cell.** These rows are markdown tables,
+#     so `| … SUPERSEDED, | … R1 has still not armed the DSN |` puts the label and
+#     the claim in two independent cells sharing a line; a cell boundary is as
+#     hard a boundary as a sentence one.
+#   * **the em-dash label was not accepted at all** — the shape this file's own
+#     docs use most (`**SUPERSEDED** — kept as …`). That is the opposite error (a
+#     false RED on a correctly labelled correction), and the comment above claimed
+#     it was accepted while `_SUPERSEDED_LABEL_RE` rejected it. A comment that
+#     states a property the code does not have is the same defect class as a doc
+#     that states a measurement the deployment does not have.
 #
 # The property this enforces, stated exactly (do not restate it as "labelled"):
-# **some `SUPERSEDED` LABEL token occurs before the retired text, and neither a
-# sentence boundary nor the label's own terminator separates them.** It is a
-# textual proxy for "this clause is labelled history", not a proof of intent — a
-# label token followed by a comma chain that then re-asserts the premise still
-# passes. That residual is accepted and named, because the alternative (parsing
-# the prose) is a bigger fail-open than the one it closes.
+# **some `SUPERSEDED` LABEL token occurs before the retired text, in the SAME
+# sentence AND the same table cell, the label does not itself close that sentence
+# or clause, and nothing in between closes it either.** It is a textual proxy for
+# "this clause is labelled history", not a proof of intent — a label token
+# followed by a comma chain that then re-asserts the premise still passes. That
+# residual is accepted and named, because the alternative (parsing the prose) is a
+# bigger fail-open than the one it closes.
+# `test_the_retired_sentence_guard_rejects_its_own_regressions` pins all seven
+# mutations — the two original first-occurrence ones, the two mention-shaped ones,
+# and the three above (two must red, the em-dash one must stay green).
 _SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:\s|$)|;\s")
-#: A `SUPERSEDED` that is a LABEL — a standalone token closed by `, ; : . ! ?`, by
-#: an em/en dash (with or without a preceding emphasis run, so both `SUPERSEDED —`
-#: and `**SUPERSEDED** —` are labels), by a trailing emphasis run
-#: (`**SUPERSEDED**`), or by end of text. The closer is a LOOKAHEAD so it stays in
-#: the text between the label and the retired sentence, where the
-#: sentence-boundary test can see it — that is what makes `SUPERSEDED. <retired>`
-#: red. ⛔ `)` and `]` are deliberately NOT closers: a bracket is a parenthetical
-#: pointer, i.e. a mention. This list is the whole accepted set — nothing else is
-#: documented in prose, so a fixer is never told to use a form the regex refuses.
+#: Punctuation that closes the sentence or clause the label token sits in. It is
+#: consumed BY the label match, so the gap scan above cannot see it — without this
+#: a label one sentence away passes whenever the boundary is its own terminator.
+_LABEL_CLOSES_ITS_OWN_CLAUSE = ".!?;"
+#: A markdown table-cell separator. Cells are independent claims sharing a line,
+#: so a label in one does not label the text in the next.
+_CELL_SEPARATOR = "|"
+#: A `SUPERSEDED` that is a LABEL — a standalone token closed by punctuation (or
+#: end of text), optionally wrapped in emphasis. Anything else (`the SUPERSEDED
+#: note`, `SUPERSEDED-ish`) is a mention and does not label a clause. The dashes
+#: are in the class because `**SUPERSEDED** — kept as …` is the shape the docs in
+#: this repo actually use; rejecting it was a false RED, not a tightening.
 _SUPERSEDED_LABEL_RE = re.compile(
-    re.escape(_INDEX_SUPERSEDED_MARKER) + r"(?=[\s*_]*(?:[,;:.!?]|[\u2014\u2013]|[*_]+|$))"
+    re.escape(_INDEX_SUPERSEDED_MARKER) + r"[\s*_]*(?:[,;:.!?)\]]|—|–|$)"
 )
 
 
@@ -779,9 +787,11 @@ def _assert_retired_claim_is_labelled(
     retired sentence may be kept as labelled history — this repo's convention for
     an overridden ruling — but each retained copy must be inside the sentence
     whose LABEL covers it. A copy with no label before it, with only a *mention*
-    of the word (`the SUPERSEDED note`) in a preceding clause, or with the
-    covering label a sentence away (so it was never covering this clause), is
-    telling a reader something was measured false as if it were live.
+    of the word (`the SUPERSEDED note`) in a preceding clause, with the covering
+    label a sentence away (so it was never covering this clause), with a label
+    that closed its own sentence (`SUPERSEDED.`), or with the label in another
+    table cell, is telling a reader something was measured false as if it were
+    live.
     """
     for match in re.finditer(re.escape(needle), text):
         labels = list(_SUPERSEDED_LABEL_RE.finditer(text, 0, match.start()))
@@ -792,7 +802,20 @@ def _assert_retired_claim_is_labelled(
             f"that is a live instruction, not labelled history. {remedy}"
         )
         label = labels[-1]
+        terminal = text[label.end() - 1] if label.end() else ""
+        assert terminal not in _LABEL_CLOSES_ITS_OWN_CLAUSE, (
+            f"{where} asserts {needle!r} after a {terminal!r}-closed "
+            f"{_INDEX_SUPERSEDED_MARKER} label ({label.group(0)!r}); that label "
+            "CLOSED its own sentence, so it labels the clause BEFORE it, not "
+            f"this one — the retired text still reads as live. {remedy}"
+        )
         gap = text[label.end() : match.start()]
+        assert _CELL_SEPARATOR not in gap, (
+            f"{where} asserts {needle!r} with its nearest "
+            f"{_INDEX_SUPERSEDED_MARKER} label in a DIFFERENT table cell; cells "
+            f"are independent claims sharing a line, so that label does not "
+            f"cover this one. {remedy}"
+        )
         assert not _SENTENCE_BOUNDARY_RE.search(gap), (
             f"{where} asserts {needle!r} with the nearest "
             f"{_INDEX_SUPERSEDED_MARKER} label a SENTENCE away ({gap[:160]!r}); "
@@ -1045,11 +1068,24 @@ def test_the_retired_sentence_guard_rejects_its_own_regressions():
        is the edit shape the row has taken every round (a correction lands, and
        the next sentence appended after it re-asserts the old premise);
     2. **strip the covering label** from the retained clause, leaving the
-       unrelated earlier A8-cell marker as the only `SUPERSEDED` in the row.
+       unrelated earlier A8-cell marker as the only `SUPERSEDED` in the row;
+    3. and 4. **mention** the label while re-asserting the premise in the same
+       breath (`the SUPERSEDED note, because …`), which is not a label;
+    5. **close the label's own sentence** and re-assert the premise in the next one
+       (`The earlier note was SUPERSEDED. Because …`) — the period belongs to the
+       label token, so a gap-only boundary scan never sees it;
+    6. put the **label in another table cell** from the claim it is supposed to
+       cover, which is the same edit shape one column over;
+    7. (the inverse control) an **em-dash label** (`**SUPERSEDED** — …`) must stay
+       GREEN — it is this repo's most common shape, and rejecting it was a false
+       RED, not a tightening.
 
-    Both mutations leave the first-occurrence check green — that is measured, not
-    supposed — and both must raise here. If the guard is ever weakened back to a
-    first-occurrence shape, this test reds on the mutation it no longer catches.
+    Mutations 3–6 leave the first-occurrence check green and mutations 5–6 also
+    leave the pre-round-9 same-sentence rule green — that is measured, not
+    supposed — and every one of them must raise here. If the guard is ever
+    weakened back to a shape that misses one, this test reds on the mutation it no
+    longer catches; if it is over-tightened so that a real label stops counting,
+    mutation 7 reds instead.
     """
     row = _index_record_row()
     marker = _INDEX_SUPERSEDED_MARKER
@@ -1074,21 +1110,15 @@ def test_the_retired_sentence_guard_rejects_its_own_regressions():
     )
     needle = retained[0]
 
-    def _expect(verdict: str, mutated: str, why: str) -> None:
-        """The guard must reach `verdict` on this mutation — that IS the deliverable."""
+    def _expect_red(mutated: str, why: str) -> None:
+        """The guard must REFUSE this mutation — the assertion is the deliverable."""
         try:
             _assert_retired_claim_is_labelled(
                 mutated, needle, where="the mutation", remedy="none"
             )
         except AssertionError:
-            if verdict == "RED":
-                return
-            raise AssertionError(f"the guard REFUSED a form it must accept. {why}")
-        if verdict == "RED":
-            raise AssertionError(why)
-
-    def _expect_red(mutated: str, why: str) -> None:
-        _expect("RED", mutated, why)
+            return
+        raise AssertionError(why)
 
     # MUTATION 1 — the stale premise re-appended as a live claim. `find`-based
     # first-occurrence logic sees the earlier, unrelated marker and passes;
@@ -1135,69 +1165,76 @@ def test_the_retired_sentence_guard_rejects_its_own_regressions():
         "defect. Require the label in the same sentence as the sentence",
     )
 
-    # MUTATIONS 3–7 — one per CLAIM the docstring makes, not one per fault class.
-    # A textual invariant has no universal sufficient mutant set, so each clause of
-    # "label, not a mention; adjacent, not a sentence away" gets a mutant that
-    # kills it (#11064 round-9 review, P3 — the first cut of this drift was caught
-    # only because a reviewer wrote the mutants the test had not).
-    #
-    # Rounds 8 and 9 each contributed shapes the previous constructor accepted:
-    # the bare mention, the mention whose own full stop was swallowed by the match,
-    # and the parenthetical pointer. The last is the SAME anaphoric move as the
-    # bare mention with the noun dropped — `(see SUPERSEDED) and, as before,
-    # <retired>` — which is why a bracket is no longer a label closer.
-    for why, mention in (
-        (
-            "a bare mention of the word is not a label",
-            f"In short, the earlier {marker} note stands, and {needle}.",
-        ),
-        (
-            "the same mention, noun dropped — a label is not a pointer",
-            f"Per the {marker} note, {needle}, nothing lands.",
-        ),
-        (
-            "a label's own full stop must NOT read as the same sentence",
-            f"{marker}. In short, {needle}, nothing lands.",
-        ),
-        (
-            "a parenthetical pointer is a mention, not a label",
-            f"(see {marker}) and, as before, {needle}, nothing lands.",
-        ),
-        (
-            "a bracketed pointer is a mention, not a label",
-            f"[{marker}] and {needle}.",
-        ),
-        (
-            "a label adjacent through an emphasis run IS a label — this one must "
-            "stay GREEN, or the documented forms become unusable and a fixer "
-            "reds on correct prose",
-            f"**{marker}** — {needle}.",
-        ),
+    # MUTATIONS 3 and 4 — the MENTION shapes (round-8 review, P3). A sentence
+    # that names the label and re-asserts the premise in the same breath defeated
+    # the sentence-boundary rule alone, because "the SUPERSEDED note" is a marker
+    # occurrence with no sentence break after it. These are the two live sentences
+    # the review replayed that passed; a label is a token closed by punctuation
+    # (`SUPERSEDED,` / `SUPERSEDED:` / `**SUPERSEDED** —`), never a modifier of a
+    # following noun, and that distinction is what these two mutations pin.
+    for mention in (
+        f"In short, the earlier {marker} note stands, and {needle}.",
+        f"Per the {marker} note, {needle}, nothing lands.",
     ):
         mutated_mention = f"{row} {mention}"
         assert mutated_mention.rfind(needle) >= len(row), (
             "the mention mutation did not land a second occurrence after the "
             f"head row: {mention!r}"
         )
-        _expect(
-            "GREEN" if mention.startswith(f"**{marker}**") else "RED",
+        _expect_red(
             mutated_mention,
-            f"the retired-sentence guard got the wrong verdict on a sentence it "
-            f"must judge: {why}. Mutation was {mention!r}; the stale premise is "
-            f"{needle!r} and a LABEL is a token closed by `, ; : . ! ?`, a "
-            "trailing emphasis run, or end of text — never a bracket, and never "
-            "a word modifying a following noun",
+            "the retired-sentence guard accepted a sentence that only MENTIONS "
+            f"{marker!r} ('{mention}') and re-asserts {needle!r} as live — a "
+            "mention is not a label, and this is the most plausible way the "
+            "stale premise gets re-introduced by a lane sounding careful. "
+            "Require a LABEL token (punctuation-closed), not the bare word",
         )
-        # …and for the RED ones, the RETAINED occurrence must still be accepted:
-        # otherwise the mutant would red for the head row's own label being wrong,
-        # and it would prove nothing about the appended claim.
-        if not mention.startswith(f"**{marker}**"):
-            _assert_retired_claim_is_labelled(
-                f"{row} {marker}, and this stands.",
-                needle,
-                where="the control",
-                remedy="none",
-            )
+
+    # MUTATION 5 — the label closes its OWN sentence, and the premise is re-asserted
+    # as live in the next one. The period is part of the label token, so the gap
+    # scan cannot see the sentence boundary it just crossed: this was GREEN before
+    # round 9, on the most natural way to write a superseded marker (as a sentence
+    # of its own).
+    mutated_closed = f"{row} The earlier note was {marker}. Because {needle}, nothing lands."
+    assert mutated_closed.rfind(needle) >= len(row), (
+        "the clause-closing mutation did not land a second occurrence after the "
+        "head row"
+    )
+    _expect_red(
+        mutated_closed,
+        "the retired-sentence guard accepted a label that closed its own "
+        f"sentence ('{marker}.') and then re-asserted {needle!r} as live in the "
+        "next one — the boundary was consumed by the label match, so the gap "
+        "scan never saw it. A label that closes a sentence or clause (`.!?;`) "
+        "labels what precedes it, never what follows",
+    )
+
+    # MUTATION 6 — the label and the claim sit in DIFFERENT table cells of the same
+    # row. These docs are markdown tables, so this is the edit shape a lane gets
+    # when it labels one cell and re-asserts the premise in the next one; the cell
+    # separator is as hard a boundary as a sentence end.
+    mutated_cell = f"{row} | the earlier note was {marker}, | {needle} |"
+    assert mutated_cell.rfind(needle) >= len(row), (
+        "the cell mutation did not land a second occurrence after the head row"
+    )
+    _expect_red(
+        mutated_cell,
+        "the retired-sentence guard accepted a label in a DIFFERENT table cell "
+        f"from the {needle!r} it is supposed to cover — cells are independent "
+        "claims sharing a line, so the label does not reach across a `|`",
+    )
+
+    # MUTATION 7 is the INVERSE control: an em-dash label must stay GREEN. This is
+    # the shape the docs in this repo use most (`**SUPERSEDED** — kept as …`), and
+    # `_SUPERSEDED_LABEL_RE` did not accept it before round 9 — so a correctly
+    # labelled correction was a false RED, and the block comment claimed otherwise.
+    mutated_dash = f"{row} Kept as the {marker} — {needle}, nothing lands."
+    assert mutated_dash.rfind(needle) >= len(row), (
+        "the em-dash mutation did not land a second occurrence after the head row"
+    )
+    _assert_retired_claim_is_labelled(
+        mutated_dash, needle, where="the em-dash label", remedy="none"
+    )
 
 
 
