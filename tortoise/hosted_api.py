@@ -35567,7 +35567,9 @@ def _registry_probe_sdk() -> TortoiseSDK:
             _close_registry_probe_handle(retired)
         return sdk
 
-    # The identity never held still for a single build. INSTALL nothing — and
+    # The identity never held still for a single build, or the cache was
+    # invalidated on every attempt (a reset landing inside each build — the
+    # fence above, #10962 review finding 1). INSTALL nothing — and
     # note the word, because it is not the same as caching nothing (#10962
     # round-6 obs 2): this fallthrough declines to ADD an entry and leaves
     # `_REGISTRY_PROBE_CACHE` exactly as it found it, so a handle cached earlier
@@ -35579,8 +35581,9 @@ def _registry_probe_sdk() -> TortoiseSDK:
     # the call that built it, never every later caller. Say so, and hand back
     # one built for the identity the process resolves to right now.
     _logger.warning(
-        "registry probe: identity (TORTOISE_DB_URI / TORTOISE_DB_PATH) changed "
-        "during %d consecutive builds — serving an UN-CACHED handle",
+        "registry probe: %d consecutive builds were discarded — the identity "
+        "(TORTOISE_DB_URI / TORTOISE_DB_PATH) did not hold still, or the cache "
+        "was invalidated mid-build — serving an UN-CACHED handle",
         _REGISTRY_PROBE_BUILD_ATTEMPTS,
     )
     return _build_registry_probe_handle()
