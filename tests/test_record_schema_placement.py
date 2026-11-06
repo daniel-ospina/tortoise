@@ -1151,10 +1151,16 @@ def test_the_retired_sentence_guard_rejects_its_own_regressions():
             _assert_retired_claim_is_labelled(
                 mutated, needle, where="the mutation", remedy="none"
             )
-        except AssertionError:
+        except AssertionError as exc:
             if verdict == "RED":
                 return
-            raise AssertionError(f"the guard REFUSED a form it must accept. {why}")
+            # Chained, not swallowed: the raised message carries WHAT the pin
+            # demanded, and the guard's own refusal stays on the traceback as
+            # the cause — a fixer needs both to tell an over-tight guard from a
+            # mutation that really is labelled.
+            raise AssertionError(
+                f"the guard REFUSED a form it must accept. {why}"
+            ) from exc
         if verdict == "RED":
             raise AssertionError(why)
 
