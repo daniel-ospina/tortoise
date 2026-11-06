@@ -1774,6 +1774,21 @@ def test_the_item_content_column_collapses_a_wide_gap_to_one():
     assert cl._fence_candidate("", "-     ```", []) is None, "gap > 4 opens no fence"
 
 
+def test_strip_code_strict_is_keyword_only():
+    """Round 31 review, P3 — the record said `strict` was keyword-only; the code was not.
+
+    The round-30 record (and the round-28 one it repeated) states `strip_code(body, *, strict=False)`.
+    The signature kept `strict` positional and three in-module callers passed it that way, so the
+    record and the artifact disagreed in the one direction that breaks the next lane who makes them
+    match. The `*` is real now; this pin is what keeps it real.
+    """
+    assert cl.strip_code("Refs #1\n", strict=True) == cl.strip_code("Refs #1\n")
+    with pytest.raises(TypeError):
+        cl.strip_code("Refs #1\n", True)
+    with pytest.raises(TypeError):
+        cl.strip_code("Refs #1\n", False, {})
+
+
 # ── cycle 10: containers by DEPTH, the ending line is fresh, list items end ──
 
 @pytest.mark.parametrize("body,expected,why", [

@@ -792,6 +792,18 @@ def _content_column(rest: str) -> int | None:
 
     Two computations of one column is how the next reader re-derives it and re-introduces the
     double count, so this is the single definition both call sites use.
+
+    ⛔ AND IT IS NOT INERT OUTSIDE ARM 2 (round 31 review, P3 — the docstring claimed it was, and a
+    sweep measured otherwise). The push's column is also read by `_item_dedented` (every pop) and by
+    `_fence_candidate`'s enclosing-item branch, so collapsing it for a gap>4 line reaches the DEFAULT
+    and `strict` arms too. Measured over a 5,760-body sweep (markers `-`/`*`/`1.`/`10.` x gap 1-9 x
+    fence indent 0-7 x claim indent 0-4 x closer x blank): 660 divergences at the default and 440 at
+    `strict`, and EVERY one is a claim the parent LOST and this keeps, confirmed against
+    `MarkdownIt("commonmark")` — 0 in the other direction. The old column put a wide-gap item's
+    content at the marker's raw width, so a fence opened under it was measured past the item and a
+    real `Closes #N` in its prose was blanked away:
+        `-     item` + blank + `  ``` Closes #100 ``` `  -> renderer keeps it as PROSE, parent dropped it
+    Stated here because "additive only" was the previous claim and it was not true.
     """
     marker = _LIST_MARKER_RE.match(rest)
     if marker is None:
@@ -863,7 +875,7 @@ def _fence_candidate(prefix: str, rest: str,
                   enclosing.depth)
 
 
-def strip_code(body: str, strict: bool = False, *, stats: dict[str, int] | None = None,
+def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None = None,
                indented_code: bool = False) -> str:
     """Blank out the parts of a PR body that are CODE, not prose.
 
@@ -926,9 +938,15 @@ def strip_code(body: str, strict: bool = False, *, stats: dict[str, int] | None 
     `indented_code` (keyword-only, additive) opts into the OTHER half of the same
     question: blank a line only where the CommonMark block grammar says it is an
     indented CODE block — past 3 columns AND past the enclosing list item's content
-    column plus 4. `strict` (above, positional, unchanged) blanks every indented
-    line instead. The two exist together because the callers fail in opposite
-    directions; see the branch at the end of the loop.
+    column plus 4. `strict` blanks every indented line instead. The two exist
+    together because the callers fail in opposite directions; see the branch at the
+    end of the loop.
+
+    ⛔ `strict` IS KEYWORD-ONLY HERE TOO (round 31 review, P3). The round-30 record
+    said it was, and it was not — three in-module callers passed it positionally, so
+    the record and the artifact disagreed in the one direction that breaks the next
+    lane who makes them match. A positional call now raises `TypeError`, which the
+    suite pins.
     """
     out: list[str] = []
     fence: _Fence | None = None
@@ -1036,7 +1054,8 @@ def strip_code(body: str, strict: bool = False, *, stats: dict[str, int] | None 
             # shape that motivated it).
             container = list_items[-1] if list_items else None
             rest_col = _content_column(rest)
-            if rest_col is not None:
+            pushed = rest_col is not None
+            if pushed:
                 list_items.append(
                     _ListItem(_quote_depth(prefix), rest_col,
                               len(prefix) + rest_col))
@@ -1073,14 +1092,28 @@ def strip_code(body: str, strict: bool = False, *, stats: dict[str, int] | None 
         # declared rather than fixed: teaching the rule about paragraph interruption
         # needs the block state the fence pass does not keep, and guessing it the other
         # way re-opens the class-A false PASS this mode exists to close.
-        if rest_indent > _MAX_FENCE_INDENT:
-            if strict:
-                out.append("")
-                continue
-            if indented_code and (container is None
-                                  or rest_indent > container.rest_col + _MAX_FENCE_INDENT):
-                out.append("")
-                continue
+        # ⛔ A LINE THIS FUNCTION BLANKS AS CODE OPENS NO ITEM, SO THE ITEM IT JUST PUSHED IS
+        # UNDONE (round 31 review, P2 — a class-A false PASS). The `container` capture above kept this
+        # CODE LINE from being measured against the item it opens itself, but the item stayed on the
+        # stack, so the NEXT line of the same block was measured against a PHANTOM content column and
+        # came out as prose:
+        #     `- item` + `      - [ ] example` + `        - [ ] nested example`
+        #   renderer: ONE `<pre><code>` holding BOTH boxes
+        #   before:   the first line was blanked, the second was kept -> arm 2 saw an issue with WIP and
+        #             no criteria as CLEAN (rc 0), and `in_flight_markers` read a QUOTED marker as live
+        #   after:    both blanked
+        # The population is not exotic: 224 of 720 marker-led two-line shapes (markers `-`/`1.`/`10.`)
+        # counted a box the renderer puts in code. The FENCE branch above deliberately KEEPS its push —
+        # a marker line that opens a fence really does open its item.
+        blank = rest_indent > _MAX_FENCE_INDENT and (
+            strict or (indented_code
+                       and (container is None
+                            or rest_indent > container.rest_col + _MAX_FENCE_INDENT)))
+        if blank:
+            if pushed:
+                list_items.pop()
+            out.append("")
+            continue
         out.append(raw)   # prose: keep it, keywords and all
     if stats is not None:
         stats["hidden_lines"] = hidden_lines if fence is not None else 0
@@ -1108,7 +1141,7 @@ def parse_closing_refs(body: str, repo: str | None = None,
     (#10597 review P2-3). With no `repo`, a slug is treated as foreign: the
     function cannot tell, and inventing a finding is worse than missing one.
     """
-    text = _strip_inline_code(strip_code(body or "", strict), strict=strict)
+    text = _strip_inline_code(strip_code(body or "", strict=strict), strict=strict)
     seen: list[int] = []
     # The separator spelling follows the QUESTION: a pass (strict) refuses a
     # keyword whose reference sits across a blank line; a finding (lenient)
@@ -1760,7 +1793,7 @@ def parse_reference_refs(body: str, repo: str | None = None,
     phrase sits inside a backtick span in its prose — the shape this function
     would reproduce if it parsed the body itself.
     """
-    text = _strip_inline_code(strip_code(body or "", strict), strict=strict)
+    text = _strip_inline_code(strip_code(body or "", strict=strict), strict=strict)
     seen: list[int] = []
     pattern = _REFERENCE_RE_ONELINE if strict else _REFERENCE_RE
     for m in pattern.finditer(text):
@@ -1808,7 +1841,7 @@ def acceptance_from_body(body: str) -> Acceptance:
     `strict=True` on the strip: a QUOTED checklist (`- [ ]` inside a code block,
     e.g. a template being discussed) is not this issue's acceptance.
     """
-    text = _strip_inline_code(strip_code(body or "", True), strict=True)
+    text = _strip_inline_code(strip_code(body or "", strict=True), strict=True)
     boxes = _TASK_ITEM_RE.findall(text)
     return Acceptance(total=len(boxes),
                       checked=sum(1 for b in boxes if b.lower() == "x"))
