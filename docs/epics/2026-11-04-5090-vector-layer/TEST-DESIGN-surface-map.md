@@ -201,9 +201,9 @@ self-test: 11/11 mutation(s) refused — the checker is not a rubber stamp
 
 The `--self-test` arm exists because a checker that passes on everything is worse than no checker:
 it applies the eleven mutations an editor actually makes (remove a row, **remove a row and every mention
-of it**, blank a cell, retype a layer as a mechanism, retype a crosswalk surface as one that has no
-row, **splice a raw `|` into a cell**, drop a child, drop a capability, forget a seam, destroy the
-section structure) to an in-memory
+of it**, blank a cell, restate a failure as a mechanism, retype a layer as a mechanism, retype a
+crosswalk surface as one that has no row, **splice a raw `|` into a cell**, drop a child, drop a
+capability, forget a seam, destroy the section structure) to an in-memory
 copy and **requires each to be caught**. That is the same discipline the epic applies to its own probe
 — *an instrument that cannot fail is not an instrument.* "Every mention of it" is meant literally: the
 case deletes the mentions, because the first version of the case **renamed** them to `SF1` and so
@@ -211,11 +211,16 @@ never built the consistent shrink its own label claimed.
 
 **The width case is load-bearing, and that is measured, not asserted.** The arm that matters most is
 the one covering the rule added *last*: with `parse_surface_rows` monkeypatched back to the previous
-`< 7` floor — the exact false PASS the exact-7 rule closes — `--self-test` reports **11/11 refused and
-exits 0** without this case, so a quietly relaxed width rule would have kept the REQUIRED `docs` job
-green. With the case present, the same relaxation exits **1**. `cells()` is escape-aware (it splits on
-`(?<!\\)\|`), so an escaped `\|` stays inside its cell and R2/R3 read the column they name; a raw
-extra `|` is still refused as an unreadable row.
+`< 7` floor — the exact false PASS the exact-7 rule closes — `--self-test` reports **10/10 refused and
+exits 0** without this case (ten, not eleven: the case is the one removed), so a quietly relaxed width
+rule would have kept the REQUIRED `docs` job green. With the case present, the same relaxation exits
+**1**. ⚠️ State the mechanism rather than overclaiming it: on this input the relaxed rule is caught
+because the shifted row parks a one-word value in the failure column and **R3** fires, so what the
+case proves is that a relaxed width rule **reds the arm** — not that the exact-7 refusal is the only
+rule that could notice. `cells()` is escape-*parity* aware (a pipe delimits only after an **even** run
+of backslashes, matching CommonMark), so an escaped `\|` stays inside its cell and R2/R3 read the
+column they name, while a raw extra `|` — or an escaped backslash before a real `|` — is refused as an
+unreadable row.
 
 **It runs on every edit, not only when someone remembers.** Both arms are wired into CI's `docs` job
 (`.github/workflows/ci.yml`, beside `tools/substrate_map_check.py`): the check, **and** `--self-test` —
@@ -226,9 +231,12 @@ selects no test surface. So a lane that deletes a row here gets a red `docs` che
 one and a smaller checklist. `.github/workflows/*` is a surface worth naming explicitly: the change that
 added this line touches a workflow file, which a lane's own preflight cannot prove it may write —
 so the PR body says so. ⚠️ **A residual worth stating:** the population pin lives inside the tool an
-editor edits, so a single change can still shrink the row, the pin and the self-test case together. Any
+editor edits, so a change can still shrink the row, the pin and the self-test case together. Any
 in-repo pin has that property; the honest statement is that it converts a silent shrink into a
-deliberate three-place edit that a reviewer can see, not that it makes the shrink impossible.
+deliberate three-place edit that a reviewer can see, not that it makes the shrink impossible. What it
+does **not** leave open is the cheaper edit: `MIN_SELF_TEST_MUTATIONS` makes a **shrunk** mutation
+population exit 1, because a green `self-test: 0/0 … not a rubber stamp` would be the same false PASS
+one place short of the three.
 
 This is what lets **#11089** cite the map as its checklist: the capstone walks `SF1…SF15`, and a
 deleted row, a blanked layer, or a consistently-shrunk population reds the check instead of quietly

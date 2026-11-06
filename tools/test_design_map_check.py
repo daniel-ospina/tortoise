@@ -30,9 +30,11 @@ Rules (the map's own §8 states them; this file is the enforcement):
 * **R5** every seam named by `04-plan.md` §5–§6 appears in the crosswalk, and
   every surface a crosswalk row names has a row in the surface table.
 
-A surface row is refused (exit 2) unless it has exactly 7 cells: an escaped pipe
-(`\\|`) inside a cell shifts every column after it, so a width the parser cannot
-interpret is an unreadable map, not a map that happens to be tidy.
+A surface row is refused (exit 2) unless it has exactly 7 cells. A cell delimiter
+is a pipe carrying an EVEN run of preceding backslashes (CommonMark parity), so an
+escaped `\\|` stays inside its cell while a raw `|` splits it; a width the parser
+cannot interpret is an unreadable map, not a map that happens to be tidy, because
+`row[4]`/`row[6]` would then grade the wrong column and report clean.
 
 **Exit codes:** `0` clean · `1` violations (printed, one per line) · `2` the map
 could not be read or a required section is missing (an unparseable map is not a
@@ -121,16 +123,47 @@ def split_sections(text: str) -> dict[str, str]:
     return sections
 
 
-#: Split on pipes that are NOT backslash-escaped. `\\|` is a LITERAL pipe inside a
-#: markdown cell (MD056 creates no extra markdown cell for it), so splitting on
-#: every `|` shifted every column after it: R2/R3 then read `row[4]`/`row[6]` of a
-#: shifted row and reported CLEAN while the real failure cell was never read.
-_CELL_SPLIT = re.compile(r"(?<!\\)\|")
+#: A pipe is a cell delimiter only when it carries an EVEN number of preceding
+#: backslashes (CommonMark's escape parity): `\|` is a LITERAL pipe inside a cell,
+#: `\\|` is an escaped backslash followed by a REAL delimiter. Splitting on every
+#: `|` shifted every column after an escaped pipe — R2/R3 then read `row[4]`/`row[6]`
+#: of a shifted row and reported CLEAN while the real failure cell was never read.
+#: ⚠️ Parity, not the presence of a backslash: `(?<!\\)\|` gets `\|` right and
+#: `\\|` WRONG (it swallows a real delimiter, so an 8-column row scored CLEAN and a
+#: valid 7-column row was falsely refused — both measured before this scanner).
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    """True when `text[index]` carries an ODD run of preceding backslashes."""
+    run = 0
+    while index - run - 1 >= 0 and text[index - run - 1] == "\\":
+        run += 1
+    return run % 2 == 1
+
+
+def _split_cells(raw: str) -> list[str]:
+    """Split on delimiter pipes only, honouring backslash parity."""
+    parts: list[str] = []
+    buf: list[str] = []
+    for index, char in enumerate(raw):
+        if char == "|" and not _is_escaped(raw, index):
+            parts.append("".join(buf))
+            buf = []
+            continue
+        buf.append(char)
+    parts.append("".join(buf))
+    return parts
 
 
 def cells(line: str) -> list[str]:
-    """Split a markdown table row into trimmed cells (escape-aware)."""
-    return [c.strip() for c in _CELL_SPLIT.split(line.strip().strip("|"))]
+    """Split a markdown table row into trimmed cells (escape-parity aware)."""
+    raw = line.strip()
+    # Drop the row's boundary delimiters. Leading pipes are always delimiters; a
+    # trailing pipe is one only when it is not escaped (otherwise it is content).
+    raw = raw.lstrip("|")
+    while raw.endswith("|") and not _is_escaped(raw, len(raw) - 1):
+        raw = raw[:-1]
+    return [cell.strip() for cell in _split_cells(raw)]
 
 
 def parse_surface_rows(section: str) -> dict[str, dict[str, str]]:
@@ -294,8 +327,22 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
             violations.append(f"R5 {seam}: missing from the §5/§6 crosswalk")
             continue
         present.add(seam)
-        for sf in sorted(surface_tokens(row) - set(surfaces)):
-            violations.append(f"R5 {seam}: names {sf}, which has no surface row")
+    # The referential half covers EVERY row of the crosswalk table, not only the
+    # nine pinned seams: the table also carries a `§7` row (D1–D13), and a scope
+    # limited to `PLAN_SEAMS` let `| §7 | SF99 … |` exit 0 — a claim of "every
+    # crosswalk row" that only held for 9 of the 10. A pinned seam's first cell IS
+    # its seam token, so its violation message is unchanged. (A surface number
+    # typed a digit OFF still lands on a real row, so R5 does NOT catch that; its
+    # wording is "names a surface with no row in §1", and that is all it claims.)
+    for line in crosswalk.splitlines():
+        if not line.startswith("|"):
+            continue
+        row = cells(line)
+        if not row or all(set(cell) <= {"-", ":", ""} for cell in row):
+            continue  # the header separator
+        label = row[0] or "?"
+        for sf in sorted(surface_tokens(line) - set(surfaces)):
+            violations.append(f"R5 {label}: names {sf}, which has no surface row")
 
     stats: dict[str, object] = {
         "surfaces": len(surfaces),
@@ -308,15 +355,43 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     return violations, stats
 
 
+def _rewrite_cell(line: str, column: int, value: str, target: str) -> str:
+    """Rewrite one cell of a table row, re-emitting it — the shared mutation primitive.
+
+    Parses with `cells()` — the SAME escape-aware split the checker grades with —
+    so the mutation lands on the cell its case names even when the row carries an
+    escaped `\\|`. Splitting on every `|` here made a CORRECT document report
+    "the checker is a rubber stamp" (measured: 2/11 NOT caught on a copy of the
+    live map whose only change was an escaped pipe in SF2's surface cell).
+
+    The width the caller INTENDS (a mutation whose value splices a raw `|` into a
+    cell must widen the row — that is the case's whole point) is derived from the
+    value itself; what is refused is an accidental width change from the rewrite,
+    which would move the column the next case names.
+    """
+    row = cells(line)
+    if column >= len(row):
+        raise AssertionError(
+            f"self-test mutation target {target} has {len(row)} cell(s); column {column} does not exist"
+        )
+    row[column] = value
+    rewritten = "| " + " | ".join(row) + " |\n"
+    added = len(cells(f"| {value} |")) - 1  # extra cells the value itself splices in
+    width, expected = len(cells(rewritten)), len(cells(line)) + added
+    if width != expected:
+        raise AssertionError(
+            f"self-test mutation on {target} changed the row's width {expected} → {width}"
+        )
+    return rewritten
+
+
 def _rewrite_row(text: str, sf: str, column: int, value: str) -> str:
     """Replace one cell of one surface row — the mutation primitive."""
     out: list[str] = []
     hit = False
     for line in text.splitlines(keepends=True):
         if line.startswith(f"| **{sf}**"):
-            row = line.strip().strip("|").split("|")
-            row[column] = f" {value} "
-            line = "|" + "|".join(row) + "|\n"
+            line = _rewrite_cell(line, column, value, sf)
             hit = True
         out.append(line)
     if not hit:
@@ -330,9 +405,7 @@ def _rewrite_crosswalk_row(text: str, seam: str, value: str) -> str:
     hit = False
     for line in text.splitlines(keepends=True):
         if line.startswith(f"| {seam}"):
-            row = line.strip().strip("|").split("|")
-            row[2] = f" {value} "
-            line = "|" + "|".join(row) + "|\n"
+            line = _rewrite_cell(line, 2, value, seam)
             hit = True
         out.append(line)
     if not hit:
@@ -420,8 +493,24 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 )
 
 
+#: The population `--self-test` must carry. A floor, not a count-only print:
+#: emptying `SELF_TEST_MUTATIONS` is a ONE-place edit and used to print
+#: "self-test: 0/0 mutation(s) refused — the checker is not a rubber stamp" and
+#: exit 0 (measured), which is the false PASS this arm exists to prevent. The
+#: map's own residual covers a THREE-place edit (row + pin + case together), so
+#: the shrink that is two places short of that must still be loud.
+MIN_SELF_TEST_MUTATIONS = 11
+
+
 def self_test(text: str) -> int:
     """Prove the checker is not a rubber stamp. Prints one line per mutation."""
+    if len(SELF_TEST_MUTATIONS) < MIN_SELF_TEST_MUTATIONS:
+        print(
+            f"self-test: {len(SELF_TEST_MUTATIONS)} mutation(s) registered, at least "
+            f"{MIN_SELF_TEST_MUTATIONS} required — a shrunk mutation population proves nothing",
+            file=sys.stderr,
+        )
+        return 1
     failures = 0
     for name, mutate, expected in SELF_TEST_MUTATIONS:
         try:
