@@ -4749,6 +4749,10 @@ surfaces:
   # states the same thing — reading this comment as "`core` covers the docs edit"
   # would let the next lane delete the `tier1` row believing the pin still fires.
   - test_7949_e5_section10_writeback.py
+  # #10990: E5's 25-qualifier vs 29-marker population is pinned as two instruments over
+  # two vocabularies, so the row's "must be reconciled" note stops being re-derived by
+  # hand. Stdlib + the corpus loader only: no DB, no network, no model.
+  - test_7949_e5_population_reconcile.py
   # #2008 review (P1+P2): the capstone verification report's OWN claims guard — the
   # cross-head licence must be the test-file check it can actually prove (it is not),
   # the shared-hub tree state at measurement time must be recorded as un-recorded,
