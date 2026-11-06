@@ -5527,9 +5527,31 @@ surfaces:
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
   - test_suggest_entry_points.py
   - test_supabase_control.py
-  # #10593: the pin on the CLI that applies migrations — a workflow-only edit to
-  # `supabase-deploy.yml` selects no python surface, so this file must be in
-  # `core` or the coupling it guards is never graded on the PR that breaks it.
+  # #10593: the pin on the CLI that applies migrations. It reads TWO files —
+  # `.github/workflows/supabase-deploy.yml` (the `setup-cli` MAJOR ceiling) and
+  # `supabase/config.toml` (the LOCAL-STACK config — the `[inbucket]` section is the shape v3
+  # refuses at config load, but #10896/#11104 retired it from the file, so the pin now asserts
+  # the shape stays ABSENT and derives the major-3 refusal message from it; the ceiling itself
+  # is on the MAJOR) — and the placement is load-bearing for the SECOND of them:
+  # `supabase/` is a flat `NON_PYTHON_PREFIXES` entry, `supabase/config.toml` is the
+  # `CORE_ALSO` row in `tools/ci_selection.py`, and a CONFIG-only diff selects `core`
+  # and NOTHING else —
+  # measured: `--changed-files supabase/config.toml` ->
+  # `{"surfaces": ["core"], "full": false}`. Registered on any other surface, the
+  # pin would not run on the config change it exists to grade.
+  # ⛔ The WORKFLOW half is graded by a DIFFERENT mechanism, and blurring the two is the
+  # error this block replaces. `.github/workflows/supabase-deploy.yml` matches no
+  # `SOURCE_PATTERNS` row, so a workflow-only diff takes the fail-closed FULL matrix —
+  # measured: `--changed-files .github/workflows/supabase-deploy.yml` ->
+  # `{"surfaces": [all 8], "full": true, "test_files": "ALL"}`, with the tool
+  # explaining "FULL matrix because 1 changed path(s) are unknown to every
+  # SOURCE_PATTERN". On that path the row's SURFACE is irrelevant but its MEMBERSHIP is
+  # NOT: the full pool is manifest-derived (`fast_pool()`, sharded by `push_legs()`) and
+  # `python-ci.yml`'s `split` step is skipped on a full-matrix PR, so the matrix falls
+  # back to those push shards. Measured in-memory: with the row, the pin is in the fast
+  # pool and push shard `g`; delete the row and it is in neither, while `select()` still
+  # answers `full=true, test_files="ALL"` — i.e. "ALL" would be a lie. Keep the row
+  # (`--integrity` reds without it); its SURFACE is what covers the CONFIG half above.
   - test_supabase_cli_pin_10593.py
   # #4606: the pin that stops a PR neutering its own surface gate. It guards
   # `.github/workflows/python-ci.yml`, a non-python prefix, so a workflow-only
