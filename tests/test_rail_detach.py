@@ -375,6 +375,81 @@ def test_a_recycled_pid_without_procfs_does_not_read_waiting(tmp_path, monkeypat
     assert rd._pid_alive(me, marker) is True         # the real wrapper still reads alive
 
 
+def test_a_LIVE_pid_in_ANOTHER_group_is_not_our_rail():
+    """⛔ THE RECYCLED-PID CASE `_in_group` EXISTS FOR — the one no other test ASKS it about.
+
+    `_in_group` is the module's stated *"THE ownership test for the rail
+    process"*, and on the `pgid=` path it is the ONLY identity probe: the
+    `os.kill(pid, 0)` existence check is skipped whenever `pgid` is supplied
+    (see `_pid_alive`), so a LIVE pid recycled into some other process group
+    reads `waiting` — reported alive forever AND refusing every later `start`
+    on the PR, the unrailable wedge this module exists to remove.
+
+    ⛔ WHY THIS TEST EXISTS, stated by BEHAVIOUR and not by a count, because the
+    count this paragraph used to carry is not re-derivable. It said *"replacing
+    `_in_group`'s body with `return True` left `tests/test_rail_detach.py` at 46
+    passed, i.e. NOTHING pinned the rejection"*. Measured at this head, the
+    mutant reds **2** tests — this one and `origin/main`'s
+    `test_a_permission_denied_probe_keeps_the_claim_and_only_esrch_is_gone`
+    (`assert rd._in_group(pid, 42) is False`, its own control arm), which the
+    forward-merge brought in — so "NOTHING pinned it" is false at this head, and
+    the figure is a frozen count of a file the merge has since grown (45
+    `^def test_` at `e49e641f4^`, 46 at `e49e641f4`, 76 here). ⛔ TWO COUNTING
+    DEFINITIONS meet in this paragraph and neither figure is wrong: the `46
+    passed` quoted above is pytest's COLLECTED population at `e49e641f4^` (45
+    `^def test_` functions, one of them carrying a 2-case `parametrize`, so
+    45 + 1 = 46), while the parenthetical counts `^def test_` definitions. Do
+    not "correct" one figure to match the other. Reproduce with a plugin that
+    sets `rail_detach._in_group = lambda pid, pgid: True`:
+    `2 failed, 75 passed`.
+
+    The gap this test fills survives that correction, and it is narrower than the
+    old sentence claimed: every other test reaches `_in_group`'s rejecting
+    direction only through `getpgid` RAISING (`ProcessLookupError` for a reaped
+    pid) or by monkeypatching `os.getpgid` — never by ASKING it about a LIVE pid
+    in a foreign group. That non-raising `False` arm is the one that stops a
+    recycled live pid reading `waiting`, which is the unrailable wedge stated
+    above. The killed/fork-window/recycled tests all exercise the TRUE direction
+    (a child that really is in the group) or the argv-marker path with
+    `pgid=None`; the dead-pid case is caught by `_proc_stat_letter`/procfs.
+
+    No procfs, no `ps`: a child started in its OWN session is a live pid this
+    process does not own, which is the whole predicate.
+    """
+    # A sleeping stub on this interpreter's own argv, so no suppression is
+    # needed: `S` is not in this repo's ruff select (pyproject `[tool.ruff.lint]`),
+    # and naming a rule that is not enabled reds `RUF100` here in CI.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True)
+    try:
+        # `setsid` runs in the child AFTER fork, so poll until the group splits.
+        deadline = time.time() + 10
+        while True:
+            try:
+                child_pgid = os.getpgid(child.pid)
+            except OSError:                        # pragma: no cover - not reaped
+                child_pgid = None
+            if child_pgid is not None and child_pgid != os.getpgid(0):
+                break
+            assert time.time() < deadline, (
+                "the stub child never left our process group, so this pin "
+                "cannot test group membership")
+            time.sleep(0.02)
+        assert rd._in_group(child.pid, child_pgid) is True
+        assert rd._in_group(child.pid, os.getpgid(0)) is False
+        # LIVENESS-ONLY: the pid is alive, and only identity rejects it — so a
+        # pass here cannot be `_pid_alive` deciding the process is dead.
+        assert rd._pid_alive(child.pid) is True
+        assert rd._pid_alive(child.pid, pgid=os.getpgid(0)) is False
+        # the TRUE direction, so the predicate is not `return False` either.
+        assert rd._pid_alive(os.getpid(), pgid=os.getpgid(0)) is True
+    finally:
+        child.kill()
+        child.wait(timeout=30)
+
+
+
 def test_the_no_procfs_argv_probe_asks_ps_for_the_full_width(tmp_path, monkeypatch):
     """⛔ BSD/macOS `ps` TRUNCATES `command=` TO THE DISPLAY WIDTH (80 when stdout
     is not a tty), which cuts the artifact path off BEFORE the marker.
