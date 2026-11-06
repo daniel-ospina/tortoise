@@ -1234,8 +1234,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     # `--limit` is read by the two sweeps and by NOTHING else, so on every other mode it used to be
     # accepted and silently ignored — the caller read the output as a capped population it never
-    # asked for (review round 25, P4). Resolve it AFTER the refusal below, so the refusal tests the
-    # flag the caller actually passed rather than the default that makes every run look explicit.
+    # asked for (review round 25, P4). The refusal below tests `args.limit` — the RAW flag — and
+    # never `limit`: refusing on the RESOLVED value would fire on every run, because the default
+    # 50 makes every run look explicit. (An earlier cut of this comment claimed the resolution
+    # happened "AFTER the refusal below"; it happens here, and a comment that states what the code
+    # does not do is the exact defect class this module's own rails call out.)
     limit = 50 if args.limit is None else args.limit
 
     wip: bool | None = None
