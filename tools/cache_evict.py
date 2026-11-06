@@ -307,9 +307,20 @@ def main(argv: list[str] | None = None) -> int:
         if absent is not None:
             _emit({"verdict": "REFUSED", "reason": absent}, args.out)
             return CACHE_EVICTION_EXIT_REFUSED
-        assessment = assess(client, graph, args.graph,
-                            ceiling_bytes=args.ceiling_bytes,
-                            parity_reports=reports)
+        try:
+            assessment = assess(client, graph, args.graph,
+                                ceiling_bytes=args.ceiling_bytes,
+                                parity_reports=reports)
+        except Exception as exc:  # noqa: BLE001 — any measurement fault is a refusal
+            # ⛔ A cache nobody could MEASURE is a refusal (3), never a traceback: the
+            # census guards this exact call the same way, and this file's own table
+            # reserves exit 1 for a flag/IO mistake — which would tell the operator to
+            # retry FLAGS against a store that did not answer.
+            _emit({"verdict": "REFUSED",
+                   "reason": (f"the cache could not be measured "
+                              f"({type(exc).__name__}: {exc}) — nothing is claimed")},
+                  args.out)
+            return CACHE_EVICTION_EXIT_REFUSED
         if assessment.verdict == "UNBOUNDED":
             _emit({"verdict": "UNBOUNDED", "census": assessment.as_dict()}, args.out)
             return CACHE_EVICTION_EXIT_UNBOUNDED
@@ -360,7 +371,13 @@ def main(argv: list[str] | None = None) -> int:
     # that as exit 3 — "nothing may go" — records "nothing happened" for a destructive
     # run whose after-state is UNKNOWN, which is the same conflation exit 0 was fixed
     # for. Nodes went, so the code must say so.
-    if report.deleted:
+    # ⛔ `delete_unverified` COUNTS TOO. The executor sets it when the `DETACH DELETE`
+    # statement RAISED (or removed fewer rows than planned) — i.e. the statement was
+    # ISSUED and the server may already have applied it, even with `deleted == 0` on the
+    # first deleting pass. Reading only `deleted` recorded "nothing happened" (exit 3)
+    # for exactly the run whose effect is unknowable, which is the conflation this arm
+    # exists to prevent.
+    if report.deleted or report.delete_unverified:
         return CACHE_EVICTION_EXIT_PLAN
     if report.verdict == "REFUSED":
         return CACHE_EVICTION_EXIT_REFUSED

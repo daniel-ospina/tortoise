@@ -57,8 +57,13 @@ class _FakeGraph:
         *,
         delete_removes: int | None = None,
         peer_takes: int = 0,
+        fail_delete: bool = False,
     ) -> None:
         self.nodes = nodes
+        #: Raise INSIDE the `DETACH DELETE` statement, to pin that a store fault during
+        #: the delete still returns the record of what was already removed and marks the
+        #: effect UNVERIFIED (the CLI reads that flag to avoid reporting "nothing went").
+        self.fail_delete = fail_delete
         self.delete_removes = delete_removes   # None = remove everything offered
         #: Rows a PEER evicted inside the probe->delete window. They are gone from the
         #: graph but are NOT this pass's deletions — the case `survivors` cannot
@@ -86,6 +91,10 @@ class _FakeGraph:
         if "DETACH DELETE" in statement:
             rows = list((params or {}).get("rows") or [])
             self.deletes.append((statement, rows))
+            if self.fail_delete:
+                # ⛔ The statement REACHED the server and its effect is unknown — the one
+                # case where the report must say UNVERIFIED rather than "nothing went".
+                raise RuntimeError("RUNTIME reset on the delete")
             removed = len(rows) if self.delete_removes is None else self.delete_removes
             # ⛔ PEER-TAKEN rows: the statement removed `len(rows) - peer_takes`, and a
             # peer took the rest, so the survivor query returns NOTHING. This is the
@@ -617,3 +626,65 @@ def test_a_failed_post_delete_byte_read_is_none_not_the_pre_delete_value():
     )
     assert m["bytes_reclaimed"] is None
     assert m["byte_ceiling_still_exceeded"] is None
+
+
+# --------------------------------------------------------------------------------------
+# gate 1's allow-list, pinned where the PR lane actually runs it (#10976 cycle 3)
+#
+# ⛔ WHY THESE LIVE HERE. `CLEAN` was added to gate 1 because the census's verdict is its
+# BYTE state while this module enforces an ENTRY budget — a cache far over its node budget
+# can sit under its byte ceiling (measured: 1,000,000 nodes against a declared 20,000-node
+# budget -> `CLEAN`). Without a pin in THIS file, reverting the allow-list to `("PLAN",)`
+# merged green: the only coverage lived in the URI-requiring suite this file's own
+# docstring records as subtracted from the tier-2 lane.
+# --------------------------------------------------------------------------------------
+def test_a_CLEAN_byte_verdict_still_licenses_the_sweep():
+    """CLEAN + a licensed population + over the entry budget must SWEEP."""
+    graph = _FakeGraph()
+    report = evict(
+        _assessment(verdict="CLEAN"), _FakeClient(), graph,
+        population=POPULATION,
+        selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record,
+        dry_run=False, policy=EvictionPolicy(max_nodes=1),
+    )
+    assert report.verdict != "REFUSED", report.reason
+    assert report.deleted, "a CLEAN byte verdict licensed nothing"
+    assert graph.mutating, "the sweep issued no statement"
+
+
+def test_a_CLEAN_byte_verdict_licenses_nothing_without_a_proven_population():
+    """The negative half: CLEAN is admission, not a licence."""
+    graph = _FakeGraph()
+    report = evict(
+        _assessment(verdict="CLEAN", evictable=[]), _FakeClient(), graph,
+        population=POPULATION,
+        selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record,
+        dry_run=False, policy=EvictionPolicy(max_nodes=1),
+    )
+    assert report.verdict == "REFUSED"
+    assert graph.mutating == [], f"a CLEAN census with no licence mutated: {graph.mutating}"
+
+
+def test_a_failed_DELETE_statement_is_reported_as_unverified_not_as_clean():
+    """⛔ The statement was ISSUED; the server may have applied it.
+
+    `nodes_after` must be None (UNMEASURED, never a fabricated value), `deleted` must not
+    claim the pass's own rows, and `delete_unverified` must be set — the flag the CLI reads
+    to avoid reporting exit 3 ("nothing went") for a run whose effect is unknowable.
+    """
+    graph = _FakeGraph(fail_delete=True)
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION,
+        selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record,
+        dry_run=False, policy=EvictionPolicy(max_nodes=1),
+    )
+
+    assert report.delete_unverified is True
+    assert report.nodes_after is None, "an UNMEASURED after-state was reported as a value"
+    assert report.deleted == (), "the pass's own rows were claimed as removed"
+    assert "UNVERIFIED" in report.reason, report.reason
+    assert graph.mutating, "the fake never saw the DELETE it was meant to fail on"

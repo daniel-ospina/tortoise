@@ -21,19 +21,32 @@ record-serve check before any delete**, and a **metric**.
 is the graph destroys it … A pass that cannot answer that must refuse, never
 sweep."*
 
-So the delete path is **armed only by a ``PLAN`` verdict**, and ``PLAN`` is reachable
-only when a parity instrument both RAN and was CLEAN over the ENTIRE population
-(``ParityReport.proves()``). Both record gates — #10593 and #7879 — are open as of
+So the delete path is armed only by a census verdict in ``{"PLAN", "CLEAN"}`` **and**
+a licensed population (gate 2) **and** an explicit per-node ``True`` from the record
+probe (gate 3). A licence exists only where a parity instrument both RAN and was CLEAN
+over the ENTIRE population (``ParityReport.proves()``).
+
+⛔ ``CLEAN`` IS ADMITTED AND THAT IS NOT A LOOSENING OF THE ORDERING CONSTRAINT. The
+census's ``verdict`` is its **BYTE** state (``resident_bytes > bound_bytes``); this
+module enforces an **ENTRY** budget, and the two are not the same question — a cache far
+over its node budget can sit under its byte ceiling (measured: 1,000,000 nodes against a
+declared 20,000-node budget -> ``CLEAN``). Gating the licence on the byte verdict made
+the enforced bound unreachable in exactly the population shape #10976 describes. Every
+gate below is unchanged, and ``REFUSED``/``UNBOUNDED`` still yield an EMPTY licence. Both record gates — #10593 and #7879 — are open as of
 this writing, so every production assessment is ``REFUSED`` and this module issues no
 mutating statement at all. The day the record can serve, the census flips to ``PLAN``
 by itself and this executor becomes reachable without a second decision.
 
 ⛔ FOUR INDEPENDENT GATES, and each one alone refuses
 ----------------------------------------------------
-1. **The census** — the verdict must be **exactly** ``PLAN``. ⛔ Not "not refused":
-   ``refused`` is True only for ``REFUSED``/``UNBOUNDED``, so a deny-list would arm the
-   delete path for a verdict this module has never heard of (a typo, a future census
-   verdict) whenever the caller also supplied a populated plan.
+1. **The census** — the verdict must be in the allow-list ``{"PLAN", "CLEAN"}``.
+   ⛔ An ALLOW-LIST, not "not refused": ``refused`` is True only for
+   ``REFUSED``/``UNBOUNDED``, so a deny-list would arm the delete path for a verdict this
+   module has never heard of (a typo, a future census verdict) whenever the caller also
+   supplied a populated plan. ``CLEAN`` is admitted because it is the census's BYTE
+   state and this module enforces an ENTRY budget — not because a byte-clean cache is
+   "nothing to do". **It licenses nothing on its own:** gate 2 reads the licence from
+   ``plan["evictable"]``, and ``REFUSED``/``UNBOUNDED`` still publish an EMPTY one.
 2. **The licence and its SIZE** — the population must be named in
    ``plan["evictable"]``, and the census's own ``nodes`` count for it is a hard cap on
    how many may go. ⚠️ The cap bounds the NUMBER, not the membership: whether a
@@ -827,10 +840,15 @@ def evict(
             delete_unverified = True
             after_measured = False
             bytes_measured = False
+            # ⛔ `deleted` counts EARLIER passes at this point — this pass's own rows
+            # are not in it yet. Saying "after {len(deleted)} node(s) were already
+            # removed by this pass" understated the removal (0 on pass 1) while the
+            # statement had in fact been ASKED for `len(final)` rows.
             abort_reason = (
-                f"the delete statement raised ({type(exc).__name__}: {exc}) after "
-                f"{len(deleted)} node(s) were already removed by this pass — the "
-                f"after-state is UNMEASURED"
+                f"the delete statement raised ({type(exc).__name__}: {exc}) while "
+                f"asked to remove {len(final)} node(s); {len(deleted)} node(s) from "
+                f"EARLIER passes were already removed and this statement's effect is "
+                f"UNVERIFIED — the after-state is UNMEASURED"
             )
             break
         if removed != len(final):

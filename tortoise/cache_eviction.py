@@ -825,6 +825,10 @@ def assess(
                 reason=(f"cannot-answer: {entry.instrument} claims {entry.nodes} node(s) "
                         f"but the graph holds only {resident_total} — the report is "
                         f"stale or is about another graph"),
+                # ⛔ Carry the field through the demotion. Dropping it made the
+                # exported artefact report `population: null` beside a row whose label
+                # demonstrably names one — a null for a name the row HAS.
+                population_name=entry.population_name,
             )
             problems.append(f"{entry.label}: {entry.reason}")
         checked.append(entry)
