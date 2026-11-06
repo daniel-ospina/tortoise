@@ -967,7 +967,11 @@ def test_the_duplicate_rail_guard_keys_on_the_repo_not_its_spelling(tmp_path, mo
     above).
 
     Non-vacuity, and ⛔ THE CARRIER IS NOT THE ONE THIS DOCSTRING USED TO NAME (#10963
-    review, measured). The identity is enforced at THREE sites, and THIS case's
+    review, measured). The identity is enforced at THREE sites THIS CASE DEPENDS ON, and the
+    count is scoped deliberately: `_repo_key` decides repo identity at nine call sites in
+    `tools/rail_detach.py` (`_record_names_repo`, `_names_this_repo`, the `collect` CLI
+    resolution, and `launch`'s own `art_key` attestation among them — `:2115` is the site
+    that actually fires in the `launch`-alone experiment below). THIS case's
     spelling-insensitivity is carried by the RECORD side, not the write side:
     `_waiting_record` → `_candidate_records` (`tools/rail_detach.py`) globs
     `rail-*-{pr}.md` and canonicalises each record's OWN `REPO=` line, so a record
