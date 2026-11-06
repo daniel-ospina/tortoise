@@ -3603,6 +3603,75 @@ class TestCaptureOrgIngestBound:
         # so the retry after `Retry-After` is a clean first attempt.
         assert TestCommitPointsGate._chain_counts("sCapIngest2") == (0, 0, 0)
 
+    def test_an_unserializable_body_is_never_charged_the_floor(
+            self, client, monkeypatch, no_provider_keys):
+        """RED-FIRST: a lone surrogate must not make a 200 KB capture free.
+
+        The byte term is ``model_dump_json``, which RAISES on a lone surrogate
+        (``"\ud800"`` — carried by any JSON body as an escape, accepted by the
+        schema). ``metadata`` is never stored by this lane, so the surrogate
+        rides a field that costs nothing to keep, while 200 KB of turn text IS
+        stored and extracted. The pre-fix fallback set the term to ``0`` and the
+        charge collapsed to the node floor: MEASURED at that head, this exact
+        request was charged 4,096 B instead of 200,220 B and was ADMITTED (200)
+        on a window that refused the identical surrogate-free capture (429) —
+        the fail-open direction #4051 names.
+
+        So: (a) the charge of the hostile body is at least its stored text, and
+        (b) the endpoint refuses it on a window that would refuse—and has just
+        refused—the clean twin.
+        """
+        import json as _json
+
+        from tortoise.hosted_api import SessionRequest, capture_ingest_charge_bytes
+
+        fat = "x" * 200_000
+        clean = [{"role": "user", "content": fat}]
+        honest = capture_ingest_charge_bytes(SessionRequest(conversation=clean))
+        hostile_body = SessionRequest(
+            conversation=clean, metadata={"k": "\ud800"})
+        assert capture_ingest_charge_bytes(hostile_body) >= len(fat), (
+            "a body the fast serializer cannot render was charged less than the "
+            "text it stores — the fallback is under-charging (fail-open)")
+
+        def post(session_id: str, body: dict):
+            raw = _json.dumps(body, ensure_ascii=True).encode("utf-8")
+            return client.post("/v1/sessions", content=raw,
+                               headers={"Content-Type": "application/json"})
+
+        # Window = three node floors. The clean 200 KB capture is over-sized, so
+        # the documented rule admits it once; the SECOND is refused, which is
+        # what proves the window is armed before the hostile leg is tried.
+        self._allow(monkeypatch, 3 * 4096)
+        assert post("sCapSurrWarm", {
+            "harness": "claude", "conversation": clean}).status_code == 200
+        control = post("sCapSurrClean", {
+            "harness": "claude", "conversation": clean})
+        assert control.status_code == 429, (
+            f"the ingest window is not armed: a second {honest}-byte capture was "
+            f"admitted ({control.status_code})")
+
+        self._allow(monkeypatch, 3 * 4096)
+        r1 = post("sCapSurrHostile", {
+            "harness": "claude", "conversation": clean,
+            "metadata": {"k": "\ud800"}})
+        assert r1.status_code == 200, (
+            f"the over-sized rule admits ONE over-allowance request on an empty "
+            f"window ({r1.status_code}) — {r1.text[:200]}")
+        # ⛔ THE DISCRIMINATOR. Pre-fix the hostile charge was 4,096 B, so this
+        # second request (8,192 B total) fit a 12,288 B window and was ADMITTED —
+        # 400 KB of stored text against a 12 KB allowance. Post-fix the first
+        # request spends the window on its real charge, so the second is refused.
+        r = post("sCapSurrHostile2", {
+            "harness": "claude", "conversation": clean,
+            "metadata": {"k": "\ud800"}})
+        assert r.status_code == 429, (
+            f"BYPASS: a 200 KB capture whose metadata carries a lone surrogate "
+            f"was admitted ({r.status_code}) on a window that refuses the same "
+            "capture without it — the byte term fell back to 0")
+        detail = r.json()["detail"]
+        assert detail["resource"] == "capture_ingest_bytes"
+
     def test_the_window_is_shared_with_the_commit_lane(
             self, client, monkeypatch, no_provider_keys):
         """ONE window per org, not one per route (§3.1).

@@ -17160,6 +17160,32 @@ def declared_capture_write_count(body: SessionRequest) -> int:
             + _CAPTURE_TURN_NODES * len(body.conversation or ()))
 
 
+def _capture_payload_envelope_bytes(body: SessionRequest) -> int:
+    """Bytes of the posted capture request — and it can never come out ``0``.
+
+    The fast path is ``model_dump_json`` (the canonical re-serialization). It
+    RAISES on a value it cannot render as UTF-8 — measured: a lone surrogate
+    (``"\ud800"``, carried as a JSON escape, accepted by the schema, and never
+    stored by this lane) raises ``PydanticSerializationError``. Before this
+    helper the ``except`` branch set the term to ``0``, so such a body was
+    charged only the node floor and a 200 KB capture slipped a window that
+    refused its identical, surrogate-free twin — under-charging is the one
+    direction a throttle must not fail (it removes the bound, #4051).
+
+    The fallback renders the SAME validated model through ``json.dumps`` with
+    ``ensure_ascii`` — which ESCAPES a lone surrogate instead of raising — and
+    encodes with ``surrogatepass``, which cannot fail on any ``str`` a JSON body
+    can produce. It therefore over-counts the escape rather than under-counting
+    the write, and there is no remaining path to a free charge.
+    """
+    try:
+        return len(body.model_dump_json().encode("utf-8"))
+    except Exception:  # a charge must never fail a capture — or shrink to 0
+        return len(_json.dumps(body.model_dump(), default=str,
+                               ensure_ascii=True)
+                   .encode("utf-8", "surrogatepass"))
+
+
 def capture_ingest_charge_bytes(body: SessionRequest) -> int:
     """The stored BYTES one capture is charged against its org's ingest window.
 
@@ -17191,14 +17217,19 @@ def capture_ingest_charge_bytes(body: SessionRequest) -> int:
     ``commit_ingest_admit`` call itself stays inline: it is a lock plus a short
     list scan over the org's in-window charges, no I/O and no serialization.
 
-    A serialization failure yields 0 for that term rather than failing the
-    capture: the node floor still charges the request.
+    ⛔ A SERIALIZATION FAILURE MUST NOT BE FREE (measured, review round 2). The
+    payload term is rendered by ``_capture_payload_envelope_bytes`` above, whose
+    fallback is the SAME request rendered another way — never ``0``. Zeroing it
+    was the fail-OPEN direction #4051 names: ``model_dump_json`` raises on a lone
+    surrogate (``"\ud800"``, which any JSON body can carry as an escape), that
+    state is reachable through ``metadata`` — a field this lane never stores —
+    and it collapsed the charge to the node floor. Measured at the pre-fix head:
+    a 200 KB capture was charged 4,096 B instead of 200,220 B, and the endpoint
+    ADMITTED it on a window that refused the identical capture without the
+    surrogate (200 vs 429).
     """
     from tortoise.commit_schema import COMMIT_INGEST_BYTES_PER_NODE
-    try:
-        payload_bytes = len(body.model_dump_json().encode("utf-8"))
-    except Exception:  # a charge must never fail a capture
-        payload_bytes = 0
+    payload_bytes = _capture_payload_envelope_bytes(body)
     return max(payload_bytes,
                declared_capture_write_count(body)
                * COMMIT_INGEST_BYTES_PER_NODE)
