@@ -3470,3 +3470,62 @@ def test_the_word_arm_declares_its_own_gap_rather_than_carrying_it_silently() ->
     ):
         caught = (rfo.asserts_a_clear(body) is False) or rfo._grades_as_blocking(body, {})
         assert caught, body
+
+
+def test_a_truncated_run_listing_fails_closed_before_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed `workflow_runs` page is a READ FAILURE, so the gates are UNREADABLE.
+
+    `ci_verdict.collect_items` refuses a listing it could not fully read, and that must win
+    over attribution: grading "no run matched" against a surface that refused would read a
+    broken read as a deferral. `unreadable` (not a plain FAIL) is right here because the
+    read can be retried — unlike a config fact.
+    """
+    probe = _collect(
+        monkeypatch,
+        _gh_payloads(
+            check_runs=_check_runs_for(ENTRY_REQUIRED),
+            runs=["not-a-run", None, 17],  # type: ignore[list-item]
+        ),
+    )[0]
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    assert gates.passed is False
+    assert gates.unreadable is True
+    assert "TRUNCATED" in gates.raw
+
+
+def test_a_malformed_run_entry_reaching_attribution_is_skipped_not_a_traceback() -> None:
+    """★ The `--fixture`/direct-Probe door: a non-mapping run entry must not RAISE.
+
+    Every condition is a pure function of the Probe, and `probe_from_dict` is a documented
+    way to build one, so a non-mapping entry can reach `_run_emits` without passing
+    `collect_items`. An AttributeError escaping `check_gates` exits **1** through the CLI,
+    which a caller reads as "a required check is red" rather than "I could not read the
+    runs" — the mis-attribution earlier rounds fixed for a non-integer run `id`.
+    """
+    probe = rfo.probe_from_dict(
+        {
+            "pr": 10999,
+            "head": HEAD,
+            "tree": True,
+            "required": list(ENTRY_REQUIRED),
+            "required_deferred": list(MERGE_TIME_REQUIRED),
+            "merge_emit_files": {MERGE_TIME_REQUIRED[0]: ["python-ci.yml"]},
+            "head_runs": ["not-a-run", None, 17],
+            "groups": [
+                {
+                    "job": job,
+                    "state": ci_verdict.GROUP_GREEN,
+                    "status": "completed",
+                    "conclusion": "success",
+                    "check_id": 1000 + i,
+                }
+                for i, job in enumerate(ENTRY_REQUIRED)
+            ],
+        }
+    )
+    gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+    # No ATTRIBUTABLE run => no evidence the workflow ran here => DEFERRED, and no crash.
+    assert gates.passed is True, gates.raw
+    assert "DEFERRED(merge-time)" in gates.raw

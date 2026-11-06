@@ -1393,6 +1393,12 @@ def _run_emits(run: Mapping[str, Any], files: tuple[str, ...]) -> bool:
     the documented API always returns it, so a payload without one must not silently
     downgrade a FAIL to a DEFER.
     """
+    if not isinstance(run, Mapping):
+        # A malformed entry is not evidence that the workflow ran, and it must not be a
+        # traceback either: `check_gates` converts every unreadable input into a VERDICT,
+        # and an AttributeError escaping to the CLI exits 1 — which a caller reads as
+        # "a required check is red" rather than "I could not read the runs".
+        return False
     if _run_file(run) not in files:
         return False
     event = run.get("event")
@@ -3062,6 +3068,21 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         tree_raw=str(data.get("tree_raw", "")),
         groups=parsed_groups,
         groups_raw=str(data.get("groups_raw", "")),
+        # The run listing and the emitter projection are what decide a merge-time
+        # context's ABSENCE, so the fixture door must be able to express both — a fixture
+        # that could not would force every absent-merge-time fixture into the
+        # UNATTRIBUTABLE arm and make the DEFERRED arm unreachable from `--fixture`.
+        # Same absent-vs-null idiom as `labels`/`required_deferred`: an omitted key is a
+        # pre-attribution fixture (no runs read), an explicit null is "the READ failed".
+        head_runs=(
+            None
+            if "head_runs" in data and data["head_runs"] is None
+            else tuple(data.get("head_runs") or ())
+        ),
+        merge_emit_files={
+            str(name): tuple(files or ())
+            for name, files in (data.get("merge_emit_files") or {}).items()
+        },
         required=None if data.get("required") is None else tuple(data["required"]),
         # Same absent-vs-null idiom as `labels` above: a fixture that OMITS the key is a
         # pre-split fixture whose flat set was all entry checks (so `()` is faithful),
