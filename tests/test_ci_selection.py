@@ -10566,9 +10566,106 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
         "wheel either way")
 
 
+#: The in-step watchdog each save-arm job must still clear, from the COLLECT+run
+#: measurement (run 42154769896, job 127701854811): a 11 m 10 s collection of the
+#: 46,906-item tree plus 3 m 20 s of tests = 14 m 30 s at the worst collect cost
+#: observed, so 20 m is 1.38x. `test-track-b`'s own run phase is unchanged (its
+#: tests pass in 44.96s and its in-step cap is the 5 m `timeout` in its step).
+_SAVE_ARM_IN_STEP_FLOORS: dict[str, int] = {
+    "test-d14-hosted-api": 20,
+    "test-track-b": 5,
+}
+
+
+def _save_arm_cap(in_step: int, setup: int = 1, cold_save: int = 9) -> int:
+    """`docs/ops/ci-wall-clock.md` §2's save arm: SUM x 1.5, rounded UP to the
+    next 10 m. Kept as an executable derivation so a measured re-tune of either
+    term moves the assertion with it instead of needing a new magic number."""
+    total = in_step + setup + cold_save
+    return -(-(total * 3 // 2) // 10) * 10
+
+
+def test_the_save_arm_caps_clear_the_post_step_that_reddened_them():
+    """#10182/#10212: a job that SAVES the shared 3.6 GB pip archive must carry a
+    cap sized from its SUM, not from its measured job time.
+
+    MEASURED on run 42154769896 (head `8f32c5255`): this workflow reddened TWO
+    required checks that had **no failing test in either artifact**, on exactly
+    the two terms `docs/ops/ci-wall-clock.md` §2 names.
+
+    * `test-d14-hosted-api` (job 127701854811) — COLLECTION alone took 11 m 10 s
+      of the then-15 m in-step cap (04:23:22 -> 04:34:32; the same 46,906 items
+      collected in 4 m 59 s on run 42135045069). The run then finished CLEAN
+      (`256 passed, 39 skipped, 46812 deselected ... in 855.20s`) and the
+      watchdog SIGINT-killed the process at 900 s while it unwound — which
+      `pytest-attribution` reads as `INCOMPLETE`, so the leg certified nothing
+      (#5219). #10212 predicted this exact shape; it is what sizes the in-step
+      cap (15 -> 20 m), and the save arm then sizes the job cap (30 m x 1.5 =
+      45 -> 50 m).
+    * `test-track-b` (job 127701854910) — `4 passed, 9 deselected in 44.96s`,
+      then `setup-python cache: pip` tarred the SAME shared archive in its POST
+      step and GitHub cancelled the job at 10 m 15 s against a 10 m cap. Its
+      save surface comes from a THIRD-PARTY action, not from an `actions/cache`
+      step of its own, which is why no `actions/cache`-shaped audit saw it: a
+      1.18 m max looked like a comfortable 10 m. 15 m x 1.5 -> 30 m.
+
+    Pinned as the RELATIONSHIP, so a measured re-tune passes and a silent revert
+    to either pre-fix number reds: the 15 m watchdog fails the in-step floor, the
+    10 m track-b cap fails the SUM, and neither is reachable by deleting the save
+    surface (asserted present below), which would make the cases vacuous.
+    """
+    jobs = _load_python_ci()["jobs"]
+
+    # The save surface must still be there, or these caps guard nothing.
+    d14_caches = [s for s in jobs["test-d14-hosted-api"]["steps"]
+                  if (s.get("with") or {}).get("path") == "~/.cache/pip"]
+    assert d14_caches, (
+        "test-d14-hosted-api no longer mounts ~/.cache/pip — the 3.6 GB save this "
+        "cap is sized for is gone, so re-scope this pin rather than leaving a "
+        "cap asserted against a save that no longer happens")
+    track_b_setup_python = [s for s in jobs["test-track-b"]["steps"]
+                            if str(s.get("uses") or "").startswith(
+                                "actions/setup-python")]
+    assert any((s.get("with") or {}).get("cache") == "pip"
+               for s in track_b_setup_python), (
+        "test-track-b no longer sets `setup-python cache: pip` — its save surface "
+        "is what reddened it at 10 m 15 s (run 42154769896); if it was moved to a "
+        "restore-only shape, assert THAT here instead")
+
+    for job_name, in_step_floor in _SAVE_ARM_IN_STEP_FLOORS.items():
+        job = jobs[job_name]
+        runs = [s.get("run") or "" for s in job["steps"]]
+        watchdogs = [int(m.group(1))
+                     for run in runs
+                     for m in re.finditer(r"timeout -s INT -k 10 (\d+)m", run)]
+        assert len(watchdogs) == 1, (
+            f"{job_name}: expected exactly ONE in-step watchdog "
+            f"(`timeout -s INT -k 10 <N>m`), found {watchdogs} — this pin reads "
+            "that number as the job's in-step cap")
+        in_step = watchdogs[0]
+        assert in_step >= in_step_floor, (
+            f"{job_name}: the in-step watchdog is {in_step}m, below the "
+            f"{in_step_floor}m the COLLECT+run measurement requires (14 m 30 s "
+            "observed on run 42154769896, job 127701854811). At 15 m the leg "
+            "SIGINT-kills after a complete green summary, pytest-attribution "
+            "emits INCOMPLETE, and a REQUIRED check reds with no failing test.")
+        cap = job.get("timeout-minutes")
+        required = _save_arm_cap(in_step=in_step)
+        assert cap is not None, (
+            f"{job_name}: no `timeout-minutes` at all — GitHub's 360m default then "
+            "applies to a job that saves the shared archive (#3239)")
+        assert cap >= required, (
+            f"{job_name}: `timeout-minutes: {cap}` cannot hold its own SUM — "
+            f"{in_step}m in-step + ~1m setup + ~9m cold save = {in_step + 10}m, "
+            f"x 1.5 = {required}m (docs/ops/ci-wall-clock.md §2, save arm). "
+            "Below that the ~3.6 GB pip-cache SAVE POST-step runs out of budget "
+            "and GitHub reports `cancelled` — which python-ci-gate reads as red "
+            "BY DESIGN (#5219), reddening a REQUIRED check on a green leg "
+            "(run 42154769896: 4 passed in 44.96s, cancelled at 10m15s).")
+
+
 def _carve_matrix() -> dict:
     """W37: the carve-out matrix the workflow ACTUALLY expands.
-
     Derived from `push_legs`, not rebuilt from `carve_out`: the point of every
     assertion below is to inspect the object `test-carve-out` receives. A
     helper that re-packed the set independently would happily agree with itself

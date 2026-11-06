@@ -3753,11 +3753,14 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: `docs/ops/ci-wall-clock.md`'s own `python-ci.yml:<n>` citations, each paired with the text its
 #: sentence is about. Separate from `_REFUSAL_CITATION_SITES` because the anchor differs: these
 #: point at install/cache STEPS, not at the `test-slow` refusal paragraph, so one anchor cannot
-#: serve both. (§1's postgres row, §1's falkor install row, §6's arm-1 cache-key row.)
+#: serve both. (§1's postgres row, §1's falkor install row, §6's arm-1 cache-key row, §2's
+#: save-arm note — the last one added with the `test-track-b` launch, whose save surface is a
+#: `setup-python cache: pip` argument rather than an `actions/cache` step of its own.)
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("python-ci.yml:4312", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2734-2739", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
     ("python-ci.yml:4304-4306", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:3015", ("cache: pip",)),
 )
 
 #: The numbers those three carried before this round — the non-vacuity population. Each has moved to a

@@ -129,9 +129,9 @@ Samples: `python-ci.yml` 60 newest runs (54 with visible jobs, `pull_request`-do
 | `test-slow (a…e)` (5 legs) | 18–19 | 8.0–9.9 | 9.9–12.7 | 12.92 | 60 |
 | `test-carve-out` (+`(b)`,`(c)`) | 20–23 | 8.3–8.6 | 8.7–9.2 | 19.85 | 30 |
 | `test-record-postgres` | 23 | 1.62 | 14.61 | 15.43 | 20 ⚠ thin |
-| `test-d14-hosted-api` | 22 | 4.71 | 7.23 | 8.03 | **40 (was 20)** |
+| `test-d14-hosted-api` | 22 | 4.71 | 7.23 | 8.03 | **50 (was 40)** |
 | `test-concurrency-falkor` | 18 | 2.02 | 2.71 | 2.95 | 15 |
-| `test-track-b` | 17 | 0.93 | 1.09 | 1.18 | 10 |
+| `test-track-b` | 17 | 0.93 | 1.09 | 1.18 | **30 (was 10)** |
 | `surface-guard` | 24 | 1.07 | 1.26 | 1.35 | 10 |
 | `changes` | 27 | 0.38 | 0.58 | 1.25 | 5 |
 | `manifest-integrity` | 28 | 0.28 | 0.33 | 0.40 | 5 |
@@ -174,6 +174,27 @@ uploading a 3.6 GB `~/.cache/pip` archive in the `actions/cache` save POST-step 
 at 20 m, which `python-ci-gate` reads as red (#5219). `max 8.03` therefore never saw it. The
 binding term is the job's own in-step `timeout … 15m` plus a ~9 m cold save, not the 8.03 m norm —
 read the cap against the SUM of the job's caps, not against its median.
+
+⚠ **Both of those numbers moved again on 2026-11-06, on a measurement that closes the loop the
+paragraph above opens.** Run 42154769896 (PR #11032, head `8f32c5255`) reddened **two** required
+checks with no failing test in either artifact, and both terms are the ones this section names:
+
+* `test-d14-hosted-api` (job 127701854811) — the in-step `15m` was eaten by **COLLECTION**: 11 m 10 s
+  (04:23:22 → 04:34:32) before a single test ran, against 4 m 59 s for the same 46,906-item
+  collection on run 42135045069. The run then finished CLEAN — verbatim
+  `256 passed, 39 skipped, 46812 deselected, 14 warnings in 855.20s (0:14:15)` — and the watchdog SIGINT-killed the process at 900 s while it unwound —
+  which `pytest-attribution` reads as `INCOMPLETE`, so a green leg certified nothing (#5219).
+  #10212 predicted exactly this and is what sizes the in-step cap: 14 m 30 s at the worst observed
+  collect cost → **15 → 20 m** (1.38×), and the save arm then sizes the job cap:
+  20 + ~1 + ~9 = 30 m × 1.5 = 45 → **50**.
+* `test-track-b` (job 127701854910) — `4 passed, 9 deselected in 44.96s`, then
+  `setup-python cache: pip` tarred the SAME shared archive in its POST step and GitHub cancelled the
+  job at 10 m 15 s against a 10 m cap. **This row was missed by the audit above for a structural
+  reason worth keeping: its save surface is created by a third-party action**, not by an
+  `actions/cache` step of its own (`actions/setup-python` with `cache: pip`,
+  `python-ci.yml:3015`) — so a scan for `actions/cache` steps cannot see it, and a 1.18 m max looked
+  like a comfortable 10 m. It is the only `cache: pip` site left in the workflow. Save arm:
+  5 m in-step + ~1 + ~9 = 15 m × 1.5 = 22.5 → **30**.
 
 Every other row was checked against that rule. The discriminating fact is **not** that the
 remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
@@ -241,14 +262,15 @@ produces no runs — and because a warn-only step added to that workflow never e
   binding term is the SUM of every in-step cap plus ~1 m setup plus the observed cold save, and
   the cap is **that SUM × 1.5, rounded UP to the next 10 m**. The margin is not decoration: a save
   killed at the cap reds a required check (#5219), while 10 m of extra exposure costs only a held
-  slot. The worked example is `test-d14-hosted-api`: 15 m in-step + ~1 m + ~9 m save = 25 m →
-  37.5 → **40**, which is the number that ships (#10182).
+  slot. The worked example is `test-d14-hosted-api`: 20 m in-step + ~1 m + ~9 m save = 30 m →
+  45 → **50**, which is the number that ships (#10182, re-sized in #10212).
 
 At the time of the first pass no cap was raised and none was lowered: `test` 90, `test-slow` 60 and
 `test-carve-out` 30 carry documented derivations (setup + last-failed pre-phase + the shard's
 in-step watchdog, #6135/#6142), and lowering them would re-open #798's death mode — a runner-level
-kill that loses the pass/fail summary. The one cap moved since is `test-d14-hosted-api` 20 → 40
-(#10182), on the post-step arm.
+kill that loses the pass/fail summary. The caps moved since are `test-d14-hosted-api` 20 → 40 → 50
+(#10182, re-sized in #10212) and `test-track-b` 10 → 30 (the same class: an `actions/setup-python
+cache: pip` save), both on the post-step arm.
 
 `python-ci.yml` is now capped on **every** job, and `tests/test_ci_selection.py` asserts both
 that and the derived-required-context invariant, so the next added leg cannot silently inherit

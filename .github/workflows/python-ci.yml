@@ -2978,11 +2978,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
-    # #3239: this job carried NO outer cap, so GitHub's 360m default applied —
-    # a hung Track B leg could withhold the REQUIRED python-ci-gate for six
-    # hours. Measured 2026-09-30 (60 newest completed runs): pytest-step max
-    # 0.08m, job max 1.15m — 10m is a floor, not a measurement-thin bound.
-    timeout-minutes: 10
+    # #3239: GitHub's 360m default applied to a job measured at 1.15m max — but
+    # it ALSO saves the shared 3.6 GB pip archive in a POST step charged here
+    # (#10182, `setup-python cache: pip`): run 42154769896 passed 4 tests at
+    # 44.96s, tarred, then `cancelled` at 10m15s. SUM 15m × 1.5 → 30m.
+    timeout-minutes: 30
     # Epic #1647 Task 9 Step 5: track-b flips to docker — the track_b tests'
     # db_path SDK constructions redirect to the server lane via the seam.
     # The URI carries the test-prefixed path (P1-2) for consistency.
@@ -3741,23 +3741,23 @@ jobs:
     # cancelled leg certifies nothing), so a job whose work was green reddened
     # a REQUIRED check on a diff that touches three Markdown files.
     #
-    # The arithmetic that forces the raise is the job's OWN in-step cap, not
-    # this run's duration: `timeout … 15m` (below) + ~1m setup/install + ~9m
-    # for a cold save ≈ 25m against a 20m ceiling. On measured norms the margin
-    # is thinner than it looks — whole-job p50 4.71m / p95 7.23m / max 8.03m
-    # (docs/ops/ci-wall-clock.md) is measured over `success`/`failure` jobs
-    # only, so it CANNOT see a save that ran to cancellation; against a ~9m
-    # save that leaves ~3m, and this run's test step had already spent 12m32s
-    # of its own 15m cap.
+    # The arithmetic that forces this number is the SUM of the job's own in-step
+    # cap and its post-step save, never its duration: `timeout … 20m` (below) +
+    # ~1m setup/install + ~9m for a cold save ≈ 30m → ×1.5 → 45 → next 10 = 50
+    # (docs/ops/ci-wall-clock.md §2, the save-arm rule). The measured norms are
+    # thinner than they look — whole-job p50 4.71m / p95 7.23m / max 8.03m are
+    # taken over `success`/`failure` jobs only, so they CANNOT see a save that
+    # ran to cancellation (#10182's blind spot), and against a ~9m save this
+    # job's test step had already spent 14m30s of its own in-step cap.
     #
-    # What this does NOT fix, and no job cap can: the in-step `15m` cap
-    # SIGINT-kills the step (pytest-attribution then emits INCOMPLETE) instead
-    # of letting it finish, and this run was within 2m28s of that — 9m11s of
-    # its 12m32s was COLLECTION (01:00:53 → 01:10:04) against a 221s norm for
-    # the whole step (docs/ci-timing.md). Tracked in #10212. Raising this number
-    # stops the cache SAVE from being the term that reds the gate; it does not
-    # make the shared-HOME pip cache small, which is why the save is 3.6 GB.
-    timeout-minutes: 40
+    # What this does NOT fix, and no job cap can: the in-step cap SIGINT-kills
+    # the step (pytest-attribution then emits INCOMPLETE) instead of letting it
+    # finish. MEASURED (run 42154769896, job 127701854811): COLLECTION alone took
+    # 11m10s of the then-15m cap (04:23:22 → 04:34:32) against a 221s norm for
+    # the whole step (docs/ci-timing.md); all 256 selected tests passed in 200s
+    # and the kill still reddened a REQUIRED check with no failing test in the
+    # artifact. SIZED FROM THAT (#10212): 15 → 20m, not the 3.6 GB save.
+    timeout-minutes: 50
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
@@ -3805,11 +3805,11 @@ jobs:
         run: |
           set -eo pipefail
           # #3470: the log is captured through `tee`, so this leg needs the SAME
-          # attribution every `tail -n` leg gets — without it a D14 leg killed at its
-          # 15m watchdog emits no INCOMPLETE marker and its unobservable failure set
+          # attribution every `tail -n` leg gets — without it a D14 leg killed at
+          # its in-step watchdog emits no INCOMPLETE marker and its unobservable set
           # is indistinguishable from a clean leg, on a job `python-ci-gate` needs.
           rc=0
-          timeout -s INT -k 10 15m python -m pytest tests/ -m embedded_only \
+          timeout -s INT -k 10 20m python -m pytest tests/ -m embedded_only \
             -v --timeout=300 -p no:cacheprovider --junitxml="${RUNNER_TEMP:-/tmp}/junit-d14.xml" -o junit_family=xunit1 2>&1 | tee "${RUNNER_TEMP:-/tmp}/pytest-d14.log" || rc=$?
           bash .github/scripts/pytest-attribution.sh --log "${RUNNER_TEMP:-/tmp}/pytest-d14.log" --rc "$rc" \
             --junit "${RUNNER_TEMP:-/tmp}/junit-d14.xml"
