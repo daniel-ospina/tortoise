@@ -230,20 +230,20 @@ Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 
 - **And the 0.0 pp is a property of the CORPUS, not of S2.2 — the probe's own control shows it.** Strip
   the 9 `about_entities` references and the *same* arbiter arm then removes all 9
   (`control variant=unreferenced-definite-descriptions arm=after-vet-arbiter stripped_objects=9
-  stripped_references=9 objects=16 the_prefix=6 share=0.375000 real_facts=90 removed=9`; the probe's own
-  note: *"the
-  0.0 pp is a corpus property (every Object wired to its statement), not a property of S2.2"*). So nothing
+  stripped_references=9 objects=16 the_prefix=6 share=0.375000 real_facts=90 removed=9`; the probe's
+  own note: *"the 0.0 pp is a corpus property (every Object wired to its statement), not a property of
+  S2.2"*). So nothing
   is removed here because on this corpus every Object is defended by a reference — which is the same fact
   that makes E1b's `90 of 90` hold **vacuously**.
 - And the mechanism that *would* move it is foreclosed: the **design decision recorded for `#5333`,**
   in `#10069` (merged) and in `EXTRACTOR-V4-ARCHITECTURE.md` §*G5's destructive half*, says a pass may
   not remove a committed row — and **no shipped** non-destructive mechanism moves E1's share. The one
-  hypothetical arm that does (`counterfactual-mint-skip`, `0.600000 → 0.375000` on the 16-Object stripped
-  corpus — the arm §2's gap (c) below names) is a mechanism
-  that does not exist **and would still miss the registered `0.300000` bound if it did** — so "nothing
-  non-destructive moves it" is true of the tree, false of the arithmetic. ⚠️ `#5333`
-  is still **OPEN** because the design half above settles only the *design* answer: the **authorisation**
-  (its task 1, *whether a relocation pass may ever RUN*) remains the owner's, and nothing here assumes it.
+  hypothetical arm that does (`counterfactual-mint-skip`, `0.600000 → 0.375000` on the 16-Object
+  stripped corpus — the arm §2's gap (c) below names) is a mechanism that does not exist **and would
+  still miss the registered `0.300000` bound if it did** — so "nothing non-destructive moves it" is
+  true of the tree, false of the arithmetic. ⚠️ `#5333` is still **OPEN** because that is the *design*
+  answer only: the **authorisation** (its task 1, *whether a relocation pass may ever RUN*) remains the
+  owner's, and nothing here assumes it.
 
 ⛔ **The blocker `#10985` names by id has LANDED — and it did not move the number.** Its body: *"⛔ The id
 is `#10997` (S3 — an unresolved identity is HELD, never minted)"*. `#10997` is **CLOSED
