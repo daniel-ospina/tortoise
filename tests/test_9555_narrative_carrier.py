@@ -1837,10 +1837,27 @@ _AFFIRMATIVE_ADVERBS = (
     "exclusively", "least", "unlike", "mind", "alone", r"to\s+mention",
 )
 
+#: The exclusion ITSELF, built once and applied to BOTH cue arms.
+#:
+#: ⛔ The peek is not one token. `not the ONLY narrative` inserts an article and
+#: `not so much the narrative as the summary` asserts the second term — both
+#: measured to leave the ENTIRE pin green while stating §12.1b's inverse, so the
+#: optional article and the `so much … as` comparative are part of the class.
+_AFFIRMATIVE_EXCLUSION = (
+    rf"(?!(?:\s+(?:the\s+)?(?:{'|'.join(_AFFIRMATIVE_ADVERBS)})\b"
+    rf"|\s+so\s+(?:much|many)\b))"
+)
+
 _NEGATION_CUE = (
     r"(?:\b(?:not|never|cannot|can\s?not|no longer|by no means|in no case)\b"
-    rf"(?!\s+(?:{'|'.join(_AFFIRMATIVE_ADVERBS)})\b)"
-    r"|\w+n['’]t\b)"
+    + _AFFIRMATIVE_EXCLUSION
+    # ⛔ THE CONTRACTION ARM CARRIES THE EXCLUSION TOO. It was attached to the
+    # first arm only, so the whole set above was DEAD for the `-n't` spelling and
+    # `and it isn't only the narrative` / `isn't just` / `isn't merely` left the
+    # ENTIRE pin green (measured). A class closed on one spelling is not closed.
+    + r"|\w+n['’]t\b"
+    + _AFFIRMATIVE_EXCLUSION
+    + r")"
 )
 
 #: ⛔ `rather than` / `instead of` are NOT cues here, and the reason is measured.
@@ -2524,6 +2541,12 @@ _SUMMARY_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     #: the family form at `docs/architecture/STORAGE-ARCHITECTURE.md:41`.
     ("the `not alone` affirmative",
      "⛔ not alone `:Source.summary` but the S1 narrative"),
+    ("the `-n't only` contraction",
+     "⛔ isn't only `:Source.summary` but the S1 narrative"),
+    ("the `not the only` article form",
+     "⛔ not the only `:Source.summary` but the S1 narrative"),
+    ("the `not so much … as` comparative",
+     "⛔ not so much `:Source.summary` as the narrative"),
 ]
 
 
@@ -2557,7 +2580,8 @@ def test_the_summary_negation_ACCEPTS_a_correct_rewording(why: str, clause: str)
     "why,clause", _SUMMARY_NEGATION_INVERSIONS,
     ids=["negation-dropped", "negates-another-name",
          "negation-in-other-clause", "not-only-but-also", "not-merely",
-         "not-just", "not-least", "not-alone"])
+         "not-just", "not-least", "not-alone", "isnt-only",
+         "not-the-only", "not-so-much-as"])
 
 
 def test_the_summary_negation_REFUSES_a_line_that_only_NAMES_the_trap(
@@ -2673,6 +2697,11 @@ _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str]] = [
     #: The two the enumeration missed one cut later.
     ("the `not alone` affirmative", "not alone the narrative"),
     ("the `not to mention` affirmative", "not to mention the narrative"),
+    #: The two shapes the exclusion's PEEK missed, both on §12.1b's own clause.
+    ("the `-n't only` contraction", "isn't only the narrative"),
+    ("the `not the only` article form", "not the only narrative"),
+    ("the `not so much … as` comparative",
+     "not so much the narrative as the summary"),
 ]
 
 
@@ -2759,7 +2788,8 @@ def test_every_affirmative_adverb_is_refused_on_BOTH_guards():
          "never-mind-affirmative", "not-merely-affirmative",
          "not-just-affirmative", "not-solely-affirmative",
          "not-least-affirmative", "not-alone-affirmative",
-         "not-to-mention-affirmative"])
+         "not-to-mention-affirmative", "isnt-only-contraction",
+         "not-the-only-article", "not-so-much-as-comparative"])
 def test_the_narrative_negation_REFUSES_a_line_that_only_NAMES_the_narrative(
         why: str, clause: str):
     """*What value makes this test fail?* Deleting the guard instead of binding it.
