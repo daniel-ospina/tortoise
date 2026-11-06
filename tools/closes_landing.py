@@ -1444,7 +1444,13 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             container = None
             own_gap = 0
             _lazy_push = False
-        if line.strip():
+        # ⛔ A BLANK LINE IS BLANK CONTENT, NOT A DEDENT (round 46 review, P1 — a fail-open that swept
+        # in 350,316 bodies). A quote-only line (`>`, `>  `, `> >`) is NON-EMPTY as a raw line but
+        # carries no content after its container prefixes, so `_item_dedented` read it as a dedent,
+        # popped the item — and the HTML block that opened next bound to `None` and could never end.
+        # §4.6 ends types 6/7 at a blank line, which is what `rest.strip()` decides; the pop needs
+        # the same test.
+        if line.strip() and rest.strip():
             while list_items and _item_dedented(line, list_items[-1]):
                 list_items.pop()
             # The container THIS line sits in, captured BEFORE the line can push its own
@@ -1489,8 +1495,8 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 if html_closer:
                     if html_closer.lower() in rest.lower():
                         html_closer = None    # types 1-5: this line carries the block's own closer
-                elif not line.strip():
-                    _html_here = False        # type 6: the next blank line ends the block
+                elif not rest.strip():
+                    _html_here = False        # types 6/7: the next blank line ends the block
                     html_closer = None
         else:
             _html_here = False
