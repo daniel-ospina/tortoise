@@ -195,7 +195,10 @@ _EXIT_ZERO_TRAP = re.compile(r"trap\s+[^;\n]*exit\s+0")
 #: Redirections are NOT control composition: `2>&1`, `&> file`, `>> log`, `2>/dev/null` only move the
 #: file descriptors and cannot change the exit status. They are stripped before the operator scan,
 #: which otherwise false-RED `2>&1` (measured, review cycle 8).
-_REDIRECTION = re.compile(r"(?:\d?>&\d?|&>>?|\d?>>?\s*\S+)")
+#: ⛔ The TARGET class excludes `| & ; ( ) < >`: a greedy `\S+` swallowed an operator glued to the
+#: target, so `>/dev/null||true`, `2>/dev/null|tee l` and `2>/dev/null||true` passed GREEN — the
+#: swallow this whole check exists to catch (measured, review cycle 9).
+_REDIRECTION = re.compile(r"(?:\d?>&\d?|&>>?|\d?>>?\s*[^\s|&;()<>]+)")
 
 #: `set +e` / `set +o errexit` re-enable "keep going after a failure" — the errexit axis.
 _ERRETIT_DISABLED = re.compile(r"(?m)^\s*set\s+\+[eo]\b")
@@ -204,6 +207,19 @@ _ERRETIT_DISABLED = re.compile(r"(?m)^\s*set\s+\+[eo]\b")
 def _run_body(step: dict) -> str:
     """A step's `run:` body, shell line-continuations joined so a wrapped flag is still one command."""
     return str(step.get("run") or "").replace("\\\n", " ")
+
+
+#: A printed REMEDY is identified by its command ROOT plus the flag that makes it the RUNNABLE form.
+#: Anchoring only on a flag window could not tell a command from a MENTION of one: a note like
+#: `echo "NOTE: supabase db push --linked is the manual door"` or
+#: `echo "Use supabase secrets set to add a missing secret"` matched and RED, while
+#: `echo "See the --status applied <version> --yes note."` matched and satisfied the assertion with no
+#: command printed at all (both measured, review cycle 9). The distinguisher is what a *mention*
+#: would not carry; `--yes` may then appear ANYWHERE in the match, so a valid
+#: `migration repair --yes --linked --status applied <version>` is not false-RED for token order.
+_REPAIR_REMEDY = re.compile(r"supabase\s+migration\s+repair[^\"\n]*--status\s+applied[^\"\n]*")
+_DB_PUSH_REMEDY = re.compile(r"supabase\s+db\s+push\s+--linked[^\"\n]*--include-all[^\"\n]*")
+_SECRETS_SET_REMEDY = re.compile(r"supabase\s+secrets\s+set[^\"\n]*--project-ref[^\"\n]*")
 
 
 def _printed_remedies(text: str, pattern: str) -> list[str]:
@@ -370,13 +386,23 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
             f"would stop blocking, and the app flip at the end of the same job would fire over an "
             f"unapplied schema (#10896, #3627)"
         )
+        assert not step.get("shell"), (
+            f"{where} overrides `shell:`. A mutating step must run under the runner's default "
+            f"`bash -e`; `shell: bash -c 'exit 0'` takes the body as `$0` and exits 0 without running "
+            f"it — a silent no-op that reads as a successful apply (measured, review cycle 9)"
+        )
         assert not job.get("continue-on-error"), (
             f"job {job_name!r} sets `continue-on-error` and runs a hosted mutation: a FAILED apply "
             f"then produces a GREEN RUN, and `Dispatch deploy-hosted` (#3627) fires over an "
             f"unapplied schema — the inversion this test exists to catch, with every flag above "
             f"still intact (#10896)"
         )
-        body = _run_body(step)
+        # Comment lines are dropped first, exactly as `_printed_remedies` does: a comment is prose,
+        # so the most natural note on this very step ("# NOTE: v3 consent-gates this; keep --yes")
+        # must not be read as shell and red a correct step (measured, review cycle 9).
+        body = "\n".join(
+            line for line in _run_body(step).splitlines() if not line.lstrip().startswith("#")
+        )
         assert not _ERRETIT_DISABLED.search(body), (
             f"{where} disables errexit (`set +e` / `set +o errexit`): the apply can then fail and "
             f"the step still exits 0, so the co-move dispatch fires over an unapplied schema "
@@ -419,9 +445,7 @@ def test_printed_remediations_pass_yes_too() -> None:
         ),
     }
     for name, path in governed.items():
-        sites = _printed_remedies(
-            path.read_text(encoding="utf-8"), r"--status applied <version>(?:\s+--yes)?"
-        )
+        sites = _printed_remedies(path.read_text(encoding="utf-8"), _REPAIR_REMEDY)
         assert sites, (
             f"{name} must still print a `migration repair --status applied <version>` remedy: an "
             f"operator shown OUT OF ORDER versions needs a command to run (#1095). A silent "
@@ -442,7 +466,7 @@ def test_printed_remediations_pass_yes_too() -> None:
     # prose about `db push` (comments at :38, :156; the echo at :336/:411) cannot false-RED it —
     # measured for a comment that mentions `--linked` (cycle 7) and for `printf`/heredoc forms that an
     # `echo`-prefixed filter missed entirely (cycle 8).
-    pushes = _printed_remedies(drift, r"supabase db push --linked[^\"\n]*")
+    pushes = _printed_remedies(drift, _DB_PUSH_REMEDY)
     assert pushes, (
         "the drift gate must still print a runnable `supabase db push --linked` apply remedy: an "
         "operator resolving drift needs a command to run (#1095), and its disappearance must not "
@@ -465,9 +489,7 @@ def test_printed_secrets_set_remedy_passes_yes_too() -> None:
     is in CLI v3's consent table (docs -> 'Migrating to Supabase CLI v3'), so the copy-paste an
     operator takes from a failing run would fail the same way and say nothing.
     """
-    printed = _printed_remedies(
-        WORKFLOW.read_text(encoding="utf-8"), r"supabase secrets set[^\"\n]*"
-    )
+    printed = _printed_remedies(WORKFLOW.read_text(encoding="utf-8"), _SECRETS_SET_REMEDY)
     assert printed, (
         "the workflow must still PRINT a runnable `supabase secrets set` remedy — it is the only "
         "instruction an operator gets when a required secret is missing (#1121), and its "
