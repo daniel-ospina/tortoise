@@ -1648,15 +1648,20 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # `public.session_narrative`, NOT `:Source.summary`; 432 lines on, §12.1b's
 # `:Source` footnote — the section that decides WHERE vectors live — told a
 # designer that vector *"would be **indexing an existing field**"*, i.e. embed
-# the `summary` the Source already holds. `#10852` (OPEN at this head) would make
-# that field a topic lexicon — six content words behind a constant display prefix
-# — so the blurry section orders exactly the bag-of-words vector §9.4 forbids.
-# ⛔ FUTURE TENSE ON PURPOSE: at this head `tortoise/sdk.py::_session_source_metadata`
-# still derives the summary as "the first substantive utterance", and §9.4 states
-# it as *"`#10852` … WILL replace that derivation"*. A present-tense claim here
-# would be false on the tree it is committed to, and true only once `#10852`
-# merges — a falsehood with a delayed expiry. The reader who lands on §12.1b gets
-# the wrong instruction for the same vector, and nothing reds: both sentences are
+# the `summary` the Source already holds. `#10852` — the PR this pin is committed
+# on — makes that field a topic lexicon — six content words behind a constant
+# display prefix — so the blurry section ordered exactly the bag-of-words vector
+# §9.4 forbids.
+# ⛔ THE TENSE FLIPPED WITH THE FIX, and the pin follows it. `#10978` wrote §9.4
+# in the FUTURE tense ("`#10852` … WILL replace that derivation with a topic
+# lexicon") because at ITS head `_session_source_metadata` still returned the
+# transcript's first substantive utterance. On THIS tree the lexicon IS the
+# derivation, so the future tense is now a falsehood with a negative expiry —
+# and it also read as though the recovery door still dropped the indexed field,
+# which is the opposite of what `#10852` changed. §9.4 therefore states it in
+# the present tense, and the future-tense phrasing is pinned ABSENT below so a
+# well-meaning merge cannot restore it. The reader who lands on §12.1b gets the
+# wrong instruction for the same vector, and nothing reds: both sentences are
 # prose, and the graph stays green while a designer embeds a word list and calls
 # it a summary.
 #
@@ -1681,6 +1686,12 @@ def test_section_9_1b_counts_the_routes_it_actually_enumerates():
 # it — the §9.4/§12.1b split is precisely a "present somewhere" failure.
 _RETIRED_SUMMARY_BLUR = "We already write the summary — it is the S1 narrative"
 _RETIRED_VECTOR_FOOTNOTE = "would be **indexing an existing field**"
+#: #10852 review (P2): §9.4 announced this PR as a future change while
+#: naming the derivation it was about to retire. Both clauses were false on the
+#: tree #10852 merges, and the second one told a reader the recovery door still
+#: drops `_searchText` — the behaviour this PR removes, i.e. the most expensive
+#: possible mis-reading of the ruling doc.
+_RETIRED_FUTURE_DERIVATION = "will replace that derivation with a topic lexicon"
 _SOURCE_VECTOR_FOOTNOTE_ANCHOR = "Practical footnote for `:Source`"
 _SOURCE_VECTOR_SECTION_94_ANCHOR = "it is one vector attached to the `:Source` node"
 
@@ -1790,6 +1801,18 @@ def test_the_source_vector_reads_the_narrative_and_BOTH_doc_sections_say_so():
         f"§9.4 is back to *\"{_RETIRED_SUMMARY_BLUR}\"* — it conflates the "
         f"summary ON THE NODE with the narrative IN THE RECORD, and a design "
         f"reading it embeds `:Source.summary` and calls a bag of words a summary")
+    assert _RETIRED_FUTURE_DERIVATION not in text, (
+        f"§9.4 is back to *\"{_RETIRED_FUTURE_DERIVATION}\"* — it announces "
+        "`#10852` as a future change (it is this PR, so the sentence can never "
+        "come true) and it names the OLD derivation as the current one, so a "
+        "reader holding this line concludes the record→cache door still drops "
+        "`_searchText` — the behaviour `#10852` removed")
+    assert "TOPIC LEXICON" in paragraph, (
+        "§9.4 no longer states what a captured session's `:Source.summary` "
+        "VALUE now is — a display descriptor over the session's TOPIC LEXICON. "
+        "Without it the paragraph leaves the pre-#10000 derivation (the "
+        "transcript's first substantive utterance) as the only one named, "
+        "which is the prose §9.1/D1 forbids")
 
     # ── §12.1b: the section that decides WHERE vectors live may not order the
     #    design §9.4 forbids ──
