@@ -1283,7 +1283,7 @@ def test_a_present_but_EMPTY_graph_passes_presence_and_reaches_the_emptiness_ver
         "--expect-empty",
     ])
     err = capsys.readouterr().err
-    assert "does not exist" not in err, (
+    assert "does not exist in this store" not in err, (
         "the presence check refused a graph that EXISTS and is drained — this "
         "is exactly #10017's post-purge re-run: " + err)
     assert rc == 0, err
@@ -1337,6 +1337,104 @@ def test_write_freedom_needs_the_flag_PAIR_not_ensure_indexes_alone(
         assert sorted(pair.db.list_graphs()) == ["half_rule", "tortoise"]
     finally:
         pair.close()
+
+
+def _embedded_store_with_TWO_graphs(tmp_path, monkeypatch):
+    """A store holding `live` (one turn node) AND `tortoise` (present, empty).
+
+    The residual case: a wrong `--graph-name` whose value the store HAPPENS to
+    hold. Presence cannot tell it from the graph the operator meant, because
+    both exist.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "census_two.db")
+    live = FalkorProjection(db_path, graph_name="live", skip_health_check=True)
+    try:
+        live.g.query("CREATE (:Point {id:'live_t1', is_episodic:true, "
+                     "pointKind:'event'})")
+    finally:
+        live.close()
+    drained = FalkorProjection(db_path, graph_name="tortoise",
+                               skip_health_check=True)
+    try:
+        assert sorted(drained.db.list_graphs()) == ["live", "tortoise"]
+    finally:
+        drained.close()
+    return db_path
+
+
+def test_expect_empty_STILL_certifies_a_wrong_but_EXISTING_graph_name(
+        tmp_path, monkeypatch, capsys):
+    """⛔ PIN ON A LIMIT, not on a guarantee (#11113 review cycle 2, P1).
+
+    The presence check proves a NAME EXISTS. It does not prove it is the graph
+    the operator meant: another tenant's graph of the same name, a typo an
+    earlier run created, or a wrong --db-path pointing at another store all
+    pass it. Measured here: `--graph-name tortoise` on a store whose real
+    target is `live` certifies CLEAN under `--expect-empty`.
+
+    This test exists so the help text can never again claim that `--expect-empty`
+    "can never be used to pass a target that does not exist" — an assurance that
+    is FALSE for a target that exists under the wrong name, which is the class
+    this gate is most likely to be pointed at by accident. If the gate ever
+    grows the intent check that would close this, this pin must be updated
+    deliberately rather than deleted quietly.
+    """
+    db_path = _embedded_store_with_TWO_graphs(tmp_path, monkeypatch)
+
+    rc = tpc.main([
+        "--db-path", db_path, "--graph-name", "tortoise",
+        "--local-record-dir", str(tmp_path / "no-record"),
+        "--expect-empty",
+    ])
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    assert "graph      : tortoise" in out.out, out.out
+    assert "verdict    : CLEAN" in out.out, out.out
+
+
+def test_the_expect_empty_help_NAMES_the_intent_residual():
+    """The false assurance that this pin replaces, asserted absent.
+
+    Truthiness is one thing; a docstring that promises safety the code does not
+    provide is how an operator arms `--expect-empty` on a suspicious run
+    (#11113 review cycle 2, P1 — it was green because nothing pinned the text).
+    """
+    import ast
+    import inspect
+
+    src = inspect.getsource(tpc)
+    tree = ast.parse(src)
+    helps = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == \
+                "add_argument":
+            flags = [a.value for a in node.args
+                     if isinstance(a, ast.Constant)
+                     and isinstance(a.value, str)]
+            for kw in node.keywords:
+                if kw.arg == "help" and isinstance(kw.value, ast.Constant):
+                    for f in flags:
+                        helps[f] = kw.value.value
+
+    expect_help = helps["--expect-empty"]
+    graph_help = helps["--graph-name"]
+    # the false assurance: names the absent case only, and calls it safety.
+    assert "cannot be blessed" not in expect_help
+    assert "refuses those regardless" not in expect_help
+    assert "cannot be blessed" not in graph_help
+    # the true statement, in both operator-visible sites.
+    assert "not the intended" in expect_help.replace("\n", " "), expect_help
+    # the USAGE block is the other operator-visible site (the argparse help for
+    # --graph-name is one line; the full text there is the usage preamble).
+    usage = src.split('"""', 2)[1]
+    flat_usage = " ".join(usage.split())
+    assert "not prove it is the graph you meant" in flat_usage, flat_usage
+    # and the USAGE block must not repeat the old claim either.
+    assert "cannot be blessed" not in usage
+    assert "NOT the same answer as a drained graph" not in usage
 
 
 def test_an_unlistable_store_REFUSES_rather_than_reading_through(
