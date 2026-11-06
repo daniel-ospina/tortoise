@@ -163,14 +163,48 @@ def test_the_off_arm_refuses_every_switch_that_arms_the_passes(monkeypatch):
 
 
 def test_the_off_arm_reads_back_all_four_switches(monkeypatch):
-    """The record must NAME every switch, so a reader sees what was consulted."""
+    """The record must NAME every switch, so a reader sees what was consulted.
+
+    `#10996`: the OFF arm sets ``TORTOISE_VALUE_GATE=0`` EXPLICITLY — the other
+    three stay absent, whose unset value is still OFF. The value gate is the one
+    switch whose ABSENT value is the ON arm, so it is asserted here as ``"0"``
+    and not as ``None``; the pin below is what keeps that distinction alive.
+    """
     for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
 
     arm = e1_paired_arm.off_arm_readback()
 
     assert set(arm) == {*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY}
-    assert set(arm.values()) == {None}
+    assert arm["TORTOISE_VALUE_GATE"] == "0"
+    assert {k: v for k, v in arm.items() if k != "TORTOISE_VALUE_GATE"} == \
+        dict.fromkeys([k for k in arm if k != "TORTOISE_VALUE_GATE"])
+
+
+def test_the_off_arm_PINS_a_DEFAULT_ON_switch_left_unset(monkeypatch):
+    """`#10996` review P1: an unset default-ON switch read as the OFF arm.
+
+    Measured before the fix: with only the four keys cleared,
+    ``value_gate.value_gate_enabled()`` was ``True`` inside an arm this driver
+    labelled OFF, so the pre-registered CONTROL was scored with the `#4899`
+    predicate armed — a fabricated before/after pair, silently. The driver now
+    PINS the switch to `0` and reads it back (a set, truthy value is still
+    refused above), so the label matches the resolved state.
+    """
+    from tortoise import value_gate
+
+    assert e1_paired_arm.DEFAULT_ON_KEYS == ("TORTOISE_VALUE_GATE",)
+    for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+        monkeypatch.delenv(key, raising=False)
+    assert value_gate.value_gate_enabled() is True  # the default we must pin away
+
+    arm = e1_paired_arm.off_arm_readback()
+
+    assert arm["TORTOISE_VALUE_GATE"] == "0", arm
+    assert value_gate.value_gate_enabled() is False, (
+        "the arm is labelled OFF while the resolved predicate is ON — the "
+        "fabricated-pair defect this pin exists for")
 
 
 def test_the_off_arm_accepts_an_explicit_zero(monkeypatch):

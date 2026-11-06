@@ -2479,8 +2479,11 @@ def test_the_measured_arm_is_forced_in_process_and_restored():
         with measure.measured_arm() as arm:
             assert arm["TORTOISE_VET"] == "1", arm
             assert arm["TORTOISE_CLASSIFY_LATER"] == "1", arm
-            # pinned OFF so the arm is a function of the probe, not the shell
-            assert arm["TORTOISE_VALUE_GATE"] is None, arm
+            # pinned OFF so the arm is a function of the probe, not the shell —
+            # and pinned to "0", not to absence: since #10996 an UNSET value gate
+            # is the ON arm, so a pop would print a header that denies the arm
+            # (#10996 review P2). The shell held "1" and it must not survive.
+            assert arm["TORTOISE_VALUE_GATE"] == "0", arm
             assert os.environ["TORTOISE_VET"] == "1"
         assert os.environ["TORTOISE_VET"] == "0"
         assert os.environ["TORTOISE_CLASSIFY_LATER"] == "0"
@@ -9087,6 +9090,10 @@ def test_the_readmes_floor_provenance_claim_matches_the_code(monkeypatch,
     monkeypatch.setattr(probe, "backend_ready", lambda: (True, "ok"))
     for key in (*probe.ARM_KEYS, probe.SEAM_KEY):
         monkeypatch.delenv(key, raising=False)
+    # #10996: the OFF arm's value gate is EXPLICIT — an unset default-ON switch is
+    # refused by the driver now, and that refusal would pre-empt the floor refusal
+    # this test is about.
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
     with pytest.raises(SystemExit) as refused:
         probe.main(["--graph", "g", "--out", str(tmp_path / "off.json")])

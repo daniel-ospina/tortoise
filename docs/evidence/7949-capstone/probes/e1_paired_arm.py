@@ -80,8 +80,20 @@ from capstone_measure import (  # noqa: E402
     run_corpus,
 )
 
-#: The three flags the measured arm pins. OFF means: absent, empty, or "0".
+#: The three flags the measured arm pins. OFF means: present and falsy ("0",
+#: empty) — NOT "absent". ⛔ Since `#10996` an ABSENT ``TORTOISE_VALUE_GATE`` is
+#: the ON arm (the S2.2 mechanical half defaults ON), so the key is listed in
+#: :data:`DEFAULT_ON_KEYS` and an unset value is REFUSED rather than read as OFF.
 ARM_KEYS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_VALUE_GATE")
+
+#: Switches whose UNSET value is ON. For these, "absent" is not an OFF spelling:
+#: the run must SET the falsy value explicitly, so the record shows the arm was
+#: produced rather than inherited. `TORTOISE_VALUE_GATE` joined the set in
+#: `#10996` (the `#4899` mechanical predicate defaults ON); the other two still
+#: default OFF. Measured before the fix: with only the four keys cleared,
+#: ``value_gate.value_gate_enabled()`` was True inside an arm this file labelled
+#: OFF — i.e. the pre-registered CONTROL was scored with the predicate armed.
+DEFAULT_ON_KEYS = ("TORTOISE_VALUE_GATE",)
 
 #: A FOURTH switch for the same pass, and the reason it is checked beside the
 #: three: `TORTOISE_S2_DECISION_SEAM` arms S2.2 *through the arbiter*, so
@@ -94,7 +106,13 @@ SEAM_KEY = "TORTOISE_S2_DECISION_SEAM"
 
 
 def off_arm_readback() -> dict[str, str | None]:
-    """The arm actually in force, READ BACK — never a literal this file types."""
+    """The arm actually in force, READ BACK — never a literal this file types.
+
+    Two refusals, because "unset" is not one state (`#10996`): a switch SET to a
+    truthy value, and a switch in :data:`DEFAULT_ON_KEYS` left UNSET — the
+    second reads OFF by the old rule while the resolver reports ON. Both are the
+    same defect (a mislabelled arm), arriving through different spellings.
+    """
     held = {key: os.environ.get(key) for key in (*ARM_KEYS, SEAM_KEY)}
     on = {k: v for k, v in held.items() if v not in (None, "", "0")}
     if on:
@@ -102,7 +120,16 @@ def off_arm_readback() -> dict[str, str | None]:
             f"REFUSED: {on!r} is set — this driver measures the OFF arm; a run "
             "that prints OFF while the shell holds the passes ON measures the "
             "wrong population under the right label")
-    return held
+    # PIN the default-ON switches to their OFF value, then read them back. An
+    # ABSENT switch from :data:`DEFAULT_ON_KEYS` is the ON arm, so leaving it
+    # unset would label a treated run OFF; setting it here makes the arm a fact
+    # this file produced rather than a claim about the operator's shell (the
+    # `capstone_measure.measured_arm` precedent). The refusal above still fires
+    # for a switch the shell EXPLICITLY armed.
+    for key in DEFAULT_ON_KEYS:
+        if held.get(key) is None or held.get(key) == "":
+            os.environ[key] = "0"
+    return {key: os.environ.get(key) for key in (*ARM_KEYS, SEAM_KEY)}
 
 
 def _frozen_record(prereg: dict | None) -> dict:

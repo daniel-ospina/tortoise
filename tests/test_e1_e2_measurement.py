@@ -1886,18 +1886,33 @@ def test_the_arm_table_names_which_arm_production_runs():
 
 
 def test_the_bundle_doc_carries_the_same_reconciliation():
-    """One arm cannot be production in the probe and a what-if in the bundle."""
+    """One arm cannot be production in the probe and a what-if in the bundle.
+
+    `#10996` inverted this pin with the claim it holds. The bundle used to say
+    ``before`` was the deployed config and the scored arm was *"forced ON … the
+    gate's behaviour once it is switched on, which is the decision #7949 still
+    carries"*. Both sentences are now false — the mechanical half defaults ON, so
+    the scored arm IS the deploy and "enable the flag and re-measure" is done —
+    and leaving them in place kept two contradicting readings of the decisive
+    question in the artifact the E1 number is read from (the `#10996` review's
+    P1: the false one sat under the table with the numbers).
+    """
     text = (_EVIDENCE_DIR / "E1-E2.md").read_text(encoding="utf-8")
     assert "exactly what production wires today" not in text
     note = " ".join(text.split())
-    assert "**forced ON**" in note, (
-        "E1-E2.md must say the scored arm has both flags forced ON")
     for citation in ("fly.toml", ".github/scripts/fly-managed-secrets.txt"):
         assert citation in note, (
-            f"E1-E2.md must cite {citation} as the evidence that the deploy leaves "
-            "all three flags OFF")
-    assert "`before` arm is what the" in note, (
-        "E1-E2.md must name the `before` arm as the deployed configuration")
+            f"E1-E2.md must cite {citation} as the evidence that the deploy sets "
+            "none of the switches")
+    assert "what production runs by default" in note, (
+        "E1-E2.md must name the scored arm as the configuration production runs "
+        "by default since #10996")
+    assert "`before` arm is what the" not in note, (
+        "E1-E2.md still names the `before` arm as the deployed configuration, "
+        "which runs the gate-armed arm by default since #10996")
+    assert "defaults **ON**" in note, (
+        "E1-E2.md must state that unset is no longer an OFF spelling for the "
+        "value gate — that is why both arms are set explicitly")
     assert "REQUIRED_ARMS" in note, (
         "E1-E2.md must record WHY the arm keeps its misleading name instead of "
         "silently renaming the scored arm")

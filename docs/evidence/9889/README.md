@@ -90,6 +90,16 @@ census (`capstone_measure.census`), with `TORTOISE_VET`,
 `TORTOISE_CLASSIFY_LATER` and `TORTOISE_VALUE_GATE` OFF. The arm is **read back
 from `os.environ`** and printed, never typed as a literal.
 
+⚠️ **`TORTOISE_VALUE_GATE` OFF means `=0`, not "unset" — since `#10996`.** The
+S2.2 mechanical half defaults **ON** (`tortoise/value_gate.py`), so an ABSENT
+value gate is the *treatment* arm; a control produced by unsetting it would be
+the treatment under the control's label. `e1_paired_arm.off_arm_readback()`
+therefore REFUSES an unset value gate (naming the key), and the OFF arm is run
+with `TORTOISE_VALUE_GATE=0`. That reproduces the **intent** of
+`PRE-REGISTRATION.md`'s CONTROL arm ("the selection flags unset … their default
+is OFF"); the frozen record's *wording* predates the flip and is left unedited —
+amending a pre-registration is its owner's call, not a probe's.
+
 ```bash
 export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n 's/^export TORTOISE_DB_URI=//p' | tr -d "'")"
 uv run python docs/evidence/7949-capstone/probes/e1_paired_arm.py \
