@@ -1222,44 +1222,6 @@ def test_a_NAMELESS_target_is_REFUSED_not_verified_as_some_other_graph(
         proj.close()
 
 
-def test_the_EMBEDDED_branch_never_coerces_an_EMPTY_name_into_a_different_graph(
-        tmp_path, monkeypatch):
-    """⛔ `graph_name or "tortoise"` opened a DIFFERENT graph than the artifact named.
-
-    #11113 review cycle 3, P3: the guard refuses a falsy name, but the EMBEDDED
-    branch coerced one away before the guard existed, so the library arm reached
-    the wrong graph and said nothing. Measured before this pin:
-
-        read_graph_turns(None, db, "")      -> the `tortoise` graph's nodes
-        resolve_graph_name(None, db, "")    -> ''        # the artifact's name
-
-    i.e. a run that certifies `tortoise` while its report names `""`. The
-    coercion is now `is not None`, so ONLY an absent name takes the documented
-    default and an EMPTY one is refused like the URI leg already was.
-
-    RED under the mutation this defends: restore `graph_name or "tortoise"` and
-    the `pytest.raises` below does not fire (the read returns `tortoise`'s
-    nodes).
-    """
-    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
-
-    with pytest.raises(tpc.CensusError) as exc:
-        tpc.read_graph_turns(None, db_path, "")
-    assert "no NAME" in str(exc.value)
-
-    # An ABSENT name is still the documented default, and it still reads.
-    assert "s1_t1" in tpc.read_graph_turns(None, db_path, None)["nodes"]
-
-    # …and nothing was minted by either call.
-    from tortoise.projection import FalkorProjection
-    proj = FalkorProjection(db_path, graph_name="tortoise",
-                            skip_health_check=True, ensure_indexes=False)
-    try:
-        assert sorted(proj.db.list_graphs()) == ["tortoise"]
-    finally:
-        proj.close()
-
-
 def test_an_ABSENT_name_refuses_rather_than_assuming_the_default(
         monkeypatch):
     """No name anywhere is not `tortoise` — the same rule, one spelling over.

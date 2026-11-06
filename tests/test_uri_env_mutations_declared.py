@@ -846,9 +846,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # process and asserts a REFUSAL, never a measurement.
     "test_7949_capstone_measure.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*"docker://:@127\.0\.0\.1:1/'],
-    # #11112/#11113 `turn_parity_census`: the TWO sites are the helpers that
-    # build a REAL embedded store (`_embedded_store_with_tortoise` and its
-    # EMPTY twin, which seeds one turn node and then drains it), so the presence
+    # #11112/#11113 `turn_parity_census`: the THREE sites are the helpers that
+    # build a REAL embedded store (`_embedded_store_with_tortoise`, its EMPTY
+    # twin which seeds one turn node and drains it, and the TWO-graph fixture
+    # the `--expect-empty` LIMIT pin needs), so the presence
     # pre-check and the write-freedom pins can be measured against a real
     # `GRAPH.LIST` (a fake cannot show that a typo'd `--graph-name` mints
     # `tortise`, nor that `ensure_indexes=False` alone still does) — the embedded
