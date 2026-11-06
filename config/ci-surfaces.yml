@@ -5119,6 +5119,19 @@ surfaces:
   - test_pack_shipping.py
   - test_pack_shipping_wheel.py
   - test_pack_state.py
+  # #11001: the pack's DECLARED hierarchy (`tortoise/pack_hierarchy.py` +
+  # `pack_registry` carrying `ontology.hierarchies`) — the declaration is READ and
+  # never inferred, because an invented edge is a structure nobody asserted.
+  # ⛔ NOT #11021's file and NOT #11021's change: this row repairs a `main` breakage
+  # merged minutes before this branch integrated it (`e918f3d6dd`, PR #11213, landed
+  # the test file with no manifest row — measured: `tools/ci_selection.py --integrity`
+  # at `origin/main` `9732106fdc` reports `manifest drift:
+  # ['test_pack_hierarchy_11001.py']`, so the REQUIRED `manifest-integrity` leg is
+  # red on main and no leg runs the suite). `core` because its subjects
+  # (`tortoise/pack_hierarchy.py`, `tortoise/pack_registry.py`) match no
+  # `SOURCE_PATTERNS` row and fall through to the `core` fallback; hermetic —
+  # manifest YAML plus the two modules, no DB, no graph, no network.
+  - test_pack_hierarchy_11001.py
   # #9068: the #5475 pack-approval-set residuals MEASURED — a :Pipeline row,
   # a journal-less fold, and the DECLARED offline re-typing. Registered beside
   # the pack tests it reads (`pack_state.graph_kind_namespaces` /
@@ -8795,6 +8808,7 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
+  test_pack_hierarchy_11001.py: 2.0  # added by #11021 to repair a `main` breakage (see the `core` row): the file landed at `e918f3d6dd` with no manifest row, so it had no reading AND `manifest-integrity` was red on `main`. The #3400/#4348 trap applies unchanged — a fast file added by a PR must carry a weight, and a default is not a reading. Hermetic: manifest YAML plus `pack_hierarchy`/`pack_registry`, no DB, no graph, no network, no model. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_referentiality_11021.py: 2.0  # new in #11021 (review P1) — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input. The row must EXIST, not merely default: the `core` + `tier1` registrations put it in `fast_pool()`, and a fast file added by a PR must carry a weight at all ("a default is not a reading"). What the weight covers: hermetic — a scripted model and in-memory embed lists, no DB, no graph, no network, no `gh`; the only file reads are the committed capstone corpus under `docs/evidence/7949-capstone/corpus/` and `tests/eval/write_path/salience_labels.jsonl`, plus `extractor_v2`'s own predicates. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every row a later review round adds, and this file gained eleven of them inside its own PR. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_vocabulary_gap_run_reader_10626.py: 2.0  # new in #10626 — the same #3400/#4348 trap as the row below: a file a PR ADDS cannot carry a CI junit reading yet, so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading. The row must EXIST, not merely default (a default is not a reading). 14 of its 18 arms are hermetic; the 4 `sdk`-fixture arms skip visibly without `TORTOISE_DB_URI` (re-derived at `#10790`: `grep -c '^def test_'` -> 18 — the 18th is that PR's review-note pin for the LAZY wiring itself, a source read that adds no `sdk` arm, so the hermetic/`sdk` split moves 13/4 -> 14/4). `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_cli_config_show.py: 2.0  # new in #10694 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet, so it takes the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading. The row must EXIST, not merely default ("a default is not a reading"): the `api` registration above puts it in `fast_pool()`, and a fast file added by a PR must carry a weight at all. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
