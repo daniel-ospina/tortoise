@@ -761,9 +761,19 @@ def test_a_satisfies_heading_with_no_checkbox_is_not_a_checklist():
 
 
 def test_a_tick_in_a_later_comment_still_counts():
-    """Criteria are ticked once proved; requiring heading+boxes in ONE comment re-flags a finished issue."""
+    """A finished issue stays clear — but NOT because of the later tick (review round 26, P2).
+
+    This test's name and docstring used to credit the `- [x] a` in the follow-up comment for clearing
+    the arm. It never did: the heading's OWN comment carries `- [ ] a` / `- [ ] b`, so the first arm
+    already returns True. Kept (and relabelled) as the control it actually is — the affordance this
+    test was believed to justify is the one that was a false PASS, and it is pinned against below in
+    `test_a_ticked_list_after_the_heading_is_not_this_headings_criteria`.
+    """
     findings, _ = L.classify_issue([IN_FLIGHT, "## Satisfies\n\n- [ ] a\n- [ ] b\n", "- [x] a\n"], 1)
     assert findings == []
+    # …and it clears on the heading's own UNticked boxes alone, with no follow-up comment at all —
+    # which is the whole demonstration that the later tick is not load-bearing.
+    assert L.classify_issue([IN_FLIGHT, "## Satisfies\n\n- [ ] a\n- [ ] b\n"], 1)[0] == []
 
 
 def test_an_injected_wip_verdict_is_honoured_and_attributed():
@@ -1709,20 +1719,11 @@ def test_the_usage_block_never_advertises_wip_for_a_pr_mode():
         assert any(m in line for m in _MODES_THAT_READ_WIP), line
 
 
-# --- review round 11: the decline escape deleted a claim, and the sweeps hid their own cap ----
-# `DECLINE_RE` is applied PER LINE to EVERY ref on that line, so a bare `deliberately not` anywhere
-# on a claiming line deleted the claim. Measured at the reviewed head:
-#   `Refs #11077 — the lint is deliberately not a gate.` -> classify_pr(...) == []   (CLEAN)
-# That is a false PASS in the direction this module ranks worst (#10534: delivered work that nothing
-# closes reports as healthy), from a sentence that is not about closing the reference at all.
-def test_an_incidental_deliberately_not_does_not_delete_the_claim():
-    """The sentence beside the claim is not the author answering about the reference."""
-    body = "Refs #11077 — the lint is deliberately not a gate.\n"
-    assert L.claims(body)["declined"] == [], L.claims(body)
-    findings = L.classify_pr(body, 11078)
-    assert [f.evidence["unresolved"] for f in findings] == [[11077]], findings
-
-
+# --- review round 11: the sweeps hid their own cap, and the peer scan was vacuous ---------------
+# The `--sweep` / `--sweep-issues` cap and the peer-vocabulary defects live here; the third finding
+# of that round (the decline escape) is pinned above, next to `DECLINE_RE`'s own controls — a
+# concurrent lane landed the same fix on this branch, so the two copies were reconciled rather than
+# stacked.
 @pytest.mark.parametrize("body,why", [
     # the pinned real shape: the quoted keyword sits in an inline code span, so `strip_code` has
     # already blanked it — the decline must survive that (this is why the phrase is not deleted)
@@ -1739,14 +1740,14 @@ def test_the_decline_still_clears_a_reference_the_author_says_is_not_closing(bod
 
 
 def test_the_decline_window_does_not_reach_across_a_clause():
-    """The narrowing is a WINDOW, not a word list: the phrase must be adjacent to what it declines.
+    """The narrowing is a WINDOW, not a word list: the phrase must sit beside the reference's clause.
 
     `deliberately not a gate` is about the gate; `deliberately not closing` is about the reference.
-    Both are pinned above/below, so this asserts only that the same sentence cannot be read the
-    other way round — the failure would be silent in the CLEAN direction.
+    Both directions are pinned (the incident cases above, the controls here and in the parametrised
+    case below), because the failure mode in the CLEAN direction is silent.
     """
-    # the incidental phrase must not decline, however much prose follows it
-    for tail in ("a gate", "a blocker for anyone", "worth blocking a merge over"):
+    for tail in ("a gate", "a blocker for anyone", "worth blocking a merge over",
+                 "the thing this measures"):
         assert L.classify_pr(f"Refs #1234 — deliberately not {tail}.\n", 99), tail
 
 
@@ -2391,6 +2392,193 @@ def test_a_gloss_ending_on_an_auxiliary_cannot_carry_a_clause_subject_past_the_b
         "Refs #100 (a) — not closing it.\n",
     ):
         assert L.classify_pr(honest, 1) == [], honest
+
+
+def test_a_gloss_with_a_MID_CLAUSE_auxiliary_cannot_carry_the_subject_either():
+    r"""Round 27, P2 — the SAME class-A silent drop as the case above, one word over.
+
+    The discriminator was END-anchored (`[\W_]*\)` after the auxiliary), so a gloss whose auxiliary
+    sat mid-clause slipped past it and still carried the clause subject past the bridge:
+
+        Refs #1234 (the sprint is, apparently) — not closed.   -> declined=[1234], CLEAN  # #1234 dropped
+        Refs #1234 — the sprint is not closed.                 -> flagged                  # the control
+
+    The residual was DECLARED in the code and nowhere else, so the merge record certified a residual
+    set that did not contain it. `\b{_AUX_TAIL}\b` now refuses the auxiliary anywhere in the gloss.
+    """
+    for dropped in (
+        "Refs #1234 (the sprint is, apparently) — not closed.\n",
+        "Refs #1234 (the outage is, as far as i can tell) — not closed.\n",
+        "Refs #1234 (it did, eventually) — not closed.\n",
+    ):
+        assert L.claims(dropped, 1)["declined"] == [], dropped
+        assert [f.evidence["unresolved"] for f in L.classify_pr(dropped, 1)] == [[1234]], dropped
+
+    # the controls: a gloss naming NO auxiliary still declines, so the narrowing did not delete the
+    # feature — `(2026-11-05.)` is why the tail is anchored on the auxiliary and not on punctuation.
+    for honest in (
+        "Refs #1234 (blind spot) — not closed.\n",
+        "Refs #100 (the parent.) — not closed.\n",
+        "Refs #100 (P3.) — not closed.\n",
+        "Refs #100 (2026-11-05.) — not closed.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
+
+
+def test_a_CONTRACTED_auxiliary_in_a_gloss_cannot_carry_the_subject_either():
+    r"""Round 28, P2 — a class-A silent drop: the auxiliary discriminator is blind to contractions.
+
+    `_AUX_TAIL`'s tail is `(?:[\W_]|$)`, i.e. "the auxiliary ends the gloss OR is followed by a
+    non-word character". A CONTRACTION puts a WORD character there — `isn't` is `is` + `n` — so the
+    lookahead never fired and the gloss carried a clause subject past the bridge, dropping the claim:
+
+        Refs #1234 (the sprint isn't) — not closed.            -> declined=[1234], CLEAN  # #1234 DROPPED
+        Refs #1234 (the migration didn't land) — not closed.    -> declined=[100],  CLEAN  # DROPPED
+        Refs #1234 (the sprint is, apparently) — not closed.   -> flagged                 # the control
+
+    `n['’]?t` is now an admitted tail, and `wo` is spelled out because `won't` does not begin with
+    `will`. Both arms only widen REFUSALS, so neither can cost a claim — the controls below keep the
+    honest glosses declining.
+    """
+    for dropped in (
+        "Refs #1234 (the sprint isn't) — not closed.\n",
+        "Refs #100 (the migration didn't land) — not closed.\n",
+        "Refs #100 (the sprint hasn't) — not closed.\n",
+        "Refs #100 (the box won't) — not closed.\n",
+    ):
+        assert L.claims(dropped, 1)["declined"] == [], dropped
+        assert [f.evidence["unresolved"] for f in L.classify_pr(dropped, 1)] == [[
+            1234 if "1234" in dropped else 100]], dropped
+
+    # the controls: a gloss naming NO auxiliary still declines, and the uncontracted spelling is
+    # still refused — so the widening above did not delete the feature it protects.
+    for honest in (
+        "Refs #1234 (blind spot) — not closed.\n",
+        "Refs #100 (the parent.) — not closed.\n",
+        "Refs #100 (a) — not closed.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
+    for flagged in ("Refs #1234 (the sprint is, apparently) — not closed.\n",):
+        assert [f.evidence["unresolved"] for f in L.classify_pr(flagged, 1)] == [[1234]], flagged
+
+def test_a_colon_introduces_a_reason_like_the_other_spellings():
+    """Round 28, P3 — the SAME honest decline flipped verdict on the punctuation alone.
+
+    `_DECLINE_TAIL` treats `:` as clause punctuation, but the terminator admitted only `;`, `.`, the
+    four reason words, `(` and a dash — so the colon spelling was the one form of the author's own
+    convention that was FLAGGED:
+
+        Refs #100 — deliberately not closing: measurement only.   -> FLAGGED
+        Refs #100 — deliberately not closing; measurement only.   -> declined
+        Refs #100 — deliberately not closing — measurement only.  -> declined
+
+    The structural rule is unchanged: the reason may contain no `#`, so it still cannot sweep a live
+    claim into the decline — asserted here with the pinned negative.
+    """
+    for honest in (
+        "Refs #100 — deliberately not closing: measurement only.\n",
+        "Refs #100 — deliberately not closing: the estimate is still open.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
+
+    # the reason may not name a reference — that would buy the decline with a second claim
+    for still_flagged in (
+        "Refs #100 — not closing it: #300 must land first.\n",
+        "Refs #100 — non-closing reference, see the review.\n",
+    ):
+        assert [f.evidence["unresolved"] for f in L.classify_pr(still_flagged, 1)] == [[100]], still_flagged
+
+
+def test_a_closing_list_after_an_UNREADABLE_gloss_under_counts_and_is_a_DECLARED_residual():
+    """Round 28, P2 — the `closing` bucket under-counts; the UNRESOLVED direction was measured and
+    is NOT a false PASS.
+
+    `_GLOSS` cannot read a parenthetical holding a `#`, a `)`, or more than 80 characters, so the
+    claim list stops at the gloss and a ref sharing that `Closes` list is not counted:
+
+        Closes #100 (see #999), #200.      -> closing=[100]        # #200 uncounted
+        Closes #100 (the parent), #200.    -> closing=[100], weak=[200]   # the readable control
+
+    ⛔ BUT THE FINDING'S STRONGER CLAIM — "every `#N` after the gloss is silently dropped and arm 1
+    reads CLEAN" — is FALSIFIED by measurement: a ref in its OWN claim is still read, so the case
+    that would matter (an unresolved claim vanishing) does not occur:
+
+        Closes #100 (see #999), Refs #200.  -> weak=[200], FLAGGED
+        Refs #100 (see #999), #200.         -> weak=[100], FLAGGED
+
+    So the residual is an under-count of the RESOLVED set (which can under-report what a PR closes),
+    not a dropped claim. Making the gloss non-terminating is a change to the claim-list grammar —
+    the part rounds 22–25 kept trading one direction of error for the other in — so it is declared
+    here rather than restructured at the end of this lane. Pinned so it is a decision, not a silence.
+    """
+    under = "Closes #100 (see #999), #200.\n"
+    assert L.claims(under, 1)["closing"] == [100], "the under-count this residual names"
+    assert L.classify_pr(under, 1) == [], "rc 0 is correct: both refs ARE closed by `Closes`"
+    # the control: a readable gloss keeps the list, so the narrowing is the gloss reader alone
+    control = "Closes #100 (the parent), #200.\n"
+    assert 200 in L.claims(control, 1)["closing"] + L.claims(control, 1)["weak"]
+    # ⛔ and the falsified half — an UNRESOLVED claim is never dropped
+    for flagged in (
+        "Closes #100 (see #999), Refs #200.\n",
+        "Refs #100 (see #999), #200.\n",
+    ):
+        assert L.classify_pr(flagged, 1) != [], flagged
+
+
+def test_the_abbreviation_split_is_a_DECLARED_residual():
+    """Round 16/17's residual, which this body's ledger claimed was pinned and was not.
+
+    `Refs #100, #200 — deliberately not closing #100, e.g. #200.` declines `#100` and flags `#200`:
+    the abbreviation splits the object list. An example is arguably not the same list, so the
+    grammar does not stitch it — the honest author writes both refs out without the `e.g.`.
+    """
+    body = "Refs #100, #200 — deliberately not closing #100, e.g. #200.\n"
+    assert L.claims(body, 1)["declined"] == [100]
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[200]]
+    # the control: the same list written without the abbreviation declines BOTH
+    control = "Refs #100, #200 — deliberately not closing #100, #200.\n"
+    assert L.classify_pr(control, 1) == [], control
+
+
+def test_a_STATE_copula_after_an_agent_subject_is_a_DECLARED_residual():
+    """Round 27, P3 — a CLASS-B false positive, declared rather than fixed, and pinned so the state
+    is a recorded decision instead of a silence the next round can "discover".
+
+    The bridge admits an ACT (`does`/`do`/modals) after a human-agent subject but not a STATE
+    (`is`/`am`/`are`/`was`/`were`), so the same honest decline flips verdict on the auxiliary alone:
+
+        Refs #100 — we do not close it.              -> declines
+        Refs #100 — we are not closing it.           -> FLAGGED
+        Refs #100 — the author does not close the issue.  -> declines
+        Refs #100 — the author is not closing the issue.  -> FLAGGED
+
+    Admitting the state copula after those subjects is NOT a one-line widening: `we are not closed`
+    would then decline too, and that sentence says nothing about #100 — the round-13/round-20
+    class-A hole this narrowing exists to close. Closing it needs the object to be proven to name
+    the reference, which is a change to the target RESOLUTION, not to the bridge; the honest author
+    has spellings that decline (`does not close it`, `not closing #100`). Declared, not guessed at.
+    """
+    # the false-positive direction, pinned as the current (declared) behaviour
+    for flagged in (
+        "Refs #100 — we are not closing it.\n",
+        "Refs #100 — the author is not closing the issue.\n",
+        "Refs #100 — I am not closing it.\n",
+    ):
+        assert L.claims(flagged, 1)["declined"] == [], flagged
+
+    # the ACT spelling of each is the working form, and the class-A hole stays closed
+    for honest in (
+        "Refs #100 — we do not close it.\n",
+        "Refs #100 — the author does not close the issue.\n",
+        "Refs #100 — I do not close it.\n",
+    ):
+        assert L.classify_pr(honest, 1) == [], honest
+    for about_something_else in (
+        "Refs #100 — we are not closed.\n",
+        "Refs #100 — the PR is not closed.\n",
+        "Refs #100 — the sprint is not closed.\n",
+    ):
+        assert [f.evidence["unresolved"] for f in L.classify_pr(about_something_else, 1)] == [[100]]
 # --- review round 24: one list grammar read by three readers, and one object slot -------------------
 
 
@@ -2520,10 +2708,17 @@ def test_a_task_list_SOMEWHERE_is_not_a_satisfies_checklist():
     assert L.has_satisfies_checklist([body_list, empty]) is False
 
 
-def test_the_checklist_must_belong_to_the_heading_but_a_LATER_tick_still_counts():
+def test_the_checklist_must_belong_to_the_heading_and_a_LATER_tick_does_not_count():
     """The two sides the fix must keep apart: a box in the HEADING's own comment clears the arm, and
-    a TICK in a follow-up comment still does (criteria are ticked once proved — requiring
-    co-location would re-flag every finished issue, which is why the original predicate was loose)."""
+    an UNticked list in a later comment does not.
+
+    ⛔ THE NAME AND THE THIRD ASSERTION ARE NOW THE WHOLE STORY (review round 26, P2): the "a TICK in
+    a follow-up comment still does" half was removed because it was a false PASS — a finished list
+    anywhere after the heading cleared a `## Satisfies` with no criteria. This test's second
+    assertion still holds, but it holds on the heading's own `- [ ]` boxes, not on the later tick;
+    the ticked/unrelated pair is pinned in
+    `test_a_ticked_list_after_the_heading_is_not_this_headings_criteria`.
+    """
     inv = "IN FLIGHT: 3.2c — branch feat/census"
     assert L.classify_issue([inv, "## Satisfies\n\n- [ ] a\n- [ ] b\n"], 1)[0] == []
     assert L.classify_issue([inv, "## Satisfies\n\n- [ ] a\n- [ ] b\n", "- [x] a\n"], 1)[0] == []
@@ -2604,8 +2799,14 @@ def test_the_checklist_belongs_to_the_satisfies_SECTION_not_the_whole_comment():
                  "## Satisfies\n\n* [ ] a\n\n### a sub-heading inside the section\n\n+ [ ] b\n"):
         assert L.has_satisfies_checklist([real]) is True, real
         assert L.classify_issue([real, inv], 1)[0] == [], real
-    # …and the cross-comment arm round 25 added is untouched.
-    assert L.has_satisfies_checklist(["## Satisfies\n\nTo be derived.\n", "- [x] a\n"]) is True
+    # ⛔ THE CROSS-COMMENT TICK DOES **NOT** CLEAR IT (the parallel lane's round-26 finding, kept).
+    # The arm round 25 tolerated was itself a false PASS — a finished `## Verification` list in ANY
+    # later comment cleared a criteria-less heading. The two narrowings compose: a box must be in the
+    # heading's own SECTION, and a tick in some later comment is not this heading's criteria.
+    assert L.has_satisfies_checklist(["## Satisfies\n\nTo be derived.\n", "- [x] a\n"]) is False
+    assert [f.arm for f in L.classify_issue(
+        [inv, "## Satisfies\n\nTo be derived.\n", "## Verification\n\n- [x] x\n"], 1)[0]] \
+        == [L.ARM_ISSUE]
 
 
 def test_an_honest_decline_may_carry_its_reason_as_an_APPOSITIVE():
@@ -2673,7 +2874,7 @@ def test_the_marker_spelling_the_block_ships_is_the_one_the_lint_reads():
     # placeholders are substituted — i.e. the block does not teach an unreadable spelling.
     template = yaml.safe_load(
         (ROOT / ".github" / "ISSUE_TEMPLATE" / "agent_finding.yml").read_text(encoding="utf-8"))
-    value = [b for b in template["body"] if b.get("id") == "working_process"][0]["attributes"]["value"]
+    value = next(b for b in template["body"] if b.get("id") == "working_process")["attributes"]["value"]
     marker_lines = [ln for ln in value.splitlines() if "IN FLIGHT:" in ln]
     assert marker_lines, "the block no longer mentions the marker at all"
     for line in marker_lines:
@@ -2693,3 +2894,570 @@ def test_the_marker_spelling_the_block_ships_is_the_one_the_lint_reads():
     assert L.in_flight_markers(["```\nIN FLIGHT: 4282 — branch fix/x\n```"]) == []
     # …and the unsubstituted template is still not a claim.
     assert L.in_flight_markers(["IN FLIGHT: <ids> — branch <b> — box <c> — since <UTC>"]) == []
+
+# --- review round 25: `commit` is not the reference, and two flags that could not be honoured -----
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #100 — does not close the commit.", "a COMMIT is the closing verb's object"),
+    ("Refs #100 — this PR does not close the commit.", "…same, behind a two-word subject"),
+    ("Refs #100 — no closing commit.", "`no closing commit` names a commit, not `#100`"),
+    ("Refs #100 — does not close commits.", "the plural spelling, same object"),
+    ("Refs #100 — deliberately not closing the commit.", "the convention word does not change the object"),
+])
+def test_the_commit_is_not_the_object_of_a_decline(body, why):
+    """Measured at `afd6de51d` (review round 25, P2) — the FALSE PASS direction, class A.
+
+    `commit|commits` sat in `_REF_NOUN`, the object list a decline may name, so a sentence about a
+    COMMIT cleared the reference on the line while saying nothing about it (declined=[100], rc 0):
+
+        Refs #100 — does not close the commit.    -> CLEAN, declined=[100]   (#100 dropped)
+
+    A closing keyword closes an ISSUE (GitHub's own "Linking a pull request to an issue"), so a
+    commit is not the reference — the same ruling round 22 made for `pr`/`prs`, one noun over. The
+    constant's own comment already said the list admits "the reference, and nothing else".
+    """
+    assert L.claims(body + "\n", 1)["declined"] == [], why
+    assert [f.evidence["unresolved"] for f in L.classify_pr(body + "\n", 1)] == [[100]], why
+
+
+@pytest.mark.parametrize("body,why", [
+    ("Refs #100 — this commit does not close it.", "the commit as SUBJECT, the reference as object"),
+    ("Refs #100 — these commits do not close it.", "the plural demonstrative form"),
+])
+def test_the_commit_that_does_not_close_it_is_still_an_honest_decline(body, why):
+    """The mirror half of the removal above, pinned so the fix cannot be made green by deleting the
+    noun outright: deleting `commit` from the OBJECT list alone left the honest sentence FLAGGED
+    (`declined=[]` at `afd6de51d`), a class-B false positive on exactly the honesty the block asks
+    for. `commit` is now admitted where `pr` is — as the two-word subject whose demonstrative makes
+    it the reference — so both spellings of the same sentence agree."""
+    assert L.claims(body + "\n", 1)["declined"] == [100], why
+    assert L.classify_pr(body + "\n", 1) == [], why
+
+
+def test_the_commit_subject_narrowing_keeps_the_bare_and_the_forms_out():
+    """`commit` is admitted ONLY behind `this`/`these`, exactly as `pr` is (round 20's narrowing) —
+    so the forms that say nothing about the reference still take the object route and still flag."""
+    for body in ("Refs #100 — the commit is not closed.\n",
+                 "Refs #100 — commit is not closed.\n"):
+        assert L.claims(body, 1)["declined"] == [], body
+        assert [f.evidence["unresolved"] for f in L.classify_pr(body, 1)] == [[100]], body
+    # …and the objects that genuinely ARE the reference keep declining, so the grammar is not
+    # narrowed shut.
+    for body in ("Refs #100 — not closing this issue.\n",
+                 "Refs #100 — does not close #100.\n",
+                 "Refs #100 — this PR does not close the issue.\n"):
+        assert L.claims(body, 1)["declined"] == [100], body
+        assert L.classify_pr(body, 1) == [], body
+
+
+def test_json_and_annotate_are_refused_together(tmp_path):
+    """Measured at `afd6de51d` (review round 25, P4): `main()` dispatches `if args.json: … elif
+    args.annotate: …`, so both flags together ran the JSON mode and emitted NO `::warning`/`::notice`
+    line at all — a workflow step that asked for annotations silently produced none. There is no
+    union of one JSON document and a stream of annotations, so the pair is refused rather than
+    resolved in silence, the same doctrine as `--label` / `--comments-file` above it."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    r = _run("--body-file", str(body), "--json", "--annotate")
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert "--json and --annotate are mutually exclusive" in r.stderr
+    # the controls: each flag alone still runs its own surface
+    assert _run("--body-file", str(body), "--json").returncode == L.RC_FINDINGS
+    assert "::warning title=issue-process-lint" in _run("--body-file", str(body), "--annotate").stdout
+
+
+@pytest.mark.parametrize("argv", [
+    ("--pr", "1"),
+    ("--issue", "1"),
+    ("--body-file", "{body}"),
+    ("--issue-body-file", "{body}"),
+])
+def test_limit_is_refused_on_every_mode_that_reads_a_fixed_subject(argv, tmp_path):
+    """Measured at `afd6de51d` (review round 25, P4): `--limit` is read by the two sweeps and by
+    nothing else, so on every other mode it was accepted and silently ignored while the caller
+    believed the run had been narrowed. Refused here for the same reason `--label` is — and the
+    sweeps stay the control, so the refusal cannot be made green by refusing the flag everywhere."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    r = _run(*(a.format(body=str(body)) for a in argv), "--limit", "3")
+    assert r.returncode == 2, (argv, r.returncode, r.stderr)
+    assert "--limit applies to --sweep/--sweep-issues only" in r.stderr
+
+
+def test_the_default_limit_is_not_refused_offline(tmp_path):
+    """The control for the refusal above: `--limit`'s default must not read as an explicit flag, or
+    every offline run would be refused for a cap it never asked for. Only the OFFLINE modes are run
+    here — the live ones would reach `gh`, and this file is on the required `core` surface, which is
+    hermetic (no network, modelled by the `fetch_*`/`sweep_*` monkeypatch seam elsewhere)."""
+    body = tmp_path / "body.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    for argv in (("--body-file", str(body)), ("--issue-body-file", str(body))):
+        assert _run(*argv).returncode in (L.RC_CLEAN, L.RC_FINDINGS), argv
+
+# --- review round 26: two false PASSes, in the two arms this file's pairs exist to pin ------------
+
+
+def test_an_emphasised_continuation_is_the_same_list():
+    """Measured at `afd6de51` (review round 26, P2) — the FALSE PASS direction, arm 1.
+
+    `CLAIM_RE`'s continuation separator was `_SOFT_GAP` — whitespace only — while the DECLINE list
+    (`_REF_LIST`), the plural run (`_REF_RUN_GAP_RE`) and this module's own comment all admitted
+    Markdown emphasis (`_LIST_SEP`'s `*`, `_`, `` ` ``). So the emphasis a decline list ACCEPTS made
+    the claim list lose the reference, and `#200` was never even evaluated:
+
+        `Closes #100, #200`            -> closing=[100], weak=[200]                     (correct)
+        `Closes #100, **#200**`        -> `#200` absent, rc 0                           (false PASS)
+        `Part of **#100**, #200`       -> weak=[100], `#200` absent, rc 0               (false PASS)
+        `Part of #100 and **#200**`    -> weak=[100], `#200` absent, rc 0               (false PASS)
+
+    Emphasised references are prose this repo writes (`#11116`: `Also closes the gap tracked by
+    **#5114**`), so this is not a theoretical spelling. Each shape is pinned as a PAIR — the
+    emphasised body must read exactly like its unemphasised twin — and the round-22 blank-line rule
+    and the conjunction prose control are re-run here so the widening cannot buy its green by
+    re-opening either.
+    """
+    for plain, emph in (("Closes #100, #200\n", "Closes #100, **#200**\n"),
+                        ("Refs #100, #200\n", "Refs #100, *#200*\n"),
+                        ("Part of #100 and #200\n", "Part of #100 and **#200**\n"),
+                        ("Part of #10085,\n#10063\n", "Part of #10085,\n**#10063**\n")):
+        assert L.claims(emph, 1) == L.claims(plain, 1), emph
+        assert [f.evidence["unresolved"] for f in L.classify_pr(emph, 1)] == \
+            [f.evidence["unresolved"] for f in L.classify_pr(plain, 1)], emph
+    # The emphasis may also close the ref the list starts FROM (`**#100**`), not just the continuation.
+    assert L.claims("Part of **#100**, #200\n", 1) == L.claims("Part of #100, #200\n", 1)
+    # ⛔ THE WIDENING MUST NOT RE-OPEN EITHER NARROWING. A blank line still ends the list, so the
+    # `#N` after it is a MENTION and is never claimed (`Closes` claims #100 alone → clean;
+    # `Part of` claims #100 alone → #100 flagged, #200 not).
+    assert L.claims("Closes #100\n\nand **#200** is tracked separately.\n", 1)["weak"] == []
+    assert L.claims("Closes #100\n\nand **#200** is tracked separately.\n", 1)["closing"] == [100]
+    assert L.claims("Part of #100,\n\n**#200**\n", 1)["weak"] == [100]
+    # …and a `#N` still has to follow the separator, so prose is not a list (`#200` in inline code,
+    # and the no-separator spelling, both claim only `#100`).
+    assert L.claims("Part of #100 and the fix is `#200`.\n", 1)["weak"] == [100]
+    assert L.claims("Part of #100 and#200\n", 1)["weak"] == [100]
+
+
+def test_a_ticked_list_after_the_heading_is_not_this_headings_criteria():
+    """Measured at `afd6de51` (review round 26, P2) — the FALSE PASS direction, arm 2.
+
+    `has_satisfies_checklist`'s second arm returned True on a TICKED box in ANY later comment, so a
+    finished list cleared a `## Satisfies` that has no criteria at all:
+
+        [INV, "## Satisfies\\n\\nTo be derived.", "## Verification\\n\\n- [x] x"]  -> rc 0   (false PASS)
+        [INV, "## Satisfies\\n\\nTo be derived.", "- [ ] unrelated"]             -> wip-no-satisfies
+
+    That is the same shape round 25 closed one layer up (a task list SOMEWHERE is not this heading's
+    checklist) — the only difference being whether the unrelated list happens to be finished. The
+    arm's stated justification ("criteria are ticked in a follow-up comment once proved, and that
+    must not re-flag a finished issue") is measurably false: a finished issue's criteria are `[x]`
+    boxes in the HEADING's own comment, which the first arm already accepts.
+
+    The pairs: a TICKED and an UNticked unrelated list must get the SAME verdict (red-first — the
+    ticked one read rc 0 before this fix), and every shape that legitimately clears still clears.
+    """
+    inv = "IN FLIGHT: 3.2c — branch feat/census"
+    unrelated = ("- [ ] a\n",
+                 "- [x] a\n",
+                 "## Verification\n\n- [x] the guard holds\n",
+                 "## Verification\n\n- [ ] the guard holds\n")
+    for later in unrelated:
+        assert [f.arm for f in L.classify_issue(
+            [inv, "## Satisfies\n\nTo be derived.\n", later], 1)[0]] == [L.ARM_ISSUE], later
+        assert L.has_satisfies_checklist(
+            ["## Satisfies\n\nTo be derived.\n", later]) is False, later
+    # ⛔ THE AFFORDANCE IS NOT LOST. A real checklist clears whether its boxes are unticked (scoping
+    # happened) or ticked (the criteria were proved), with or without a follow-up comment.
+    for satisfies in ("## Satisfies\n\n- [ ] a\n- [ ] b\n",
+                      "## Satisfies\n\n- [x] a\n- [x] b\n"):
+        assert L.classify_issue([inv, satisfies], 1)[0] == [], satisfies
+        assert L.classify_issue([inv, satisfies, "- [x] a\n"], 1)[0] == [], satisfies
+    assert L.has_satisfies_checklist(["## Satisfies\n\n- [x] a\n"]) is True
+
+
+def test_a_code_span_that_wraps_a_line_break_is_still_code():
+    """Measured at `e7061e8cd` (review round 28, P2) — the FALSE-POSITIVE direction, arm 1.
+
+    The inline-code strip was the LENIENT arm of `closes_landing._strip_inline_code`, which searches
+    only to the END OF THE LINE. CommonMark lets a code span cross one SOFT line break (one
+    paragraph, §6.1), so a span that wrapped was never blanked and the reference it QUOTED was read
+    as a claim:
+
+        Example: `Part of #10085,\\ndeliberately not closing them.` declines #10063.
+          -> renderer: <code>…</code>;   lenient scan: weak=[10085]   -> arm 1 FLAGS
+
+    The measured population is this PR's own body: `--pr 11078` flagged it, and both hits were its
+    two quoted examples. A warn-only tool that cries on the PR that ships it is exactly the failure
+    the module's header ranks second-worst, and the renderer is the oracle (as in
+    `test_a_multi_backtick_code_span_is_not_a_claim`), not a second copy of the pattern.
+
+    The pairs: the SAME sentence as prose must still be flagged (the strip cannot simply be widened
+    to swallow everything), and the hazard that keeps `closes_landing`'s own arms lenient — a stray
+    opener whose real claim sits between it and the closer — is pinned as still-claimed, because
+    strict blanks no further than the renderer's span.
+    """
+    quoted = "Example: `Part of #10085,\ndeliberately not closing them.` declines #10063.\n"
+    assert "<code>" in MarkdownIt("commonmark").render(quoted)
+    assert L.classify_pr(quoted, 9) == []
+    # …while the same words OUTSIDE the span are a claim, so the fix is the span and not a blanket.
+    prose = "Example: Part of #10085,\ndeliberately not closing them. declines #10063.\n"
+    assert [f.evidence["unresolved"] for f in L.classify_pr(prose, 9)] == [[10085]]
+    # ⛔ THE CLAIM-LOSING HAZARD STAYS CLOSED: an unmatched opener in one line must not blank a real
+    # claim that follows it (§6.1's span ends at the paragraph, and the renderer's does too).
+    assert L.claims("a` then the fix\n`Closes #100`\n", 9)["closing"] == [100]
+    assert L.claims("Closes #100, and a ` tick later\n", 9)["closing"] == [100]
+
+
+def test_a_pr_side_json_run_emits_no_wip_read(tmp_path):
+    """Measured at `e7061e8cd` (review round 28, P3) — an arm reported as measured when it never ran.
+
+    The module states that a PR-side run (`--pr`, `--sweep`, `--body-file`) never evaluates the WIP
+    arm "so it prints NO WIP line at all", and the human and `--annotate` modes keep that promise via
+    `if measured_rows:`. `--json` did not, so a machine consumer read
+
+        "wip_read": {"subjects": 0, "with_marker": 0, "markerless": 0,
+                     "populations_not_consulted": ["branches", "worktrees", "ref-claims"]}
+
+    — indistinguishable from an issue-mode run over a population that carried no marker, plus a
+    sentence asserting three populations were "not consulted" for an arm that never ran. `None` is
+    the honest value: no measurement, nothing to misread.
+    """
+    body = tmp_path / "b.md"
+    body.write_text("Refs #100\n", encoding="utf-8")
+    r = _run("--body-file", str(body), "--json")
+    assert r.returncode in (L.RC_CLEAN, L.RC_FINDINGS), r.stderr
+    doc = json.loads(r.stdout)
+    assert doc["wip_read"] is None, doc
+    assert doc["findings"], "the flagged body must still report its finding in the same document"
+    # The human mode keeps its own promise (the control: the guard is per-mode, and `--json`'s
+    # absence must not be achieved by dropping the section from the modes that DO measure).
+    assert "WIP arm:" not in _run("--body-file", str(body)).stdout
+
+
+def test_an_injected_wip_verdict_prints_no_marker_count(tmp_path):
+    """Measured at `2bc77dcc6` (review round 29, P3) — a population that does not add up.
+
+    `markerless` counts only rows read from a `<!-- p01-status -->` COMMENT, so under an injected
+    `--wip`/`--no-wip` verdict on a markerless issue the summary read
+
+        1 subject(s) read — 0 carried an `IN FLIGHT:` marker, 0 carried none
+
+    — one subject, and neither bucket. That sentence exists precisely so "0 markers read" and "0 with
+    WIP" cannot be laundered into each other, so it may not print numbers describing an arm the caller
+    did not run; the injection notice says where the verdict came from instead.
+
+    The control: a NON-injected run keeps the count, and it must still add up.
+    """
+    body = tmp_path / "nomarker.md"
+    body.write_text("no marker here\n", encoding="utf-8")
+    for flag in ("--wip", "--no-wip"):
+        out = _run("--issue-body-file", str(body), flag).stdout
+        wip_line = [ln for ln in out.splitlines() if "WIP arm:" in ln]
+        assert wip_line, out
+        assert "INJECTED" in wip_line[0], wip_line[0]
+        assert "carried" not in wip_line[0], wip_line[0]
+    plain = next(ln for ln in _run("--issue-body-file", str(body)).stdout.splitlines()
+                 if "WIP arm:" in ln)
+    assert "1 subject(s) read" in plain and "1 carried none" in plain, plain
+    assert "carried an `IN FLIGHT:` marker, 0" not in plain
+
+# --- review round 28: the PASS arm is strict about CONTAINMENT, and only the PASS arm -----------
+# Round 27 applied `strict=True` to the SHARED `strip_code`, which the arm-2 predicates also read.
+# Two P2s followed, and both are pinned here from the direction each one broke: a claim credited
+# through an INDENTED block (arm 1, false PASS) had to stop being credited, while a 4-space-indented
+# list item — PROSE inside a list, not code — had to keep being read (arm 2, silent miss).
+
+def test_an_indented_closing_keyword_does_not_resolve_a_claim():
+    """Round 28 P2, class A — the PASS direction's CONTAINMENT, not just its separator.
+
+    `closes_landing.parse_closing_refs(..., strict=True)` treats an INDENTED block as code; F1's fix
+    narrowed only the SEPARATOR, so `Refs #100` + blank line + a 4-space-indented `Closes #100` was
+    credited as a close — `NOTHING FLAGGED`, rc 0 — while the sibling grammar said nothing closes.
+    F1's own invariant ("a CLEAN verdict may not rest on a shape the sibling grammar refuses to pass
+    on") applied to one half of its own statement.
+
+    ⚠️ RECORD, measured (round 33 review, P3): this pin was written against `e7061e8cda` and it PASSES
+    at `ee01b70f6e`, because the arm-1 narrowing landed on THIS branch first (`5e1c557b83`, round 27).
+    It came in with the cherry-pick as a REGRESSION GUARD, not as a red-first fix; nothing in it was
+    fixed by the commits above it. Kept for that reason — no other case pins the arm-1 containment.
+    """
+    for body in ("Refs #100\n\n    Closes #100\n",
+                 "Refs #100\n\n\tCloses #100\n"):
+        assert L.claims(body)["closing"] == [], body
+        assert [f.arm for f in L.classify_pr(body, 999)] == [L.ARM_PR], body
+    from tools.closes_landing import parse_closing_refs
+    assert parse_closing_refs("Refs #100\n\n    Closes #100\n", None, strict=True) == []
+    # CONTROLS — prose closers (at any indent ≤ 3) still resolve, so this is not a blanket ban.
+    for ok in ("Refs #100\n\nCloses #100\n", "Refs #100\n\n   Closes #100\n"):
+        assert L.claims(ok)["closing"] == [100], ok
+        assert L.classify_pr(ok, 999) == [], ok
+
+
+def test_a_multiline_code_span_is_not_a_claim():
+    """Round 28 P2 — a QUOTED multi-line example must not be read as prose claims.
+
+    An inline code span may cross a soft line break (CommonMark), and `strict` is what makes the
+    span scanner honour that boundary. Without it a quoted example's refs were read as claims —
+    a false positive, live on PR #11078's own body.
+
+    ⚠️ RECORD, measured (round 33 review, P3): the defect was live at `5e1c557b83` and fixed on this
+    branch by `2bc77dcc6c`, both ANCESTORS of the commits this pin arrived with — so at
+    `ee01b70f6e` it already passed. It is a regression guard, not a red-first fix of anything above it.
+    """
+    body = "Prose.\n\nRefs #100\n\n`Part of #10085,\n#10063` is a quoted example.\n"
+    assert L.claims(body)["weak"] == [100], L.claims(body)
+    # `#100` IS still flagged (a `Refs` with nothing closing it — arm 1's whole point). What the fix
+    # buys is that the QUOTED refs are not dragged in with it.
+    findings = L.classify_pr(body, 999)
+    assert [f.evidence["unresolved"] for f in findings] == [[100]], findings
+    # Control: the same refs OUTSIDE a span are still claims.
+    assert sorted(L.claims("Refs #100\n\nPart of #10085,\n#10063\n")["weak"]) == [100, 10063, 10085]
+
+
+def test_strict_containment_does_not_reach_the_WIP_arms():
+    """Round 28 P2 — the regression the first attempt at the fix above introduced, pinned.
+
+    `strict` was applied to the SHARED `strip_code`, which `has_satisfies_checklist` and
+    `in_flight_markers` also read. Both predicates deliberately admit leading whitespace, and a line
+    indented 4 spaces INSIDE A LIST ITEM is PROSE, not code (CommonMark measures the content column
+    from the list marker), so:
+
+        `## Satisfies` + `1. Criteria` + `    - [ ] a`   -> arm 2 said "no criteria" (false positive)
+        `- note` + `    IN FLIGHT: 3.2c`                -> the marker vanished (silent miss)
+
+    Only `claims()` (arm 1) passes `strict=True`; the arm-2 predicates ask for `indented_code`
+    instead. (`classify_pr` — the other arm-1 reader — passes it too; this docstring said
+    "only" until a review pointed at the call site.) The difference matters, and it is pinned in
+    the next case: `strict` blanks on the WIDTH alone, which is wrong for both arms' purposes in
+    the opposite direction.
+    """
+    assert L.has_satisfies_checklist(["## Satisfies\n\n1. Criteria\n    - [ ] a\n"]) is True
+    assert L.in_flight_markers(["- note\n    IN FLIGHT: 3.2c\n"]) == ["3.2c"]
+    # …and the indented-block narrowing still holds where it belongs (arm 1).
+    assert L.claims("Refs #100\n\n    Closes #100\n")["closing"] == []
+
+
+def test_arm_2_hides_a_QUOTED_example_but_keeps_a_list_items_continuation():
+    """Round 29 P2 (the review at `d70bc57891`) — `strict` OFF is not the answer either.
+
+    Turning `strict` off for arm 2 fixed list-item continuations and simultaneously un-blanked the
+    OTHER CommonMark way to show an example, a top-level INDENTED CODE BLOCK — a class-A false PASS
+    and a regression against the parent head:
+
+        `## Satisfies` + `To be derived.` + `    - [ ] an example`   parent FALSE -> this TRUE
+        `    IN FLIGHT: quoted example - branch b`                   parent []    -> this ["quoted…"]
+
+    Arm 2 asks for `indented_code` now: blank a line only where the BLOCK grammar (§5.2) says it is
+    code — past 3 columns AND past the enclosing item's content column + 4. The renderer is the
+    oracle: both quoted shapes render as `<pre><code>`, while `1. Criteria` + `    - [ ] a` renders
+    as a nested list. Each half is a pair, so neither direction can be satisfied by a blanket.
+    """
+    quoted_checklist = "## Satisfies\n\nTo be derived.\n\n    - [ ] an example from the template\n"
+    assert "<pre><code>" in MarkdownIt("commonmark").render(quoted_checklist)
+    assert L.has_satisfies_checklist([quoted_checklist]) is False
+    assert [f.arm for f in L.classify_issue(
+        [quoted_checklist, "IN FLIGHT: 3.2c - branch x"], 1)[0]] == [L.ARM_ISSUE]
+    assert L.in_flight_markers(["    IN FLIGHT: quoted example - branch b"]) == []
+    # CONTROLS — a list item's continuation is prose at ANY indent past the marker, and a genuine
+    # code block INSIDE an item (content column + 4) is still code.
+    assert L.has_satisfies_checklist(["## Satisfies\n\n1. Criteria\n    - [ ] a\n"]) is True
+    assert L.in_flight_markers(["- note\n    IN FLIGHT: 3.2c\n"]) == ["3.2c"]
+    assert L.has_satisfies_checklist(["## Satisfies\n\n- item\n\n      - [ ] x\n"]) is False
+    # A fenced example keeps working (the always-on half), so this is not the only hiding rule.
+    assert L.has_satisfies_checklist(["## Satisfies\n\n```\n- [ ] x\n```\n"]) is False
+    # ⛔ THE CONTENT COLUMN IS COMMONMARK'S, NOT THE MARKER'S RAW LENGTH (round 30 review, P2).
+    # A 5+-space gap collapses to ONE column (§5.2), so `-     item` has content column 2 — and a
+    # checklist at 6+ columns is then an indented code block. While the item push and the fence
+    # path computed that column DIFFERENTLY (raw marker length vs the collapsed one), the blanking
+    # threshold sat four columns too far out and the quoted box cleared the heading:
+    #     `-     item` + `        - [ ] x`   renderer `<pre><code>`  ->  was CLEARED, must be hidden
+    # The expected values below come from the renderer: at 5 columns the checklist renders as a
+    # nested list (`<li>[ ] x</li>`), at 6 and 8 the `- [ ] x` survives INSIDE `<pre><code>`.
+    for spaces, quoted in ((5, False), (6, True), (8, True)):
+        body = "## Satisfies\n\n-     item\n\n" + " " * spaces + "- [ ] x\n"
+        assert ("- [ ] x" in MarkdownIt("commonmark").render(body)) is quoted, (spaces, body)
+        assert L.has_satisfies_checklist([body]) is not quoted, (spaces, body)
+
+
+def test_a_two_line_indented_example_is_hidden_by_BOTH_of_its_lines():
+    """Round 31 review, P2 — a blanked line opened a PHANTOM list item for the next one.
+
+    The capture-before-push fix kept a code line from being measured against the item it opens
+    itself, but the item it pushed stayed on the stack — so the SECOND line of the same block was
+    measured against a content column two to four columns too deep, came out as prose, and was
+    counted:
+
+        `## Satisfies` + `To be derived.` + `- item` + BLANK + `      - [ ] example` + `        - [ ] nested example`
+        renderer: ONE `<pre><code>` holding BOTH boxes (the blank line is load-bearing — without it
+                  the two boxes are a paragraph continuation under §4.4, not code)
+        before:   arm 2 saw a satisfied heading, `classify_issue` returned [] -> rc 0   (false PASS)
+        before:   `in_flight_markers` read a QUOTED marker as live                      (false positive)
+
+    The sweep this docstring used to quote as numbers ("224 of 720", then "177 of 177") is run
+    HERE instead, over the family it names — markers `-`/`*`/`1.`/`10.` x gaps 1,2,4,5,8 x first-line
+    indents 4,5,6,7,8,10 x second line +2/+3/+4 — and asserts the two properties directly, because
+    a prose count is what rotted twice: no body the PARSER puts in a `code_block` may be counted
+    (class A), and no prose body may be over-hidden.
+    The pairs below span the boundary — 6 to 10 columns, all of which the renderer treats as ONE code
+    block, and a marker-led line that is PROSE because it is shallower than the code block.
+    """
+    md = MarkdownIt("commonmark")
+
+    def in_code(body: str, text: str) -> bool:
+        return any(t.type == "code_block" and text in t.content for t in md.parse(body))
+
+    sweep = 0
+    for marker in ("-", "*", "1.", "10."):
+        for gap in (1, 2, 4, 5, 8):
+            for indent in (4, 5, 6, 7, 8, 10):
+                for extra in (2, 3, 4):
+                    sweep += 1
+                    body = ("## Satisfies\n\nTo be derived.\n\n" + marker + " " * gap + "item\n\n"
+                            + " " * indent + "- [ ] example\n"
+                            + " " * (indent + extra) + "- [ ] nested example\n")
+                    quoted = in_code(body, "- [ ] nested example")
+                    counted = L.has_satisfies_checklist([body])
+                    assert not (quoted and counted), ("counts code", marker, gap, indent, extra)
+                    assert not (not quoted and not counted), ("over-hides", marker, gap, indent, extra)
+    assert sweep == 360, sweep
+    for indent in (6, 7, 8, 9, 10):
+        body = ("## Satisfies\n\nTo be derived.\n\n- item\n\n"
+                + " " * indent + "- [ ] example\n"
+                + " " * (indent + 2) + "- [ ] nested example\n")
+        html = MarkdownIt("commonmark").render(body)
+        quoted = "- [ ] nested example" in html
+        assert quoted, (indent, html)
+        assert L.has_satisfies_checklist([body]) is False, (indent, body)
+        assert L.classify_issue([body + "\nIN FLIGHT: 3.2c - branch b\n"], 1)[0] != [], indent
+    assert L.in_flight_markers(["- note\n\n      IN FLIGHT: quoted 3.2c\n"
+                                 "        IN FLIGHT: quoted 3.2b\n"]) == []
+    # CONTROL — a marker-led line that IS prose is still read (the rule cannot be "blank them all").
+    assert L.in_flight_markers(["- note\n\n  IN FLIGHT: 3.2c - branch b\n"]) == ["3.2c - branch b"]
+
+
+def test_a_wide_gap_MARKER_LINE_can_be_code_on_its_own():
+    """Round 32 review, P2 — the marker line's OWN content can be an indented code block.
+
+    `rest_indent` is the indentation BEFORE the marker, so it is 0 for `-     [ ] x` — but §5.2
+    collapses that 5-space gap to ONE column, so the content sits 4 columns past the item's content
+    column and §4.4 makes it code, starting on the marker line itself. The renderer is the oracle:
+
+        `-     [ ] x`            -> <ul><li><pre><code>[ ] x</code></pre></li></ul>
+        `-     IN FLIGHT: 3.2c`  -> the marker is INSIDE <pre><code>
+        `-     Closes #100`      -> the keyword is INSIDE <pre><code>   (and `strict` did not save it:
+                                    `parse_closing_refs(..., strict=True)` credited it too)
+
+    All three were read as PROSE — a quoted checklist cleared a criteria-less `## Satisfies`, a quoted
+    marker read as live, a quoted close was credited in BOTH arms. Parity with the parent head rather
+    than a regression, and no instance in this repo's own docs, but the same family as the two
+    preceding rounds: a false PASS is a false PASS.
+
+    The sweep below is the evidence, not a quoted count (this lane has misquoted two already): it
+    walks markers x gaps x indents and asserts, on every run, that no marker line the PARSER puts in
+    a `code_block` is credited and that no marker line it calls prose is hidden. The `gap == 4`
+    control is prose and is still read by every predicate.
+    """
+    md = MarkdownIt("commonmark")
+
+    def is_code(line: str, text: str) -> bool:
+        return any(t.type == "code_block" and text in t.content for t in md.parse(line + "\n"))
+
+    sweep = 0
+    for marker in ("-", "*", "1.", "10.", "+"):
+        for gap in range(1, 10):
+            for indent in (0, 1, 2, 3):
+                sweep += 1
+                line = " " * indent + marker + " " * gap + "[ ] x"
+                body = "## Satisfies\n\nTo be derived.\n\n" + line + "\n"
+                # The oracle is the PARSER, not a substring: from gap 6 on the code block's content
+                # keeps leading spaces (` [ ] x`), so a `<pre><code>[ ] x` match would skip those.
+                quoted = is_code(line, "[ ] x")
+                counted = L.has_satisfies_checklist([body])
+                assert not (quoted and counted), ("counts code", marker, gap, indent)
+                assert not (not quoted and not counted), ("over-hides", marker, gap, indent)
+    assert sweep == 180, sweep
+    # The CLOSE sweeps every marker: the claim grammar has no list-marker class of its own (it reads
+    # whatever survives `strip_code`), so an ordered marker is the same case as a dash.
+    for marker in ("-", "*", "1.", "10.", "+"):
+        for gap in range(1, 10):
+            close_line = marker + " " * gap + "Closes #100"
+            assert (L.claims(close_line)["closing"] == []) is is_code(close_line, "Closes"), \
+                (marker, gap)
+    # The `IN FLIGHT:` sweep is BULLET-ONLY, and for a different reason: `IN_FLIGHT_RE` carries its
+    # own marker class (`[-*+][ \t]+`) and admits no ordered marker at all, so an ordered case would
+    # be measuring that pre-existing arm limit rather than this rule.
+    for marker in ("-", "*", "+"):
+        for gap in range(1, 10):
+            marker_line = marker + " " * gap + "IN FLIGHT: 3.2c"
+            assert (L.in_flight_markers([marker_line]) == []) is is_code(marker_line, "IN FLIGHT"), \
+                (marker, gap)
+    # ⛔ AN INDENTED MARKER LINE OPENS NO ITEM AT ALL (round 33 review, P2 — the sub-case where the
+    # gap rule and the INDENT rule fire on the SAME line). At a legal marker position the renderer
+    # opens the `<li>` even when its content is code; indented past the allowance at top level the
+    # line is a top-level INDENTED CODE BLOCK and no `<li>` is opened — so the push must be undone, or
+    # the NEXT line of the same block is measured against a phantom column and comes out as prose:
+    #     `    -     item` + `      - [ ] QZX`   -> ONE code_block holding both lines
+    # (Round 32 suppressed the pop whenever `own_code`, which re-opened exactly this hole.)
+    sweep = 0
+    for marker in ("-", "*", "+", "1.", "10."):
+        for indent in (4, 5, 6, 8):
+            for gap in (5, 6, 9):
+                sweep += 1
+                lead = " " * indent + marker + " " * gap + "item"
+                body = ("## Satisfies\n\nTo be derived.\n\n" + lead + "\n"
+                        + " " * (indent + 2) + "- [ ] QZX\n")
+                quoted = is_code(body, "- [ ] QZX")
+                counted = L.has_satisfies_checklist([body])
+                assert not (quoted and counted), ("counts code", marker, indent, gap)
+                assert not (not quoted and not counted), ("over-hides", marker, indent, gap)
+                if marker in ("-", "*", "+"):
+                    follow = " " * (indent + 2) + "IN FLIGHT: QZX"
+                    assert (L.in_flight_markers([lead + "\n" + follow]) == []) is quoted, \
+                        (marker, indent, gap)
+    assert sweep == 60, sweep
+    # CONTROL — a 4-space gap is PROSE by §5.2, so every predicate still reads it.
+    prose = "## Satisfies\n\nTo be derived.\n\n-    [ ] x\n"
+    assert "<pre><code>" not in MarkdownIt("commonmark").render(prose)
+    assert L.has_satisfies_checklist([prose]) is True
+    assert L.in_flight_markers(["-    IN FLIGHT: 3.2c"]) == ["3.2c"]
+    assert L.claims("-    Closes #100")["closing"] == [100]
+
+
+def test_a_deeper_heading_ends_the_satisfies_section():
+    """Round 28 P2 — the false PASS that the "same-or-higher level" terminator introduced.
+
+    Making a deeper heading part of the section meant every box under it was this section's
+    criteria, so an unrelated list ONE LEVEL DOWN cleared a criteria-less `## Satisfies` — round
+    25/26's exact population re-opened. ANY ATX heading ends the section.
+
+    ⚠️ DECLARED trade-off, pinned so it reads as a decision: a `###`-per-criterion layout
+    (`## Satisfies` + `### 1. Guard holds` + boxes) is therefore flagged. That is a false POSITIVE on
+    honest scoping, and it is accepted because the alternative is a false PASS — which this module
+    ranks worse. A structured checklist should put its boxes directly under `## Satisfies`.
+    """
+    false_pass = "## Satisfies\n\nTo be derived.\n\n### Verification\n\n- [ ] x\n"
+    assert L.has_satisfies_checklist([false_pass]) is False
+    assert [f.arm for f in L.classify_issue(
+        [false_pass, "IN FLIGHT: 3.2c — branch x"], 1)[0]] == [L.ARM_ISSUE]
+    # The accepted false positive, pinned rather than left to be "discovered".
+    per_criterion = "## Satisfies\n\n### 1. Guard holds\n\n- [ ] a\n"
+    assert L.has_satisfies_checklist([per_criterion]) is False
+    # CONTROLS: boxes directly under the heading still clear it, at any level of `Satisfies`.
+    for ok in ("## Satisfies\n\n- [ ] a\n", "### Satisfies\n\n- [ ] a\n"):
+        assert L.has_satisfies_checklist([ok]) is True, ok
+
+
+def test_the_ascii_hyphen_is_an_appositive_dash_too():
+    """Round 28 P3 — a REGRESSION PIN, not a red-first fix.
+
+    ⚠️ Measured honest: both bodies already returned `[]` at `5e1c557b83` and at the parent, so the
+    code behaved this way before this commit and nothing here was "fixed". It is kept because no
+    other case covers `-` or `–` as an appositive dash, so it is what stops a later narrowing of
+    `_REASON_TAIL` from silently re-flagging the two most natural spellings.
+    """
+    for honest in ("Refs #100 — not closing it - measurement only.\n",
+                   "Refs #100 — not closing it – measurement only.\n"):
+        assert L.classify_pr(honest, 1) == [], honest
+    # The no-`#` guard is what keeps the widening contained.
+    assert [f.arm for f in L.classify_pr("Refs #100 — not closing it - #300 must land first.\n", 1)] \
+        == [L.ARM_PR]
