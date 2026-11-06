@@ -3497,8 +3497,11 @@ operator who read the line above as "CI defends this" would never run it.
 >   ```
 >
 >   A **complete-set** verdict **at that reading** — so **as of 2026-11-03T18:56:04Z** both were
->   PENDING, independently corroborated then (the residual plan's own row: *"present
->   in the repo, unapplied in production"*). ⛔ **That is no longer the last measurement.** The
+>   PENDING. (⛔ **Not "independently corroborated then":** the residual-plan row that says *"present in
+>   the repo, unapplied in production"* was written **2026-11-05**, so it cannot corroborate a
+>   2026-11-03 reading — and its own evidence column is the two migration **filenames**, not a
+>   `schema_migrations` read. The gate log above is the measurement; this row only repeats the
+>   conclusion.) ⛔ **That is no longer the last measurement either.** The
 >   repo's own fail-closed drift gate ran again **2026-11-05T23:07:38Z** — run `42117073101`,
 >   `deploy-api` job `127578919481`, the deploy that shipped `46ea687dc` — against prod project
 >   `ybetwichurajbfswfeqa`, and printed in full:
@@ -4067,8 +4070,7 @@ with that lane verifying the boundary by connecting **as** the role). The migrat
 `NOLOGIN` (`supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql`: *"`LOGIN` and setting
 its password is an OPERATOR act, done once"*), so the measured `LOGIN` state **is** proof this step ran.
 ⛔ **The `22P02` write failures are NOT a second, independent proof of it** — this note used to say they
-were: an invalid-JSON-input cast fires for ANY connecting role, so it establishes that a login happened
-and never which role made it.
+were: an invalid-JSON cast fires for any **non-bypassing** role — `scope_connection()` refuses `postgres`/`service_role` before the first statement, so those never reach the cast — so it proves the role PASSED the posture gate and an `INSERT` was attempted, never WHICH non-bypassing role made it.
 ⚠️ **So do NOT re-run it casually:** `\password tortoise_record_app` **rotates the live credential
 that the deployed `TORTOISE_RECORD_DSN` names**, and the GitHub secret **and** the Fly secret must be
 re-set with the new value in the same change, or the record stops authenticating. Keep this step as
