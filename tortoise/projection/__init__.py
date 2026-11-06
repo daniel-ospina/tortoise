@@ -18690,6 +18690,16 @@ class FalkorProjection(
 
             self._vector_index_served_labels = served
             self._vector_indexed_labels = measured & served
+            # #11087: sort INSIDE the guard. `sorted()` runs the labels'
+            # `__lt__`, and `measured & served` does NOT sanitise the type:
+            # when the catalogue is the shorter operand CPython keeps ITS
+            # objects, so an exotic label (a `str` subclass without a total
+            # order) reaches `sorted()` here. Outside this guard that would
+            # raise out of a method whose contract is "never raises" — the
+            # store would fail to construct. A sort failure is a read failure:
+            # both halves go None (below) and setup stays healthy.
+            serves_reported = sorted(served)
+            indexes_reported = sorted(self._vector_indexed_labels)
         except Exception as e:  # fail-open: never break store setup
             log.debug("#4997: vector-index inventory read failed: %s", e)
             self._vector_indexed_labels = None
@@ -18705,8 +18715,8 @@ class FalkorProjection(
         log.info(
             "#11087: vector contract on %s: serves=%s indexes=%s",
             self._graph_name,
-            sorted(served),
-            sorted(self._vector_indexed_labels),
+            serves_reported,
+            indexes_reported,
         )
 
         gap = served - self._vector_indexed_labels
@@ -18722,7 +18732,7 @@ class FalkorProjection(
                     "governs; indexing those labels is NOT done here.",
                     self._graph_name,
                     sorted(gap),
-                    sorted(self._vector_indexed_labels) or "none",
+                    indexes_reported or "none",
                 )
 
     def _get_falkordb_version(self):
