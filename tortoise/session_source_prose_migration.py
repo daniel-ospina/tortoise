@@ -524,6 +524,15 @@ def record_turn_reader(conn: Any, *, org_id: str, graph_id: str
     ``:Session`` node in the same scan it already makes; a caller that truly
     cannot name it passes ``None`` and accepts the degraded answer knowingly.
 
+    ⚠️ Stated residual, WIDENED because the narrow form under-claimed it: the
+    mark is ``None`` — and the tail arm is then unreachable — for THREE shapes,
+    not one. (a) the candidate's ``:Session`` node is missing (`OPTIONAL MATCH`
+    yields NULL); (b) its ``sessionId`` is null, so the `OPTIONAL MATCH` cannot
+    bind; and (c) the node EXISTS but its ``turn_max_index`` is absent or
+    non-int, which :func:`_read_source_rows` also maps to ``None``. Each one
+    silently degrades the tail witness; none of them is a record that declined
+    to answer.
+
     ``None`` means THE RECORD DID NOT ANSWER for those turns — which is not the
     same as "the session has no turns" (``TurnAnswer.NO_ACCOUNT`` and
     ``EMPTY`` are different answers, and #10000 review P0-3 exists because

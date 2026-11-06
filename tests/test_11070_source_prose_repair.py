@@ -1997,6 +1997,11 @@ def test_the_printed_and_json_detail_never_carries_the_utterance(monkeypatch,
         `test_the_write_is_a_compare_and_set_on_the_pair_the_census_read`).
     (2) REACHABLE: a dry run over one pre-fix candidate, `--json`.
     """
+    # ⛔ THE BOX THE STEP RUNS ON: the URI is EXPORTED, because the CLI refuses
+    # `--db`-less runs without one ("no DB URI") before it ever prints a report.
+    # Without this the test reds on the ENVIRONMENT, not on the redaction it
+    # claims to prove — a gate that fails for the wrong reason is not a gate.
+    _export_a_record_dsn(monkeypatch)
     graph = _RecordingGraph([(_session_node(),)])
     _install_cli(monkeypatch, graph, ["--dry-run", "--json"])
 
