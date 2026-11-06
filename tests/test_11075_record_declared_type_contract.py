@@ -340,40 +340,67 @@ def _is_json_text(value: str) -> bool:
 
 
 _UUID_RE = re.compile(r"^[0-9a-f]{32}$", re.I)
+#: The largest value each integer column's declared type can hold — the `22003`
+#: boundary, shared by every numeric shape (int, float and Decimal alike).
+_INT_LIMITS = {
+    "smallint": 2 ** 15 - 1,
+    "smallserial": 2 ** 15 - 1,
+    "integer": 2 ** 31 - 1,
+    "serial": 2 ** 31 - 1,
+    "bigint": 2 ** 63 - 1,
+    "bigserial": 2 ** 63 - 1,
+}
 _INT_LITERAL_RE = re.compile(r"^-?\d+$")
-
-
-def _parse_date(value: str) -> object:
-    """`value` as a date, or raise `ValueError`.
-
-    Wider than one pattern because `date_in` is: the ISO basic form
-    (`20260228`), slash-separated input, and a full timestamp (which `date_in`
-    TRUNCATES) are all accepted by Postgres, so refusing them would be a false
-    red on the first `date` column.
-    """
-    from datetime import date, datetime
-
-    text = value.strip()
-    for pattern in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S",
-                    "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(text, pattern)
-        except ValueError:
-            continue
-    # The VALUE, not the shape: `2026-02-30` matches any pattern and is refused
-    # by Postgres (`22008`), so the day/month combination is validated too.
-    return date.fromisoformat(text)
 
 
 def _parse_iso(value: str) -> object:
     """`value` as a datetime, or raise `ValueError` — Postgres's own verdict.
 
     `Z` is normalised to `+00:00` because `datetime.fromisoformat` predates the
-    `Z` spelling on 3.11.
+    `Z` spelling on 3.11. This one DOES use `fromisoformat`: a timestamp has no
+    equivalent of the ISO-week `date` trap, and the alternative would be a dozen
+    near-identical patterns.
     """
     from datetime import datetime
 
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+#: `date_in`'s accepted spellings that a producer can plausibly emit. ⚠️ NOT
+#: `date.fromisoformat`, which on 3.11+ accepts the ISO-WEEK forms (`2026-W05-1`,
+#: `2026W051`) that Postgres REFUSES — a fail-open arm is the one direction this
+#: file cannot afford (#11075 review round 5, measured on PG 16).
+_DATE_PATTERNS = (
+    "%Y-%m-%d",
+    "%Y%m%d",
+    "%Y/%m/%d",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%dT%H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y-%j",  # the day-of-year form `date_in` takes (`2026-059`)
+)
+
+
+def _parse_date(value: str) -> object:
+    """`value` as a date, or raise `ValueError`.
+
+    `date_in` accepts all of these and TRUNCATES a timestamp, so refusing them
+    would be a false red on the first `date` column. The VALUE is validated, not
+    the shape: `2026-02-30` matches any pattern and Postgres refuses it (`22008`).
+    """
+    from datetime import datetime
+
+    text = value.strip()
+    for pattern in _DATE_PATTERNS:
+        try:
+            return datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+    raise ValueError(f"not a date Postgres would accept: {value!r}")
 
 
 def _accepts(declared: str, value: Any) -> bool:
@@ -436,8 +463,14 @@ def _accepts(declared: str, value: Any) -> bool:
                     "smallserial"):
         if isinstance(value, bool):
             return False
+        # ⚠️ The RANGE applies to every numeric shape, not only to `float`: an
+        # `int`/`Decimal` beyond the column's range is `22003` exactly as a float
+        # is, and a bare `return True` here would certify a row Postgres drops —
+        # the fail-open direction, i.e. the class this pin exists to catch
+        # (#11075 review round 5, measured on PG 16 for 2**31 and Decimal 1e400).
+        limit = _INT_LIMITS.get(declared, _INT_LIMITS["bigint"])
         if isinstance(value, int):
-            return True
+            return -limit - 1 <= value <= limit
         # `float8 → int4` is an ASSIGNMENT cast, so Postgres ACCEPTS any
         # in-range float and ROUNDS it. Refusing a non-integral float here would
         # be a false red on a correct tree — the direction this file calls the
@@ -445,17 +478,14 @@ def _accepts(declared: str, value: Any) -> bool:
         # exists to make unreachable. (A lossy value is the producer's problem,
         # not a refusal.)
         if isinstance(value, float):
-            # Finite and in the target's range: `float8 → int4` is an assignment
-            # cast that ROUNDS, but NaN/±Inf/1e300 are `22003` — and `json.loads`
-            # accepts `NaN`/`Infinity` literals by default, so a producer really
-            # can hand one over (#11075 review round 4).
-            limits = {"integer": 2 ** 31 - 1, "serial": 2 ** 31 - 1,
-                      "smallint": 2 ** 15 - 1, "smallserial": 2 ** 15 - 1}
-            return math.isfinite(value) and abs(value) <= limits.get(
-                declared, 2 ** 63 - 1)
+            # `float8 → int4` is an assignment cast that ROUNDS, but NaN/±Inf/
+            # 1e300 are `22003` — and `json.loads` accepts `NaN`/`Infinity`
+            # literals by default, so a producer really can hand one over
+            # (#11075 review round 4).
+            return math.isfinite(value) and abs(value) <= limit
         if isinstance(value, Decimal):
-            # `numeric → int4` is also an assignment cast.
-            return value.is_finite()
+            # `numeric → int4` is also an assignment cast — with the same range.
+            return value.is_finite() and abs(value) <= limit
         # A string literal is coerced by the assigned column type (`'3'` into an
         # `integer` column IS accepted), so the arm matches that rather than
         # claiming a refusal that does not happen.
@@ -796,7 +826,12 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
     with a deliberately DUMB reader (name + any first token) and requires every
     column it finds to be one the vocabulary captured.
     """
-    declared = rp.column_types()
+    # ⚠️ The directory is passed EXPLICITLY: the file half of this arm reads
+    # `MIGRATIONS` and the type half would otherwise read `_migrations_dir()`, so
+    # a mutation arm that pointed one at a copy and not the other would red with
+    # the WRONG diagnosis ("the rewrite is not applied" for a file the reader
+    # never opened) — #11075 review round 5.
+    declared = rp.column_types(MIGRATIONS or None)
     loose = re.compile(r'^\s*"?([a-z_][a-z0-9_]*)"?\s+\S', re.M)
     #: The two FORWARD shapes, read with the same deliberate dimness: a column
     #: name, then whatever token follows. ⚠️ Without these the arm is blind to
@@ -1073,6 +1108,58 @@ def test_the_10593_arm_is_CLOSED_AT_THE_WRITER_and_that_is_pinned(tmp_path):
     assert _accepts("integer", 3), "an integral float is an assignment cast"
     assert _accepts("integer", 3.0), "float8 → int4 is an assignment cast"
     assert _accepts("integer", "3"), "an untyped literal is coerced"
+
+
+def test_the_scalar_arms_are_pinned_in_BOTH_directions():
+    """Every scalar arm is asserted where it lives, not only in a review report.
+
+    The widened vocabulary is what makes `uuid`/`date`/`smallint` judgeable at
+    all, so these arms greet the first column of those types. A fail-open arm
+    certifies a row Postgres drops (the incident class); an over-strict one
+    false-reds a correct tree, whose obvious repair is the exemption this file
+    exists to make unreachable. Both directions, for each arm.
+    """
+    from datetime import date, datetime
+    from decimal import Decimal
+    from uuid import UUID
+
+    # uuid — the driver's native object, and the three spellings `uuid_in` takes.
+    assert _accepts("uuid", UUID("123e4567-e89b-12d3-a456-426614174000"))
+    for spelling in ("123e4567-e89b-12d3-a456-426614174000",
+                     "123e4567e89b12d3a456426614174000",
+                     "{123e4567-e89b-12d3-a456-426614174000}"):
+        assert _accepts("uuid", spelling), spelling
+    assert not _accepts("uuid", "zzz")
+
+    # date — `date_in`'s forms are accepted (a timestamp is truncated), an
+    # impossible day and the ISO-WEEK forms it refuses are not.
+    assert _accepts("date", date(2026, 2, 28))
+    assert _accepts("date", datetime(2026, 2, 28, 10, 0))
+    for spelling in ("2026-02-28", "20260228", "2026/02/28",
+                     "2026-02-28 10:00:00", "2026-02-28T10:00:00Z",
+                     "2026-02-28 10:00:00.123", "2026-059"):
+        assert _accepts("date", spelling), spelling
+    for refused in ("2026-02-30", "2026-13-01", "2026-W05-1", "2026W051",
+                    "garbage"):
+        assert not _accepts("date", refused), refused
+
+    # integer — the assignment cast rounds, but NaN/±Inf and OUT OF RANGE are
+    # `22003`, in every numeric shape.
+    assert _accepts("integer", 3)
+    assert _accepts("integer", 3.5)
+    assert _accepts("integer", Decimal("3"))
+    assert _accepts("integer", "3")
+    for refused in (True, 3.5e100, float("nan"), float("inf"), 2 ** 31,
+                    Decimal("1e400")):
+        assert not _accepts("integer", refused), refused
+    assert not _accepts("smallint", 2 ** 15)
+    assert _accepts("bigint", 2 ** 31)
+
+    # jsonb — a string is PARSED, a typed scalar is refused (both incidents).
+    assert _accepts("jsonb", '{"a": 1}')
+    assert _accepts("jsonb", {"a": 1})
+    for refused in ("the session capture redactions", 3, 3.0, True):
+        assert not _accepts("jsonb", refused), refused
 
 
 def test_a_column_of_an_unknown_type_is_not_silently_skipped():
