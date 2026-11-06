@@ -1563,8 +1563,10 @@ def read(
     # once and cannot see a spec that arrives later, so the short-TTL guarantee is enforced here,
     # where the read actually happens. Both halves live in :func:`_door` so the CLI's live paths —
     # which spend a call WITHOUT going through this function — walk the SAME door rather than a
-    # second copy of it.
-    _spec = _door(key)
+    # second copy of it. ⛔ CALLED BARE, NOT `_spec = _door(key)`: the spec is consumed INSIDE the
+    # door now, and a binding nothing reads invites a later lane to "restore" a use the refactor
+    # deliberately moved — the same shape as the second-copy-of-a-guard hazard this module names.
+    _door(key)
     # ⛔ A repo-scoped key derived from an EMPTY repo yields `"@main"`, which passes the
     # non-empty-scope test and then spends one call from the very pool this module exists to
     # protect, on `gh api repos/` (a guaranteed 404) reported as a GitHub fault.

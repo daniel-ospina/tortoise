@@ -114,8 +114,9 @@ head, and each states what it does NOT cover:
   SILENT DROP, which is the pre-fix defect one line below where it was fixed. ⛔ IT SURVIVED THE
   FIRST CUT of this round for exactly that reason: the arm tested the three SUPPORTED values and
   never a malformed one, so the hazard lived in the shape and not in the behaviour.
-⛔ M94-M96 are round 20's numbering (the review at `1217611e7` found two SURVIVORS, #11047). Both
-were measured SURVIVING on that head and are KILLED here; each row states what it does NOT cover:
+⛔ M94-M98 are round 20's numbering (two reviews at `1217611e7` and `e1f1e3f4b`, #11047). M94/M95
+were found SURVIVING on the first head; all five are KILLED here, and each row states what it does
+NOT cover:
   M94 (`_negative_ttl`'s `min()` removed, i.e. `return int(neg.ttl_s)`): **1 failed, 346 passed** —
   `test_a_TIGHTENED_ttl_is_never_served_the_WIDER_negative`. ⛔ IT SURVIVED THE PREVIOUS HEAD (344
   passed) because every shipped key asks at its own 1800 s ceiling, where `min()` is
@@ -129,14 +130,30 @@ were measured SURVIVING on that head and are KILLED here; each row states what i
   deletion is behaviourally SURVIVABLE, because the projectability check below it refuses `b""` too,
   so only a `match=` on the MESSAGE makes it lethal. `match=` is the point, not decoration — that
   line is the whole operator-facing detail on a `REFUSED` read, the M80 row's class.
-  M96 (`_door(a.key)` deleted from the `--no-cache` live path): **1 failed, 346 passed** —
-  `test_the_CLI_live_paths_walk_the_DOOR_and_name_the_REAL_fault`. ⛔ THE PRE-FIX BEHAVIOUR IS
-  MEASURED, not asserted: `--no-cache --key pr.state` answered `no argv is declared for 'pr.state'`
-  (exit 1) — a REGISTRY-shaped fault for an R4 refusal. It does not cover the SIBLING live path (the
-  global-key fallback where `scope_for` cannot name a credential), and that gap is STRUCTURAL, not
-  an oversight: `_door` is called there too, but every key that can reach that branch is in
-  `GLOBAL_KEYS` and therefore already a DECLARED invariant, so no test can make that particular call
-  observable — deleting it would leave the suite green and the path unchanged.
+  M96 (`_door(a.key)` deleted from the `--no-cache` live path): **2 failed, 347 passed** —
+  `test_the_CLI_live_paths_walk_the_DOOR_and_name_the_REAL_fault` (the fault-message half) and
+  `test_the_no_cache_path_REFUSES_a_spec_that_padding_guard_2_would_pass` (the guard-2 half). ⛔ THE
+  PRE-FIX BEHAVIOUR IS MEASURED, not asserted: `--no-cache --key pr.state` answered `no argv is
+  declared for 'pr.state'` (exit 1) — a REGISTRY-shaped fault for an R4 refusal.
+  M97 (`_door(a.key)` replaced by `ttl_for(a.key)` in the `--no-cache` path — the door's SECOND
+  question dropped): **1 failed, 348 passed** —
+  `test_the_no_cache_path_REFUSES_a_spec_that_padding_guard_2_would_pass`. ⛔ IT SURVIVED THE FIRST
+  CUT OF M96 (347 passed): the fault-message arm's two keys are both answered by `ttl_for`/`kind_of`
+  alone, so the door could be halved on the one path that spends a call with nothing red. The arm
+  now injects a spec carrying `--jq` (guard 2's own forbidden flag) and requires a refusal with NO
+  `subprocess.run`. It does not cover the negative's short-TTL half of question 2, which `read()`'s
+  own arms (M88/M92) pin on the cached path.
+  M98 (`_door(a.key)` deleted from the GLOBAL-KEY FALLBACK, the sibling live exit): **1 failed, 348
+  passed** — `test_the_global_fallback_walks_the_DOOR_too`. ⛔ THIS ROW CORRECTS ITSELF, ON THE
+  RECORD: the first cut of M96 claimed that path's gap was "STRUCTURAL … no test can make that
+  particular call observable — deleting it would leave the suite green and the path unchanged".
+  Deleting it DID leave the suite green (347 passed, re-measured), but BOTH of my conclusions from
+  that were wrong: the call IS observable with the suite's own established bypass (a spec injected
+  straight into `INVARIANTS` after import — the exact bypass `_door`'s docstring exists for, already
+  used by `test_the_negative_declaration_guard_is_WIRED_INTO_the_import_check`), and deleting it DOES
+  change the path — a live `gh api user --jq .` call is spent on a guard-2-violating spec. "The
+  existing suite does not catch it" is not "no test can"; the sentence was the sole justification
+  for leaving a live guard unpinned, which is the M73 class this file has now had to correct twice.
 ⛔ M73's LEDGER ROW OVERSTATED ITS COVERAGE AND THAT IS NOW FIXED, not re-labelled. The old
 parametrization had 5 arms, two of which (`/commits/main/status`, `/commits/abc/check-runs`) were
 satisfied by the EARLIER `/commits` marker, and six of the ten deny-list markers had no arm at all —
@@ -1685,8 +1702,13 @@ def test_the_CLI_live_paths_walk_the_DOOR_and_name_the_REAL_fault(
     credential) call `reader(key)` directly, so `read()`'s door never ran on them. The refusal still
     happened — `_gh_reader` refuses an undeclared key before `subprocess.run` — but it was reported
     as `no argv is declared for 'pr.state'`: a REGISTRY-shaped fault that sends a triaging lane
-    hunting a missing registration, when the true reason is R4's (mutable-state vocabulary), and it
-    skipped guard 2 on the path that actually spends the call (the M80 message row's class).
+    hunting a missing registration, when the true reason is R4's (mutable-state vocabulary).
+
+    ⛔ THIS ARM COVERS QUARTER 1 OF THE DOOR ONLY (`ttl_for`: may this key be cached at all?). The
+    second half — guard 2 and the negative's short-TTL rule — is pinned by
+    `test_the_no_cache_path_REFUSES_a_spec_that_padding_guard_2_would_pass`, because replacing
+    `_door(a.key)` with `ttl_for(a.key)` here satisfied BOTH needles below and left the suite green
+    (measured). A parametrized arm that passes for an unrelated reason is not coverage.
     """
 
     def explode(cmd, **kw):  # the door must refuse BEFORE any call is made
@@ -1720,6 +1742,109 @@ def test_the_CLI_live_paths_walk_the_DOOR_and_name_the_REAL_fault(
             f"the whole operator-facing detail, so it must name the refusal that fired"
         )
         assert b"no argv is declared" not in err.buffer.getvalue()
+
+
+def _inject_spec(key: str, **kwargs) -> object:
+    """Put a spec STRAIGHT into the registry — the bypass `_door`'s defence-in-depth exists for.
+
+    `declare_invariant` is the guarded door; this is the door being walked around, which is exactly
+    the shape an import-time-only check cannot see (the M85/M88 rows' bypass).
+    """
+    saved = C.INVARIANTS[key]
+    C.INVARIANTS[key] = C.Invariant(**kwargs)
+    return saved
+
+
+def test_the_no_cache_path_REFUSES_a_spec_that_padding_guard_2_would_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """⛔ THE DOOR'S SECOND QUESTION, ON THE PATH THAT SPENDS THE CALL.
+
+    `_door` asks two things: (1) may this key be cached at all, (2) is its spec still valid — guard 2
+    (no whole body, no projection flags) and the negative's short-TTL rule. `read()` re-checks (2)
+    at run time because the import check runs ONCE; the `--no-cache` and global-fallback paths skip
+    `read()` entirely, so without `_door` there is (2) nowhere on the path that actually calls `gh`.
+
+    ⛔ MEASURED: with `_door(a.key)` replaced by `ttl_for(a.key)` — which answers (1) only — the
+    whole suite stayed GREEN (347 passed), because the sibling arm's two keys are both refused by
+    (1). This arm injects a spec whose ARGV carries `--jq` (guard 2's own forbidden flag) and
+    requires the live path to refuse WITHOUT spending the call.
+    """
+
+    def explode(cmd, **kw):
+        raise AssertionError(f"the door let a live call through: {cmd}")
+
+    monkeypatch.setattr(C.subprocess, "run", explode)
+    saved = _inject_spec(
+        "repo.metadata",
+        ttl_s=1800,
+        argv=("api", "repos/{repo}", "--jq", "."),
+        projection="inj-v1",
+        project=C.INVARIANTS["repo.metadata"].project,
+    )
+    try:
+        err = _Err()
+        monkeypatch.setattr(C.sys, "stderr", err)
+        monkeypatch.setattr(C.sys, "stdout", _Out())
+        rc = C.main(
+            [
+                "--no-cache",
+                "--key",
+                "repo.metadata",
+                "--repo",
+                "o/r",
+                "--branch",
+                "main",
+                "--cache-dir",
+                str(tmp_path),
+            ]
+        )
+        assert rc == 1, "a spec violating guard 2 must be REFUSED on the live path"
+        assert b"REFUSED" in err.buffer.getvalue(), err.buffer.getvalue()
+        assert b"--jq" in err.buffer.getvalue(), (
+            "the refusal must name the forbidden flag, not leave the caller guessing"
+        )
+    finally:
+        C.INVARIANTS["repo.metadata"] = saved
+
+
+def test_the_global_fallback_walks_the_DOOR_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """⛔ THE SIBLING LIVE EXIT: `scope_for` cannot name a credential, so `main()` reads live.
+
+    ⛔ THIS ARM EXISTS BECAUSE THE FIRST CUT OF THE LEDGER ROW BELOW CLAIMED THE GAP WAS
+    "STRUCTURAL — no test can make that particular call observable". That was FALSE, and it was the
+    sole justification for leaving a live guard unpinned: a spec injected straight into
+    `INVARIANTS` reaches this path (the suite's own established bypass technique), the guard refuses
+    BEFORE `subprocess.run`, and deleting the `_door` call there spends a real call on it.
+    """
+
+    def explode(cmd, **kw):
+        raise AssertionError(f"the door let a live call through: {cmd}")
+
+    monkeypatch.setattr(C.subprocess, "run", explode)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    saved = _inject_spec(
+        "user.identity",
+        ttl_s=43200,
+        argv=("api", "user", "--jq", "."),
+        projection="inj-v1",
+        project=C.INVARIANTS["user.identity"].project,
+    )
+    try:
+        err = _Err()
+        monkeypatch.setattr(C.sys, "stderr", err)
+        monkeypatch.setattr(C.sys, "stdout", _Out())
+        rc = C.main(["--key", "user.identity", "--cache-dir", str(tmp_path)])
+        assert rc == 1, "the global fallback must REFUSE a guard-2-violating spec"
+        stderr = err.buffer.getvalue()
+        assert b"live read (not cached)" in stderr, stderr
+        assert b"REFUSED" in stderr, stderr
+        assert b"--jq" in stderr, stderr
+    finally:
+        C.INVARIANTS["user.identity"] = saved
 
 
 def test_the_unprotected_answer_is_a_VALUE_the_CLI_exits_0_on(
