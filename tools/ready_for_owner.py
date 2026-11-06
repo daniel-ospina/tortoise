@@ -1417,10 +1417,15 @@ def _run_emits(run: Mapping[str, Any], files: tuple[str, ...]) -> bool:
 def check_gates(probe: Probe) -> Check:
     """Every required ENTRY context must have a newest attempt concluded ``success``.
 
-    ``merge_conditions`` names are a different case: they are settled by Mergify on
-    ``mergify/merge-queue/<sha>``, so at a PR head they are ``DEFERRED(merge-time)``
-    rather than missing — but a merge-time check that DID run here and is red still
-    fails, because a measured red is evidence about this tree wherever it is judged.
+    ``merge_conditions`` names are a different case, and the difference is ATTRIBUTION,
+    not tolerance: an absent merge-time name is ``DEFERRED(merge-time)`` (a PASS) **only**
+    when nothing shows its emitting workflow ran on this head — then Mergify settles it on
+    ``mergify/merge-queue/<sha>``. When a PR-triggered run of that workflow IS on the head,
+    the aggregate is pending or never posted and the absence is ``MISSING`` (a FAIL); when
+    the attribution or the run listing cannot be read, it is ``UNATTRIBUTABLE`` (also a
+    FAIL, never a deferral). A merge-time check that ran here and is red fails too, because
+    a measured red is evidence about this tree wherever it is judged. See
+    ``_merge_time_absence`` for the three arms.
 
     In-flight is a FAIL here, not a wait: a head whose checks have not concluded is not
     ready *now*, and the answer the owner needs is about now.
@@ -3027,6 +3032,37 @@ def _failure_output(args: argparse.Namespace, reason: str) -> str:
     return f"NOT-READY({pr}, failed={','.join(CONDITIONS)})"
 
 
+def _fixture_head_runs(data: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...] | None:
+    """A fixture's run listing, or ``None`` when the fixture does not carry a READABLE one.
+
+    The run listing and the emitter projection are what decide a merge-time context's
+    ABSENCE, so the fixture door must be able to express both — a door that could not would
+    force every absent-merge-time fixture into the UNATTRIBUTABLE arm and make the DEFERRED
+    arm unreachable from ``--fixture``.
+
+    ``None`` is the fail-closed "not read" arm — the value the live path sets when
+    ``ci_verdict.collect_items`` refuses a truncated listing — and BOTH an omitted key and an
+    explicit null land there. ⛔ Not the ``labels`` idiom: ``()`` is not a neutral default, it
+    ASSERTS "read it, zero runs exist", which is the DEFERRED (PASS) arm, so a fixture that
+    never spoke about attribution must not silently exercise the pass arm. A legitimate
+    DEFERRED is spelled ``"head_runs": []``.
+
+    The SHAPE is validated, not just presence: only a sequence whose every entry is a mapping
+    is a listing. ``"python-ci.yml"`` (a string, which would become a tuple of characters), a
+    bare mapping, and a listing with unreadable entries are all type-confused or partially-read
+    surfaces; the live path refuses each of them, so the fixture door must not turn any of them
+    into "read it, no run of the emitter exists".
+    """
+    if "head_runs" not in data or data["head_runs"] is None:
+        return None
+    raw = data["head_runs"]
+    if not isinstance(raw, (list, tuple)):
+        return None
+    if not all(isinstance(run, Mapping) for run in raw):
+        return None
+    return tuple(raw)
+
+
 def probe_from_dict(data: Mapping[str, Any]) -> Probe:
     """Build a Probe from a fixture dict (used by tests and ``--fixture``)."""
     groups = data.get("groups")
@@ -3078,20 +3114,7 @@ def probe_from_dict(data: Mapping[str, Any]) -> Probe:
         tree_raw=str(data.get("tree_raw", "")),
         groups=parsed_groups,
         groups_raw=str(data.get("groups_raw", "")),
-        # The run listing and the emitter projection are what decide a merge-time
-        # context's ABSENCE, so the fixture door must be able to express both — a fixture
-        # that could not would force every absent-merge-time fixture into the
-        # UNATTRIBUTABLE arm and make the DEFERRED arm unreachable from `--fixture`.
-        # ⛔ NOT the `labels` idiom. Omitted and explicit null BOTH mean "not read" here
-        # (=> FAIL, unattributable): `()` is not a neutral default, it ASSERTS "read it,
-        # zero runs exist", which is the DEFERRED PASS arm. So a fixture that never spoke
-        # about attribution must not silently exercise the pass arm — a legitimate
-        # DEFERRED is spelled `"head_runs": []`.
-        head_runs=(
-            None
-            if "head_runs" not in data or data["head_runs"] is None
-            else tuple(data["head_runs"])
-        ),
+        head_runs=_fixture_head_runs(data),
         merge_emit_files={
             str(name): tuple(files or ())
             for name, files in (data.get("merge_emit_files") or {}).items()

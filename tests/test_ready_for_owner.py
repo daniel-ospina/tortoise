@@ -15,9 +15,12 @@ The modes, one test each:
 * a required check concluded ``cancelled``           → NOT-READY   (``test_cancelled_*``)
 * a required check concluded ``null``                → NOT-READY   (``test_null_*``)
 * a required **entry** check never scheduled          → NOT-READY   (``test_missing_*``)
-  (a ``merge_conditions`` check with no run at the head is DEFERRED and PASSES —
-  ``test_a_head_carrying_no_merge_time_check_is_READY_not_NOT_READY``: that is the live
-  shape of every author head, and treating it as missing is NOT-READY forever)
+  (a ``merge_conditions`` check is DEFERRED and PASSES **only** when no PR-triggered run
+  of its emitting workflow is on the head —
+  ``test_a_head_carrying_no_merge_time_check_is_READY_not_NOT_READY``; when its workflow
+  DID run here, absence is ``MISSING`` and NOT-READY, because a ``needs``-gated aggregate
+  is absent until its prerequisites finish —
+  ``test_a_pending_merge_time_aggregate_is_a_FAIL_not_a_deferral``)
 * a required check still in flight                   → NOT-READY   (``test_in_flight_*``)
 * a required check ``skipped``/``neutral``           → NOT-READY   (``test_skipped_*``)
 * a red that a cancellation re-ran over              → NOT-READY   (``test_voided_red_*``)
@@ -3496,13 +3499,20 @@ def test_a_truncated_run_listing_fails_closed_before_attribution(
 
 
 def test_a_malformed_run_entry_reaching_attribution_is_skipped_not_a_traceback() -> None:
-    """★ The `--fixture`/direct-Probe door: a non-mapping run entry must not RAISE.
+    """★ The `--fixture` door: a non-mapping run entry must not RAISE — and not DEFER.
 
     Every condition is a pure function of the Probe, and `probe_from_dict` is a documented
-    way to build one, so a non-mapping entry can reach `_run_emits` without passing
-    `collect_items`. An AttributeError escaping `check_gates` exits **1** through the CLI,
-    which a caller reads as "a required check is red" rather than "I could not read the
-    runs" — the mis-attribution earlier rounds fixed for a non-integer run `id`.
+    way to build one, so a malformed entry can reach attribution without passing
+    `collect_items`. Two things must hold, and they pull in opposite directions:
+
+    * an AttributeError escaping `check_gates` exits **1** through the CLI, which a caller
+      reads as "a required check is red" rather than "I could not read the runs" — the
+      mis-attribution earlier rounds fixed for a non-integer run `id`;
+    * a listing with unreadable entries is NOT a reading. "Not evidence the workflow ran"
+      is not "evidence it did not run", so it may not reach the DEFERRED (PASS) arm —
+      that is the same conflation `958b235db` retracts for the omitted key, one shape over.
+
+    So the verdict is FAIL(unattributable): a verdict, not a traceback, and not a pass.
     """
     probe = rfo.probe_from_dict(
         {
@@ -3525,10 +3535,11 @@ def test_a_malformed_run_entry_reaching_attribution_is_skipped_not_a_traceback()
             ],
         }
     )
+    assert probe.head_runs is None, probe.head_runs
     gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
-    # No ATTRIBUTABLE run => no evidence the workflow ran here => DEFERRED, and no crash.
-    assert gates.passed is True, gates.raw
-    assert "DEFERRED(merge-time)" in gates.raw
+    # A partially-readable listing is UNATTRIBUTABLE — a verdict, not a crash, not a deferral.
+    assert gates.passed is False, gates.raw
+    assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
 
 
 def _fixture_with_head_runs(extra: dict[str, object]) -> dict[str, object]:
@@ -3568,6 +3579,28 @@ def test_an_omitted_head_runs_is_unattributable_not_a_deferral() -> None:
     assert gates.passed is False, gates.raw
     assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, gates.reason
     assert "UNATTRIBUTABLE" in gates.raw
+
+
+def test_a_type_confused_head_runs_is_unattributable_not_a_deferral() -> None:
+    """★ A listing's SHAPE is validated, not just its presence.
+
+    `tuple(...)` accepts any iterable, so a string becomes a tuple of CHARACTERS and a bare
+    mapping becomes its KEYS — neither matches an emitter, and both therefore graded
+    `DEFERRED` / PASS, i.e. "read it, no run of the emitter exists". The live path cannot
+    produce either shape (`collect_items` yields mappings only), so this is the fixture door,
+    but it is the same conflation the omitted-key pin above closes: an unreadable surface is
+    not a reading.
+    """
+    for shape in (
+        "python-ci.yml",
+        {"path": ".github/workflows/python-ci.yml", "event": "pull_request"},
+        ({"path": ".github/workflows/python-ci.yml"}, "not-a-run"),
+    ):
+        probe = rfo.probe_from_dict(_fixture_with_head_runs({"head_runs": shape}))
+        assert probe.head_runs is None, (shape, probe.head_runs)
+        gates = next(c for c in rfo.evaluate(probe).checks if c.name == "gates")
+        assert gates.passed is False, (shape, gates.raw)
+        assert f"unattributable:{MERGE_TIME_REQUIRED[0]}" in gates.reason, (shape, gates.reason)
 
 
 def test_an_explicit_empty_head_runs_still_defers() -> None:
