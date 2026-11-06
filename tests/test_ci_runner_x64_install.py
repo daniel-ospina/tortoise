@@ -3763,6 +3763,10 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: surface is a `setup-python cache: pip` argument rather than an `actions/cache` step of its own.)
 #: ⚠ Named by ROW, not by section: all four sit in §2 today, and a §-number would re-stale on the
 #: next section this doc gains — the same failure mode as the citations themselves.
+#: ⚠ The two `test-record-postgres` numbers were re-anchored when #10962's merge brought the workflow
+#: forward; the doc ALSO names the same constructs in prose (`Install package + the postgres extra`,
+#: the `Cache pip dependency caches (#7612)` step's `with:` block) so a reader has a grep-able handle
+#: that outlives any number — the number is the checkable claim, the construct name is the map.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("python-ci.yml:4575", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2932-2937", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
