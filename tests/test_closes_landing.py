@@ -4084,3 +4084,51 @@ def test_the_opener_allowance_inside_a_CONTAINER_is_a_DECLARED_residual():
     assert cl.parse_closing_refs(item_relative) == [], "DECLARED residual"
     # The control: at the TOP level the same opener is inside the allowance and IS read.
     assert cl.parse_closing_refs("   <div>\n-     Closes #100\n") == [100]
+
+
+def test_a_quote_only_line_is_BLANK_CONTENT_and_ends_the_block():
+    """Round 46 review (P1) — a FAIL-OPEN the html-block state carried into `main`.
+
+    §4.6 ends a type-6/7 HTML block at a BLANK line, and the state tested `line.strip()` — but a
+    quote-only line (`>`, `>  `, `> >`) is non-empty as a raw line and empty of CONTENT after its
+    container prefixes. Two consequences, each alone sufficient:
+
+      * the blank-line end never fired, so the block stayed open; and
+      * the same line was read as a DEDENT (`_item_dedented(">", item)` is True), which popped the
+        item BEFORE the next opener was scanned, so that block bound to `html_item = None` and had
+        no end condition at all.
+
+    Each body below is a renderer `code_block`, and each was CREDITED in both arms:
+
+        `> <span>` + `>` + `> -     Closes #100`                 renderer `code_block`
+        `>  <div>` + `>` + `> -     Closes #100`                 same
+        `> - item` + `>` + `>   <pre>` + `>` + `> -     Closes`  same
+        `> - item` + `>` + `>  <br />` + `>` + `> -     Closes`  same
+
+    Measured over the review's grid: 350,316 bodies newly credited against the pre-fix head, 236,952
+    of them in `strict=True` too — the direction this module ranks worst. End to end,
+    `issue_process_lint --body-file` printed `NOTHING FLAGGED` on the quoted body while the identical
+    body without its `>` prefixes flagged `pr-unclaimed-issue`.
+    """
+    md = MarkdownIt("commonmark")
+
+    def token_type(body: str) -> str | None:
+        for token in md.parse(body):
+            if "Closes #100" in getattr(token, "content", ""):
+                return token.type
+        return None
+
+    for body in ("> <span>\n>\n> -     Closes #100\n",
+                 ">  <div>\n>\n> -     Closes #100\n",
+                 "> - item\n>\n>   <pre>\n>\n> -     Closes #100\n",
+                 "> - item\n>\n>  <br />\n>\n> -     Closes #100\n"):
+        assert token_type(body) == "code_block", body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # Controls: the same shapes WITHOUT the quote-only line still credit — the block genuinely
+    # continues there, and the fix must not become "blank anything quoted".
+    for body in ("> <span>\n> -     Closes #100\n",
+                 ">  <div>\n> -     Closes #100\n"):
+        assert token_type(body) == "html_block", body
+        assert cl.parse_closing_refs(body) == [100], body
