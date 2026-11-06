@@ -83,7 +83,13 @@ def test_init_turns_source_context_off(enabled_sentry: dict[str, list]) -> None:
     # constant, never re-typed. Two hand-written copies are one silent drift from
     # re-opening the storm — the handler would call a class benign while the SDK
     # still delivered an event for it (or the reverse), and every other test here
-    # would stay green. Mutating either side alone reddens this.
+    # would stay green.
+    #
+    # ⛔ What this assertion holds is DERIVATION, and only derivation (review round
+    # 5, P3). Editing `BENIGN_EXCEPTION_NAMES` alone does NOT redden it — `init()`
+    # derives `ignore_errors` from that same constant, so both sides move together.
+    # That is the property we want (one source of truth), not a hole in the pin.
+    # The mutation that reddens it is re-typing a literal into `init()`.
     assert set(kwargs.get("ignore_errors") or ()) == set(tsentry.BENIGN_EXCEPTION_NAMES), (
         "init()'s ignore_errors and BENIGN_EXCEPTION_NAMES must be the SAME set — "
         "init derives it, so a difference means one of them was re-typed by hand"
@@ -356,6 +362,65 @@ def live_sentry_client(monkeypatch: pytest.MonkeyPatch):
         importlib.reload(tsentry)
 
 
+@pytest.fixture()
+def real_sentry(monkeypatch: pytest.MonkeyPatch):
+    """Init the REAL ``tortoise.sentry`` against the REAL pinned SDK, then restore.
+
+    ``enabled_sentry`` above fakes ``sentry_sdk`` so this module's CALL SURFACE can
+    be observed with nothing installed; this fixture instead lets it build a
+    genuine client, which is the only way to ask the pinned SDK's own event
+    builder what the configured value actually does.
+    """
+    previous_client = sentry_sdk.get_client()
+    monkeypatch.setenv("SENTRY_DSN", "https://public@example.invalid/1")
+    monkeypatch.delenv("SENTRY_ENV", raising=False)
+    monkeypatch.delenv("SENTRY_TRACES_SAMPLE_RATE", raising=False)
+    importlib.reload(tsentry)
+    try:
+        assert tsentry.init() is True
+        yield sentry_sdk
+    finally:
+        sentry_sdk.get_global_scope().set_client(previous_client)
+        # ``_enabled`` is module state, which monkeypatch does not unwind; reload it
+        # back to OFF so no later test inherits an enabled module with a dead client.
+        monkeypatch.delenv("SENTRY_DSN", raising=False)
+        importlib.reload(tsentry)
+
+
+def _recorded_event(sdk, client) -> dict:
+    """Capture one exception through ``client`` and return the event it built.
+
+    The recording TRANSPORT is the observation point that matters: it sits after
+    event construction and serialization, so it sees exactly what the product
+    would send — ``before_send`` on the production client is not configurable, and
+    ``client.options[...]`` is only an echo of the kwargs.
+    """
+
+    class _Recorder(sdk.transport.Transport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.events: list[dict] = []
+
+        def capture_envelope(self, envelope) -> None:
+            # Event items only — a flush also carries a `sessions` envelope.
+            for item in envelope.items:
+                if item.type == "event":
+                    self.events.append(item.payload.json)
+
+    recorder = _Recorder()
+    previous_transport = client.transport
+    client.transport = recorder
+    try:
+        try:
+            raise _OtherError("boom")
+        except _OtherError as exc:
+            sdk.capture_exception(exc)
+    finally:
+        client.transport = previous_transport
+    assert recorder.events, "the recording transport saw no event"
+    return recorder.events[-1]
+
+
 def _disconnect_app(routes):
     """A Starlette app whose ServerErrorMiddleware uses the real handler."""
     from starlette.applications import Starlette
@@ -436,4 +501,52 @@ def test_an_upstream_connection_reset_still_reaches_a_real_sentry_client(
     assert len(live_sentry_client.events) == after_upstream, (
         "a ClientDisconnect is unambiguously the CALLER leaving — it must still "
         "be filtered globally, otherwise the storm's fuel is back"
+    )
+
+
+def test_the_real_sdk_builds_an_event_with_no_source_context(real_sentry) -> None:
+    """Guard 1 must be honoured by the INSTALLED SDK, not merely passed to it.
+
+    ``test_init_turns_source_context_off`` pins a kwarg captured by the FAKE SDK,
+    so a ``sentry-sdk`` bump that keeps the key accepted while no longer reading
+    it would leave that pin green while the per-frame source read — the outage —
+    came back. ``with_locals`` → ``include_local_variables`` is the precedent this
+    very module already relies on for #2863, and it is the SAME major that removes
+    both options (`sentry-sdk` 3.x drops ``include_source_context`` and
+    ``include_local_variables`` for ``data_collection=``), while
+    ``pyproject.toml`` declares ``sentry-sdk>=2.0`` with no upper bound. So assert
+    on the BUILT event: the frames a real exception produces must carry no
+    ``context_line``/``pre_context``.
+
+    The control below is the falsifier: the same observation point on a client
+    built with source context ON must SEE those keys, so a zero is a fact about
+    the option and not about the recorder.
+    """
+    event = _recorded_event(real_sentry, real_sentry.get_client())
+    frames = event["exception"]["values"][-1]["stacktrace"]["frames"]
+    assert frames, "the event carries no frames — the pin below would be vacuous"
+    assert not any("context_line" in f or "pre_context" in f for f in frames), (
+        "the installed sentry-sdk still attached source context to an event frame: "
+        "building that event re-reads and tokenizes the source file of every frame "
+        "on the calling thread, which is the 2026-11-04 outage (#11092, "
+        "sentry-python#8089)"
+    )
+
+    # Control: same recorder, same exception, source context switched BACK ON.
+    previous_client = real_sentry.get_global_scope().get_client()
+    real_sentry.init(
+        dsn="https://public@example.invalid/1",
+        include_source_context=True,
+        default_integrations=False,
+        integrations=[],
+    )
+    try:
+        control = _recorded_event(real_sentry, real_sentry.get_client())
+    finally:
+        real_sentry.get_global_scope().set_client(previous_client)
+    control_frames = control["exception"]["values"][-1]["stacktrace"]["frames"]
+    assert any("context_line" in f for f in control_frames), (
+        "falsifier: with include_source_context=True the recorder must SEE "
+        "context_line, otherwise the assertion above measures the recorder rather "
+        "than the option"
     )
