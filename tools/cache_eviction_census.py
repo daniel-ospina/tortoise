@@ -25,9 +25,12 @@ which cannot mint either.
         --out /tmp/egress-census.json
 
     # …with the one class that HAS a parity instrument already measured. The report
-    # comes from that instrument's `--json` (it has no `--out`), and the graph it was
-    # measured on is named by `--parity-graph` — REQUIRED, and required to equal
-    # `--graph`, because the instrument emits no graph identity of its own:
+    # comes from that instrument's `--json` (it has no `--out`), and it carries the
+    # graph it measured (`graph`, emitted by `turn_parity_census.census`).
+    # `--parity-graph` is still REQUIRED and still must equal `--graph`: it is the
+    # operator's declaration, and the report's own identity must MATCH it — the binding
+    # no longer rests on the flag alone (review P1 on #11004: the loader used to fill a
+    # missing graph in with the caller's own name, so the check could never fail):
     uv run python tools/turn_parity_census.py --uri "$TORTOISE_DB_URI" \\
         --graph-name tortoise --json /tmp/turns.json
     uv run python tools/cache_eviction_census.py \\
@@ -283,10 +286,15 @@ def main(argv: list[str] | None = None) -> int:
                               "each needs --parity-graph."))
     parser.add_argument("--parity-graph", default=None, metavar="NAME",
                         help=("the graph the parity report was measured against. "
-                              "REQUIRED with --parity-report: the instrument emits no "
-                              "graph identity, so without this a CLEAN census of one "
-                              "graph would license evicting another. An operator "
-                              "ASSERTION, and the census says so."))
+                              "REQUIRED with --parity-report, and required to equal "
+                              "--graph. The report must ALSO carry its own `graph` "
+                              "(`tools/turn_parity_census.py --json` emits it) and "
+                              "that name must match this one: a report naming no "
+                              "graph is REFUSED, so a CLEAN census of another graph "
+                              "cannot be re-badged by repeating --graph here. "
+                              "⚠️ The check is NAME-ONLY: a graph of the same name "
+                              "on a different INSTANCE, or measured EARLIER, is "
+                              "NOT detected here."))
     parser.add_argument("--ceiling-bytes", type=int, default=None,
                         metavar="N",
                         help=("a declared ceiling; defaults to "
@@ -318,16 +326,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.parity_report and not args.parity_graph:
         return _usage_error(
             parser,
-            "--parity-report requires --parity-graph: the instrument emits no graph "
-            "identity, so without naming the graph it measured a CLEAN census of one "
-            "graph would license evicting another",
+            "--parity-report requires --parity-graph: it is the operator's "
+            "declaration of the graph the report was measured on, and the report's "
+            "own `graph` field must match it (a report naming none is refused)",
         )
     if args.parity_graph is not None and args.parity_graph != args.graph:
         # ⛔ THE ASSERTION MUST NAME THE GRAPH BEING MEASURED. Comparing the report
         # against an operator-typed string that may name a DIFFERENT graph made the
         # binding vacuous: `--graph A --parity-report <clean census of B>
         # --parity-graph B` produced a PLAN for A on evidence about B. Requiring
-        # equality to `--graph` (itself pinned to the URI) is what closes it.
+        # equality to `--graph` (itself pinned to the URI) closes that half; the
+        # report's own `graph` (emitted by `turn_parity_census.census`) closes the
+        # other — `load_parity_report` refuses a report that names no graph, so a
+        # FOREIGN census cannot be re-badged by repeating `--graph` here
+        # (review P1 on #11004; the `--parity-graph` help carries the same rule).
+        # ⚠️ What is NOT closed, here or anywhere on this path: a census of the SAME
+        # graph measured EARLIER. Its `graph` matches by construction, so the name
+        # comparison passes it, and the only staleness guard downstream is
+        # `assess()`'s over-count check (`entry.nodes > resident_total`), which fires
+        # only when the report's population EXCEEDS the resident node count
+        # (review P2 on #11097). Stated in `--parity-graph`'s help as well, where the
+        # operator reads it at the moment of choosing the flag.
         return _usage_error(
             parser,
             f"--parity-graph {args.parity_graph!r} must be the graph being measured "
