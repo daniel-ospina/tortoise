@@ -10316,10 +10316,15 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     1. it is removed from ``entities[]`` — so the entity loop at S5
        (``execute_embed``, the ``for e in embed_list.get("entities")`` mint)
        cannot see it, which is the *structural* half of the no-mint guarantee;
-    2. it is stripped from every CLAIM's AND every EVENT's ``about_entities`` —
-       ``commit_schema`` validates both (``points[i].about_entities`` and
-       ``events[i].about_entities`` against the emitted set), and a hold that
-       422s the whole session is worse than the phantom node it removed;
+    2. it is stripped from every CLAIM's AND every EVENT's ``about_entities``
+       and from the typed ``subject``/``object`` **slots** — ``commit_schema``
+       resolves BOTH reference sets against the emitted entities
+       (``points[i].about_entities``/``events[i].about_entities``, then
+       ``_resolve_slot_refs``: "does not resolve to an emitted entity"), and a
+       hold that 422s the whole session — or drops a slot with a warning that
+       reads as an extraction error — is worse than the phantom node it removed;
+       ``slots.event`` is event-as-content and is never resolved against
+       entities, so it is left alone;
     3. every operator whose endpoint names it is DROPPED, because
        ``execute_embed``'s mint-before-wire pass materialises an unresolvable
        operator endpoint as a fabricated statement Point (#2552) — exactly the
@@ -10448,15 +10453,23 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
                                       "already recorded on a claim"))
 
     def _claims_naming(surface: str) -> list[dict]:
-        """Every carrier of this surface — claims AND events. Layer-1 validates
-        both sets, so both are stripped (review: events were missed, and an event
-        naming a held surface 422'd the whole session)."""
-        carriers = [p for p in points
-                    if isinstance(p.get("about_entities"), list)
-                    and any(str(a).strip() == surface for a in p["about_entities"])]
-        carriers += [e for e in events
-                     if isinstance(e.get("about_entities"), list)
-                     and any(str(a).strip() == surface for a in e["about_entities"])]
+        """Every carrier of this surface — claims AND events, in BOTH reference
+        sets Layer-1 resolves against the emitted entities.
+
+        ``about_entities`` is the first set; the typed ``subject``/``object``
+        SLOTS are the second (``_resolve_slot_refs`` refuses a slot that does
+        not resolve to an emitted entity). ⛔ Reading only the first set made a
+        slot-only reference invisible: the hold was abandoned, the phantom was
+        MINTED (fail-open) and the slot then dropped with a warning that reads
+        as an extraction error (#11021 review cycle 5, P1).
+        """
+        carriers: list[dict] = []
+        for carrier in [*points, *events]:
+            names = carrier.get("about_entities")
+            if ((isinstance(names, list)
+                 and any(str(a).strip() == surface for a in names))
+                    or surface in _slot_ref_names(carrier)):
+                carriers.append(carrier)
         return carriers
 
     stats: dict = {"held_surfaces": 0, "hold_abandoned_no_claim": 0,
@@ -10531,33 +10544,42 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             held_surfaces.add(surface)
             hold.setdefault(surface, verdict)
 
+    def _strip_reference_sets(carrier: dict) -> dict:
+        """Remove every held surface from BOTH reference sets Layer-1 resolves.
+
+        Returns ``carrier`` ITSELF when nothing changed (an untouched carrier
+        stays byte-identical and the caller's dicts are never mutated), else a
+        NEW dict. ⛔ `about_entities` alone leaves the slot dangling, and a
+        dangling slot is what Layer-1 reports as an extraction error.
+        """
+        out: dict = carrier
+        names = carrier.get("about_entities")
+        if isinstance(names, list):
+            pruned = [a for a in names
+                      if str(a).strip() not in held_surfaces]
+            if len(pruned) != len(names):
+                out = {**out, "about_entities": pruned}
+        slots = carrier.get("slots")
+        if isinstance(slots, dict):
+            stripped = _strip_held_slot_refs(slots, held_surfaces)
+            if stripped is not slots:
+                out = {k: v for k, v in out.items() if k != "slots"}
+                if stripped:
+                    out["slots"] = stripped
+        return out
+
     for point in (embed_list.get("points") or []):
-        if not isinstance(point, dict):
-            kept_points.append(point)
-            continue
-        names = point.get("about_entities")
-        if not isinstance(names, list):
-            kept_points.append(point)
-            continue
-        pruned = [a for a in names
-                  if str(a).strip() not in held_surfaces]
-        kept_points.append(point if len(pruned) == len(names)
-                           else {**point, "about_entities": pruned})
+        kept_points.append(_strip_reference_sets(point)
+                           if isinstance(point, dict) else point)
 
     for event in (embed_list.get("events") or []):
         if not isinstance(event, dict):
             kept_events.append(event)
             continue
-        names = event.get("about_entities")
-        if not isinstance(names, list):
-            kept_events.append(event)
-            continue
-        pruned = [a for a in names if str(a).strip() not in held_surfaces]
-        if len(pruned) != len(names):
+        stripped = _strip_reference_sets(event)
+        if stripped is not event:
             stats["events_stripped"] += 1
-            kept_events.append({**event, "about_entities": pruned})
-        else:
-            kept_events.append(event)
+        kept_events.append(stripped)
 
     kept_operators, dropped = _prune_held_operators(
         embed_list.get("operators"), held_surfaces)
@@ -10745,6 +10767,62 @@ def _carried_holds(rows: object) -> dict[str, str]:
         if verdict is not None and verdict[0] == rule_id:
             out.setdefault(surface, rule_id)
     return out
+
+
+#: The participant-slot roles Layer-1 resolves against the EMITTED entities
+#: (``_resolve_slot_refs``). ``slots.event`` is deliberately absent: it is
+#: event-as-content (#1417 B2), resolved by the write path against events, so a
+#: held SURFACE name in it is not a reference to an entity (#11021).
+_SLOT_ENTITY_ROLES = ("subject", "object")
+
+
+def _slot_ref_names(carrier: dict) -> set[str]:
+    """The typed participant-slot references that point at an EMITTED ENTITY.
+
+    This is the SECOND reference set ``commit_schema``/``_resolve_slot_refs``
+    validate against the emitted set (the first is ``about_entities``). A
+    surface named only here is still "a claim that used it", so the
+    referentiality selection must treat it as a CARRIER (#11021 review cycle 5,
+    P1: reading ``about_entities`` alone abandoned the hold and MINTED the
+    phantom, then Layer-1 dropped the dangling slot with a warning that reads
+    as an extraction error).
+    """
+    slots = carrier.get("slots")
+    if not isinstance(slots, dict):
+        return set()
+    names: set[str] = set()
+    for role in _SLOT_ENTITY_ROLES:
+        refs = slots.get(role)
+        if not isinstance(refs, list):
+            continue
+        for ref in refs:
+            if isinstance(ref, dict) and ref.get("name"):
+                names.add(str(ref["name"]).strip())
+    return names
+
+
+def _strip_held_slot_refs(slots: dict, held_surfaces: set[str]) -> dict:
+    """``slots`` with every held surface removed from ``subject``/``object``.
+
+    Returns the SAME object when nothing was removed (so an untouched carrier
+    stays byte-identical), otherwise a new dict — possibly empty, in which case
+    the caller drops the key. ``slots.event`` passes through untouched.
+    """
+    out: dict = {}
+    changed = False
+    for role, refs in slots.items():
+        if role in _SLOT_ENTITY_ROLES and isinstance(refs, list):
+            kept = [ref for ref in refs
+                    if not (isinstance(ref, dict)
+                            and str(ref.get("name") or "").strip()
+                            in held_surfaces)]
+            if len(kept) != len(refs):
+                changed = True
+            if kept:
+                out[role] = kept
+            continue
+        out[role] = refs
+    return out if changed else slots
 
 
 def _operator_endpoint_surfaces(operators: object) -> set[str]:

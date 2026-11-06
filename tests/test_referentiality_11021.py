@@ -1036,3 +1036,91 @@ def test_an_unarmed_run_publishes_no_held_record(monkeypatch):
                              session_id="unarmed-records")
     assert out["mentions"]["records"] == [], (
         "an unarmed run reported records it never made")
+
+
+# ── the SECOND reference set: typed participant SLOTS ──────────────────────
+# Layer-1 resolves two reference sets against the emitted entities:
+# `about_entities` (`points[i]`/`events[i]`) AND the typed `subject`/`object`
+# slots (`_resolve_slot_refs`: "does not resolve to an emitted entity"). The
+# selection read only the first, so a mention referenced ONLY from a slot had
+# no carrier: the hold was abandoned, the phantom was MINTED (fail-open) and
+# the slot survived to the payload. #11021's guarantee is that a mention is
+# never promoted to an :Object — and a slot reference IS a promotion path.
+
+def _slot_only_embed_list(surface: str = "it") -> dict:
+    """One entity, and ONE claim whose ONLY reference to it is a typed slot."""
+    return {
+        "entities": [{"name": surface, "kind": "core:other"}],
+        "events": [],
+        "points": [{
+            "content": f"a claim that uses {surface} in its own sentence",
+            "pointKind": "statement",
+            "about_entities": [],
+            "quote": f"a claim that uses {surface}",
+            "slots": {"subject": [{"name": surface, "kind": "core:other",
+                                   "confidence": 0.93}]},
+        }],
+        "operators": [],
+    }
+
+
+def test_a_reference_that_is_ONLY_a_SLOT_is_held_and_recorded_not_minted():
+    """⛔ THE CARRIER SET WAS INCOMPLETE (review cycle 5, P1). A surface the model
+    emitted as an entity and referenced only from `slots.subject` had no carrier
+    in `_claims_naming`, so the hold was abandoned and the phantom was MINTED —
+    the exact promotion #11021 exists to prevent, through the second reference
+    set Layer-1 resolves."""
+    el = _slot_only_embed_list()
+    routed = route_mentions(copy.deepcopy(el), "")
+    stats = routed["mention_stats"]
+    assert stats["hold_abandoned_no_claim"] == 0, (
+        "a slot reference IS a claim to record the mention on")
+    assert stats["held_surfaces"] == 1
+    assert [m["surface"] for m in routed["mentions"]] == ["it"]
+    payload, _ = _mint(el)
+    assert "it" not in _entity_names(payload), (
+        "the phantom node minted through the slot reference")
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"], (
+        "the mention was not recorded on the claim that used it")
+
+
+def test_a_held_surface_is_stripped_from_the_slots_that_reference_it():
+    """Stripping `about_entities` alone left the slot dangling: Layer-1 then drops
+    it with `slot subject 'it' … does not resolve to an emitted entity — dropped`,
+    a warning that reads as an EXTRACTION error for a decision the run made on
+    purpose. Both reference sets are stripped, and `slots.event` (event-as-content,
+    never resolved against entities) is left alone."""
+    el = _slot_only_embed_list()
+    el["points"][0]["slots"]["event"] = [
+        {"name": "it", "kind": "core:event", "confidence": 0.8}]
+    routed = route_mentions(copy.deepcopy(el), "")
+    # ⛔ Asserted on the ROUTED list, not on the payload: Layer-1 drops a
+    # dangling slot too, so a payload-only assertion passes whether WE stripped
+    # it or Layer-1 reported it as an extraction error (measured: the mutant that
+    # makes `_strip_held_slot_refs` a no-op left a payload-only assertion green).
+    assert not (routed["points"][0].get("slots") or {}).get("subject"), (
+        f"the dangling slot survived the selection: {routed['points'][0].get('slots')}")
+    res = execute_embed(copy.deepcopy(routed), {}, session_id="slot-strip")
+    payload = res["payload"]
+    point = payload["points"][0]
+    assert not (point.get("slots") or {}).get("subject"), (
+        f"the dangling slot survived: {point.get('slots')}")
+    assert not any("does not resolve to an emitted entity" in str(w)
+                   for w in res.get("warnings") or []), (
+        f"Layer-1 reported our own decision as an extraction error: {res.get('warnings')}")
+    assert [r["name"] for r in point["slots"]["event"]] == ["it"], (
+        "slots.event is event-as-content and must pass through untouched "
+        "(its kind may be repaired by _clean_slots; its REFERENCE must survive)")
+
+
+def test_a_slot_only_hold_survives_the_union_pass():
+    """The carried decision must cover the second reference set too: pass 2 sees
+    the payload pass 1 rewrote (entity gone, slot gone), so re-deriving would
+    abandon the hold and mint the phantom on the ordinary two-pass pipeline."""
+    el = _slot_only_embed_list()
+    twice = route_mentions(copy.deepcopy(route_mentions(el, "")), "")
+    assert twice["mention_stats"]["hold_abandoned_no_claim"] == 0
+    assert "it" not in {e["name"] for e in twice["entities"]}
+    assert [m["surface"] for m in twice["mentions"]] == ["it"]
+    payload = execute_embed(copy.deepcopy(twice), {}, session_id="slot-union")["payload"]
+    assert "it" not in _entity_names(payload)
