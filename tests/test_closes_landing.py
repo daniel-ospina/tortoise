@@ -4556,3 +4556,214 @@ def test_a_TYPE1_opener_ENDS_the_paragraph_and_a_type7_block_can_then_OPEN():
     assert cl.parse_closing_refs("Notes\n<pre>\n-     Closes #100\n") == [100]
     assert token_type("Notes\n-     Closes #100\n") == "code_block"
     assert cl.parse_closing_refs("Notes\n-     Closes #100\n") == []
+
+
+# ── round 49 review: the fence's CONTAINER, a stale item, and a bare marker ──────────────────
+#
+# Four rules from the round-49 review, each with its own pin below and each pinned in BOTH
+# directions: the renderer (MarkdownIt "commonmark") decides whether the keyword is the block's
+# own TEXT or code, and the assertion is the one the arm owes that answer.
+
+def _keyword_block_type(body: str, n: int = 100) -> str | None:
+    """The token type holding `#n` — the oracle every assertion below is written against."""
+    for token in MarkdownIt("commonmark").parse(body):
+        if f"#{n}" in getattr(token, "content", ""):
+            return token.type
+    return None
+
+
+def test_the_line_after_a_CONTAINER_LESS_fence_CLOSER_is_not_measured_against_a_stale_item():
+    """Round 49 review, P1 — the FAIL-OPEN the round-48 fence binding introduced, in the default arm.
+
+    The round-48 rule is right that a fence whose opener DROPPED the item's `>` has no container
+    (§4.5: a fence is never a lazy continuation). What it did not do was take the abandoned item
+    off the stack, so the line after the CLOSER was still measured against it: `_dropped_quote_is_lazy`
+    answered "a lazy continuation of the item's paragraph", `own_code` was suppressed, and an
+    indented `Closes #N` inside a top-level code block was credited.
+
+        `> - item` + `` ``` `` + `` ``` `` + `    Closes #100`
+            renderer: `<blockquote><ul><li>item</li></ul></blockquote>`, an EMPTY top-level fence,
+            then `<pre><code>Closes #100</code></pre>`  ->  CODE
+            `origin/main` `[]`; the round-48 head `[100]` in the lenient AND `indented_code` arms.
+
+    The `strict` arm was clean only because it blanks every indented line by its own contract,
+    which is exactly why a green gate did not catch this.
+    """
+    for body in ("> - item\n  ```\n```\n    Closes #100\n",
+                 "> - item\n  ~~~\n~~~\n    Closes #100\n",
+                 "> - item\n  ```\n```\n    -     Closes #100\n",
+                 "> - item\n  ```\n```\n     -     Closes #100\n"):
+        assert _keyword_block_type(body) == "code_block", body
+        # The FINDING arm and the indented-code arm both owe `[]`; the gate arm too.
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+        assert "#100" not in cl.strip_code(body, indented_code=True), body
+    # CONTROL — the round-48 P0 this branch exists for must stay closed: the dropped marker ends
+    # the blockquote, and a `>`-prefixed `<div>` may not end the fence early and free the rest.
+    p0 = "> - item\n  ```\n> <div>\n<div>\n-     Closes #100\n"
+    assert _keyword_block_type(p0) == "fence", p0
+    assert cl.parse_closing_refs(p0) == [], p0
+    assert cl.parse_closing_refs(p0, None, strict=True) == [], p0
+
+
+def test_a_fence_binds_to_the_item_that_STILL_encloses_it_not_to_the_top_of_the_stack():
+    """Round 49 review, P1 — the LOST close the opposite reading of the same branch created.
+
+    The round-48 branch asked only `list_items[-1]`. When the fence abandoned a NESTED item but an
+    OUTER item still enclosed the line, it concluded "no container" without ever looking at it, so
+    the fence ran to EOF and swallowed a real claim:
+
+        `- outer` + `  > - inner` + `` ``` `` + `Closes #100`
+            renderer: the fence sits inside the OUTER `<li>`; line 4 dedents out of it, so the fence
+            ENDS there and `Closes #100` is a top-level `<p>`  ->  PROSE
+            `origin/main` `[100]`; the round-48 head `[]` in all three arms.
+
+    The container is the INNERMOST item whose depth the line's own quote does not exceed, and the
+    two pre-existing branches then decide its edge (`==` keeps the item binding, `<` the raw
+    column). No item at or above the line's depth is the "no container" case, and only that one.
+    """
+    for body in ("- outer\n  > - inner\n  ```\nCloses #100\n",
+                 "- outer\n  > - inner\n  ```\n- Closes #100\n"):
+        assert _keyword_block_type(body) == "inline", body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+    # CONTROL — with no item enclosing the line at all, the fence really has no container and still
+    # runs to EOF, which is the fail-open the round-48 branch closed.
+    orphan = "> - item\n  ```\n> <div>\n<div>\n-     Closes #100\n"
+    assert cl.parse_closing_refs(orphan) == [], orphan
+
+
+def test_an_INDENTED_line_that_OPENED_a_container_does_not_keep_the_paragraph_open():
+    """Round 49 review, P1 — a FAIL-OPEN in `strict`, the arm `issue_process_lint` passes on.
+
+    Round 48 taught the blanked path to keep the paragraph open across an indented line (§4.4: an
+    indented code block cannot interrupt a paragraph), but gave that carry no CONTAINER term: §4.4
+    is conditional on a paragraph in the SAME container, and a line that OPENS one ends it (§5.1).
+    The path also `continue`s before the state write at the bottom of the loop, so
+    `prev_quote_depth`/`prev_container` still described the line BEFORE the container opened.
+
+        `Notes` + `>     code` + `2.     Closes #100`
+            renderer: `<p>Notes</p>`, a blockquote, then a NEW `<ol start="2">` whose wide-gap
+            content is `<pre><code>`  ->  CODE
+            `origin/main` `[]` in both arms; the round-48 head `[100]` in `strict` AND
+            `indented_code`, i.e. a claim bought by a line the renderer never shows as prose.
+    """
+    body = "Notes\n>     code\n2.     Closes #100\n"
+    assert _keyword_block_type(body) == "code_block", body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    assert "#100" not in cl.strip_code(body, indented_code=True), body
+    # CONTROL — a blanked indented line in the SAME container still carries the paragraph, which is
+    # the lost close round 48 fixed and this must not shadow (`Notes` + `    cont` + `2.     …` is
+    # ONE `<p>` in the renderer and `origin/main` credits it).
+    same = "Notes\n    cont\n2.     Closes #100\n"
+    assert _keyword_block_type(same) == "inline", same
+    assert cl.parse_closing_refs(same) == [100], same
+
+
+def test_a_BARE_list_marker_opens_an_EMPTY_item():
+    """Round 49 review, P1 — §5.2's OTHER marker spelling, and the lost close it hid.
+
+    `_LIST_MARKER_RE` required a gap after the marker, so `> -` (the end-of-line spelling §5.2
+    allows) read as ordinary paragraph text: it left a paragraph OPEN behind it, which made
+    `_html_block_leaf` refuse the type-7 `<br />` below, and the type-7 block's own raw TEXT — the
+    marker line — was blanked as a wide-gap code line:
+
+        `> <div>` + `>` + `> -` + `> <br />` + `> -     Closes #100`
+            renderer `html_block` (the `<br />` block holds the marker line as text) -> PROSE
+            `origin/main` `[100]`; the round-48 head `[]` in all three arms (240/240 of the family).
+
+    A bare marker is an item whose content column is the marker's width + 1, so it has NO content,
+    so it has no paragraph — the answer the `- ` spelling already got.
+    """
+    # PROSE — the marker line is the html block's own text, or the empty item's content.
+    for body in ("> <div>\n>\n> -\n> <br />\n> -     Closes #100\n",
+                 "> <div>\n>\n> -\n> <br />\n> 1.      Closes #100\n",
+                 "> <div>\n>\n> -\n> <br />\n> - Closes #100\n"):
+        assert cl.parse_closing_refs(body) == [100], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+    # …and an EMPTY item still holds the line at its content column, which is what makes the answer
+    # PROSE rather than a code block. The `strict` arm blanks every indented line BY ITS OWN
+    # CONTRACT (see `strip_code`), so only the two content-aware arms are asserted here.
+    for body in ("> -\n>     Closes #100\n", "-\n    Closes #100\n"):
+        assert _keyword_block_type(body) == "inline", body
+        assert cl.parse_closing_refs(body) == [100], body
+        assert "#100" in cl.strip_code(body, indented_code=True), body
+    # CODE — the control that must NOT move: an empty item is still an item, so the wide-gap
+    # content under it is a code block, and with TEXT in the item the `<br />` really is inside the
+    # `<li>` (§4.6 type 7 then opens a block over the next item's content).
+    for body in ("> -\n> -     Closes #100\n",
+                 "> <div>\n>\n> - x\n> <br />\n> -     Closes #100\n"):
+        assert _keyword_block_type(body) == "code_block", body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    # …and the empty item does NOT extend §5.2's allowance to a 4-space line below a blank line: the
+    # renderer closes the item there and makes that line a TOP-LEVEL code block. The lenient arm
+    # still reports it — the documented over-report for exactly that position (`strip_code`) — so the
+    # two content-aware arms are what this asserts.
+    blank_then_marker = "-\n\n    Closes #100\n"
+    assert _keyword_block_type(blank_then_marker) == "code_block", blank_then_marker
+    assert cl.parse_closing_refs(blank_then_marker, None, strict=True) == [], blank_then_marker
+    assert "#100" not in cl.strip_code(blank_then_marker, indented_code=True)
+
+
+def test_a_BLANK_list_item_cannot_INTERRUPT_a_paragraph():
+    """Round 49 review — the bare-marker rule's own consumer side (§5.2's interruption rule).
+
+    "In order for a list to interrupt a paragraph, it must start with a non-blank list item." So a
+    bare marker after prose opens NO item and is that paragraph's own text. Reading it as an item
+    ended the paragraph, which let the type-7 `<br />` below open a phantom html block, and that
+    block's `not _html_here` term then CREDITED a wide-gap marker the renderer puts in
+    `<pre><code>` — in all three arms:
+
+        `Notes` + `1.` + `<br />` + `1.     Closes #100`
+            renderer: ONE `<p>` for the first three lines, then `<ol><li><pre><code>`  ->  CODE
+            `origin/main` `[]`; the bare-marker head `[100]` everywhere.
+
+    This one is a PIN rather than red-first: the pre-fix head did not treat a bare marker as an item
+    at all, so it answered this body correctly by accident. It freezes the CONSUMER side of the rule
+    that `test_a_BARE_list_marker_opens_an_EMPTY_item` introduces.
+    """
+    body = "Notes\n1.\n<br />\n1.     Closes #100\n"
+    assert _keyword_block_type(body) == "code_block", body
+    for arm in ({}, {"strict": True}, {"indented_code": True}):
+        assert "#100" not in cl.strip_code(body, **arm), (arm, body)
+    # CONTROL — `1.` can interrupt a paragraph (an ordered list that starts at 1), so WITHOUT the
+    # bare marker above it the same marker line is code at the same place.
+    assert cl.parse_closing_refs("1.     Closes #100\n") == []
+    # …and a bare `-` under a paragraph is a SETEXT UNDERLINE (§4.3), which also opens no item but
+    # leaves a HEADING behind, so the type-7 leaf below it is a real block again (PROSE).
+    setext = "**bold**\n-\n<span>\n1.     Closes #100\n"
+    assert _keyword_block_type(setext) == "html_block", setext
+    assert cl.parse_closing_refs(setext) == [100], setext
+
+
+def test_no_ITEM_opens_inside_an_HTML_block_and_none_of_its_text_is_HIDDEN():
+    """Round 49 review — the round-43/48 leaf decisions, applied to the ITEM STACK and to `indent_code`.
+
+    Two halves of one rule ("an HTML block is a LEAF, and its own TEXT is READ"):
+
+    * a marker written in the block's raw TEXT opens no item, so it cannot become the container of
+      the NEXT block — a phantom 2-column item made the tool credit a `<pre><code>`;
+    * an indented line inside the block is the block's TEXT, not code, so `indent_code` must not
+      blank it either (`own_code` already had the `not _html_here` term from round 43).
+    """
+    # The phantom item: the last line is a `<pre><code>` inside a NEW blockquote, so the gate arm and
+    # the indented-code arm owe `[]` — the phantom item defeated the second one in particular.
+    # (`strict` blanks EVERY indented line by its contract, so it cannot discriminate on its own.)
+    phantom = " \n    - x\n<br />\n~~~\n  > - inner\n\n>     Closes #100\n"
+    assert _keyword_block_type(phantom) == "code_block", phantom
+    assert cl.parse_closing_refs(phantom, None, strict=True) == [], phantom
+    assert "#100" not in cl.strip_code(phantom, indented_code=True), phantom
+    # …and the LENIENT arm still reports it, deliberately: with no container the position is the one
+    # `strip_code` declares over-reporting for (a 4-space line after a blank line — the pinned
+    # `note:` + `` + `    Closes #N` case). Recording the real answer here is the point; the
+    # phantom item this test is about is what `indented_code` above measures.
+    assert "#100" in cl.strip_code(phantom)
+    # The text half: an indented line inside an open html block is that block's raw text.
+    for body in ("> <div>\n>     Closes #100\n",
+                 "<div>\n    Closes #100\n",
+                 "<span>\n>\n    Closes #100\n"):
+        assert _keyword_block_type(body) == "html_block", body
+        assert "#100" in cl.strip_code(body, indented_code=True), body
+        assert cl.parse_closing_refs(body) == [100], body

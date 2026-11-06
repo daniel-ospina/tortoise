@@ -571,10 +571,15 @@ def _split_prefix(line: str) -> tuple[str, str]:
 
 _MAX_FENCE_INDENT = 3  # a 4+ column ``` is an INDENTED CODE BLOCK, not a fence
 
-# A list item's content column, so a fence opened inside one can END when the
-# item ends. Without it, `- item\n  ```\nCloses #N\n` blanked the column-0 prose
-# and the tool reported nothing at all (review c10-3).
-_LIST_MARKER_RE = re.compile(r"^(?P<indent>[ \t]*)(?:[-*+]|\d{1,9}[.)])(?P<gap>[ \t]+)")
+#: A list marker and the gap after it. ⛔ THE GAP MAY BE EMPTY OR ABSENT (§5.2 allows exactly two
+#: spellings: "one or more spaces or tabs" after the marker, or the END OF THE LINE) — `- `, `-`, `*`,
+#: `1.` all open list items, and the bare form opens an EMPTY item whose content column is the
+#: marker's width + 1. Round 49 review, P1: requiring the gap read `> -` as ordinary paragraph text,
+#: so the type-7 leaf under it was refused and a real close was blanked (`> <div>` + `>` + `> -` +
+#: `> <br />` + the marker). ⚠️ `[ \t]*` ALONE WOULD MATCH `**bold**` AS A BARE `*` MARKER — the
+#: second alternative is end-of-line ONLY, so neither group can match into content.
+_LIST_MARKER_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?:[-*+]|\d{1,9}[.)])(?:(?P<gap>[ \t]+)|[ \t]*$)")
 
 
 def _fence_open(rest: str, content_col: int = 0) -> tuple[str, int] | None:
@@ -857,9 +862,13 @@ def _content_column(rest: str) -> int | None:
     if marker is None:
         return None
     m_indent = len(marker.group("indent"))
-    gap = len(marker.group("gap"))
+    gap = len(marker.group("gap") or "")
     marker_w = len(marker.group(0)) - m_indent - gap
-    return m_indent + marker_w + (gap if gap <= 4 else 1)
+    # ⛔ A MARKER WITH NOTHING AFTER IT STILL OPENS AN ITEM, AT THE MARKER'S WIDTH + 1 (§5.2's
+    # "if the list item starts with an empty line, the content column is marker width + 1"). `gap == 0`
+    # is exactly that spelling (`-`, `*`, `+`, `1.`), so it takes the collapse-to-one branch rather
+    # than a marker-width-only column — which would put the content INSIDE the marker.
+    return m_indent + marker_w + (gap if 0 < gap <= 4 else 1)
 
 
 def _ordered_marker_at_least_two(rest: str) -> bool:
@@ -888,10 +897,21 @@ def _ordered_marker_at_least_two(rest: str) -> bool:
     if marker is None:
         return False
     token = marker.group(0)[len(marker.group("indent")):]
-    num = token[:len(token) - len(marker.group("gap"))]
+    num = token[:len(token) - len(marker.group("gap") or "")]
     if not num[0].isdigit():
         return False           # a bullet CAN interrupt a paragraph (§5.2), so this rule never fires
     return int(num.rstrip(".)")) != 1
+
+
+def _is_bare_marker(rest: str) -> bool:
+    """Is this line a list marker with NO content at all (`-`, `*`, `+`, `1.`) — §5.2's other spelling?
+
+    `_LIST_MARKER_RE` accepts it (round 49) and `_content_column` gives it the spec's content column
+    (marker width + 1). TWO readers need the distinction rather than the column: `_is_lazy_marker`,
+    which answers §5.2's interruption rule, and the item push, which follows it.
+    """
+    marker = _LIST_MARKER_RE.match(rest)
+    return marker is not None and not rest[_content_column(rest):].strip()
 
 
 def _marker_gap(rest: str) -> int:
@@ -911,7 +931,7 @@ def _marker_gap(rest: str) -> int:
     computed here.
     """
     marker = _LIST_MARKER_RE.match(rest)
-    return len(marker.group("gap")) if marker else 0
+    return len(marker.group("gap") or "") if marker else 0
 
 
 #: A line that STARTS a LEAF block — one that leaves NO PARAGRAPH OPEN behind it, so the next line
@@ -1059,7 +1079,23 @@ def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
     the same pair round 39 established for the `>=` term below.
     """
     if not (prev_prose
-            and _ordered_marker_at_least_two(rest)
+            # ⛔ AND A **BLANK** LIST ITEM CANNOT INTERRUPT A PARAGRAPH EITHER (§5.2: "in order for a
+            # list to interrupt a paragraph, it must start with a non-blank list item"). A bare
+            # marker — the end-of-line spelling `_LIST_MARKER_RE` now accepts — therefore opens no item
+            # after prose and is that paragraph's own text:
+            #     `Notes` + `1.` + `<br />` + `1.     Closes #100`
+            #         renderer ONE `<p>` for the first three lines, so `<br />` is inline text (no
+            #         type-7 block) and the wide-gap `1.` below opens the `<ol>` whose content is
+            #         `<pre><code>` — CODE. Reading `1.` as an item ended the paragraph, opened a
+            #         phantom html block on `<br />`, and its `not _html_here` term then CREDITED the
+            #         marker line in all three arms (round 49, the bare-marker rule's own sibling).
+            # ⚠️ A BARE `-` IS EXCLUDED: under an open paragraph it is a SETEXT UNDERLINE (§4.3), so
+            # the paragraph becomes a HEADING rather than surviving as lazy text (`**bold**` + `-` +
+            # `<span>` + `1.     Closes #N` — renderer `<h2>`, the `<span>` then OPENS a type-7 block
+            # and the marker line is that block's text, i.e. PROSE; reading the `-` as lazy kept a
+            # paragraph open, refused the leaf and blanked the real close).
+            and (_ordered_marker_at_least_two(rest)
+                 or (_is_bare_marker(rest) and not _SETEXT_UNDERLINE_RE.match(rest.strip())))
             and container is prev_container):
         return False
     depth = _quote_depth(prefix)
@@ -1175,6 +1211,10 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
         return False
     if not body.strip():
         return True
+    # ⛔ A BARE MARKER OPENS AN EMPTY ITEM (round 49 review, P1). §5.2 lets a list marker be followed
+    # by the END OF THE LINE, and such an item has no content, so it has no paragraph — the same
+    # answer the test above gives the `- ` spelling. `_content_column` returns the marker's width + 1
+    # for it, so `body` is empty here and this is the ONE place that fact needs no special case.
     # ⛔ A MARKER LINE THAT OPENS NO ITEM HAS NO CONTENT COLUMN TO INSPECT (round 37 review, P2). An
     # ordered marker ≥ 2 that CONTINUES an open paragraph is a lazy continuation, so its `# H` / `***`
     # is INLINE TEXT, not a leaf block — reading it as one ended the paragraph and blanked the real
@@ -1243,16 +1283,17 @@ def _fence_candidate(prefix: str, rest: str,
         if opener is None:
             return None
         return _Fence(opener, prefix, 0, False)
-    enclosing = list_items[-1]
-    if enclosing.depth == depth:
-        # SAME container: the item's column is already a `rest` column, so the
-        # dedent is measured with it directly and no raw number is needed.
-        opener = _fence_open(rest, enclosing.rest_col)
-        if opener is None:
-            return None
-        return _Fence(opener, prefix, enclosing.rest_col, True, 0,
-                      enclosing.depth)
-    if enclosing.depth > depth:
+    # ⛔ THE CONTAINER IS THE INNERMOST ITEM THAT STILL ENCLOSES THE LINE, NOT `list_items[-1]`
+    # (round 49 review, P1 — a LOST close against `origin/main`). Reading only the TOP of the stack
+    # stopped at an item this fence had ABANDONED and concluded "no container" without looking at
+    # the item that still holds the line:
+    #     `- outer` + `  > - inner` + `` ``` `` + `Closes #100`
+    #         renderer: the fence sits inside the OUTER `<li>`; line 4 dedents out of it, so the
+    #         fence ends there and `Closes #100` is a top-level paragraph — `origin/main` `[100]`,
+    #         head `[]`. The dropped INNER item is genuinely gone (a fence is never a lazy
+    #         continuation, round 48's P0), but the OUTER one still encloses the line.
+    enclosing = next((it for it in reversed(list_items) if it.depth <= depth), None)
+    if enclosing is None:
         # ⛔ A FENCE OPENER IS NEVER A LAZY CONTINUATION, SO A DROPPED MARKER ENDS THE ITEM (round 48
         # review, P0 — a FAIL-OPEN, and its root is THIS BINDING, not the state machine that exposed
         # it). `> - item` followed by `  ``` ` drops the item's `>`; a fence may not continue a
@@ -1265,14 +1306,21 @@ def _fence_candidate(prefix: str, rest: str,
         #     `> - item` + `` ``` `` + `> <div>` + `<div>` + `-     Closes #100`
         #         renderer `fence` / `<pre><code>`, `origin/main` `[]`, gated head `[100]`
         # The rule this module's own docstring already states for a depth-0 fence is the one that
-        # applies once the item is gone: no container, so nothing but a matching closer (or EOF)
-        # ends it. This branch is the item at a DEEPER depth than the fence, which is exactly the
-        # dropped-marker case; the opposite one (`enclosing.depth < depth`, a blockquote opened
-        # INSIDE the item) keeps the binding below, where its edge really is the raw column.
+        # applies once NO item encloses the line: no container, so nothing but a matching closer (or
+        # EOF) ends it. The opposite one (`enclosing.depth < depth`, a blockquote opened INSIDE the
+        # item) keeps the binding below, where its edge really is the raw column.
         opener = _fence_open(rest, 0)
         if opener is None:
             return None
         return _Fence(opener, prefix, 0, False)
+    if enclosing.depth == depth:
+        # SAME container: the item's column is already a `rest` column, so the
+        # dedent is measured with it directly and no raw number is needed.
+        opener = _fence_open(rest, enclosing.rest_col)
+        if opener is None:
+            return None
+        return _Fence(opener, prefix, enclosing.rest_col, True, 0,
+                      enclosing.depth)
     # The item is OUTSIDE the fence's blockquote, so it is matched BEFORE the
     # quote's markers and its edge is the RAW column (`item_col_raw`).
     residual_col = max(0, enclosing.rest_col - len(prefix))
@@ -1428,6 +1476,9 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
     # level, and then it can never be dedented out of one) plus the quote depth it opened at.
     html_item: _ListItem | None = None
     html_depth = 0
+    # Whether the LAST line ENDED a fence — by a closer or by dedenting out of its container
+    # (see the read site below).
+    prev_fence_end = False
     # Lines the CURRENTLY OPEN block has hidden from the scan. Reset when a block
     # opens or closes, so the value at the end is the unterminated block's tail.
     hidden_lines = 0
@@ -1438,6 +1489,12 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # The line's indent AFTER its blockquote prefix: `close_base` is measured
         # there, which is the space the strict arm below reports in.
         rest_indent = len(rest) - len(rest.lstrip(" "))
+        # ⛔ THE ANSWER BELONGS TO THE LINE ABOVE, SO IT IS READ AND CLEARED HERE (round 49 review,
+        # P1). `prev_fence_end` is set only by the two places a fence can END, and a fence line
+        # `continue`s, so reading it per line — rather than at the point of use — keeps it from
+        # leaking past the one line it describes.
+        after_fence_end = prev_fence_end
+        prev_fence_end = False
         if fence is not None:
             # The container can END the block: the quote it lived in closed, or
             # (for a fence opened inside a list item) the item did.
@@ -1494,6 +1551,19 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 past = residual - fence.close_base
                 if (past <= _MAX_FENCE_INDENT
                         and _is_closer(line[column:], fence.opener)):
+                    # ⛔ A LINE THAT CLOSES A CONTAINER-LESS FENCE LEAVES THE NEXT ONE AT TOP LEVEL
+                    # (round 49 review, P1 — the LENIENT arm of the fence-closer regression). The
+                    # default arm does not blank indented code, deliberately (see `strip_code`), and
+                    # that decision's REASON — "whether a 4-space line is code depends on the
+                    # enclosing container's content column" — does not reach this position: the
+                    # fence had no container, so the line after it has none either, and §4.4's
+                    # paragraph protection needs a paragraph an open fence cannot be:
+                    #     `> - item` + `` ``` `` + `` ``` `` + `    Closes #100`
+                    #         renderer: TWO top-level blocks, `<pre><code></code></pre>` then
+                    #         `<pre><code>Closes #100</code></pre>`. `origin/main` blanked the marker
+                    #         line through the phantom fence it re-opened HERE; the round-48 binding
+                    #         made this a closer instead, so that accident went away.
+                    prev_fence_end = True
                     fence = None
                 # A closer is the LAST line the block hides; content before it
                 # counts (it is unmeasurable until the block ends), a closed
@@ -1505,6 +1575,15 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             # The container ended, so this line is FRESH: it may open a new fence
             # (review c10-2), and — outside the block — it is also where the list
             # item stack is tracked again.
+            # …and THIS line is the fresh one, so the flag is set for it as well as for the next —
+            # but ONLY when the fence had a CONTAINER to lose. A fence that ended by dropping its own
+            # `>` (in_list False) leaves the line inside a container it never owned, and blanking a
+            # 4-space line there is a LOST CLOSE the module ranks second-worst:
+            #     `**bold**` + `</div>` + `- outer` + `  ~~~` + `> ``` ` + `    Closes #100`
+            #         the dedent lands on a line the renderer keeps (an html block's raw text);
+            #         `origin/main` credits it and the closer path below is what the F1 shape needs.
+            prev_fence_end = fence.in_list
+            after_fence_end = fence.in_list
             fence = None
         # LIST-ITEM TRACKING happens only on lines that are NOT inside a fence. A
         # marker line inside the block is CONTENT; counting it as an item opened a
@@ -1529,6 +1608,18 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # such body aborts `--sweep` for EVERY PR and the run exits 1 against a documented 0/3/2
         # contract. Reset at the top of the iteration, which is where "this line's own" begins.
         if not rest.strip():
+            # ⛔ A BLANK LINE CLOSES AN EMPTY ITEM (round 49 review, P1 — the `indented_code` arm of
+            # the bare-marker parity). §5.2 gives an item's content column as marker width + 1 when the
+            # item is EMPTY, and a blank line then ends the list: the renderer's own answer is
+            #     `- ` + `` + `    Closes #100`   -> `<ul><li></li></ul>` then `<pre><code>`
+            # so the 4-space line is a TOP-LEVEL code block, not the item's continuation. Leaving the
+            # empty item on the stack made `container` a 2-column item the renderer had closed, and the
+            # `+ _MAX_FENCE_INDENT` allowance then credited the block. An item WITH content is
+            # untouched: a blank line inside it does not end it, and the following line may still be
+            # its paragraph (`- item` + `` + `    Closes #100` renders a second `<p>` inside the
+            # `<li>` — `origin/main` credits it and this must not shadow that).
+            if list_items and not list_items[-1].has_content:
+                list_items.pop()
             pushed = False
             container = None
             own_gap = 0
@@ -1609,7 +1700,19 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                                           indent)
                           or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
                                                     prev_container, rest_indent, indent))
-            pushed = rest_col is not None and not _lazy_push
+            pushed = (rest_col is not None and not _lazy_push
+                      # ⛔ A BARE `-` UNDER AN OPEN PARAGRAPH IS A SETEXT UNDERLINE, NOT AN ITEM
+                      # (§4.3, and §5.2's "the first item must not be blank"). It ends the
+                      # PARAGRAPH — the line above becomes a heading — but it opens no `<li>`, so
+                      # pushing one measured the next line against a content column the renderer
+                      # never created and credited an indented code block:
+                      #     `**bold**` + `-` + `    Closes #100`   renderer `<h2>` then
+                      #     `<pre><code>`; `origin/main` blanked it, this head credited it.
+                      # …and only in the SAME container: a `-` that dropped out of an item (or a
+                      # quote) has no paragraph above it to underline, so it IS an item —
+                      #     `> - item` + `- ` + `    Closes #N`   renderer `<li>Closes #N</li>`
+                      and not (prev_prose and container is prev_container
+                               and _SETEXT_UNDERLINE_RE.match(rest.strip())))
             own_gap = _marker_gap(rest)
             if pushed:
                 list_items.append(
@@ -1639,6 +1742,18 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 _scan_for_opener = True       # …so this line is FRESH, and may open its own
             else:
                 _html_here = True
+                # ⛔ AN HTML BLOCK IS A LEAF, SO NO ITEM OPENS INSIDE ITS RAW TEXT (round 49 review —
+                # the round-43/48 decisions, applied to the ITEM STACK and not only to the fence
+                # path). A marker written in the block's text was counted as an item, and its content
+                # column then held the NEXT real block:
+                #     ` ` + `    - x` + `<br />` + `~~~` + `  > - inner` + `` + `>     Closes #100`
+                #         renderer: the last line is a `<pre><code>` inside a new blockquote — CODE —
+                #         and the phantom 2-column item made the tool credit it. Popping HERE (rather
+                #         than skipping the push) is what keeps a marker line that OPENED a block
+                #         (`- <div>`) intact: that line's block survives across iterations.
+                if pushed and list_items:
+                    list_items.pop()
+                    pushed = False
                 if html_closer:
                     if html_closer.lower() in rest.lower():
                         html_closer = None    # types 1-5: this line carries the block's own closer
@@ -1691,6 +1806,16 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # `_html_here` is this line's own answer, computed above, so the two state machines agree.
         fence = None if _html_here else _fence_candidate(prefix, rest, list_items)
         if fence:
+            # ⛔ AN ITEM THE FENCE ABANDONED MUST LEAVE THE STACK — DECLARING IT GONE IS NOT ENOUGH
+            # (round 49 review, P1 — the FAIL-OPEN the round-48 fence binding introduced). The
+            # `_fence_candidate` branches above decide the fence's CONTAINER; this pops every item
+            # DEEPER than the line's own blockquote, because a line that dropped the item's `>`
+            # cannot be inside it. Leaving them behind made the line AFTER the closer be measured
+            # against a stale item, which suppressed `own_code` and credited an indented code block:
+            #     `> - item` + `` ``` `` + `` ``` `` + `    Closes #100`
+            #         renderer `<pre><code>`; `origin/main` `[]`; the round-48 head `[100]`
+            while list_items and list_items[-1].depth > _quote_depth(prefix):
+                list_items.pop()
             hidden_lines = 0
             out.append("")
             prev_prose = False
@@ -1870,10 +1995,37 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                                 or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
                                                           prev_container, rest_indent, indent))
         own_code = own_gap > 4 and not ordered_continuation and not _html_here
-        indent_code = rest_indent > _MAX_FENCE_INDENT and (
+        indent_code = rest_indent > _MAX_FENCE_INDENT and not _html_here and (
             strict or (indented_code
                        and (container is None
-                            or rest_indent > container.rest_col + _MAX_FENCE_INDENT)))
+                            # ⛔ AN EMPTY ITEM HAS NO PARAGRAPH TO CONTINUE, SO IT DOES NOT EXTEND
+                            # §5.2's ALLOWANCE (round 49 review, P1). The `+ _MAX_FENCE_INDENT`
+                            # term is "this line is the content column's continuation", and an item
+                            # with no content has nothing to continue — the renderer ends it at the
+                            # blank line and the 4-space line below is a TOP-LEVEL code block:
+                            #     `- ` + `` + `    Closes #100`   renderer `<ul><li></li></ul>` then
+                            #     `<pre><code>`; this was a PRE-EXISTING fail-open for the `- `
+                            #     spelling and is the parity the bare-marker rule above now gives `-`
+                            or not container.has_content
+                            or rest_indent > container.rest_col + _MAX_FENCE_INDENT))
+            # ⛔ WITH NO CONTAINER AND NO OPEN PARAGRAPH, §4.4's PROTECTION HAS NOTHING TO PROTECT —
+            # AND DIRECTLY AFTER A CONTAINER-LESS FENCE NOTHING CAN EXPLAIN A 4-SPACE LINE EXCEPT
+            # INDENTED CODE (round 49 review, P1 — the LENIENT arm of the fence-closer regression).
+            # The default arm deliberately does NOT blank indented code (see `strip_code`: losing a
+            # real claim is worse than over-reporting), and that decision stands for the shapes it
+            # was measured on — an indented block after a paragraph or a blank line still reports
+            # (`note:` + `` + `    Closes #N` is pinned by its own test). This term is the narrower
+            # position the decision's reason does not reach: the fence that just closed had no
+            # container, so the renderer's next block is a TOP-LEVEL `<pre><code>` and nothing else:
+            #     `> - item` + `` ``` `` + `` ``` `` + `    Closes #100`
+            #         renderer `<pre><code>`; `origin/main` blanked it through the phantom fence it
+            #         re-opened on the closer line, so the round-48 binding left the LENIENT arm
+            #         crediting it alone — the one regression the fence-closer fix does not settle.
+            # `not prev_prose` is §4.4's own protection: a 4-column line under an OPEN paragraph is
+            # that paragraph's lazy continuation, not code (`> ``` ` + `  text` + `    Closes #N` is
+            # one `<p>` in the renderer, `origin/main` credits it, and the paragraph survives the
+            # fence that ended above it).
+            or (container is None and after_fence_end and not _html_here and not prev_prose))
         blank = own_code or indent_code
         if blank:
             # ⛔ WHETHER THE LINE OPENS AN ITEM DEPENDS ON WHICH RULE BLANKED IT (rounds 31-33).
@@ -1902,7 +2054,24 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
             # A CONTENT-BLANK line (`>     `) really is a blank line for the block grammar, so it does
             # end the paragraph — hence `rest.strip()`. `own_code` is excluded because a marker whose
             # own content is code does start a block (§5.2's wide gap).
-            prev_prose = bool(prev_prose and rest.strip() and indent_code and not own_code)
+            # ⛔ THE CARRY HAS A CONTAINER TERM (round 49 review, P1 — a FAIL-OPEN in `strict`, the
+            # arm `issue_process_lint` uses as its PASS path). §4.4's "an indented code block cannot
+            # interrupt a paragraph" is conditional on a paragraph in the SAME container; a line that
+            # OPENS a container ends the one above it (§5.1 — a blockquote can interrupt a paragraph),
+            # so the paragraph cannot survive it, and neither can the depth/container state that
+            # `_is_lazy_marker` reads:
+            #     `Notes` + `>     code` + `2.     Closes #100`
+            #         renderer: `<p>Notes</p>` then a blockquote and a NEW `<ol start="2">` whose
+            #         wide-gap content is `<pre><code>` — CODE. `origin/main` blanked it in both
+            #         arms; the round-48 head CREDITED it in `strict` and in `indented_code`.
+            # The second half is the state itself: this path never reached the write at the bottom of
+            # the loop, so `prev_quote_depth`/`prev_container` still described the line BEFORE the
+            # container opened. When the paragraph does not survive, they are re-based here.
+            prev_prose = bool(prev_prose and rest.strip() and indent_code and not own_code
+                              and _quote_depth(prefix) <= prev_quote_depth)
+            if not prev_prose:
+                prev_quote_depth = _quote_depth(prefix)
+                prev_container = container
             continue
         out.append(raw)   # prose: keep it, keywords and all
         # A blank line emits a blank `raw`, and a blank line ENDS a paragraph — so the state is
