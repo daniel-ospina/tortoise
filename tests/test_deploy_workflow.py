@@ -8027,9 +8027,13 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     ]
     assert not _subordinate_passed, (
         "a denial or correction of a DIFFERENT proposition exempts the equivalence — the "
-        "clause boundary does not end at `since` / `because` / `though` / `although` / "
-        "`which` / `who`, so the sentence carries the alibi into the claim next door "
-        "(#11191 review r12, P1):\n  " + "\n  ".join(_subordinate_passed)
+        "clause boundary does not end at `for` / `or` / `nor` / `so` / `since` / `because` "
+        "/ `though` / `although` (nor at a `--` dash), so the sentence carries the alibi "
+        "into the claim next door (#11191 review r12/r13, P1). `which`/`who` are "
+        "DELIBERATELY not in that set: they were tried and removed, because they cut a "
+        "denial off its own phrase (`…is not the tree WHICH is immediately before #9548`) "
+        "and bought no measured coverage. Do not re-add them.\n  "
+        + "\n  ".join(_subordinate_passed)
     )
     # …and the truthful twin, which subordinates a denial of the FALSE tree, stays GREEN:
     # the boundary must not turn every subordinator into a refusal.
