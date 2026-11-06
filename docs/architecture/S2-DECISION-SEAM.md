@@ -304,7 +304,7 @@ until an operator arms it:
   ⚠️ **That predicate runs BY DEFAULT since `#10996`** (`TORTOISE_VALUE_GATE`
   unset ⇒ on; the S2.2 mechanical half is required to default ON by
   `EXTRACTOR-V4-ARCHITECTURE.md` §S2.2, and its rate on Objects is measured at
-  0 of 61). So the three switches now have three different defaults: mechanical
+  0 of 61). So the three switches no longer share the old uniform default: mechanical
   **on** (kill-switch `TORTOISE_VALUE_GATE=0`), arbiter **off** (this flag / the
   seam), S2.3 classify-later **off** (`TORTOISE_CLASSIFY_LATER`). Arming the
   seam adds the paid question; it does not add the predicate, which is already
