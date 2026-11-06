@@ -1962,7 +1962,6 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
-  - test_pack_hierarchy_11001.py
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   - test_8447_c3_ingest_door.py
   - test_9881_rename_reaches_the_record.py
@@ -5154,19 +5153,6 @@ surfaces:
   - test_pack_shipping.py
   - test_pack_shipping_wheel.py
   - test_pack_state.py
-  # #11001: the pack's DECLARED hierarchy (`tortoise/pack_hierarchy.py` +
-  # `pack_registry` carrying `ontology.hierarchies`) — the declaration is READ and
-  # never inferred, because an invented edge is a structure nobody asserted.
-  # ⛔ NOT #11021's file and NOT #11021's change: this row repairs a `main` breakage
-  # merged minutes before this branch integrated it (`e918f3d6dd`, PR #11213, landed
-  # the test file with no manifest row — measured: `tools/ci_selection.py --integrity`
-  # at `origin/main` `9732106fdc` reports `manifest drift:
-  # ['test_pack_hierarchy_11001.py']`, so the REQUIRED `manifest-integrity` leg is
-  # red on main and no leg runs the suite). `core` because its subjects
-  # (`tortoise/pack_hierarchy.py`, `tortoise/pack_registry.py`) match no
-  # `SOURCE_PATTERNS` row and fall through to the `core` fallback; hermetic —
-  # manifest YAML plus the two modules, no DB, no graph, no network.
-  - test_pack_hierarchy_11001.py
   # #9068: the #5475 pack-approval-set residuals MEASURED — a :Pipeline row,
   # a journal-less fold, and the DECLARED offline re-typing. Registered beside
   # the pack tests it reads (`pack_state.graph_kind_namespaces` /
@@ -5888,6 +5874,15 @@ surfaces:
   # builds its store by path (the `test_update_point_content_embedding_4208.py`
   # pattern), which runs on any lane.
   - test_embed_gate_5008.py
+  # #11085: the embedding-writer EXEMPTION REGISTER — `tortoise/embed_writer_register.py`, a leaf
+  # module reached through the `core` fallback (`tortoise/` matches no named SOURCE_PATTERNS
+  # entry), so a diff touching only the register selects `core` and nothing else. Registered
+  # beside its two siblings because the three guard one seam from three sides:
+  # `test_embed_gate_5008.py` the predicate, `test_dod_5090_probe.py` (also `core`) the
+  # instrument's census, and this file the PRODUCT's declaration — which is what #11086 (arming
+  # the gate) has to point at. NOT carve_out-registered: it writes no graph, opens no connection
+  # and needs no lane.
+  - test_embed_writer_register.py
   # #5049: the verdict contract (`tests/_verdict.py`) — condition-vs-deadline
   # waits, INCONCLUSIVE-on-expiry, the measured `Deadline`, the host-capability
   # gate, and the per-test process-global reset. Registered here (core) AND its
