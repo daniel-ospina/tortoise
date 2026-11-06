@@ -203,6 +203,20 @@ _CONTROL_OPERATOR = re.compile(r"[|&;]|\$\(|`")
 #: A literal-false gate on a mutating step is the fourth measured no-op: `if: false` skips the apply
 #: and the job still passes, because the dispatch step's implicit `success()` is satisfied.
 _FALSE_CONDITION = re.compile(r"\s*(?:\$\{\{\s*)?false\s*(?:\}\})?\s*")
+# `if: false` is not the only way to write a skip: a COMPOUND condition carrying a false operand is
+# skipped just as thoroughly, and `_FALSE_CONDITION.fullmatch` sees neither. Measured GREEN (review
+# cycle 13): `if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != '' && false`
+# on the apply step — the step is skipped, the job is GREEN, and `Dispatch deploy-hosted` (#3627)
+# carries no status function, so the app flips over an unapplied schema.
+# Only the two shapes that actually force falsity are matched: `false && …` (short-circuits the whole
+# expression) and `… && false` (the last operand kills it). `A || false` is NOT matched, because it is
+# equivalent to `A` — matching it would be a false RED. `… && false || B` is also not matched; that
+# spelling is deliberately left to the allowlist rewrite (#11120), since it is far rarer than the two
+# above and a regex that guessed at operator precedence would be the kind of check that reads as
+# protection while missing its own case.
+_FALSE_OPERAND = re.compile(
+    r"(?:\A|&&)\s*(?:\$\{\{\s*)?false\s*(?:\}\})?\s*(?:&&|\Z)"
+)
 
 #: `trap … exit 0` on ERR/EXIT re-zeroes the status with no control operator to catch (measured, bug:
 #: `set -e; trap 'exit 0' ERR; false` exits 0). A mutating step has no legitimate use for it.
@@ -350,6 +364,7 @@ def _strip_shell_comment(line: str) -> str:
 #: ordinary way to scope an env var to one command, and one that must not hide the command from the
 #: guard (measured: the whole flag battery went RED with a message about a missing `db push`).
 _ENV_PREFIX = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
+_PROJECT_REF_ASSIGNMENT = re.compile(r"^(?:export\s+)?SUPABASE_PROJECT_REF=")
 
 
 def _command_text(line: str) -> str:
@@ -521,6 +536,41 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         # also covers `functions deploy --project-ref …` (a hosted mutation the flag sweep missed).
         for step in job.get("steps") or []:
             override = (step.get("env") or {}).get("SUPABASE_PROJECT_REF")
+            # …and the same re-pointing done in the BODY instead of `env:` — the Link step decides
+            # the target and is not a mutating step, so the "body must BE its invocation" rule never
+            # ran over it: `SUPABASE_PROJECT_REF=someoneelsesproject01` then
+            # `supabase link --project-ref "$SUPABASE_PROJECT_REF"` measured GREEN (review cycle 13).
+            # A body-level assignment IS visible to the following line at runtime (measured), unlike
+            # the prefix form, which bash expands before applying.
+            body_assignments = [
+                line
+                for line in (
+                    _command_text(raw) for raw in _run_body(step).splitlines()
+                )
+                if _PROJECT_REF_ASSIGNMENT.match(line)
+            ]
+            for line in body_assignments:
+                assert line.split("=", 1)[1].strip().strip("'\"") in (
+                    "${{ env.SUPABASE_PROJECT_REF }}",
+                    _PRODUCTION_PROJECT_REF,
+                ), (
+                    f"step {step.get('name')!r} in job {job_name!r} re-points the target in its "
+                    f"body ({line!r}): a body assignment is visible to the next line, so a `link` "
+                    f"in this step binds that project and `db push --linked` applies production "
+                    f"DDL there while the run reports success (#10896)"
+                )
+            # The tree that is CHECKED OUT is what `db push` applies. The workflow refuses a
+            # non-main dispatch by reading `github.ref`, but nothing read what checkout actually
+            # fetched — `with: {ref: some-other-branch}` measured GREEN (review cycle 13), and that
+            # branch's migrations land on production while the app half is dispatched at main.
+            if str(step.get("uses") or "").startswith("actions/checkout"):
+                pinned_ref = str((step.get("with") or {}).get("ref") or "").strip()
+                assert pinned_ref in ("", "${{ github.ref }}", "${{ github.sha }}"), (
+                    f"step {step.get('name')!r} in job {job_name!r} checks out {pinned_ref!r} "
+                    f"instead of the dispatched ref: `db push` applies the migrations in THAT tree "
+                    f"to production while the app half is dispatched at main — the check the "
+                    f"main-only refusal at the top of this workflow is meant to make (#10896)"
+                )
             assert override is None or str(override).strip() in (
                 "${{ env.SUPABASE_PROJECT_REF }}",
                 _PRODUCTION_PROJECT_REF,
@@ -576,10 +626,12 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         # "False" and a lowercase-only regex missed it (measured, review cycle 10).
         assert step.get("if") is not False and not _FALSE_CONDITION.fullmatch(
             str(step.get("if") or "").lower()
-        ), (
-            f"{where} is gated `if: false`: the step never runs, the job is GREEN, and "
-            f"`Dispatch deploy-hosted` (#3627) fires over an unapplied schema. No legitimate "
-            f"condition on a mutating step is the constant `false` (measured, review cycle 10)"
+        ) and not _FALSE_OPERAND.search(str(step.get("if") or "").lower()), (
+            f"{where} is gated on a condition carrying a false operand "
+            f"({step.get('if')!r}): the step never runs, the job is GREEN, and "
+            f"`Dispatch deploy-hosted` (#3627) fires over an unapplied schema. `if: false` was "
+            f"closed in cycle 10; `&& false` is the same skip one operator away (measured, review "
+            f"cycle 13)"
         )
         assert not step.get("shell"), (
             f"{where} overrides `shell:`. A mutating step must run under the runner's default "
@@ -588,9 +640,10 @@ def test_the_apply_and_function_steps_pass_yes() -> None:
         )
         assert job.get("if") is not False and not _FALSE_CONDITION.fullmatch(
             str(job.get("if") or "").lower()
-        ), (
-            f"job {job_name!r} is gated `if: false`: the whole job — including the app flip — is "
-            f"skipped and the run reads GREEN, while nothing was applied (measured, review cycle 11)"
+        ) and not _FALSE_OPERAND.search(str(job.get("if") or "").lower()), (
+            f"job {job_name!r} is gated on a condition carrying a false operand "
+            f"({job.get('if')!r}): the whole job — including the app flip — is skipped and the run "
+            f"reads GREEN, while nothing was applied (measured, review cycle 13)"
         )
         assert not job.get("continue-on-error"), (
             f"job {job_name!r} sets `continue-on-error` and runs a hosted mutation: a FAILED apply "
