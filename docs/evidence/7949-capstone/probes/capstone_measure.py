@@ -2296,10 +2296,33 @@ A_CRITERIA = ("A1", "A2", "A3", "A4", "A5")
 
 #: ⛔ `A1`'s bar is "at least one edge for EACH relation family the A-corpus's pack declares", and
 #: an unpinned set makes that bar unfalsifiable — a scorer could read 1, 2, 9 or 36 (#10982 review
-#: cycle 2, finding 6). These two are the ones the record's own basis cites
-#: (`packs/dev/manifest.yaml:142` `decomposesInto`, `:148` `hasPart`); #10983 may widen the list as a
-#: reviewed edit to the record, never as a private instrument choice.
-A1_RELATION_FAMILIES = ("decomposesInto", "hasPart")
+#: cycle 2, finding 6). The set is therefore PINNED to the **labels the WRITER stamps**, and that
+#: distinction is the whole point (#10982 review round 2):
+#:
+#:   ⛔ `decomposesInto` is a DECLARED PREDICATE, never a stored relationship label. The dev pack
+#:   declares two hierarchy entries — `Theme -> Epic` and `Epic -> Issue`
+#:   (`packs/dev/manifest.yaml:192-196`) — and BOTH carry `type: hasPart`; the seam writes the
+#:   hierarchy entry's `type` (`tortoise/pack_hierarchy.py:215-224`: "the edge this function would
+#:   write carries ``decomposesInto``, which ``create_edge`` refuses"), and every writer folds
+#:   `composedOf`/`decomposesInto`/`contains`/`wraps` onto `hasPart`
+#:   (`tortoise/projection/edges.py:1513`, `record_projection.py:4572`, `mcp_server.py:4499`).
+#:   `hasPart` IS in `create_edge`'s own predicate set; `decomposesInto` is NOT
+#:   (`edges.py:621-632`).
+#:
+#:   So a pin on `decomposesInto` names a label that occurs ZERO times on every graph this repo can
+#:   write, which made the registered bar "≥ 1 edge for EACH of the two families" **unsatisfiable** —
+#:   `#10984` (C3) would have scored A1 RED forever on a correct product. The pin is the one written
+#:   family; the declared spellings that fold onto it are named beside it so a reader can still see
+#:   which pack declarations the row is about.
+A1_RELATION_FAMILIES = ("hasPart",)
+
+#: The pack-declared predicates that are WRITTEN as the label in `A1_RELATION_FAMILIES` above. This
+#: map is documentation, not a measurement: `by_pinned_family` counts `type(r)`, and `type(r)` is
+#: never a declared spelling. A future pin that adds a written label must add its declared
+#: spellings here in the same reviewed edit.
+A1_RELATION_FAMILY_FOLD = {
+    "hasPart": ("hasPart", "decomposesInto", "composedOf", "contains", "wraps"),
+}
 
 #: The four subject-edge families (`#10987`). Counted PER FAMILY so that one wired family cannot
 #: read as "Subjects are populated" — the failure the owner's assertion exists to catch.
@@ -2349,9 +2372,15 @@ def _a1_object_edges(projection) -> dict:
     return {"by_type": by_type,
             "by_endpoint_kind": by_kind,
             "edges_total": sum(entry["edges"] for entry in by_type),
-            # per PINNED family, so the logged numbers map onto the registered bar
+            # per PINNED family, so the logged numbers map onto the registered bar. The keys are
+            # WRITTEN labels (`type(r)`), which is what the two queries above count.
             "by_pinned_family": {name: counts.get(name, 0)
-                                 for name in A1_RELATION_FAMILIES}}
+                                 for name in A1_RELATION_FAMILIES},
+            # the declared spellings each written family folds, so a reader can map the row onto
+            # the pack's own declarations without mistaking one for a stored label.
+            "pinned_family_declared_spellings": {
+                name: list(A1_RELATION_FAMILY_FOLD.get(name, (name,)))
+                for name in A1_RELATION_FAMILIES}}
 
 
 def _a3_chain_join(projection) -> dict:
@@ -2420,8 +2449,11 @@ def _a4_pointkind(projection) -> dict:
     population carried no `pointKind` at all, and folding it in reports a typing win nobody made.
 
     ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
-    a **blank** `pointKind` (`''` is what the projection writes for an operator with no kind,
-    `tortoise/projection/__init__.py:13499-13500`) is ABSENT, not typed; and **capture rows** are
+    a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
+    with no kind — `tortoise/projection/__init__.py:13507-13509`, `# Ensure pointKind is present
+    (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
+    `projection/entities.py:2578`, which leaves the property ABSENT instead) is ABSENT, not typed;
+    and **capture rows** are
     not claims — turn rows are written with `pointKind='event'` (`tortoise/sdk.py:2988`) and 159 of
     the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
     them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
@@ -2430,7 +2462,9 @@ def _a4_pointkind(projection) -> dict:
     # ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
     # (`projection/entities.py:2715-2717`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
     # from the denominator while the capture count reported it as a turn row it is not. The same
-    # predicate the file's own `POINT_COMPOSITION_CYPHER` and `tortoise/quota.py:1133` use.
+    # predicate the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1133`,
+    # which tests `is_episodic` ALONE and would count an operator Point as a claim (#10982 review
+    # round 2).
     capture = projection.g.query(
         "MATCH (n:Point) WHERE coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false) "
         "RETURN count(n)").result_set
@@ -2532,7 +2566,10 @@ def a_row_census(uri: str) -> dict:
     # A1 — the object→object graph, plus the rollup half.
     result["A1"] = row("A1", _a1_object_edges,
                        {"by_type": [], "by_endpoint_kind": [], "edges_total": 0,
-                        "by_pinned_family": {name: 0 for name in A1_RELATION_FAMILIES}})
+                        "by_pinned_family": {name: 0 for name in A1_RELATION_FAMILIES},
+                        "pinned_family_declared_spellings": {
+                            name: list(A1_RELATION_FAMILY_FOLD.get(name, (name,)))
+                            for name in A1_RELATION_FAMILIES}})
     # ⛔ The rollup half of A1 is NOT the edge count: A1's real criterion is a query ANSWERING, and
     # no pack-declared rollup query is registered for this corpus yet (`#10984` owns both). An edge
     # count with no query behind it is the shape this row exists to refuse, so it is named.
@@ -2596,6 +2633,11 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
         f"by_pinned_family={a1['by_pinned_family']}"
         + (f" error={a1['error']}" if a1.get("error") else ""))
     add(f"a1 by_endpoint_kind={a1['by_endpoint_kind'] or '[]'}")
+    # ⛔ The pinned families are WRITTEN labels (`type(r)`); the pack's declared spellings that fold
+    # onto them are named beside the counts so no reader takes `decomposesInto` for a stored label
+    # (#10982 review round 2).
+    add("a1 pinned_family_declared_spellings="
+        f"{a1.get('pinned_family_declared_spellings') or '{}'}")
     add(f"a1 rollup_queries={a1['rollup_queries']}")
 
     a2 = census_a["A2"]
@@ -3241,11 +3283,6 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         f"(owner option A, #5199; #9736) — aboutObject="
         f"{census_data['relationship_counts'].get('aboutObject', 0)} edge(s), "
         f"{census_data['relationship_anchored'].get('aboutObject', 0)} anchored")
-    # #10982: the A-row census, rendered from the SAME pass as the E-row census so a reader
-    # cannot be served two different graphs in one log.
-    add("")
-    lines.extend(a_row_census_lines(a_census))
-    add("")
     objects_in_graph = len(census_data["object_names"])
     floor_objects = bars["floors"]["e1_objects"]
     if objects_in_graph < floor_objects:
@@ -3364,6 +3401,13 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
     if e5["partial_receipts"]:
         add("e5 incomplete receipts (disclosed, not silently averaged): " +
             " | ".join(e5["partial_receipts"]))
+    add("")
+    # #10982: the A-row census, rendered from the SAME pass as the E-row census so a reader cannot
+    # be served two different graphs in one log, and emitted at a REAL section boundary — ⛔ it used
+    # to be spliced in right after the E3 note, which put the block INSIDE E3's section and left the
+    # `e1-aux objects_in_graph=…` line under the A-row heading, so a reader attributed an E1 floor
+    # reading to the A-row census (#10982 review round 2).
+    lines.extend(a_row_census_lines(a_census))
     add("")
     add("## verdict table")
     add("criterion | verdict | measured | evidence | blocked_by")

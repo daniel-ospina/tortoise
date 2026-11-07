@@ -11,7 +11,7 @@ Three properties are pinned here, and each names the mutation that makes it FAIL
    `[E1, E2, E3, E4, E5]`, because a required row cannot be inferred from the rest (`V2`) and making
    them required would red every verdict table that predates their scoring runs, the committed
    `capstone-measured-9152448d.log` included;
-2. **the amendment is an amendment** — §10.8 quotes the superseded pins line verbatim, so the change
+2. **the amendment is an amendment** — §10.9 quotes the superseded pins line verbatim, so the change
    is findable rather than a quiet overwrite (`#9736` is the model, not a new registration);
 3. **the census reports, and where it cannot measure it says so** — a population no instrument has
    counted emits `UNMEASURED(<what would measure it>)`, never a `0`, because a zero is a NUMBER and
@@ -102,6 +102,20 @@ def test_the_a_rows_are_registered_but_not_REQUIRED():
     assert pins["required_criteria_rows"] == ["E1", "E2", "E3", "E4", "E5"]
     # …and the RECOGNISED set did grow, or the rows would be unreachable.
     assert set(pins["criteria"]) >= set(A_ROWS)
+    # ⛔ The A1 family pin exists in BOTH artefacts, and must be the same list: the pins fence is the
+    # one a human reads, the machine record is the one a consumer reads, and the instrument's own
+    # constant is a THIRD copy (pinned by the `_VALID_EDGE_PREDICATES` arm below).
+    assert pins["a1_relation_families"] == _record()["a1_relation_families"], (
+        "the pins fence and the machine record pin different A1 families")
+    # …and every refusal boundary the A cells register is pinned, not only the population counts.
+    floors = pins["denominator_floors"]
+    assert floors["a1_rollup_queries"] == 1, (
+        "A1's rollup-query floor lives only in §3.1 prose — a child reading the pins would score "
+        "A1 with ZERO queries")
+    assert floors["a3_event_root_coverage"] == 0.5, (
+        "A3's event-root-coverage floor lives only in §3.1 prose — a child reading the pins would "
+        "score A3 at 0.05 coverage")
+    assert _record()["denominator_floors"] == floors
 
 
 def test_the_record_and_the_criteria_table_agree_on_every_a_row():
@@ -134,10 +148,18 @@ def test_the_record_pins_the_document_it_describes():
 
 
 def test_the_amendment_quotes_the_superseded_pins_line_verbatim():
-    """FAILS IF the A-rows are a quiet overwrite instead of a versioned amendment."""
+    """FAILS IF the A-rows are a quiet overwrite instead of a versioned amendment.
+
+    ⛔ The slice is bounded by the A-rows heading's own TEXT, not by `text.index("### 10.8")`. The
+    branch first wrote a §10.8 and then merged `origin/main`, which brought `#10997`'s own §10.8 —
+    so an ordinal first-match resolved to the WRONG section and the slice spanned both, letting this
+    arm pass on a document whose §10.9 was `#10997`'s cite re-point (#10982 review round 2).
+    """
     text = PREREG.read_text()
-    assert "### 10.8" in text and "#10982" in text
-    section = text[text.index("### 10.8"):]
+    heading = "### 10.9 — five `A`-rows added to the criteria table"
+    assert heading in text, "the A-rows amendment is not a §10.9 with its own heading"
+    assert text.count("### 10.9") == 1, "two sections claim §10.9 — a pointer to it is ambiguous"
+    section = text[text.index(heading):]
     section = section[: section.index("## 11.")]
     assert "criteria: [E1, E1b, E2a, E2b, E3, E4, E5]" in section, (
         "the superseded pins line is not quoted — a reader cannot see what changed")
@@ -230,6 +252,30 @@ def test_the_verdict_gate_accepts_a_table_that_carries_an_a_row():
     assert not [f for f in findings.items if f[0] == "V2" and "A1" in f[1]], rendered
 
 
+def test_a_duplicated_a_row_is_refused_exactly_as_a_duplicated_e_row():
+    """FAILS IF `V2`'s "decided once, not voted on" stops at `CRITERIA`.
+
+    ⛔ Widening the recognised vocabulary to `A1`–`A5` removed an ACCIDENTAL protection: two `A1`
+    rows used to be refused as unknown criteria. The duplicate half of `V2` iterates `CRITERIA`, so
+    after the widening a table could carry one GREEN and one RED `A1` with no finding — the row an
+    owner reads as "A1 decided" holding two contradictory verdicts (#10982 review round 2). The
+    control is the same mutation on `E1`, which must keep reding.
+    """
+    cvc = _verdict_module()
+    base = [_verdict_row(c) for c in cvc.CRITERIA]
+    cases = {"A1": [*base, _verdict_row("A1"), _verdict_row("A1")],   # carried row, twice
+             "E1": [*base, _verdict_row("E1")]}                        # the control
+    for criterion, rows in cases.items():
+        findings = cvc.check({"schema": cvc.SCHEMA, "rows": rows},
+                             repo=REPO_ROOT, require_green=False)
+        dupes = [f for f in findings.items
+                 if f[0] == "V2" and f"rows[{criterion}]" in str(f[1])]
+        assert dupes, (
+            f"a duplicated {criterion} row is accepted — V2's decided-once rule must cover "
+            f"every RECOGNISED criterion: {findings.render()}")
+        assert any("decided once" in str(f) for f in dupes), dupes
+
+
 def test_an_a_row_citing_a_closed_blocker_is_refused_by_v12():
     """FAILS IF the new rows are exempt from the freshness rule `V12` applies to every row."""
     cvc = _verdict_module()
@@ -315,7 +361,16 @@ def test_the_chain_join_denominator_is_STATEMENTS_only_and_the_cheap_rate_is_not
     if isinstance(out["cross_batch_joined"], int) and isinstance(out["cheap_joined"], int):
         assert out["cross_batch_joined"] <= out["cheap_joined"]
     rendered = "\n".join(probe.a_row_census_lines(_full_census(probe)))
-    assert "NOT the bar" in rendered
+    # ⛔ The CHEAP rate is reported and is NOT the bar. Asserting the phrase alone was a spell-check
+    # of the renderer's own constant — it passed against any arithmetic (#10982 review round 2).
+    # The property that discriminates: the cheap figure and the registered figure are BOTH rendered,
+    # as DIFFERENT numbers, and the note that says which is the bar is attached to them.
+    cheap_line = next(line for line in rendered.splitlines() if line.startswith("a3 statements="))
+    assert "cheap_rate=0.2" in cheap_line and "cross_batch_rate=0.1" in cheap_line, cheap_line
+    assert cheap_line.index("cheap_rate=") < cheap_line.index("cross_batch_rate="), (
+        "the registered rate must not be rendered as the cheap one")
+    assert "NOT the bar" in rendered, (
+        "the cheap rate is rendered with no statement that it is not the bar")
 
 
 def test_an_unstamped_statement_population_reports_the_cross_batch_leg_as_UNMEASURED():
@@ -386,16 +441,97 @@ def test_object_object_edges_are_reported_by_type_and_by_objectKind():
     """
     probe = _probe()
     projection = _FakeProjection({
+        "RETURN type(r) AS t, count(*) AS n ORDER BY n DESC, t": [["hasPart", 7]],
+        "a.objectKind AS ak": [["hasPart", "dev:epic", "dev:issue", 7]],
+    })
+    out = probe._a1_object_edges(projection)
+    assert out["edges_total"] == 7
+    assert out["by_type"] == [{"relation": "hasPart", "edges": 7}]
+    assert out["by_endpoint_kind"][0]["from_kind"] == "dev:epic"
+    assert "a.kind AS ak" not in "".join(projection.g.queries), (
+        "the census reads a property no writer stamps")
+    assert out["by_pinned_family"] == {"hasPart": 7}, out["by_pinned_family"]
+
+
+def test_the_pinned_a1_family_is_a_WRITTEN_label_not_a_declared_spelling():
+    """FAILS IF the pin names a relationship label no writer can stamp — an UNSATISFIABLE bar.
+
+    ⛔ The first draft pinned `("decomposesInto", "hasPart")`, the pack's two DECLARED hierarchy
+    predicates. `decomposesInto` is never a stored label: both hierarchy entries
+    (`packs/dev/manifest.yaml:192-196`) are written `type: hasPart`, every writer folds
+    `composedOf`/`decomposesInto`/`contains`/`wraps` onto it (`tortoise/projection/edges.py:1513`),
+    and `hasPart` is in `create_edge`'s own predicate set while `decomposesInto` is not
+    (`edges.py:621-632`). The registered bar is "≥ 1 edge for EACH pinned family", so a pin on the
+    declared spelling made it UNREACHABLE on every graph this repo can write — `#10984` (C3) would
+    have scored A1 RED forever on a correct product (#10982 review round 2).
+
+    Three mutations red it: re-pinning `decomposesInto`; dropping the record↔instrument parity; and
+    letting `by_pinned_family` credit a declared spelling that the writer never stores.
+    """
+    from tortoise.projection.edges import _VALID_EDGE_PREDICATES
+
+    probe = _probe()
+    pinned = tuple(_record()["a1_relation_families"])
+    assert pinned == probe.A1_RELATION_FAMILIES, (
+        "the instrument and the record pin different A1 families — two copies that can disagree")
+    for name in probe.A1_RELATION_FAMILIES:
+        assert name in _VALID_EDGE_PREDICATES, (
+            f"A1 pins {name!r}, which no writer stamps — the bar can never be met")
+    assert "decomposesInto" not in probe.A1_RELATION_FAMILIES
+    assert "decomposesInto" in probe.A1_RELATION_FAMILY_FOLD["hasPart"], (
+        "the fold must still NAME the declared spelling it absorbs, or a reader sees one family "
+        "where the pack declares two")
+    # ⛔ A graph whose only edges carry the DECLARED spelling must report 0 for the pinned family:
+    # `type(r)` is what the query counts, and crediting the declared spelling here is exactly how
+    # the first draft's bar read as satisfiable on a vocabulary no writer produces.
+    projection = _FakeProjection({
         "RETURN type(r) AS t, count(*) AS n ORDER BY n DESC, t": [["decomposesInto", 7]],
         "a.objectKind AS ak": [["decomposesInto", "dev:epic", "dev:issue", 7]],
     })
     out = probe._a1_object_edges(projection)
-    assert out["edges_total"] == 7
-    assert out["by_type"] == [{"relation": "decomposesInto", "edges": 7}]
-    assert out["by_endpoint_kind"][0]["from_kind"] == "dev:epic"
-    assert "a.kind AS ak" not in "".join(projection.g.queries), (
-        "the census reads a property no writer stamps")
-    assert out["by_pinned_family"] == {"decomposesInto": 7, "hasPart": 0}
+    assert out["by_pinned_family"] == {"hasPart": 0}, out["by_pinned_family"]
+
+
+def test_the_pinned_a5_subject_families_are_the_four_the_record_names():
+    """FAILS IF a family is renamed, dropped or added in the instrument alone.
+
+    The four names live in the A5 cell's prose (there is no `a5_subject_families` pin), so the
+    instrument's constant is the copy a reviewer has to reconcile by reading — this arm is what
+    turns that into a mechanical check.
+    """
+    probe = _probe()
+    cell = next(r for r in check.parse_criteria_rows(PREREG.read_text()) if r["id"] == "A5")
+    assert set(probe.SUBJECT_EDGE_FAMILIES) == {
+        name for name in ("aboutSubject", "memberOf", "ownedBy", "managedBy")
+        if name in cell["metric"]
+    }, "the A5 cell and the instrument disagree about the subject-edge families"
+    assert len(probe.SUBJECT_EDGE_FAMILIES) == 4
+
+
+def test_a_registered_non_bar_must_name_its_owner_decision_and_cannot_borrow_the_floor_clause():
+    """FAILS IF a row with NO bar satisfies the "has a bar" arm on the floor beside it.
+
+    ⛔ A4's threshold is `UNMEASURED(the bar is owner-gated on the D3 fork — #10988 and #1022 …)`. It
+    passed `check_completeness` only because the cell also contains the floor clause
+    `` above the floor of `>= 30` typed statements ``, i.e. the arm read the FLOOR as the bar — a
+    false PASS in the completeness gate (§7 item 1; #10982 review round 2). Three mutations red it:
+    dropping the owner decision, keeping a comparator outside the floor clause, and restating A4's
+    threshold as a bare placeholder number.
+    """
+    rows = check.parse_criteria_rows(PREREG.read_text())
+    a4 = next(r for r in rows if r["id"] == "A4")
+    assert check.check_completeness(rows) == []
+
+    def with_threshold(cell: str) -> list[str]:
+        return check.check_completeness([dict(r, threshold=cell) if r is a4 else r for r in rows])
+
+    assert with_threshold("UNMEASURED(the bar is owner-gated — `#10988` decides)") == []
+    for bad, needle in (
+        ("UNMEASURED(the bar is owner-gated on a fork nobody opened)", "owner decision"),
+        ("UNMEASURED(nothing here) `>= 30` typed statements", "outside its floor"),
+    ):
+        failures = with_threshold(bad)
+        assert any(needle in f for f in failures), (bad, failures)
 
 
 def _full_census(probe) -> dict:

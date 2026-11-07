@@ -381,6 +381,15 @@ PLACEHOLDER_CELLS = frozenset(
 
 #: A threshold must carry a comparator AND a number. Prose without both is not a threshold.
 COMPARATORS = ("<=", ">=", "<", ">", "=", "≤", "≥")
+#: A threshold that declares itself a REGISTERED NON-BAR (`UNMEASURED(<ground>)`, §3.1's A4 row).
+#: Such a cell is complete only when its ground names the owner decision gating the row — and the
+#: floor clause beside it may never be what satisfies the numeric arm (see `check_completeness`).
+REGISTERED_NO_BAR = re.compile(r"\bUNMEASURED\(")
+OWNER_DECISION = re.compile(r"#\d+")
+#: The `… above the floor of `` >= 30 `` …` clause a threshold cell may carry *beside* its bar. It is
+#: STRIPPED before the comparator test on a registered non-bar, because a floor is a refusal
+#: boundary and not a bar (§3.7, §7 item 1).
+FLOOR_CLAUSE = re.compile(r"floor of[^;]*", re.IGNORECASE)
 
 #: The four-edge denominator as a RATE: ``\\d+ / 4`` — and never ``4 / 40``, hence the trailing
 #: guard. A count in words (``2 of 4``) is deliberately NOT matched: §1.4 states the history that
@@ -3756,6 +3765,31 @@ def check_completeness(rows: list[dict[str, str]]) -> list[str]:
         if is_placeholder(row["threshold"]):
             continue  # already reported above
         plain = _plain(row["threshold"])
+        if REGISTERED_NO_BAR.search(plain):
+            # ⛔ A REGISTERED non-bar is not a bar, and its FLOOR clause may never stand in for one.
+            # Before this arm, a threshold cell declaring `UNMEASURED(...)` passed the numeric test
+            # on the `>= 30` its own floor clause happened to contain — so a row the record says has
+            # NO bar satisfied the "has a bar" check, i.e. a false PASS in the completeness gate
+            # (§7 item 1; #10982 review round 2). A floor is a REFUSAL boundary (§3.7), so:
+            #   * the cell must name the OWNER DECISION that gates the row, and
+            #   * no comparator may survive outside the floor clause.
+            if not OWNER_DECISION.search(plain):
+                failures.append(
+                    f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
+                    "declares UNMEASURED(...) but names no owner decision (#NNNN) that gates it — "
+                    "a registered non-bar must state who decides it"
+                )
+            # INDEPENDENT of the arm above, never `elif`: a cell can name its owner decision and
+            # STILL smuggle a comparator out of the floor clause, and that is the mutation this
+            # half exists to catch.
+            if any(c in FLOOR_CLAUSE.sub("", plain).split("UNMEASURED(", 1)[-1]
+                   for c in COMPARATORS):
+                failures.append(
+                    f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
+                    "declares UNMEASURED(...) and still carries a comparator outside its floor "
+                    "clause — a registered non-bar cannot also be a bar"
+                )
+            continue
         if not re.search(r"\d", plain):
             failures.append(
                 f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} carries "

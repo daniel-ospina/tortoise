@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:90727949d648ca8f7c148bcec7368e0c3744add80a3414d89e3ea513da0da5d1",
+  "document_sha256": "sha256:d08f6a9d52942c1d2ef8fdcf38b517b51fef743c5b0a7a2eba9a4ee8e03f69f1",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -105,10 +105,10 @@
       "id": "A1",
       "metric": "`object→object` edges written by the run, by **declared relation type** and by **endpoint kind**, plus the number of **rollup queries** the run asks that answer (return at least one row)",
       "denominator": "every `:Object` node written by the run, same arm, same commit (floor of at least 30 Objects); and the rollup queries asked (floor of at least 1 query)",
-      "threshold": "`>= 1` edge for **each** of the two relation families pinned in `a1_relation_families` (`decomposesInto`, `hasPart`), and **every** rollup query answers (`>= 1` row); zero object→object edges on a population that clears the floor is **RED**, never REFUSED",
-      "threshold_basis": "the owner's 2026-11-04 live-v4 reading measured `object→object edges []` — zero of every relation type — against 5,314 Objects (#7949 comment 6645275147), while the declared vocabulary already exists (packs/dev/manifest.yaml:142 `decomposesInto`, :148 `hasPart`); the bar is the pack's own declaration, not a number invented here. A1 is NOT E6 (#11083): E6 measures the declared→writable→written chain per pack across all 36 declared relations; A1 measures what the WRITTEN graph can answer.",
+      "threshold": "`>= 1` edge for **each** relation family pinned in `a1_relation_families` (`hasPart` — the ONE relationship label the pack's two declared hierarchy predicates `decomposesInto`/`hasPart` are both **written** as; a pin on the declared spelling names a label no writer stamps, which makes the bar unsatisfiable), and **every** rollup query answers (`>= 1` row); zero object→object edges on a population that clears the floor is **RED**, never REFUSED",
+      "threshold_basis": "the owner's 2026-11-04 live-v4 reading measured `object→object edges []` — zero of every relation type — against 5,314 Objects (#7949 comment 6645275147), while the declared vocabulary already exists (packs/dev/manifest.yaml:142 `decomposesInto`, :148 `hasPart`); the bar is the pack's own declaration, not a number invented here. ⛔ The family is pinned to the WRITTEN label: both of the pack's hierarchy entries (`Theme -> Epic`, `Epic -> Issue`, manifest:192-196) are written `type: hasPart`, and every writer folds `composedOf`/`decomposesInto`/`contains`/`wraps` onto it (tortoise/pack_hierarchy.py:215-224, tortoise/projection/edges.py:1513); `hasPart` is in `create_edge`'s own predicate set and `decomposesInto` is not (edges.py:621-632), so a pin on the declared spelling would name a label that never occurs and the bar could never be met (#10982 review round 2). A1 is NOT E6 (#11083): E6 measures the declared→writable→written chain per pack across all 36 declared relations; A1 measures what the WRITTEN graph can answer.",
       "measurement_visible_to_author": false,
-      "measurement_visible_to_author_basis": "no A-row has been measured. The 2026-11-04 live-v4 table that motivated the row was taken by hand on the hosted graph, has NO committed artifact and is not re-derivable from any command in this repository (docs/epics/2026-11-05-5087-extractor-v4/01-align.md:20,31), so it is this row's THRESHOLD BASIS and never its measurement; #10984 (C3) owns the scoring run.",
+      "measurement_visible_to_author_basis": "no A-row was visible at the registration commit `a6085af84` (2026-10-21), which is the anchor this field uses (PRE-REGISTRATION.md section 10.3; E3 stays false on the same ground even though the amending author had seen its FAIL). ⛔ The ground is NOT 'no committed artifact exists': on the PINNED corpus, docs/evidence/7949-capstone/capstone-measured-9152448d.log (committed 31f996f91, 2026-11-04 — two days BEFORE this row was written) carries the object population (`\"Object\": 64`) and a COMPLETE edge-type enumeration (`MATCH ()-[r]->() RETURN type(r)`, so an absent type is 0 and not uncounted) which carries no `hasPart` — i.e. A1's pinned family reads 0 on this corpus from a committed artifact. The owner's 2026-11-04 live-v4 hand reading is additionally this row's `threshold_basis`. The bar was therefore written with a figure in view; that discount is disclosed in PRE-REGISTRATION.md section 0 and section 10.9, and #10984 (C3) owns the scoring run.",
       "floor": "a1_objects"
     },
     {
@@ -149,7 +149,7 @@
       "threshold": "`>= 1` `:Subject` per distinct actor named in the A-corpus and `>= 1` statement carrying a subject edge; a family that is zero is named with its reason rather than averaged away",
       "threshold_basis": "the owner's 2026-11-04 live-v4 reading measured 26 Subjects against 19,300 points (#7949 comment 6645275147) while #4889 is CLOSED and the symptom persists; the bar is the corpus's OWN actor count, not the number 26, so it cannot be satisfied by writing one Subject per run. #10987 (C6) owns the scoring and the #4889 verdict.",
       "measurement_visible_to_author": false,
-      "measurement_visible_to_author_basis": "no four-family subject-edge census exists on any graph; the 26-Subject figure is a hand reading of the hosted graph with no committed artifact; #10987 (C6) owns the measurement.",
+      "measurement_visible_to_author_basis": "no A-row was visible at the registration commit `a6085af84` (2026-10-21), which is the anchor this field uses (PRE-REGISTRATION.md section 10.3; E3 stays false on the same ground even though the amending author had seen its FAIL). ⛔ The ground is NOT 'no census exists': this row's Subject count and three of its four families are already readable on the PINNED corpus from docs/evidence/7949-capstone/capstone-measured-9152448d.log (committed 31f996f91, 2026-11-04 — `\"Subject\": 19` at :265, `relationship_counts` at :299-309, produced by a COMPLETE edge-type enumeration so an absent family is 0 and not uncounted), and RECONCILE-A1-A2-A5.md section 1.3 states that four-family reading. The bar was therefore written with a figure in view; that discount is disclosed in PRE-REGISTRATION.md section 0 and section 10.9, and #10987 (C6) owns the scoring run.",
       "floor": "a5_actors"
     }
   ],
@@ -216,7 +216,7 @@
       "amended": "2026-11-06",
       "registration_added": "2026-10-21",
       "measurement_date": null,
-      "kind": "five A-rows ADDED to the criteria table and to criteria[] — no existing row's metric, denominator, threshold, class set or floor moves, and no committed verdict is re-scored; required_criteria_rows stays [E1..E5], so the new rows are registered and reported, never demanded by the gate (a required row would red every existing verdict table for rows nobody has run); the superseded pins line and the table's E-only shape are quoted in PRE-REGISTRATION.md section 10.8; measurement_visible_to_author is false for all five on the only ground the field recognises — none has been measured"
+      "kind": "five A-rows ADDED to the criteria table and to criteria[] — no existing row's metric, denominator, threshold, class set or floor moves, and no committed verdict is re-scored; required_criteria_rows stays [E1..E5], so the new rows are registered and reported, never demanded by the gate (a required row would red every existing verdict table for rows nobody has run); the superseded pins line and the table's E-only shape are quoted in PRE-REGISTRATION.md section 10.9. ⛔ Review round 2 corrected three things in this amendment: (a) `a1_relation_families` pinned the DECLARED spellings `decomposesInto`/`hasPart`, but `decomposesInto` is never a written label — both hierarchy entries are written `hasPart` (tortoise/pack_hierarchy.py:215-224, tortoise/projection/edges.py:1513), so the '>= 1 edge for EACH family' bar was unsatisfiable; the pin is now the one WRITTEN family, with `a1_relation_family_fold` naming the declared spellings that fold onto it. (b) `measurement_visible_to_author` stays false for all five on the `a6085af84` anchor, but the stated GROUND was the gate's blind spot rather than history: A1/A3/A4/A5 were written with the owner's 2026-11-04 hand reading in view, and A1/A5 are also readable on the pinned corpus from the committed capstone-measured-9152448d.log (31f996f91, 2026-11-04) — section 0 now carries the A-rows and states the post-visible discount. (c) the floors are SEVEN counts of 30 plus the two non-count refusal boundaries (`a1_rollup_queries: 1`, `a3_event_root_coverage: 0.50`) that existed only in section 3.1 prose and are now pinned."
     }
   ],
   "steps": {
@@ -252,7 +252,9 @@
     "a4_typed_statements": 30,
     "a5_points": 30,
     "a2_decided_candidates": 30,
-    "a5_actors": 30
+    "a5_actors": 30,
+    "a1_rollup_queries": 1,
+    "a3_event_root_coverage": 0.5
   },
   "below_floor": "REFUSED, which is neither a pass nor a fail",
   "interface_note": "The field is written_before_any_scored_run, NOT the unqualified written_before_any_run: the latter is false at this commit because e1-e2.log exists, and a machine consumer keys on the name rather than on this prose (#9075 review P1). The capstone run probe (#9089, open) reads this path as its --prereg-artifact and freezes the corpus it is handed with --corpus. This record freezes the tests/eval/write_path corpus, which is the corpus #9075 pre-registers; a run handed a DIFFERENT corpus must mismatch G1 and be refused, never scored. Reconciling the two corpora is that PR's or a follow-up's job, not something this record may paper over.",
@@ -265,7 +267,15 @@
     "zero_denominator": "REFUSED for every A-row: A2's decided-candidate count of zero and A5's named-actor count of zero make the row REFUSED, and the instrument emits UNMEASURED(<the absent population>) - never a 0/0 rate. The floors a2_decided_candidates and a5_actors sit under the RATE's own denominator, not merely under the population it is drawn from."
   },
   "a1_relation_families": [
-    "decomposesInto",
     "hasPart"
-  ]
+  ],
+  "a1_relation_family_fold": {
+    "hasPart": [
+      "hasPart",
+      "decomposesInto",
+      "composedOf",
+      "contains",
+      "wraps"
+    ]
+  }
 }

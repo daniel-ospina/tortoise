@@ -818,13 +818,20 @@ def check(record: dict, *, repo: Path,
     seen = [r.get("criterion") for r in rows
             if isinstance(r, dict)
             and isinstance(r.get("criterion"), HASHABLE_SCALARS)]
+    # ⛔ MISSING is over `CRITERIA` (the epic closes on 5/5, so only those five can be demanded);
+    # `DECIDED-ONCE` is over `RECOGNISED_CRITERIA` — an A-row a table chooses to carry is decided
+    # once exactly as an E-row is. Running the duplicate half over `CRITERIA` alone meant two
+    # contradictory `A1` rows were accepted with no finding, while `[E1, E1]` red: the widening of
+    # the recognised vocabulary (#10982) removed an accidental protection (an A-row used to be
+    # REFUSED as unknown) without replacing it (#10982 review round 2).
     for criterion in CRITERIA:
-        n = seen.count(criterion)
-        if n == 0:
+        if seen.count(criterion) == 0:
             f.add("V2", f"rows[{criterion}]", "row is MISSING — the epic closes "
                                               "on 5/5, so an absent row can "
                                               "never be inferred from the rest")
-        elif n > 1:
+    for criterion in RECOGNISED_CRITERIA:
+        n = seen.count(criterion)
+        if n > 1:
             f.add("V2", f"rows[{criterion}]", f"{n} rows — a criterion is "
                                               "decided once, not voted on")
     for criterion in seen:
