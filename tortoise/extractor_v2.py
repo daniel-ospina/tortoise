@@ -5187,6 +5187,56 @@ def _write_span_is_hard_cut(text: object, cap: int) -> bool:
     return _write_span(s, cap, hard_cut_single_token=False) == ""
 
 
+#: #10360 — the ONE name of the carve-out's write-path switch. Every read of
+#: it goes through `_state_value_verbatim_enforced`, so the guarantee has one
+#: switch rather than a second spelling per call site (`#4097`'s lesson).
+STATE_VALUE_VERBATIM_SWITCH = "TORTOISE_STATE_VALUE_VERBATIM"
+
+
+def _state_value_verbatim_enforced() -> bool:
+    """#10360: is the write path's verbatim-value refusal ARMED? (default: YES)
+
+    The off-switch of the carve-out's enforcement — the one control an operator
+    has over a rule that WITHHOLDS a durable memory, and the reason it can be
+    shipped at all: a refusal that over-blocks in production must be reversible
+    without a deploy.
+
+    Resolution is `env_truthy.env_flag`'s (#4097), so ``TORTOISE_STATE_VALUE_VERBATIM``
+    unset / blank / unparseable → **ON**: a typo can never silently disarm the
+    guarantee, which is the only safe direction for a default-ON gate.
+
+    ⛔ **What OFF restores, stated exactly, because "off" has to mean a rollback.**
+    With the switch off the emit site takes no judgment at all: no refusal, no
+    hard-cut disclosure, and — the half that is easy to miss —
+    ``refused_value_contents`` / ``refused_value_slots`` stay empty, so
+    `_mint_endpoint`'s resurrection guard cannot fire either. A rewritten value is
+    then WRITTEN, and an operator naming it re-mints it, exactly as the pre-#10513
+    REFUSAL path did. Anything less would leave a half-armed guard that refuses one
+    door and not the other.
+
+    ⛔ **What OFF does NOT restore, stated so "rollback" is not read as "byte-identical
+    to the old build":** the #10513 changes at the MINT site are not behind this
+    switch — `_mint_endpoint`'s token-safe content cut and the S5 quote's
+    ABSENT-on-hard-cut behaviour stay exactly as `main` ships them. Neither
+    withholds a memory, so the rollback's purpose (undo an over-blocking refusal)
+    is served; an operator who expected pre-#10513 mint bytes would not get them,
+    and that is recorded here rather than discovered.
+
+    ⛔ **What OFF does NOT change:** the JUDGMENT. `_value_slot_divergence` and
+    `_value_slots` keep returning what they return (they are the production value
+    engine, shared with `value_gate`/#4899), so the switch moves the DOOR, never
+    the classifier — an operator can flip it, re-measure, and flip it back without
+    re-deriving a tolerance battery.
+
+    ⛔ **TWO reads, on purpose, and neither is per-point:** once per
+    `execute_embed` BATCH at the emit site (so one batch cannot be judged under two
+    guarantees), and once INSIDE `_refuse_rewritten_value` — intrinsic, so a future
+    second call site cannot bypass the switch by calling the rule directly. Both go
+    through this helper, which is the module's ONE `env_flag` read of the name.
+    """
+    return env_flag(STATE_VALUE_VERBATIM_SWITCH, True)
+
+
 def _refuse_rewritten_value(content: object, quote: object, *,
                             warnings: list[str]) -> bool:
     """#10360: True when this point must NOT be written — its value was rewritten.
@@ -5217,7 +5267,16 @@ def _refuse_rewritten_value(content: object, quote: object, *,
     The refusal is deliberate and REPORTED: the warning quotes both values and
     the verbatim one, so the rewrite is recoverable from the run without the
     original session.
+
+    ⛔ **The off-switch is checked HERE, not only at the caller** (review round 2,
+    P3). A caller-side gate alone is bypassed by the next call site someone adds —
+    a second emit path wiring this rule would silently restore a refusal nobody
+    can turn off. Intrinsic means every caller inherits the switch; it returns
+    `False` with no warning, so the OFF arm collects no refused key and
+    `_mint_endpoint`'s guard stays off with it.
     """
+    if not _state_value_verbatim_enforced():
+        return False
     diverged = _value_slot_divergence(content, quote)
     if not diverged:
         return False
@@ -9688,6 +9747,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # records, deduped against the UPDATE-fold records below.
     point_supersede_refs: list[dict] = []
     pt_record_pairs: set[tuple[str, str]] = set()
+    # #10360: the off-switch, read ONCE for this BATCH (not per point), so one
+    # batch cannot be judged under two different guarantees. `_refuse_rewritten_value`
+    # re-checks it intrinsically as well; this read is what the hard-cut
+    # DISCLOSURE is gated on, and it is the one the emit site uses.
+    _value_fidelity_judged = _state_value_verbatim_enforced()
 
     # #9906: a FOLDED point's ``supersedes`` ref must not die at the fold.
     # Every non-emitting outcome in the loop below resolves a SURVIVOR graph id
@@ -9852,7 +9916,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # cut cycles 14/15/17 removed elsewhere; the S5 site asks for `""`
         # instead of judging). Fail OPEN with the reason NAMED, so the unjudged
         # point is visible in the run rather than silently covered.
-        _hard_cut = (
+        # #10360: the switch is read ONCE per batch (above). Off → this whole
+        # rule is skipped (`_hard_cut` is forced False so neither the disclosure
+        # nor the refusal below fires, and no refused key is collected, which is
+        # what keeps `_mint_endpoint`'s guard off too — see
+        # `_state_value_verbatim_enforced`).
+        _hard_cut = _value_fidelity_judged and (
             _write_span_is_hard_cut(_raw_content, _MAX_CONTENT)
             or _write_span_is_hard_cut(
                 str(p.get("quote") or "").strip(), _MAX_QUOTE)
@@ -9865,7 +9934,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "NOT judged on this pair (fail-open; the cut can read a value "
                 "short, which is not evidence of a rewrite)"
             )
-        elif _refuse_rewritten_value(content, quote, warnings=warnings):
+        elif (_value_fidelity_judged
+              and _refuse_rewritten_value(content, quote, warnings=warnings)):
             # ⚠️ BOTH keys are needed, and cycle 5's "only the clamped one"
             # reading was WRONG (cycle 6 measured it): the clamped key matches a
             # ref `_mint_endpoint` truncates, while the unclamped key is what it

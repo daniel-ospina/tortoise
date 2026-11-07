@@ -490,6 +490,164 @@ def test_the_refusal_judges_the_SAME_text_the_write_uses_on_a_falsy_content():
                for w in result["warnings"]), result["warnings"]
 
 
+# ── 2b. the enforcement's OWN off-switch (#10360, 2026-11-07) ────────────────
+
+def test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write(monkeypatch):
+    """The rule WITHHOLDS a durable memory, so it needs a reversible door.
+
+    MUTATION CHECK TARGETS, both arms: drop the switch from the emit site and
+    the OFF block below reds; flip its default to ``False`` and the ON block
+    reds. Neither arm is machinery — the ON arm asserts the guarantee is armed
+    when nothing is set, and the OFF arm asserts the write path is the
+    PRE-#10513 one, byte for byte (the point is written, carrying the rewritten
+    value, with no refusal and no disclosure).
+    """
+    monkeypatch.delenv(v2.STATE_VALUE_VERBATIM_SWITCH, raising=False)
+    assert v2._state_value_verbatim_enforced() is True
+    assert _write("the p95 hit 4.0 seconds",
+                  "the p95 hit 4.2 seconds")["payload"]["points"] == []
+    # a TYPO is not a statement: an unparseable value resolves to the DEFAULT (ON),
+    # which is the only safe direction for a gate that can withhold a memory.
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "ture")
+    assert v2._state_value_verbatim_enforced() is True
+    assert _write("the p95 hit 4.0 seconds",
+                  "the p95 hit 4.2 seconds")["payload"]["points"] == []
+    # …and each explicit falsy spelling opens the door.
+    for spelling in ("0", "off", "false", "no"):
+        monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, spelling)
+        off = _write("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+        assert [p["content"] for p in off["payload"]["points"]] == [
+            "the p95 hit 4.0 seconds"], spelling
+        assert not any("REWRITES its own verbatim quote" in w
+                       for w in off["warnings"]), (spelling, off["warnings"])
+        # …and the WHOLE rule is off, not just its refusal: the hard-cut
+        # disclosure is part of the judgment and must not leak into the OFF arm
+        # (a half-disarmed switch reads as "judged and failed open").
+        assert not any("NOT judged" in w for w in off["warnings"]), (
+            spelling, off["warnings"])
+
+
+def test_the_off_switch_leaves_the_MINT_guard_off_too(monkeypatch):
+    """“Off” has to mean BOTH doors, or it is a half-armed guard.
+
+    `refused_value_contents` / `refused_value_slots` are populated only on a
+    refusal, so a switch that disarmed the refusal while leaving
+    `_mint_endpoint`'s guard armed would suppress an operator edge for a point
+    the run never refused. With the switch off the rewritten value is written
+    AND an operator naming a variant of it is not suppressed — the pre-#10513
+    behaviour on both doors.
+    """
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["operators"] = [{
+        "src": "the p95 hit 4.0 seconds.",
+        "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the p95 hit 4.0 seconds" in contents, contents
+    assert not any("refused for rewriting its own verbatim quote" in w
+                   for w in result["warnings"]), result["warnings"]
+
+
+def test_the_off_switch_does_not_move_the_JUDGMENT(monkeypatch):
+    """The switch moves the DOOR, never the classifier.
+
+    `_value_slot_divergence` / `_value_slots` are the production value engine
+    (shared with `value_gate`/#4899), so an operator can flip the switch,
+    re-measure and flip it back without re-deriving a tolerance battery. Pinned
+    because a switch that also silenced the classifier would make the OFF arm
+    unable to report what it let through.
+    """
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    assert v2._state_value_verbatim_enforced() is False
+    assert v2._value_slot_divergence("the p95 hit 4.0 seconds",
+                                     "the p95 hit 4.2 seconds")
+    assert v2._value_slots("the p95 hit 4.0 seconds")
+
+
+def test_the_off_switch_is_read_at_ONE_site():
+    """One switch, one read (#4097's lesson, applied to a guarantee).
+
+    Two things a rename or a second spelling would break silently, both pinned
+    literally rather than against the constant itself (review round 2, P3: the
+    first version compared the assignment to `v2.STATE_VALUE_VERBATIM_SWITCH`,
+    i.e. the value against itself, so renaming the variable kept every test
+    green while the documented rollback stopped working):
+
+    * the module's string literal is **exactly** `TORTOISE_STATE_VALUE_VERBATIM`,
+      and it appears as a literal **once** — a second spelling is a second read
+      waiting to disagree;
+    * the single `env_flag` read of it defaults to ``True``:
+      a default-OFF read would silently disarm the guarantee for every
+      deployment that never sets the variable.
+    """
+    import ast
+    source = pathlib.Path(v2.__file__).read_text(encoding="utf-8")
+    assert v2.STATE_VALUE_VERBATIM_SWITCH == "TORTOISE_STATE_VALUE_VERBATIM", (
+        "the switch's NAME is the operator's interface: it is quoted in the "
+        "registry row and in deployment docs, so a rename is a breaking change "
+        "and must not ride on a test that compares the constant to itself")
+    tree = ast.parse(source)
+    # ONE definition of the name…
+    assigns = [n for n in ast.walk(tree)
+               if isinstance(n, ast.Assign)
+               and any(isinstance(t, ast.Name)
+                       and t.id == "STATE_VALUE_VERBATIM_SWITCH"
+                       for t in n.targets)]
+    assert len(assigns) == 1, (
+        f"expected ONE module-level definition, found {len(assigns)}")
+    # …whose string literal is the operator-visible name, spelled ONCE. Docstrings
+    # are excluded (they NAME the variable for readers; they are not reads).
+    docstrings = {id(n.body[0].value) for n in ast.walk(tree)
+                  if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                    ast.AsyncFunctionDef))
+                  and n.body and isinstance(n.body[0], ast.Expr)
+                  and isinstance(n.body[0].value, ast.Constant)
+                  and isinstance(n.body[0].value.value, str)}
+    literals = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and "TORTOISE_STATE_VALUE_VERBATIM" in n.value
+                and id(n) not in docstrings]
+    assert len(literals) == 1, (
+        f"the switch's name is spelled in {len(literals)} string literals — any "
+        "literal besides the constant's definition is a second, divergent read "
+        "that this pin would otherwise not see")
+    assert literals[0].value == "TORTOISE_STATE_VALUE_VERBATIM"
+    # …and ONE read, through `env_flag`, defaulting True.
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "env_flag"
+             and n.args and isinstance(n.args[0], ast.Name)
+             and n.args[0].id == "STATE_VALUE_VERBATIM_SWITCH"]
+    assert len(calls) == 1, f"expected ONE env_flag read, found {len(calls)}"
+    assert isinstance(calls[0].args[1], ast.Constant) \
+        and calls[0].args[1].value is True, (
+            "the switch must default ON: a default-OFF read silently disarms "
+            "the guarantee for every deployment that never sets the variable")
+
+
+def test_the_off_switch_is_INTRINSIC_so_a_second_call_site_cannot_bypass_it(
+        monkeypatch):
+    """The switch is checked INSIDE the rule, not only at the emit site.
+
+    Review round 2, P3: with the gate only at the caller, the next lane to wire
+    `_refuse_rewritten_value` into a SECOND emit path restores a refusal nobody
+    can turn off, and no test notices. Called directly with the switch OFF the
+    rule must answer ``False`` and say nothing.
+    """
+    content, quote = "the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds"
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    warnings: list[str] = []
+    assert v2._refuse_rewritten_value(content, quote, warnings=warnings) is False
+    assert warnings == [], warnings
+    # positive control: the switch is what answered — with it ON the SAME direct
+    # call refuses and reports, so this cannot pass by the rule being dead.
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "1")
+    assert v2._refuse_rewritten_value(content, quote, warnings=warnings) is True
+    assert any("REWRITES its own verbatim quote" in w for w in warnings)
+
+
 # ── 3. the invariant: a verbatim value is never dropped ─────────────────────
 
 def test_a_point_that_carries_its_value_verbatim_is_written_untouched():
@@ -504,6 +662,93 @@ def test_a_point_that_carries_its_value_verbatim_is_written_untouched():
     points = result["payload"]["points"]
     assert len(points) == 1, result["warnings"]
     assert points[0]["content"] == "the p95 hit 4.2 seconds"
+
+
+def test_every_STORED_value_bearing_point_satisfies_the_verbatim_identity(
+        monkeypatch):
+    """MECHANISM-LEVEL SURVIVAL — the value a stored point carries IS the value
+    its own verbatim quote states.
+
+    This is the provable form of “the value survives verbatim”, and it needs no
+    LLM arm: whatever the model wrote, the write path's guarantee is that a
+    stored point's value identity and its own verbatim quote's value identity
+    AGREE. A reader can re-derive it over any payload — it is
+    `_value_slot_divergence(stored.content, stored.quote) == ()` — over the FORM
+    tolerances the rule applies on purpose (unit spelling, a leading dot, a
+    magnitude prefix), none of which may be mistaken for a rewrite.
+
+    ⛔ The ON arm contains a DIVERGENT pair as well, asserted ABSENT from the
+    stored set (review round 2, P2: the first version's four cases were
+    non-divergent BY CONSTRUCTION, so every assertion held whether or not the
+    emit-site rule existed — deleting the rule left it green). MUTATION CHECK
+    TARGETS: delete the emit-site rule → the divergent case reaches the payload
+    and this reds; set the switch off → the falsifier's divergent pair is stored
+    and the identity check flags it.
+    """
+    cases = (
+        ("the p95 hit 4.2 seconds", "the p95 hit 4.2 seconds"),     # identical
+        ("the TTL is 20 minutes", "the TTL is 20 mins"),           # unit spelling
+        ("the p95 is 0.5 seconds", "the p95 is .5 seconds"),       # leading dot
+        ("we saw 5k QPS", "we saw 5000 QPS"),                      # magnitude form
+    )
+    stored_values = []
+    for content, quote in cases:
+        points = _write(content, quote)["payload"]["points"]
+        assert len(points) == 1, (content, quote)
+        stored = points[0]
+        # the value SURVIVED into what is written…
+        assert content in stored["content"], (content, stored["content"])
+        # …and the stored text still satisfies the identity against its own
+        # verbatim quote — the two readings a consumer holds agree.
+        assert v2._value_slot_divergence(
+            stored["content"], stored["quote"]) == (), (content, quote, stored)
+        stored_values.append(stored["content"])
+    # THE DISCRIMINATING CASE: a DIVERGENT pair must not be stored at all, so the
+    # identity above is a guarantee about the graph rather than a property of the
+    # four pairs picked for it.
+    divergent = _write("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    assert divergent["payload"]["points"] == [], (
+        "a divergent pair was STORED, so the identity below is not enforced by "
+        f"the write path: {divergent['payload']['points']!r}")
+    assert "the p95 hit 4.0 seconds" not in stored_values
+    # FALSIFIER — the identity check is not vacuous. With the door OPEN the same
+    # check FLAGS the pair the invariant forbids, so a future lane cannot green
+    # this test by neutering both sides.
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    leaked = _write("the p95 hit 4.0 seconds",
+                    "the p95 hit 4.2 seconds")["payload"]["points"]
+    assert len(leaked) == 1, leaked
+    assert v2._value_slot_divergence(leaked[0]["content"],
+                                     leaked[0]["quote"]), (
+        "the identity check must FLAG a stored divergent pair, or the block "
+        "above passes by vacancy")
+
+
+def test_the_registry_row_declares_the_off_switch():
+    """The row a lane reads must name the switch, its default and what OFF restores.
+
+    A rollback nobody can find is not a rollback: the row is what an operator
+    reads before flipping a guarantee off in production. The name is asserted
+    against `v2.STATE_VALUE_VERBATIM_SWITCH` (review round 2, P3) so the row and
+    the code cannot drift — renaming the variable without the row reds here.
+    """
+    row = (pathlib.Path(__file__).resolve().parent.parent
+           / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    flattened = " ".join(row.split())
+    assert v2.STATE_VALUE_VERBATIM_SWITCH in flattened, (
+        f"the registry row does not name the enforcement's off-switch "
+        f"({v2.STATE_VALUE_VERBATIM_SWITCH})")
+    assert "_state_value_verbatim_enforced" in flattened, (
+        "the row must name the ONE read the switch goes through")
+    assert "STATE_VALUE_VERBATIM_SWITCH" in flattened, (
+        "the row must name the constant as a `symbols:` anchor, or a rename "
+        "leaves it pointing at a symbol that does not exist with every gate green")
+    assert "defaults to **ON**" in flattened, (
+        "the row must state the default, so a reader knows what unset means")
+    assert "pre-#10513 REFUSAL semantics" in flattened, (
+        "the row must state WHAT OFF restores — the rollback target is the "
+        "whole point of the switch — and must not overclaim byte-identical "
+        "pre-#10513 output (the #10513 mint-site cuts are not behind it)")
 
 
 def test_a_quote_that_only_fragments_the_point_is_not_a_contradiction():
