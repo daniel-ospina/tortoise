@@ -2208,3 +2208,136 @@ def test_a_deduped_address_must_INDEX_the_text_the_record_carries():
     assert len(out) == 1
     assert out[0].get("span_start") == 2 and out[0].get("span_source") == "quote", (
         f"a VERIFIED address was dropped by the dedupe: {out[0]!r}")
+
+# ── #11368: the two mention builders must be ONE rule, not two agreeing copies ──
+#
+# `_mention_record` (the cue's channel) and `_clamped_mention` (the last door) each
+# carried their own copy of the declared-space verification AND their own spelling of
+# the cap constants (`[:200]`, `_MAX_QUOTE`, `_MENTION_CAPS["quote"]`; `[:60]` beside
+# `_MENTION_CAPS["kind_guess"]`). The copies agreed only while the spellings happened
+# to agree, so changing one left the two builders publishing different quotes and
+# different `span_source` labels for the SAME entry with a GREEN suite. The failure
+# mode is a false PASS on provenance: a `span_source` asserting a verification the
+# sibling builder would not perform (#11368, measured at `ad8022205` and again at
+# `23d227c53`: quote 200/100, surface 200/100, kind_guess 60/10 — every one a drift
+# the suites did not see).
+
+
+def _build_pair(*, surface, quote, kind_guess=None):
+    """One input, both builders, unrestricted fields (for the cap rows)."""
+    from tortoise.extractor_v2 import _clamped_mention, _mention_record
+
+    claim = {"content": "c", "quote": "c"}
+    rec = _mention_record(surface=surface, claim=claim, kind_guess=kind_guess,
+                          rule_id="coreference", reason="r", narrative="",
+                          quote=quote, span=None)
+    cl = _clamped_mention({"surface": surface, "quote": quote,
+                           "kind_guess": kind_guess, "rule_id": "coreference",
+                           "reason": "r"}, narrative="")
+    return rec, cl
+
+
+def _span_fields(d):
+    """The address a record carries — the fields a consumer resolves.
+
+    ``quote`` is compared as a VALUE, not as a key: `_clamped_mention` skips empty
+    fields (`if v is None or v == ""`) while `_mention_record` always emits the key,
+    and `commit_schema.Mention.quote` defaults to ``""`` — so an absent key and
+    ``""`` are the same contract value. The verdict (`span_source` + the pair) is
+    what must never differ.
+    """
+    assert d is not None
+    return (d.get("quote") or "", d.get("span_start"), d.get("span_end"),
+            d.get("span_source"))
+
+
+def _declared_both(surface, quote, *, span, narrative=""):
+    """The SAME DECLARED span through both builders, compared field by field.
+
+    Only a DECLARED span is compared: without one the two builders do different jobs
+    by design — `_mention_record` SEARCHES the text for an address while
+    `_clamped_mention` re-derives a claim the model made — so parity is owed on the
+    declaration verdict, which is the rule #11368 is about.
+    """
+    from tortoise.extractor_v2 import _clamped_mention, _mention_record
+
+    claim = {"content": "the problem is elsewhere",
+             "quote": "the problem is elsewhere"}
+    rec = _mention_record(surface=surface, claim=claim, kind_guess=None,
+                          rule_id="coreference", reason="cue reason",
+                          narrative=narrative, quote=quote, span=span)
+    m = {"surface": surface, "claim_ref": claim["content"], "quote": quote,
+         "kind_guess": None, "rule_id": "coreference", "reason": "cue reason"}
+    m.update({k: v for k, v in span.items() if v is not None})
+    return _span_fields(rec), _span_fields(_clamped_mention(m, narrative=narrative))
+
+
+@pytest.mark.parametrize("surface,quote,span,narrative", [
+    # a declaration that VERIFIES — both must honour it
+    ("the problem", "the problem is elsewhere",
+     {"span_start": 0, "span_end": 11, "span_source": "quote"}, ""),
+    # a declaration that does NOT verify — both must demote to "model"
+    ("the problem", "the problem is elsewhere",
+     {"span_start": 3, "span_end": 9, "span_source": "quote"}, ""),
+    # an absent QUOTE is a definite MISMATCH, never an amnesty
+    ("the problem", "",
+     {"span_start": 0, "span_end": 11, "span_source": "quote"}, ""),
+    # an absent NARRATIVE is an UNKNOWABLE haystack — the declaration STANDS
+    ("the problem", "the problem is elsewhere",
+     {"span_start": 0, "span_end": 11, "span_source": "narrative"}, ""),
+    # …and a supplied narrative that does not verify demotes
+    ("the problem", "the problem is elsewhere",
+     {"span_start": 0, "span_end": 11, "span_source": "narrative"},
+     "nothing about it here"),
+    # a padded declaration is the SAME declaration
+    ("the problem", "the problem is elsewhere",
+     {"span_start": 0, "span_end": 11, "span_source": " quote "}, ""),
+    # a haystack longer than the cap, with the address inside it
+    ("the problem", "the problem " + ("x" * 300),
+     {"span_start": 0, "span_end": 11, "span_source": "quote"}, ""),
+    # the amnesty must not leak: no narrative AND wrong offsets is still unknown
+    ("the problem", "the problem is elsewhere",
+     {"span_start": 2, "span_end": 13, "span_source": "narrative"}, ""),
+])
+def test_the_two_mention_builders_give_the_SAME_verdict_on_a_declared_span(
+        surface, quote, span, narrative):
+    rec, cl = _declared_both(surface, quote, span=span, narrative=narrative)
+    assert rec == cl, (
+        f"the two mention builders disagree on ONE declared span — record={rec} "
+        f"vs clamp={cl} for surface={surface!r} quote={quote[:40]!r} span={span} "
+        f"narrative={narrative[:40]!r}. A `span_source` may only assert a "
+        "verification BOTH builders would perform (#11368).")
+
+
+def test_both_builders_read_every_cap_from_ONE_source(monkeypatch):
+    """⛔ The drift pin: a cap is only a cap if BOTH builders honour it.
+
+    Moving one cap is exactly what #11368 measured — and what a builder-local
+    literal makes invisible: the record builder carried `[:200]` and `[:60]` beside
+    `_MAX_QUOTE`, so `_MENTION_CAPS` was a cap the OTHER builder obeyed and this one
+    ignored.
+    """
+    from tortoise.extractor_v2 import _MAX_QUOTE, _MENTION_CAPS
+
+    # A mention's quote cut IS the cut the point's own quote is stored with, or the
+    # mention cites bytes the point does not hold.
+    assert _MENTION_CAPS["quote"] == _MAX_QUOTE, (
+        "`_MENTION_CAPS['quote']` has drifted from `_MAX_QUOTE`, the cut a point's "
+        "quote is stored with")
+
+    cases = [
+        ("quote", 100, {"surface": "the problem",
+                        "quote": "the problem " + ("x" * 300)}),
+        ("surface", 100, {"surface": "s" * 300, "quote": "q"}),
+        ("kind_guess", 10, {"surface": "s", "quote": "q",
+                            "kind_guess": "k" * 100}),
+    ]
+    for name, value, kwargs in cases:
+        with monkeypatch.context() as patch:
+            patch.setitem(_MENTION_CAPS, name, value)
+            rec, cl = _build_pair(**kwargs)
+        assert rec[name] is not None and cl[name] is not None, (name, rec, cl)
+        assert len(rec[name]) == len(cl[name]) == value, (
+            f"`{name}` cap {value} is not honoured by BOTH builders: "
+            f"record={len(rec[name])} clamp={len(cl[name])} — one of them is reading "
+            "its own literal instead of `_MENTION_CAPS` (#11368)")
