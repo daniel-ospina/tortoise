@@ -1091,17 +1091,32 @@ place a machine reads it.
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
-### 10.9 — the §11 cite block re-pointed after `main`'s S5 inserts moved `extractor_v2.py` (2026-11-07, `#11205`/`#11242`/`#11264`)
+### 10.9 — the §11 cite block re-pointed after `main`'s S5 inserts moved `extractor_v2.py` (2026-11-07, `#11205`/`#11242`/`#11288` then `#11264`/`#11361`)
 
 - **Original value (as §10.8 left it):** `_collect_classify_items` at
   `tortoise/extractor_v2.py:10397`, its extent `:10397-10419`, the two `if items:` gates at
   `:11849`/`:11998`, and the two fail-open `except` arms at `:11862`/`:12009`.
 - **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
   `:12921`/`:13068`.
-- **Why:** `main` landed five changes to `extractor_v2.py` while this branch was open —
-  `#11205` (S5 Job 1, the entity↔entity channel), `#11242`, `#11264`, `#11288` and `#11361` —
-  inserting **631** lines and re-cutting **118** above every one of these cites (749 changed
-  lines in total, measured `04deeaacda..origin/main`). The symbols are unchanged: the collector
+- **Why:** `main` landed five changes to `extractor_v2.py` while this branch was open, and they
+  moved these cites in **two windows** — only the second of which is what this entry's **749**-line
+  figure measures. The first window: **`#11205`** (S5 Job 1, the entity↔entity channel; `606`/`4`
+  lines), **`#11242`** (`4`/`4`) and **`#11288`** (`22`/`22`) all landed **after §10.8's own commit**
+  (`80c912244f`) and are **ancestors of** `04deeaacda`, so they carry the collector from `:10397`
+  (as recorded above) to `:10969` at `04deeaacda` — **+572**. The second window: **`#11264`**
+  (`482`/`81`) and **`#11361`** (`149`/`37`) are the only commits in `04deeaacda..origin/main` that
+  touch `extractor_v2.py`, and they carry it the rest of the way, `:10969` → `:11098` — **+129**.
+  Their **631** insertions and **118** deletions are exactly the **749** changed lines quoted here,
+  because `04deeaacda..origin/main` is the only range they are measured over.
+  ⚠️ The first cut of this entry attributed the 631/118/749 to all five changes ("inserting **631**
+  lines and re-cutting **118** above every one of these cites"), which is false for three of them:
+  those three are ancestors of `04deeaacda` and appear nowhere in the measured range — they moved
+  the cites in the window *before* it, not inside it. Corrected here rather than silently
+  restated, in this section's own idiom (§10.7 likewise records an understated shift instead of
+  quietly fixing it). ⚠️ Also carried, not silently reconciled: the `def` sits one line lower, at
+  `:10398`, in `80c912244f` itself, so §10.8's recorded `:10397` is one line high — measured by
+  CONTENT the first window is +571 and the total +700, which is the same total the +572/+129 split
+  reaches from the recorded value. The symbols are unchanged: the collector
   grew no item and lost none, and both passes are still gated on `if items:`. Each number was
   verified by CONTENT at this head (the `def`, the `return items` that ends it, the two `if items:`
   gates, the two `except` arms), never by adding an offset — the failure this section has already
