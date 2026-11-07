@@ -105,14 +105,58 @@ def _no_embedder(monkeypatch):
     monkeypatch.setattr(_emb.EmbeddingModel, "get", staticmethod(lambda: None))
 
 
+#: Every env-gated knob ``retrieve_for_question`` reads that can move the POOL
+#: (membership/order), the WINDOW (item cap) or the ARM. A developer shell
+#: carrying any of them would red a pinned count or flip the anchor — a spurious
+#: red, never a false pass, but still a price for nothing. Scrubbed, not
+#: tolerated: the pool/window/arm set is exactly this module's subject.
+_ENV_SCRUB = (
+    # the arm under test + its boost legs
+    "TORTOISE_LME_EVIDENCE_ASSEMBLY",
+    "TORTOISE_LME_EVIDENCE_BOOST",
+    "TORTOISE_LME_EVIDENCE_BOOST_ANSWER_STRING",
+    "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+    "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+    # pool membership / order
+    "TORTOISE_LME_RERANK",
+    "TORTOISE_LME_RERANK_CAP",
+    "TORTOISE_LME_RERANK_LAMBDA",
+    "TORTOISE_LME_RERANK_POOL",
+    "TORTOISE_LME_COVERAGE_LOOP",
+    "TORTOISE_LME_POOL_SIZE",
+    "TORTOISE_LME_SESSION_REINJECTION",
+    "TORTOISE_LME_REINJECTION_TOTAL_CAP",
+    "TORTOISE_LME_ENTITY_KEY_EXPANSION",
+    "TORTOISE_LME_TIME_AWARE_QE",
+    "TORTOISE_LME_TEMPORAL_LEG",
+    "TORTOISE_LME_TEMPORAL_LEG_LIMIT",
+    "TORTOISE_LME_TEMPORAL_LEG_PLACEMENT",
+    "TORTOISE_LME_TEMPORAL_LEG_WEIGHT",
+    "TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG",
+    "TORTOISE_LME_AGGREGATIVE_FLAG",
+    "TORTOISE_LME_TR_SESSION_ADMISSION",
+    "TORTOISE_LME_TR_SESSION_COMPLETION",
+    # the reader-window item cap
+    "TORTOISE_LME_CONTEXT_ITEMS",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    """Clear the pool/window/arm knobs so a stray export cannot red a pinned
+    count (an ambient ``RERANK``/``COVERAGE_LOOP``/``CONTEXT_ITEMS`` moves the
+    very quantities this module asserts)."""
+    for var in _ENV_SCRUB:
+        monkeypatch.delenv(var, raising=False)
+
+
 @pytest.fixture
 def seeded_sdk(monkeypatch):
     """A dedicated per-test graph: one provenanced point (+ its own verbatim
     source chunk), a cross-session restatement of that same fact, and an
     unrelated statement."""
     monkeypatch.setenv("TORTOISE_DB_URI", f"{_uri()}_{uuid.uuid4().hex[:10]}")
-    for var in ("TORTOISE_LME_EVIDENCE_ASSEMBLY",
-                "TORTOISE_LME_EVIDENCE_BOOST"):
+    for var in _ENV_SCRUB:
         monkeypatch.delenv(var, raising=False)
     sdk = TortoiseSDK()
     try:
@@ -229,8 +273,9 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     assert set(off_ids) == {CHUNK_ID, POINT_ID, DUP_ID, OTHER_ID}, off_ids
 
     # the RECALL SURFACE is untouched: packaging shapes the window, never the
-    # pool the retrieval metrics are computed over.
-    assert _ids(on["hits"]) == _ids(off["hits"]), (
+    # pool the retrieval metrics are computed over — the SAME dicts, not merely
+    # the same ids (a field rewrite would silently change the recorded outcome).
+    assert on["hits"] == off["hits"], (
         "the pool (recall surface) must be byte-identical ON vs OFF")
     assert {POINT_ID, CHUNK_ID, DUP_ID, OTHER_ID} <= set(_ids(on["hits"]))
 
