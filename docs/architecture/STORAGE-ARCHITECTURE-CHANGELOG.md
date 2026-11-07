@@ -2111,7 +2111,8 @@ L2 guard — `record_restore._ask_the_wipe_guard`; an embedded `path=` DB is exe
 targeted alternative, a graph-side `REMOVE n.story_arc`, is
 in place in principle but shipped by no instrument — `#10017`'s purge is the precedent on a DIFFERENT population, legacy
 episodic turn `:Point`s (turn-shaped ones only: a non-turn episodic `:Point` refuses its sweep), and names no
-`story_arc`. ⛔ The NOT-PROJECTABLE class — and a `status` with no usable mint (§17.2, `#11296`/`#11300`) — lacks a repair
+`story_arc`. ⛔ The NOT-PROJECTABLE class — and a `status` with no usable mint (§17.2, `#11296`; and a NON-STRING
+`status`, whose mint the state-op leg's `jsonb_typeof(…) = 'string'` filter DROPS rather than folds, `#11313`) — lacks a repair
 that RESTORES the value and a non-destructive one (no RECORD→CACHE projection may write the column, so no in-place route
 can put a value back — ⛔ though a targeted `REMOVE` IS in place, it is destructive); the declined pair has one, shipped —
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
