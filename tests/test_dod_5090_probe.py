@@ -3167,6 +3167,65 @@ def test_a_bypass_declaration_holds_row_one_at_PARTIAL(tmp_path, monkeypatch):
         f"term alone leaves one half unpinned: {row.observed}")
 
 
+def test_a_bypass_on_a_GATED_writer_also_holds_row_one_at_PARTIAL(
+        tmp_path, monkeypatch):
+    """A `bypass` parked on a GATED writer is still a DEFECT — and BOTH holds catch it.
+
+    ⛔ `#11444` review: measured by mutation, then corrected by a fresh-context reviewer
+    that caught this docstring claiming more than the run showed.
+
+    The sibling test above parks its `bypass` on an *unresolved* (outside-gate) writer,
+    and its two holds are `violations` + `bypass_declarations` (its own docstring says
+    so). A `bypass` on a GATED writer leaves the SCORED population entirely —
+    `violations` is computed over `set(declared) & set(outside_gate)`, so it has nothing
+    to look at there — which changes WHICH terms hold the row:
+
+      * `bypass_declarations` is built over EVERY declaration (``declared.items()``),
+        not over ``declared ∩ outside_gate``;
+      * ``stale`` is ``set(declared) - set(outside_gate)``, and its note names this
+        exact case ("the writer now ROUTES THROUGH THE GATE").
+
+    Either term ALONE still holds the row at PARTIAL; only narrowing BOTH greens it —
+    which is why this test asserts both notes and not just the verdict. Both are a
+    natural-looking simplification in a function otherwise entirely about the
+    outside-gate population, and neither was pinned for this case.
+
+    Measured with both narrowed for the `bypass` class only (the surgical form — a
+    broader ``stale = declared & outside_gate`` also reds
+    `test_a_STALE_declaration_holds_row_one_at_PARTIAL`, so it does not isolate this
+    gap): without this arm the whole file is green (**148 passed, 2 skipped**) while
+    this population reads `MET`; with it, exactly ONE test reds — this one
+    (**1 failed, 148 passed, 2 skipped**).
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {
+        **_gated_writer("tortoise.a::_gated"),
+        **_unresolved_writer("tortoise.b::_routes", "set_embedding_clause"),
+    }
+    declarations = {
+        # The `MET` population of `test_row_one_reads_MET_...`, plus a DEFECT parked
+        # on the writer the gate already covers.
+        "tortoise.a::_gated": _declared(
+            "tortoise.a::_gated", probe.CENSUS_BYPASS),
+        "tortoise.b::_routes": _declared(
+            "tortoise.b::_routes", probe.CENSUS_RECOGNISED,
+            reason="`tortoise.b::_routes` reaches `set_embedding_clause`"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        "a bypass on a GATED writer must hold the row: "
+        f"{row.verdict!r} {row.observed}")
+    assert "tortoise.a::_gated" in next(
+        n for n in row.notes if n.startswith("REAL BYPASSES")), (
+        "`bypass_declarations` must be built over EVERY declaration, not over the "
+        f"outside-gate population: {row.observed}")
+    assert "tortoise.a::_gated" in next(
+        n for n in row.notes if n.startswith("stale declarations")), (
+        "a gated writer's declaration is STALE (it now routes through the gate), so "
+        f"`stale` must not be narrowed to the outside-gate population: {row.observed}")
+
+
 def test_the_over_inclusive_enumeration_is_still_printed_when_everything_is_named(
         tmp_path, monkeypatch):
     """`#11444`: the register CLASSIFIES the population, it never REPLACES it (*What the fix must
