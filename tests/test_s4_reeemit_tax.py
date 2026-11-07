@@ -1075,12 +1075,35 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # reader actually reads: 35 -> 36 left 36/36 green in all three README
         # copies, which silently re-states the verdict cell's own 266-231
         # arithmetic (#11385 review P2). Derived, not typed.
-        ops = lg["s2_items"] - 231
+        # ⛔ DERIVED FROM THE RECEIPTS, not typed: `231` was a literal, so a
+        # `_render_search_results` that started rendering `operators` would make
+        # 231/35 false in three README copies, the index row and the caveat while
+        # the suite stayed green (#11385 review P3).
+        _sess = tool.load_sessions(_REPO / tool._DEFAULT_RECEIPT)
+        _offered = sum(len(v) for s in _sess
+                       for v in tool.search_from_s2(s["s2"]).values())
+        _ops = sum(len(s["s2"]["operators"]) for s in _sess)
+        _tax = sum(len(s["s2"][k]) for s in _sess for k in tool._TAX_SECTIONS)
+        assert _offered == 231, _offered
+        assert _ops == 35, _ops
+        assert _tax == lg["s2_items"], (_tax, lg["s2_items"])
+        assert _offered == _tax - _ops, (_offered, _tax, _ops)
+        ops = _ops
         assert ops == 35, ops
         assert f"so the {ops} `operators` items are never offered" in flat_all, ops
         assert f"the {ops} `operators`" in flat_all
         assert f"(the {ops} `operators` are never rendered, in production too" \
             in flat_all, ops
+        # ⛔ the FOURTH copy (the caveat-provenance paragraph) was still
+        # unguarded: 35 -> 36 there stayed green (#11385 review P3).
+        assert f"the {ops} never-offered `operators`" in flat_all, ops
+        # ⛔ and the narrowing BREAKDOWN in the DOCUMENT was unpinned while the
+        # instrument copies were pinned: `chain_notes` 7 -> 8 and
+        # `link_before_create` 38 -> 39 both stayed green, breaking the
+        # document's own 266 + 7 + 38 = 311 arithmetic, whose total IS pinned
+        # (#11385 review P3).
+        assert "`chain_notes` 7 + `link_before_create` 38 dropped" in flat_all
+        assert "`chain_notes` (7) and `link_before_create` (38)" in flat_all
         # ⛔ two more artifact-derivable figures the index row claims are
         # "re-derived": 29-49 -> 30-49 and 12/9 -> 12/8 were both green
         # (#11385 review P3).
