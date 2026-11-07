@@ -3751,6 +3751,52 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
                 f"the run declares {name!r} and the census doc does not name it")
 
 
+def test_the_census_doc_collects_what_the_file_collects():
+    """§6's run record must describe THIS tree, not a branch head (#11389 review).
+
+    The row stated *"collects 128 at #11337's head … six added"* while the tree it
+    sat in collected **129**: the figure was stated against a **moving** reference,
+    so it went stale on the next test added without any line of the doc changing —
+    the defect this PR exists to remove (a figure that describes a measurement it
+    no longer matches), one artifact over.
+
+    Bound to the tree instead: the count is re-derived here from the file's own
+    `--collect-only`, so adding a test reds this row until the figure is re-cut.
+    The passed/skipped **split** is deliberately NOT pinned — it moves with the
+    interpreter and the lane (the one skip is the `<3.12` re-derive), so pinning it
+    would red on a box rather than on a defect.
+    """
+    root = Path(probe.__file__).resolve().parent.parent
+    doc = (root / "docs" / "epics" / "2026-11-04-5090-vector-layer"
+           / "S3-VECTOR-CENSUS.md")
+    assert doc.exists(), f"the census doc moved: {doc}"
+    text = doc.read_text(encoding="utf-8")
+
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", str(Path(__file__).resolve()),
+         "--collect-only", "-q", "-p", "no:cacheprovider"],
+        capture_output=True, text=True, cwd=str(root),
+    )
+    assert run.returncode == 0, (
+        f"`--collect-only` on this file failed, so the doc's count cannot be "
+        f"checked:\n{run.stdout[-2000:]}\n{run.stderr[-2000:]}")
+    match = re.search(r"(\d+) tests? collected", run.stdout)
+    assert match, (
+        "`--collect-only` printed no collected count, so this pin measured "
+        f"nothing: {run.stdout[-2000:]}")
+    actual = int(match.group(1))
+
+    stated = re.search(r"this tree: (\d+) collected", text)
+    assert stated, (
+        "§6's run record no longer states the collected count of THIS tree. A "
+        "count stated against a branch head ('at #11337's head') describes a "
+        "measurement the row no longer matches as soon as a test is added")
+    assert int(stated.group(1)) == actual, (
+        f"§6 states this tree collects {stated.group(1)} and the file collects "
+        f"{actual}: the row describes a measurement it no longer matches — re-cut "
+        f"the figure, or delete it and let this pin stand alone")
+
+
 def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():
     """No removable vector, nothing changes — including for the caller-chosen
     tools (#11088 review round 9, P2).
