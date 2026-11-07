@@ -733,3 +733,109 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     # the moment the real Sentry SDK's ThreadingIntegration wraps it (#11354).
     violations = _thread_start_stamp_violations()
     assert not violations, "\n".join(violations)
+    import threading
+
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
+        "Thread.start stamp not installed in the test session"
+    # ⛔ ONE STAMP LAYER, NOT ONE FUNCTION OBJECT (#11217 round-3 review P1).
+    # `install_thread_stamp` promises "installed exactly once … cannot
+    # double-wrap even if re-invoked after a reload", and a `reload` re-executes
+    # the module into its EXISTING dict — so the IDENTITY of the outermost function
+    # says nothing here, and #11354 measured it false under Sentry's wrapper (whose
+    # `functools.wraps` copies even the qualname). A DOUBLE WRAP is one stamp
+    # WRAPPING another, so it is asserted where it is OBSERVABLE: the original the
+    # installed wrapper reads at CALL time must not itself be a stamp. ⛔ No escape
+    # clause for the reload's self-reference: a `_ORIG_THREAD_START` that IS a stamp
+    # is not "still one layer", it is UNBOUNDED — the wrapper reads that name at
+    # call time, so it calls itself and every `Thread.start()` raises
+    # `RecursionError`. This assertion reported green over exactly that state until
+    # #11217 round 3 (the module now KEEPS the genuine original across a reload).
+    #
+    # Read it from the MODULE's dict, never from the installed function's
+    # `__globals__`: with a third-party layer on top that namespace is the WRAPPER's,
+    # which is the reading that made the identity form wrong in the first place.
+    original = proj_mod.__dict__.get("_ORIG_THREAD_START")
+    assert original is not None, (
+        "tortoise.projection has no `_ORIG_THREAD_START` — the stamp's original "
+        "capture is gone, so a reload rebinds it to the stamp")
+    assert getattr(original, "__name__", "") != "_thread_start_inherit_stem", (
+        "Thread.start's stamp reads another STAMP as the original — the reload "
+        "re-bound `_ORIG_THREAD_START` instead of keeping the real one, so every "
+        f"thread creation recurses ({original!r})")
+    # (c) THE MARKER is what makes a re-invocation a no-op, and FUNCTION
+    # IDENTITY cannot show it: re-assigning the same stamp object changes nothing
+    # either way, and `_TEST_SESSION_ACTIVE` is False in this test (set in (a)),
+    # so the installer returns on its FIRST condition and never reads the marker.
+    # Measured (#11217 round-5 review P2): deleting
+    # `and not getattr(threading.Thread, "_tortoise_stamp_installed", False)` from
+    # `install_thread_stamp` left this assertion GREEN. So assert the marker's
+    # EFFECT with a decoy, in both directions.
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", True)
+
+    def _decoy(self, *args, **kwargs):  # parked on Thread.start; must survive
+        raise AssertionError("the decoy start ran — the installer replaced it")
+
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
+        "conftest did not leave the install marker set"
+    monkeypatch.setattr(threading.Thread, "start", _decoy)
+    proj_mod.install_thread_stamp()  # marker PRESENT → must not install
+    assert threading.Thread.start is _decoy, \
+        "the marker did not stop a re-invoked installer re-wrapping Thread.start"
+
+    # Negative direction: with the marker GONE the installer MUST install. Without
+    # this pair the marker clause is unpinned and can be deleted silently.
+    monkeypatch.delattr(threading.Thread, "_tortoise_stamp_installed",
+                        raising=False)
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
+        "with the marker gone the installer did not install the stamp"
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
+        "the installer installed the stamp but did not set the marker"
+
+
+def test_a_RELOAD_keeps_the_REAL_Thread_start():
+    """#11217 round-4 review P2: the reload arm must be OBSERVED, not asserted.
+
+    `importlib.reload` re-executes the module body into its EXISTING dict. If the
+    body captures `_ORIG_THREAD_START = threading.Thread.start` unconditionally,
+    then on a reload that name is rebound to the STAMP — which the stamp reads at
+    CALL time, so it calls itself and every `Thread.start()` raises
+    `RecursionError`. The module now captures once (`globals().get(...) or …`).
+
+    Nothing else in the tree reloads `tortoise.projection`, so without this test
+    reverting the guard leaves the ENTIRE suite green while reload breaks all
+    thread creation — measured (#11217 round-4 review: an import hook that
+    restored the bare assignment passed every assertion in this file).
+
+    Runs in a SUBPROCESS on purpose: a reload resets `_TEST_SESSION_ACTIVE` and
+    re-executes module state, which must not leak into the parent session.
+    """
+    script = (
+        "import importlib, os, threading\n"
+        "os.environ['TORTOISE_TEST_MODE'] = '1'\n"
+        "import tortoise.projection as proj\n"
+        "real = threading.Thread.start\n"
+        "proj._TEST_SESSION_ACTIVE = True\n"
+        "proj.install_thread_stamp()\n"
+        "assert threading.Thread.start is not real, 'installer did not run'\n"
+        "importlib.reload(proj)\n"
+        "if proj._ORIG_THREAD_START is not real:\n"
+        "    raise SystemExit('RELOAD_REBOUND_THE_ORIGINAL')\n"
+        "t = threading.Thread(target=lambda: None)\n"
+        "t.start(); t.join()\n"
+        "print('RELOAD_OK')\n"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ)
+    env.pop("TORTOISE_TEST_DB", None)
+    env.pop("TORTOISE_DB_URI", None)
+    proc = subprocess.run(
+        [sys.executable, "-c", script], cwd=root, env=env,
+        capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, (
+        "a reload of tortoise.projection broke thread creation — the module body "
+        "must KEEP the captured original, not rebind it to the stamp. "
+        f"stdout={proc.stdout!r} stderr={proc.stderr[-800:]!r}")
+    assert "RELOAD_OK" in proc.stdout, (
+        f"the reload probe did not reach its assertion: {proc.stdout!r} "
+        f"{proc.stderr[-800:]!r}")
