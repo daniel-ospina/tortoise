@@ -494,6 +494,16 @@ for n in 11001 10997 10684 10698 10999 11021 10812 8447 10848; do
   gh api "repos/daniel-ospina/tortoise/issues/$n/timeline?per_page=100" --paginate \
     --jq '.[] | select(.event=="closed") | {created_at, commit_id, actor: .actor.login}'
 done
+                                                          # The POSITION the note below rests on is a
+                                                          # read too, not a claim — the SAME timeline with
+                                                          # NO --paginate, reporting the closed event's INDEX
+                                                          # within the first page:
+gh api "repos/daniel-ospina/tortoise/issues/11021/timeline?per_page=100" \
+  --jq 'to_entries|map(select(.value.event=="closed"))|.[].key'
+                                                          # 27 — an index INSIDE page 1, which is why the
+                                                          # paginated read above prints for this issue; push
+                                                          # that same close past the page size and the
+                                                          # unpaginated read prints nothing at all
                                                           # ⛔ --paginate is MANDATORY: without it gh
                                                           # returns only the FIRST 100 events, and the
                                                           # closed event is one line among many — a close
