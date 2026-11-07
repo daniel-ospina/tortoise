@@ -1330,13 +1330,16 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
     r"\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
     # ⛔ ONE subject phrase, and only one: `the gap that/those … closed` names the
     # gap BY ITS CLOSURE, so it can only be about this one. `the remaining gap` and
-    # `the exception it carved` were here for a revision and had to go — the row's
-    # `the remaining gap` names the SURVIVING OPEN residual (it says "What SURVIVES
-    # of the old (d) is the SPELLING case"), so anchoring it withheld the honest
-    # `spelling` waiver and red `the remaining gap is the SPELLING case, which is
-    # open by design` (#11258 review round 5 `P2`, measured). `the remaining gap is
-    # open` is therefore an undisclosed-arm shape and is named in
-    # `WHAT THIS CANNOT CATCH` instead of being claimed covered.
+    # `the exception it carved` were here for a revision and had to go — anchoring
+    # `the remaining gap` reds the honest proof `the remaining gap is the SPELLING
+    # case, which is open by design` (MEASURED: GREEN at this head, RED once the
+    # phrase is added to this anchor), because it is an ordinary noun phrase a
+    # truthful sentence about the SURVIVING residual can use. ⛔ NOT because the
+    # row says that phrase: `rg -c 'the remaining gap' config/v4-mechanisms.yml`
+    # is 0 (MEASURED), and the row's own wording is "What SURVIVES of the old (d)
+    # is the SPELLING case". `the remaining gap is open` is therefore an
+    # undisclosed-arm shape and is named in `WHAT THIS CANNOT CATCH` instead of
+    # being claimed covered.
     r"\bthe gap (?:that|those)\b[^.;]{0,40}\bclosed\b|"
     + _UNIT_TOKEN.pattern,
     re.I)
@@ -2128,11 +2131,11 @@ def _assert_the_row_names_its_closure(row: str) -> None:
         + ("\n⛔ A LEDGER SHAPE IS ALSO IN THIS SENTENCE: "
            f"{ledger_hits}. `_RESIDUAL_REFUSED_TRUTHFUL` records truthful "
            "statements this pin refuses, and its note gives the arm, why that arm "
-           "cannot be narrowed, and the phrasing each one accepts — read the "
-           "entry before rewriting: if the WHOLE sentence is honest, the accepted "
-           "workaround is there (for `is not closed` it is `is still open` / "
-           "`remains open`, both MEASURED GREEN); if it also reopens this gap, "
-           "the rest of the sentence is the defect." if ledger_hits else ""))
+           "cannot be narrowed, and — where one exists — the phrasing accepted in "
+           "its place. Read the entry before rewriting: if the WHOLE sentence is "
+           "honest and the entry records a workaround, that is it (for `is not "
+           "closed` it is `is still open` / `remains open`, both MEASURED GREEN); "
+           "if it also reopens this gap, the rest of the sentence is the defect." if ledger_hits else ""))
     assert not tail or any("spelling" in s for s in tail), (
         "a sentence after the adjacency claim says something other than the "
         f"disclosed SPELLING residual — inspect it: {tail!r}")
@@ -2429,6 +2432,12 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the ADJACENCY gap is closed by this table.",
     "the SPELLING case is still open on purpose.",
     "the SPELLING gap is not closed.",
+    # ⛔ THE WORKAROUND THE REFUSAL MESSAGE NAMES IS A PROOF, not prose: when a
+    # lane's honest `not closed` sentence is refused, the message tells it to say
+    # `is still open` / `remains open`, so both must stay GREEN or the advice
+    # itself becomes a falsified measurement (#11258 review round 12 `P3`).
+    "(b2) is still open.",
+    "(e) remains open.",
     "(d2) does not reopen (d)'s ADJACENCY result — the unit word IS fused.",
     "an unknown unit still fails open on purpose.",
     # ⛔ HONEST DENIALS, and they are here because they were FALSE BLOCKS: each one
@@ -2564,9 +2573,14 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
 #:   whose four exclusive proofs (`the remaining gap is not closed.` and its three
 #:   `the SPELLING gap is open <but|while|although> the remaining gap is not
 #:   closed` variants) go GREEN under the anchored arm — `the remaining gap` is
-#:   deliberately NOT an anchor, because the row uses it for the SURVIVING open
-#:   residual. Re-measure that set before quoting it again: a comment that names
-#:   the wrong example is how the next lane concludes the arm can be anchored.
+#:   deliberately NOT an anchor, and the reason is MEASURED rather than inferred:
+#:   adding it reds the honest proof `the remaining gap is the SPELLING case,
+#:   which is open by design` (GREEN at this head, RED with the phrase in the
+#:   anchor). ⛔ AND NOT because the row says that phrase — `rg -c 'the remaining
+#:   gap' config/v4-mechanisms.yml` is 0 (MEASURED); the row's wording is "What
+#:   SURVIVES of the old (d) is the SPELLING case". Re-measure this set before
+#:   quoting it again: a comment that names the wrong reason is how the next lane
+#:   concludes the arm can be anchored.
 #:
 #: ⛔ WHEN ONE OF THESE STOPS BEING REFUSED, THAT IS AN IMPROVEMENT — move it into
 #: `_RESIDUAL_TRUTHFUL_STATEMENTS` in the same commit. Do NOT delete the test's
@@ -2760,7 +2774,7 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "mutation list carry: it was `>= 30` against a 33-entry list, so three "
         "honest closures were deletable with both tests GREEN (the stale "
         "\"within two of the current length\" note is why it read as tight; "
-        "#11258 review round 11 `P3`, MEASURED)")
+        "#11258 review rounds 11-12, MEASURED)")
     # ⛔ AND THE OVER-BLOCK LEDGER IS PINNED BY SHAPE TOO (#11258 review round 8
     # `P2`, MEASURED): it had a fail-closed re-measurement (`now_accepted == []`)
     # and nothing else, so substituting entry 5 with a DUPLICATE of entry 1 left
@@ -2942,7 +2956,7 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "these TRUTHFUL statements red the scan — a false block is how a guard "
         f"gets deleted: {false_alarms}")
     # ⛔ AND THE OVER-BLOCK LEDGER IS RE-MEASURED, not asserted in prose (#11258
-    # review round 7 `P2`). These five are honest and refused; the pin states the
+    # review round 7 `P2`). These are honest and refused; the pin states the
     # cost so it is a measured property of this revision rather than a discovery
     # left to the next lane. A shape that stops being refused is an IMPROVEMENT —
     # move it to `_RESIDUAL_TRUTHFUL_STATEMENTS` and drop it here.
