@@ -1,3 +1,15 @@
+---
+title: "#10976 — cache EGRESS: the measurement (a licensed, record-gated pass bounds the cache)"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-06
+updated: 2026-11-07
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph, FalkorDB cache, cache eviction
+aboutObjects: "#10976, #11167, #10593, #7879, #11004, tortoise/cache_evictor.py, tortoise/cache_eviction.py, tortoise/graph_storage.py"
+---
+
 # #10976 — cache EGRESS: the measurement
 
 The issue's mandate is *"code that bounds the cache + a red-first test + the measurement
