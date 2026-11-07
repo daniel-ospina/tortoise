@@ -252,13 +252,13 @@ artifact.
   channel is structurally zero for them)
   and already emits nothing (0), so production has no room to add to it — while
   its gap channel can only *grow it*, since that channel is measured at its
-  **minimum**. So the delta arm's production cost is ≥ the measured 2 038 **for the
-  two channels this section names** — its TAX-SURFACE output is a **floor**. ⚠️ That
-  is not the same as the whole output: `s4_items` counts the four tax sections, and
-  `s4_delta_empty` is `false` on all 7 delta rows, so on the 5 rows whose
-  `s4_items` is 0 the arm still emitted content in a section this instrument does
-  not classify — a third channel measured by neither the correction nor the gap
-  reading, and the one the aggregate floor above does not cover. The **legacy** arm carries the SAME gap channel, and it
+  **minimum**. So the delta arm's TAX-SURFACE output is a **floor** — production cannot
+  emit less of the two channels this section names than the **1 498** (primary) /
+  **1 480** (re-run) tokens they account for. ⚠️ That is deliberately NOT the
+  whole-output total (2 038 / 2 047): `s4_items` counts the four tax sections, and
+  `s4_delta_empty` is `false` on all 7 delta rows, so the other **540** / **567**
+  tokens sit on the 5 rows whose `s4_items` is 0 — a third channel this instrument
+  does not classify, and therefore one the floor above does not cover. The **legacy** arm carries the SAME gap channel, and it
   is the larger one measured here — 12 / 9 gap additions in the primary / re-run
   against the delta arm's 6 / 6 — so the same production input moves its cost as
   well. Neither arm's sensitivity to the real geometry is measured, so the

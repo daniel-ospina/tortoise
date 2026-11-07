@@ -1104,6 +1104,19 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # (#11385 review P3).
         assert "`chain_notes` 7 + `link_before_create` 38 dropped" in flat_all
         assert "`chain_notes` (7) and `link_before_create` (38)" in flat_all
+        # ⛔ the FLOOR sentence must be denominated in the tax-surface component, not
+        # the whole-output total: with a third channel present (5 rows whose
+        # `s4_items` is 0 still spend tokens), a floor scoped to two channels
+        # cannot bound the total — the previous wording said "production cost is ≥
+        # the measured 2 038", which the artifact cannot support (#11385 review
+        # P2). Derived here, never typed.
+        _zero_tok = sum(a["delta"]["out_tokens"] for a in pri["arms"]
+                        if (a["delta"].get("s4_items") or 0) == 0)
+        _tax_tok = sum(a["delta"]["out_tokens"] for a in pri["arms"]) - _zero_tok
+        assert (_zero_tok, _tax_tok) == (540, 1498), (_zero_tok, _tax_tok)
+        assert (f"than the **{_thousands(_tax_tok)}** (primary)" in flat_all), _tax_tok
+        assert (f"the other **{_thousands(_zero_tok)}**" in flat_all), _zero_tok
+        assert "So the delta arm's TAX-SURFACE output is a **floor**" in flat_all
         # ⛔ two more artifact-derivable figures the index row claims are
         # "re-derived": 29-49 -> 30-49 and 12/9 -> 12/8 were both green
         # (#11385 review P3).
