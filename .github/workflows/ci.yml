@@ -845,7 +845,20 @@ jobs:
         # checklist for the #5090 capstone (#11089), and a checklist that silently
         # loses a row is the failure the artifact was written to prevent. The tool
         # is stdlib only, reads one file, touches no DB and no network.
-        # BOTH arms run. `--self-test` is the arm that proves the checker still
+        # #2820: the memory-substrate problem map's drift guard
+        # (`tools/problem_map_check.py`, pinning
+        # `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`) joins for the SAME
+        # reason as its #5086 sibling above — a docs-only edit of the map selects
+        # NO surface, so its own test reaches it only through the curated `tier1`
+        # list, and `docs` is the required, path-filter-free context that cannot
+        # inherit that skip — plus the ancestry reason stated there: its third
+        # claim is that every row's anchor commit is reachable from `HEAD`, which
+        # the depth-1 `test` job cannot answer at all (it reports exit 2
+        # UNVERIFIED rather than blaming the document). This job checks out at
+        # `fetch-depth: 0`, so this is where that claim is actually proved.
+        # Stdlib only, so it needs nothing from the `pip install` above.
+        #
+        # BOTH arms of the surface map guard run. `--self-test` is the arm that proves the checker still
         # catches the mutations the map's "not trusted" claim rests on: a rule
         # quietly weakened in a way a document mutation can reach (a reverted width
         # or parity rule) reds it instead of passing silently, and an arm nothing
@@ -862,6 +875,7 @@ jobs:
           python3 tools/mcp_rename_table.py --check
           python3 tools/sdk_surface.py --check
           python3 tools/substrate_map_check.py --check
+          python3 tools/problem_map_check.py --check
           python3 tools/test_design_map_check.py
           python3 tools/test_design_map_check.py --self-test
       - uses: actions/setup-node@v4

@@ -4156,7 +4156,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     consume nor are consumed by the general per-key budget.
     """
 
-    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}  # noqa: RUF012
+    # #10892: `/liveness` joins the exempt set for the same reason `/health` is
+    # in it — a monitoring probe must not spend a customer's budget, and it must
+    # not be refused for sharing an egress IP with anything else (GitHub Actions
+    # runners are a SHARED egress address, so an unauthenticated probe there
+    # would bucket against every other job on that runner). Note what a 429 would
+    # mean on THIS arm: the probed step sets `PROBE_EXPECT_STATUS: '200'`, so a
+    # 429 is UNEXPECTED there (a DEGRADED incident for a non-fault), NOT `UP` —
+    # the blanket `429 -> UP` arm in `classify_code` only applies to a target
+    # with no expectation list. Either way, a probe that is *supposed* to prove
+    # a request can be served must not depend on a bucket staying empty.
+    SKIP = {"/health", "/health/ready", "/liveness", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}  # noqa: RUF012
     # R-13: path → dedicated per-key limit. The commit endpoint's bucket is
     # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
     # general 100/min bucket.
@@ -6759,6 +6769,126 @@ def _record_health() -> dict:
         block["armed"] = True
         block["dsn"] = record_writer.dsn_fingerprint(dsn)
     return block
+
+
+# ── #10892: THE SERVED-REQUEST LIVENESS SURFACE ────────────────────────────
+#
+# A `~2 h` customer-visible outage (`api.premiselabs.co`, 2026-11-04) ran with
+# **2/2 Fly checks GREEN throughout**. Both of those checks are LIVENESS-shaped
+# in the sense this module now distinguishes:
+#
+#   * `servicecheck-00-tcp-8000` is a TCP connect check (`fly.toml`, #2850) —
+#     the handshake is served by the KERNEL, so a totally hung app passes it;
+#   * `[checks.loop_liveness]` points at the `9090 /healthz` listener, which
+#     runs on its OWN thread and answers from state the loop last wrote
+#     (`loop_heartbeat_info()`). A loop that never runs cannot update that
+#     state, and the verdict errs to 200 by design (`stale AND idle`), so a
+#     loop 8 minutes behind still reads `status: ok`.
+#
+# `/health` on THIS port is not the lied-about surface either — measured
+# (`tests/test_10892_served_liveness.py`): with the loop blocked, a request to
+# `/health` is not answered at all while the block holds (the client sees TCP
+# accept and zero bytes, then its own timeout). What was missing was therefore
+# not a stricter reading — it was an INSTRUMENT WITH A BOUND ON ABSENCE, pointed
+# at a request that has to be served.
+#
+# This endpoint is that request, and its answer is deliberately impossible to
+# produce from cached state: it increments a counter FOR THIS REQUEST and
+# reports the age of the PREVIOUS one, stamped when the handler ENTRY runs (not
+# on delivery — a request that ran the loop and never delivered still counts).
+# If the loop cannot run, this handler never resumes, so no answer exists to be
+# mistaken for health — the prober's own timeout is the signal
+# (`.github/workflows/availability-watchdog.yml` probes it with a 5 s per-request
+# bound, #10892).
+#
+# ⚠️ THE STALE ANSWER THIS PREVENTS IS THE WHOLE INCIDENT. `/health` and
+# `9090 /healthz` both answer from values written by something else (a
+# background thread's probe snapshot; the loop's own last tick). Those values
+# are honest evidence BESIDE a served request and worth nothing INSTEAD of one —
+# using `loop_stale_ms` to decide the loop is fine is the exact circularity
+# #10892 is about.
+#
+# BLIND SPOT, stated rather than implied (the discipline #10892's own scope
+# comment asks for — `issues/10892#issuecomment-6698714004`; there is no
+# `docs/ops/fleet-liveness.md` in this tree, so this names the source it has):
+# this proves a request was SERVED just now. It does NOT measure a
+# loop that serves SLOWLY — a 4 s answer passes a 5 s prober, and the outage's
+# mean refusal was ~45 s only because the transport wait bound eventually fired.
+# It also says nothing about a deploy that never happened (that is
+# `check-deploy-staleness.sh`) or about a process that is dead (the TCP check
+# and Fly's own routing cover that). The latency arm that closes the first
+# blind spot is the prober's per-request bound, not this handler.
+_LIVENESS_SERVED_LOCK = threading.Lock()
+#: Requests to `/liveness` this PROCESS has answered. Monotonic WITHIN the
+#: process, and it starts again at 1 after a restart (a restart starting again
+#: at 1 is itself the evidence of a restart). So it is NOT monotonic ACROSS a
+#: restart: a smaller N after a deploy is healthy, not a replayed body.
+_LIVENESS_SERVED_COUNT = 0
+#: ``time.monotonic()`` stamped when this process last STARTED a ``/liveness``
+#: handler, or None before the first one — "no sample" must be distinguishable
+#: from "a fast one". Deliberately stamped on ENTRY, not on delivery (see the
+#: handler's ``last_served_age_ms`` note): a request this process served but never
+#: delivered still ran the loop, which is the thing being evidenced.
+_LIVENESS_LAST_SERVED_AT: float | None = None
+
+
+@app.get("/liveness")
+async def liveness(response: Response):
+    """A liveness answer that can only be produced BY BEING SERVED (#10892).
+
+    Contract, and why each part of it exists:
+
+    * **200 + JSON, always** — the body is not a health *reading*; it is proof
+      that the loop ran this coroutine. A refusal (503) would make a
+      genuinely-blocked process look like a WEDGED one at the transport layer
+      too, and the prober already distinguishes "answered 5xx" (DOWN) from
+      "answered nothing" (DOWN, different `failure=` class).
+    * ``served`` — this process's count of requests to this path that REACHED
+      this handler, incremented for THIS request before the response is built. A
+      consumer can therefore tell a fresh answer from a replayed/cached one: two
+      probes must never see the same number.
+    * ``last_served_age_ms`` — age of the PREVIOUS request that entered this
+      handler, or ``null`` before the first. This is the "how long since the loop
+      last ran this" datum, computed here rather than stored by a background
+      writer. ⚠️ It is stamped when the handler RUNS, not when the response is
+      delivered (a delivery-time stamp would need a background writer, which is
+      the state-read pattern this endpoint exists to avoid), so the honest
+      reading is "the loop last ran this request", not "a client last received
+      an answer" — for the prober the two are the same event, since a response
+      that never arrives is the DOWN verdict.
+
+    ⛔ The one thing this handler must never become: a reader of
+    ``loop_heartbeat_info()`` / ``_HEALTH_PROBE.snapshot()``. Those are written
+    by the loop's timer/threads, so they keep answering exactly the question
+    this endpoint exists to ask afresh — pinned by
+    ``test_handler_yields_to_the_loop_and_reads_no_cached_state``.
+
+    ⛔ AND ITS ONE WRITE IS UNCACHEABLE, BY DIRECTIVE (review round 2). The
+    ``served`` counter is the provenance half of the answer, and a replay at any
+    intermediary would hand two probes the SAME number — the docstring's own
+    promise ("two probes must never see the same number") then becomes an
+    assumption instead of a property. `api.premiselabs.co` resolves straight to
+    Fly (`2a09:8280::/32`), so nothing caches it TODAY; the directive is what
+    keeps that true if a proxy is ever put in front of it, and it costs one
+    header. Same value the file already uses on its other non-cacheable
+    surfaces.
+    """
+    global _LIVENESS_SERVED_COUNT, _LIVENESS_LAST_SERVED_AT
+    # One real trip through the loop's ready queue: this coroutine suspends and
+    # resumes only when the loop RUNS, so the answer below cannot be produced by
+    # anything but a served request. `sleep(0)` is a bare yield to the loop's
+    # scheduler, not a sleep.
+    await asyncio.sleep(0)
+    now = time.monotonic()
+    with _LIVENESS_SERVED_LOCK:
+        previous = _LIVENESS_LAST_SERVED_AT
+        _LIVENESS_SERVED_COUNT += 1
+        served = _LIVENESS_SERVED_COUNT
+        _LIVENESS_LAST_SERVED_AT = now
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return {"status": "ok", "served": served,
+            "last_served_age_ms": None if previous is None
+            else round((now - previous) * 1000.0, 1)}
 
 
 @app.get("/health")
@@ -14837,8 +14967,25 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # demo session's read refuses with `record_unavailable` (503), and on an
     # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split
     # the counter note above exists to eliminate. Destructive, so it is out of
-    # this change's scope and belongs to the graph-side purge of §9.1's
-    # residual (a), `#10017`. Blast radius: opt-in sample content that
+    # this change's scope and belongs to §9.1's residual (a) — a graph-side
+    # removal no instrument ships today. ⛔ NOT `#10017`'s purge, though these
+    # are `pointKind='event'` `:Point`s wired to the demo session: turn SHAPE
+    # is `is_episodic` + `pointKind='event'` + `is_operator=false` + a single-session
+    # `<sid>_t<digits>` id
+    # (`tools/turn_parity_census.py`), and these fail two of those four —
+    # `t.is_episodic = true` is never set (this seeder never did), and
+    # `epi_turn<N>` carries no `_t<digits>` suffix. ⚠️ The census's graph leg
+    # READS `WHERE t.is_episodic = true` (`turn_parity_census.py`), so a node
+    # without it is never even read and cannot be one of its anomalies: on the
+    # graph THIS seeder produced the purge refuses earlier still —
+    # "the graph holds ZERO is_episodic nodes — an absence is NOT established",
+    # exit 3
+    # (`tools/purge_legacy_turns.py`). If a backfill
+    # (`graph-scripts/backfill_is_episodic.py`) has stamped the flag, the node
+    # IS read and lands in the `non_decimal_suffix` anomaly class instead, so
+    # the census refuses (`outside_population` → `census-not-clean`). Either
+    # way it purges nothing (#11325).
+    # Blast radius: opt-in sample content that
     # `org.point_count` excludes — but the demo `:Session` is still returned by
     # the session reads, so the pre-existing nodes stay reachable there and in
     # search (with their counter, which is why the repair must move both).

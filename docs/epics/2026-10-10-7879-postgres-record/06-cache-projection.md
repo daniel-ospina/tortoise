@@ -452,8 +452,33 @@ consults; nothing a reader sees is lost by the deny.
 The entry is keyed by TABLE because the statement is about the two stores, not about a row's provenance:
 a row-derived test (the shape `_EPISODIC_SOURCE_PROSE_COLUMNS` uses) would answer the wrong question
 here. The placement class came first and the projection could not express it, which is exactly how the
-RECORD → CACHE restore re-materialised the prose on every rebuild and made `#10017`'s graph-side purge
-non-durable. **The seam is the fix, and a post-restore sweep is not an alternative**: a purge pass would
+RECORD → CACHE restore re-materialised the prose on every rebuild and undid `#10000`'s write deletions,
+non-durably. ⚠️ `#10017`'s purge is NOT the lane that was undone (`#11325`): its single destructive
+statement deletes legacy episodic turn `:Point`s, never `:Source`/`:Event`, and names no `story_arc` — so
+this class's targeted repair is a graph-side `REMOVE n.story_arc` that no instrument ships, or the full
+restore's whole-graph wipe on either ANCHOR (⚠️ refused PRE-WIPE on a production SERVER graph name by
+`#2944`'s L2 guard; ⚠️ BOTH are destructive and the WIPE cannot be row-scoped — `_wipe_all_nodes` is
+`MATCH (n) DETACH DELETE n`, so a graph holding ANY row whose PROSE neither
+`public.{source,event}.story_arc` nor `public.session_narrative.narrative` carries must NOT be
+restored at all: copy that prose out first, `STORAGE-ARCHITECTURE.md` §17.2, `#11325`) — ⚠️ **and on a `:Point` a clear is available in place,**
+**subject to the same per-row test** (clear only where the record still HOLDS the text for that session —
+`public.session_narrative.narrative`; ⛔ NOT the point's own `props` tail, which the clear's OWN record
+write consumes: `point` has no `story_arc` column, so the projection tails the key and the patch merges
+right-hand (`props = props || '{"story_arc": null}'`), OVERWRITING the prose — a row whose only record
+home is the tail loses the last copy the record's KEYED VIEW holds (the append-only `journal_event` payload
+still carries the pre-clear prose, but using it needs a `rebuild_all` that can reach the graph); where the
+narrative row does not carry it the node's
+copy is the only one no shipped route can put back (the `rebuild_all` that would put it back is refused
+PRE-WIPE on a production name):
+`update_point(<id>, story_arc=None)` clears the property and keeps the node (measured; the `None` passes
+`_refuse_unpaired_narrative` and `SET n += $props` removes a `None`-valued key — but JOURNAL-bound only: the
+`PointRevised` fold has no `story_arc` clause and the creation fold's open-set passthrough drops a `None`, so a
+`rebuild_all` over a journal whose creation carried the prose RESTORES it, `#10429` — ⚠️ on a graph a rebuild can
+REACH: `rebuild_all` asks the SAME L2 name guard as the restore (`_assert_test_graph`, refused PRE-WIPE on every
+production name), so on a production server graph the replay is refused and the clear IS durable there, and it is
+defeated only on a `test_`/`tortoise_test` graph or an embedded `path=` DB — while the RECORD→CACHE
+rebuild replays the stored null and keeps it clear; and on EITHER anchor `update_entity(…, story_arc=None)` is
+refused as server-managed, the stored value untouched). **The seam is the fix, and a post-restore sweep is not an alternative**: a purge pass would
 rent the RAM for the duration of the write and would have to run on every restore forever.
 
 Three consumers align on the same constant rather than each re-deciding it, and all three are pinned:

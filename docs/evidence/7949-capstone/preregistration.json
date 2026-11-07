@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:829048953cf7a391d95285872e6283abd3ff91e734f8561a5c9f9cd74bb3e435",
+  "document_sha256": "sha256:457fb507bfa40ab6d443f1f215dd885bba596b0a8af8616cf91a0046202f79df",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -89,7 +89,7 @@
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "the measurement RAN at 2026-10-19T01:39:26Z (the receipt's own `date`), BEFORE this record's add-commit a6085af84 (2026-10-21T21:49:11Z) — but its ARTIFACT, tests/eval/write_path/receipts/w2b-operator-2026-10-19.json, was not in the tree: it landed at d50217273 (2026-10-22T05:34Z), AFTER the registration. So this `false` is a claim about VISIBILITY, not about existence: nothing measured by this row was in the tree its author wrote. That distinction is stated in PRE-REGISTRATION.md section 0's row and section 10.3 — leaving it unstated is what let the row be read as 'no measurement existed', a claim the measurement's own date refutes (#10525 review).",
       "threshold_basis": "the 15 edge gold replaced a 4-edge denominator that swung 0-2 of 4 on identical code; no rate may ever be reported against 4",
-      "post_registration_measurement": "capstone-measured-e0fc940b.log (2026-10-23): edge_correct=2 of 15 planted on receipt tests/eval/write_path/receipts/w2b-operator-2026-10-19.json — RED. NOT re-scored here: the receipt's corpus_hash sha256:943a99ec... is not the frozen fixtures_hash, so it measures its own corpus revision; denominator 15 and threshold 15-of-15 are UNCHANGED (#9736/#9738 do not reach this row). Disclosed in PRE-REGISTRATION.md section 10.3."
+      "post_registration_measurement": "capstone-measured-e0fc940b.log (2026-10-23): edge_correct=2 of 15 planted on receipt tests/eval/write_path/receipts/w2b-operator-2026-10-19.json — RED. NOT re-scored here: the receipt's corpus_hash sha256:943a99ec... is not the frozen fixtures_hash, so it measures its own corpus revision; denominator 15 and threshold 15-of-15 are UNCHANGED (#9736/#9738 do not reach this row). Disclosed in PRE-REGISTRATION.md section 10.3. ⚠️ THE ROW'S FIGURE AT THIS HEAD IS 5 OF 15, read from the FROZEN-corpus receipt the probe SELECTS by corpus_hash (w2b-operator-2026-10-24-8503-b.json, extractor extract_session_v2); the 2/15 above is the OTHER, non-frozen receipt's number, kept as a historical disclosure. See §1.6.3 and corpus_rows.E4.reconciles_with."
     },
     {
       "id": "E5",
@@ -189,5 +189,149 @@
     "e5_rate_min_sentences": 10
   },
   "below_floor": "REFUSED, which is neither a pass nor a fail",
-  "interface_note": "The field is written_before_any_scored_run, NOT the unqualified written_before_any_run: the latter is false at this commit because e1-e2.log exists, and a machine consumer keys on the name rather than on this prose (#9075 review P1). The capstone run probe (#9089, open) reads this path as its --prereg-artifact and freezes the corpus it is handed with --corpus. This record freezes the tests/eval/write_path corpus, which is the corpus #9075 pre-registers; a run handed a DIFFERENT corpus must mismatch G1 and be refused, never scored. Reconciling the two corpora is that PR's or a follow-up's job, not something this record may paper over."
+  "interface_note": "The field is written_before_any_scored_run, NOT the unqualified written_before_any_run: the latter is false at this commit because e1-e2.log exists, and a machine consumer keys on the name rather than on this prose (#9075 review P1). The capstone run probe (#9089, open) reads this path as its --prereg-artifact and freezes the corpus it is handed with --corpus. This record freezes the tests/eval/write_path corpus, which is the corpus #9075 pre-registers; a run handed a DIFFERENT corpus must mismatch G1 and be refused, never scored. Reconciling the two corpora is that PR's or a follow-up's job, not something this record may paper over.",
+  "door": {
+    "lane": "v2",
+    "lane_env": "TORTOISE_SESSION_EXTRACTOR",
+    "entry_point": "sdk.capture_session -> sdk._extract_session_v2 -> extractor_v2.extract_session_v2",
+    "hosted_selector": "tortoise/hosted_api.py::_capture_lane",
+    "hosted_selector_semantics": "the hosted endpoint and the SDK dispatch read the SAME variable with the SAME comparison, so 'hosted endpoint or SDK path' is one door with an optional HTTP boundary, not two doors (#10983)",
+    "not_the_door": "the m2 lane (sdk._extract_session_llm -> tortoise/extractor.py::LLMExtractor) is the opt-in, non-default extractor",
+    "seams": [
+      {
+        "env": "TORTOISE_VET",
+        "resolver": "extractor_v2._vet_enabled",
+        "default": "off",
+        "behaviour_seam": true,
+        "unset_behaviour": "the VET flag contributes nothing; the pass can still be armed by TORTOISE_VALUE_GATE (see below)"
+      },
+      {
+        "env": "TORTOISE_CLASSIFY_LATER",
+        "resolver": "extractor_v2._classify_later_enabled",
+        "default": "off",
+        "behaviour_seam": true,
+        "unset_behaviour": "S2.3 CLASSIFY is entirely off-path; kinds are emitted inline by S2.1"
+      },
+      {
+        "env": "TORTOISE_S2_DECISION_SEAM",
+        "resolver": "s2_decision_seam.seam_enabled",
+        "default": "off",
+        "behaviour_seam": true,
+        "unset_behaviour": "no arbiter: the model-backed typed-decision seam is off-path. Fail-closed: no network call, no spend"
+      },
+      {
+        "env": "TORTOISE_VALUE_GATE",
+        "resolver": "value_gate.value_gate_enabled",
+        "default": "on",
+        "behaviour_seam": true,
+        "unset_behaviour": "ON since #10996. The mechanical identifier-only predicate runs inside the VET pass, and extractor_v2 ORs this term into vet_enabled — so the S2.2 pass is ARMED on the fleet's default write path even with TORTOISE_VET unset. #10983's ledger said this seam was default-off; the code says otherwise at this head",
+        "evidence": "value_gate.value_gate_enabled / extractor_v2.vet_enabled"
+      },
+      {
+        "env": "TORTOISE_S4_DELTA",
+        "resolver": "extractor_v2._s4_delta_enabled",
+        "default": "on",
+        "behaviour_seam": true,
+        "unset_behaviour": "unset -> delta contract (the shipped default); an explicit falsy value selects the LEGACY complete-list contract, which changes S4's output without an audible seam"
+      },
+      {
+        "env": "TORTOISE_LABEL_ORDER",
+        "resolver": "extractor_v2._label_order_rng",
+        "default": "off",
+        "behaviour_seam": false,
+        "unset_behaviour": "NOT a behaviour seam: a render DIAGNOSTIC. 'shuffle' randomises the kind lists per call, so pinning it unset is what makes two runs of the same arm comparable"
+      }
+    ],
+    "acceptance_arm": {
+      "set_on": [
+        "TORTOISE_VET",
+        "TORTOISE_CLASSIFY_LATER"
+      ],
+      "pinned_off": [
+        "TORTOISE_CHANGE_FEED",
+        "TORTOISE_CONTEXT_ENRICH",
+        "TORTOISE_EXTRACTOR",
+        "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
+        "TORTOISE_EXTRACTOR_MAX_TOKENS",
+        "TORTOISE_EXTRACTOR_PROMPT",
+        "TORTOISE_EXTRACT_MODEL",
+        "TORTOISE_LABEL_ORDER",
+        "TORTOISE_LABEL_ORDER_SEED",
+        "TORTOISE_REFERENTIALITY",
+        "TORTOISE_S2_DECISION_SEAM",
+        "TORTOISE_SESSION_EXTRACTOR",
+        "TORTOISE_SESSION_LLM_MOCK",
+        "TORTOISE_SUBJECT_TAU_HI",
+        "TORTOISE_SUBJECT_TAU_LO",
+        "TORTOISE_VALUE_GATE"
+      ],
+      "pinned_to": {
+        "TORTOISE_S4_DELTA": "1",
+        "TORTOISE_JSON_MODE": "1",
+        "TORTOISE_IDENTIFIER_TOKENS": "1"
+      },
+      "why_value_gate_off": "its default flipped ON in #10996; an arm that declares itself OFF must pin the explicit 0 or it measures the predicate's population",
+      "read_back": "The set is CLOSED over the modules named in tests/test_7949_c2_door.py::path_modules — a pointer, not a count, because a count in this field went stale three rounds running — and what `tests/test_7949_c2_door.py` enforces mechanically is the CENSUS over that list, not the list's membership: `path_modules` is a hand-maintained tuple, and every ``TORTOISE_*`` read inside those modules must be classified (arm seam, pin, declared input, or an acknowledged non-seam with a stated reason) or the suite reds. Membership is hand-kept, so a read added to a module OUTSIDE that tuple is not caught by it; the same chain's infrastructure reads (record DSN, packs dir, embedding gates, store connection) are inputs, deliberately outside the partition, the sdk/hosted_api helpers those two hops call are in neither, which is the measured gap tracked as #11410, and a new derived module is a one-line change to the test's path_modules. Every value is re-read from os.environ after setting and a mismatch REFUSES the run.. Cycle 7 added the two reads the closure was still missing, both consulted on the acceptance path and previously in no pin, no ledger row and no closure: TORTOISE_CONTEXT_ENRICH (context_enrich.enrich_enabled, reached as sdk.capture_session(enrich_fn=_capture_enriched_texts) — it rewrites the text each turn embeds) pinned off (fail-safe OFF, so the pin matches today's behaviour), and TORTOISE_JSON_MODE (model_adapters, default-ON and read per call, flips the request's response_format) pinned to \"1\". A new read inserted in enrich_enabled() left the closure pin GREEN at the previous head (measured). Cycle 8 added TORTOISE_CHANGE_FEED (change_feed.py, reached via sdk._change_feed_enabled on PointRevised) pinned off: an ambient =1 adds a :GraphEvent to the graph the run writes and the probe's S6 step witness prints that count (measured on one capture of the registered corpus: 2 vs 3 :GraphEvent). Cycle 9 added TORTOISE_IDENTIFIER_TOKENS (sparse.py:226, default-ON, read through projection/entities.py:1208 point_identifier_aliases on the write path), pinned to its shipped default 1: it rewrites search_keys on every :Point the run writes, and the registered corpus yields no aliases either way (measured: 0 of 27 points, 0 of 7 fixtures), so the pin makes the population shell-insensitive without moving a number. tortoise/sparse.py is now in path_modules.. Cycle 10 added TORTOISE_SUBJECT_TAU_HI/_LO (subject_binding.py:189 via bind_point_subjects, read through a PARAMETER so no resolver sees them) pinned unset, and made the closure read LITERALS as well as resolved reads: measured 0.90 -> bound at the defaults, suspected with TORTOISE_SUBJECT_TAU_HI=0.99, i.e. the :aboutSubject/:aboutObject edge is not written."
+    },
+    "negative_control": {
+      "arms": [
+        "v2 (the door)",
+        "m2 (sdk._extract_session_llm)"
+      ],
+      "seam": "TORTOISE_SESSION_LLM_MOCK=1",
+      "measured": "v2 (the door): Object=1 Point=27 Event=2 Session=1 Operator=0, objects=['the strategy']; m2 (the other lane): Object=0 Point=149 Event=1 Session=1 Operator=0, objects=[] — same corpus session wp01_quarry_debug, same offline model seam, one embedded graph each",
+      "verdict": "MEASURED DIFFERENCE (structural)",
+      "why": "it is a different EXTRACTOR, not a different seam of the same one: the m2 lane mints no :Object at all on this session and 5.5x the Points, so a number measured on one lane is not a number about the other",
+      "consequence": "rows whose corpus is the m2 lane (E1b) are not fleet facts; the door is ALSO pinned structurally so the control cannot be the only guard",
+      "structural_in_kind_not_only_in_size": "the m2 lane mints no :Object at all — that is a difference in KIND, not a matter of degree — and the 5.5x Point count is the SIZE of the same difference, not the reason it matters"
+    },
+    "pinned_by": "tests/test_7949_c2_door.py"
+  },
+  "corpus_rows": {
+    "E1": {
+      "corpus": "tests/eval/write_path",
+      "claim": "the ^the <X> share falls >=50% on THIS fixture corpus, both arms, same commit",
+      "not_a_proof_of": "that the fleet's graph volume falls"
+    },
+    "E1b": {
+      "corpus": "tests/eval/write_path",
+      "claim": "anti-gaming control: planted units survive the deterministic m2 lane (90/90 at this fixtures_hash)",
+      "not_a_proof_of": "anything about the v2 door: E1b is measured on the m2 lane (tests/eval/write_path/baselines/m2.json, posture 'm2'), a DIFFERENT extractor, so unit survival there says nothing about what the v2 lane writes",
+      "lane": "m2",
+      "published_figure": "the probe publishes E1b from docs/evidence/9889/e1-e2-scores.json (e1b.real_facts=90), whose artifact is docs/evidence/9889/on-arm.log — a no-loss CONTROL on the SCORED (v2) arm, whose own note says no committed artifact carries grading.strict_survival_counts over the m2 lane. So the published 90/90 is not an m2 measurement; this row's m2 attribution describes the control's DEFINITION and the baseline below, not the lane the published figure was read from.",
+      "carried_forward": "tests/eval/write_path/baselines/m2.json records salient_unit_survival_strict=1.0 (= 90/90) at this fixtures_hash (dd7e8520…) and posture 'm2', but its own history entry for that hash records the gated metrics as CARRIED FORWARD from the 943a99ec6 measurement (only the planted_qualifiers gold changed), not re-measured at this one."
+    },
+    "E2a": {
+      "corpus": "tests/eval/write_path",
+      "claim": "value-bearing units survive; nothing is filtered away",
+      "not_a_proof_of": "the fleet's correctness, which needs a capture through the door"
+    },
+    "E2b": {
+      "corpus": "tests/eval/write_path",
+      "claim": "surviving units are not fused into each other",
+      "not_a_proof_of": "the fleet's atomicity on a real capture"
+    },
+    "E3": {
+      "corpus": "the run's own door-written graph",
+      "claim": "every derived node from a door-written graph carries a version anchor (a structural property of the writer)",
+      "not_a_proof_of": "any content claim — E3 is shape, not extraction quality; it is also not a fleet-population claim, since the graph it counts is whichever graph the run wrote"
+    },
+    "E4": {
+      "corpus": "tests/eval/write_path",
+      "claim": "5 of 15 planted operator edges are wired and persisted against the registered bar (15), read from the receipt the probe SELECTS by corpus_hash (w2b-operator-2026-10-24-8503-b.json)",
+      "not_a_proof_of": "the fleet's graph: this is the fixture corpus, and the row is graded through the v2 door on it (not on the m2 lane) — a fleet claim needs a captured corpus",
+      "lane": "v2",
+      "reconciles_with": "§10.3 and criteria.E4's post_registration_measurement record 2/15 from receipt w2b-operator-2026-10-19.json, whose corpus_hash (943a99ec…) is NOT the frozen fixtures_hash (dd7e8520…): that figure measures a different corpus revision and stays as the historical disclosure it is. The FROZEN-corpus receipt the probe SELECTS reads 5/15, and 5/15 is this row's figure at this head."
+    },
+    "E5": {
+      "corpus": "tests/eval/write_path",
+      "claim": "the raw-vs-narrative premise, measured on this corpus (§10)",
+      "not_a_proof_of": "a fleet-corpus premise: a different corpus is a different measurement"
+    },
+    "fleet-claim": {
+      "corpus": "fleet-capture",
+      "claim": "what the fleet's write path actually produces, measured on a real capture through the door",
+      "not_a_proof_of": "nothing yet — this registration pins NO fleet-capture corpus, and one must be registered BEFORE such a number is scored"
+    }
+  }
 }

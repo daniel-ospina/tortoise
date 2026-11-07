@@ -68,12 +68,24 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
 `hasPart` (`tortoise/extractor_v2.py:1720`). It does **not** discharge A1: it is **transport only** —
-nothing in the tree consumes `result["relations"]` (`extractor_v2.py:10702`), and materialising them as
-Object→Object edges is **`#11237`** (OPEN). What it *does* change is this record's evidence surface: the
-bare token count of the three edge-creating verbs prints **4** on `origin/main` and **0** at the base,
-because #11205's own explanation names `sdk.create_operator` in four comments
-(`extractor_v2.py:8892/8910/8917/9231`). The **calls** are still absent, so §1's second reason stands
-unchanged; §1 and §5 therefore now carry the call-shaped command, which a comment cannot satisfy. That
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:10815`, and
+`git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
+materialising them as Object→Object edges is **`#11237`** (OPEN). ⚠️ **The scope is `tortoise/`, and it is
+load-bearing:** tree-wide the channel HAS a reader — `tests/test_10999_batch_story_relations.py` names
+`result["relations"]` on **56 lines** (**59 occurrences**, three lines naming it twice) at `origin/main`
+(`62248db88`), pinning the contract
+against model output — so "no consumer at all" would be false of the tree. What is missing is a producer,
+not a reader; the two greps in §5 print both sides. What it *does* change is this record's
+evidence surface: the bare token count of the three edge-creating verbs prints **4** on `origin/main`
+and **0** at the base, because #11205's own explanation names `sdk.create_operator` in four comments —
+`git grep -n 'create_operator' -- tortoise/extractor_v2.py` prints exactly four, and none of them is a
+call — but ⚠️ **those four line numbers are `origin/main`'s, not this record's base's**: they are `:8938`,
+`:8956`, `:8963` and `:9343` at `origin/main` (`62248db88`; `#11361`, `7491da3fe`, moved them), while the
+same grep prints **0** at this record's base `80c912244`, and four at `:8892`, `:8910`, `:8917` and
+`:9231` at `de72cfd45` (the last commit to touch THIS record, `#11326`). The conclusion that matters —
+**zero calls** — holds at every one of those bases (the call-shaped grep prints nothing at all three); the
+mention count and its line numbers do not, which is this section's own lesson. §1's second reason therefore
+stands unchanged, and both §1 and §5 carry the call-shaped command, which a comment cannot satisfy. That
 is §7's lesson one merge later: **a count is only as good as the base it was taken at.**
 
 ⚠️ **`#11211` did not close `#11021`** — `gh pr view 11211 --json closingIssuesReferences` is empty
@@ -218,7 +230,7 @@ arm=before metric=real_facts count=90
 arm=after-vet-shipped metric=real_facts count=90
 ```
 
-Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 × before_share`,
+Against the registered bar (`PRE-REGISTRATION.md` §3.1, the E1/E1b rows; `after_share <= 0.50 × before_share`,
 `>= 90 of 90`):
 
 - **E1: `0.600000 <= 0.300000` → FALSE.** The share does not move at all (`reduction=-0.000000` is
@@ -255,8 +267,12 @@ four-suite run below is 254).
 ⛔ **But the HOLD that landed is not the gate A2 needs, and an earlier revision of this record read it as
 if it were.** The HOLD has exactly **one** kind (`identity_hold.py:125` `HOLD_ENDPOINT =
 "operator_endpoint"`, and `KINDS = (HOLD_ENDPOINT,)`) and exactly **one** call site —
-(`extractor_v2.py:9617`), inside `_mint_endpoint`, which fabricates a `statement` **Point** from an
-operator ref. A2's population is the **Object** mint: every emitted entity is appended unfiltered at `extractor_v2.py:8880`
+(`extractor_v2.py:9617` at `80c912244`; **`:10172` at `d69faaf38`**, the sole `_hold_endpoint(...)` call —
+inside `def _mint_endpoint`, `:10052` at `d69faaf38` / `:9497` at `80c912244`, while `_hold_endpoint`'s OWN
+def is `:3104` at `d69faaf38`; `git grep -n '_hold_endpoint(' -- tortoise/extractor_v2.py` prints that
+def and the one call), which fabricates a `statement` **Point** from an operator ref. A2's population is
+the **Object** mint: every emitted entity is appended unfiltered at the
+`payload_entities.append({` site (`extractor_v2.py:8880` at `80c912244`; **`:9433` at `d69faaf38`**)
 (`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16414-16428`. Nothing
 filters it, and the tree's own registry says so in `#10997`'s own words —
 `config/v4-mechanisms.yml`'s `failure_policy` row is still **`state: not-implemented`**, its note reads
@@ -266,15 +282,26 @@ So `#10985`'s own premise — *"the **MINT** half does not — 'nothing suppress
 true for Objects**, and the 0.0 pp above is explained by the arm that *did* run (Rule 2 re-KEEPs every
 referenced entity), not by a HOLD the probe's arms never reach. Its other premise blocker, `#10996`, is
 CLOSED, and S2.2's
-mechanical half now defaults ON — the composition is `extractor_v2.py:11731-11732`
-(`vet_enabled = (vet_arbiter is not None or _vet_enabled() or _value_gate_enabled())`), and the
-default-ON itself lives at `tortoise/value_gate.py:81` (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
+mechanical half now defaults ON — the composition is the `vet_enabled = (vet_arbiter is not None or
+_vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-11732` at `80c912244`;
+**`:12302-12303` at `d69faaf38`**), and the default-ON itself lives at `tortoise/value_gate.py:81`
+(`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
 `extractor_v2.py:1154` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
-nothing else. ⚠️ Both cites are line numbers **at `80c912244`**: the forward merge that brought `#11212`
-in inserted ~381 lines above them, and the two cites moved by **different** amounts —
-`:11351-11352` → `:11731-11732` (**+380**) and `:1153` → `:1154` (**+1**) — so a bare "re-anchor on merge"
-is not one arithmetic. That is the class of defect §0 exists to catch: a number true at one base and false
-at the base the record claims. Which is why the 0.0 pp above is the **armed** result, not an unarmed one.
+nothing else. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
+named by the sha it is true at, so every delta has a reproducible operand: `:11351-11352` / `:1153` at
+**`aa414b4d5`** (the `#11211` landing — ⚠️ the immediate parent of the next point, `80c912244^`, holds
+`:11358`, i.e. **+373**, so the delta depends on which pre-merge base you pick) → `:11731-11732` / `:1154`
+at **`80c912244`** (**+380** / **+1**) → `:12302-12303` / `:1154` at **`d69faaf38`** (**+571** / **+0**).
+So a bare "re-anchor on merge" is not
+one arithmetic, and an arithmetic that is right for one base is already wrong for the next: **cite the
+symbol and let the line number be a convenience printed beside it** (`git grep -n 'vet_enabled = '
+-- tortoise/extractor_v2.py`, `git grep -n 'payload_entities.append' -- tortoise/extractor_v2.py` —
+the path matters: unscoped, both patterns also match THIS record and its quoted lines, which is the
+count-of-mentions trap §0 documents). Every number in this paragraph is re-derived at its own sha by the
+`for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (it prints
+`:12779` here), which is the whole point. That is the class of defect §0 exists to catch: a number true at
+one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
+not an unarmed one.
 
 **Exact remaining gap for `#10985`:** (a) the attach rate must be a reported census number, per candidate,
 with HOLD as a third bucket; (b) E1/E1b must be scored against the registered arithmetic rather than
@@ -395,15 +422,175 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
 gh pr view 11213 --json state,mergeCommit,mergedAt
 gh pr view 11211 --json state,mergeCommit,mergedAt,closingIssuesReferences
 gh pr view 11212 --json state,mergeCommit,mergedAt        # MERGED 21:33:54Z, mergeCommit 80c912244
-# How an issue was actually CLOSED — the discriminator an empty closingIssuesReferences cannot give:
-gh api "repos/daniel-ospina/tortoise/issues/10999/timeline?per_page=100" \
-  --jq '.[] | select(.event=="closed") | {created_at, commit_id}'
-                                                          # a SHA => a commit's closing keyword closed it
-                                                          #   (#10999 -> 316a572ce2, message `Closes #10999`)
-                                                          # null => a MANUAL close (#11021 reads null)
-                                                          # ⛔ An empty closingIssuesReferences does NOT mean
-                                                          # "manual": the keyword can ride the squash COMMIT,
-                                                          # which never populates that PR-body-derived field
+gh pr view 11205 --json state,mergeCommit,mergedAt,closingIssuesReferences   # MERGED 22:40:32Z, 316a572ce2
+gh issue view 11237 --json state,closedAt                # the Object→Object WRITE path — this read
+                                                          # prints its state; do not quote the state
+# The arms' own evidence — the two PRs whose merge sha arm 1 can inherit, and arm 2's commit message.
+# Without these three lines the loop prints a sha but nothing says WHAT it must equal, so a reader
+# cannot tell arm 1 (a NON-EMPTY closedByPullRequestsReferences, whose commit_id may be NULL or that
+# PR's own merge sha) from arm 2 (empty refs + the keyword in the COMMIT message):
+gh pr view 11105 --json state,mergeCommit,mergedAt        # MERGED 11:18:49Z, mergeCommit 24d2dbcb
+gh pr view 10738 --json state,mergeCommit,mergedAt        # MERGED 16:14:21Z, mergeCommit fd6558c5
+git log -1 --format=%B 316a572ce2 | grep '^Closes #10999' # arm 2's keyword, in the COMMIT message
+# arm 1's OWN discriminator — an auto-detected keyword vs a PR linked BY HAND. `closedByPullRequestsReferences`
+# carries MANUALLY-linked closing references too: `userLinkedOnly` and its inverse `excludeUserLinked` both
+# default to `false`, and `addCloseIssueReferences` is the mutation that creates the manual kind. So a
+# NON-EMPTY field on its own does NOT prove a body/title keyword — a hand close carrying a linked PR reads
+# the same. `gh issue view` has no flag for that filter, so this is the GraphQL read that separates them.
+# Those names are read from the SCHEMA here, not remembered: the defaults are what let a `[]` mean
+# "auto-detected", and the mutation pair is what creates and removes the other kind. No count is quoted.
+# ⛔ The filter is NOT just the "Linked" pair — `includeClosedPrs` (default `false`) is the third switch,
+# and it is the one that decides whether a PR CLOSED WITHOUT MERGING still names the issue here. ⛔ `false`
+# does NOT mean "merged only": OPEN references are in the set too — that follows from the three argument
+# DEFAULTS read just below (all `false`), which is why they are read and not remembered — so the default
+# is "every reference except a PR closed without merging" — narrower than "any PR named it", not the same
+# as "only merged ones". #11337 is in the loop below, so whichever row holds the OPEN pole is
+# RE-DERIVED on every run rather than named here.
+# ⛔ No row's state is used as the BASIS of a classification here, on purpose: a row's state DRIFTS, and
+# an earlier draft cited #10848/11392 that way — it merged and closed within the day, leaving the sentence
+# re-deriving to its own opposite, beside the command that disproves it. The states quoted further down
+# sit beside the command that PRINTS them, which is the opposite contract: they are that loop's own
+# output, re-derived on every run, never relied on.
+gh api graphql -f query='{__type(name:"Issue"){fields{name args{name defaultValue}}}}' \
+  --jq '.data.__type.fields[]|select(.name=="closedByPullRequestsReferences")|.args[]|select(.name|test("Linked|ClosedPrs"))'
+                                                          # all three default FALSE — the inverse Linked
+                                                          # pair, and includeClosedPrs. The first two are why
+                                                          # an unfiltered read and a `userLinkedOnly` read can
+                                                          # differ at all (the discriminator this block rests
+                                                          # on); the third is why the default read UNDER-reports
+                                                          # the reference set — see arm 2 and the read below
+                                                          # the loop.
+gh api graphql -f query='{__schema{mutationType{fields{name}}}}' \
+  --jq '.data.__schema.mutationType.fields[].name|select(test("CloseIssueReferences"))'
+                                                          # addCloseIssueReferences /
+                                                          # removeCloseIssueReferences — how the manual kind
+                                                          # is created and removed, i.e. the arm a
+                                                          # keyword read cannot separate on its own
+for n in 11001 10997 10684 10698; do                    # arm 1's four rows; `[]` = auto-detected, not linked
+  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,userLinkedOnly:true,includeClosedPrs:true){nodes{number}}}}}" \
+    --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
+done
+                                                          # ⛔ BOTH filters, not just `userLinkedOnly`:
+                                                          # a hand link to a PR closed WITHOUT merging is
+                                                          # invisible to the narrow read, so the narrow one
+                                                          # cannot rule out "linked" on its own. With both
+                                                          # set the four rows still print `[]` — which is
+                                                          # what makes the parenthetical below a measurement
+                                                          # rather than a claim.
+# How an issue was actually CLOSED — THREE arms, and the PRIMARY field is closedByPullRequestsReferences,
+# NOT commit_id alone. Read it first, and read it WITH `state` on each node: that is the GraphQL read in
+# the loop below. (`gh issue view <n> --json state,closedByPullRequestsReferences` returns the same set
+# with no `state` on its nodes, so it cannot separate a MERGED reference from an OPEN one — arm 1 needs
+# that separation, arms 2 and 3 do not.)
+#   1. NON-EMPTY **on a MERGED node** => closed by that PR's keyword (either auto-detected from its
+#      body/title, which is what the four rows below are — `userLinkedOnly,includeClosedPrs` printed `[]`
+#      for all four when measured — or a MANUAL closing link, which that read rules out). ⛔ "MERGED" is
+#      load-bearing here for the SAME reason as in arms 2 and 3, one layer down: the default set carries
+#      OPEN references too, so a `Closes #n` on a STILL-OPEN PR reads NON-EMPTY for an issue closed by
+#      something else. ⛔ STILL-OPEN, not "never merged" — a CLOSED-unmerged PR's reference does NOT
+#      appear there (#10850 says `Closes #10812.` and #10812 still reads `[]`); that one is what
+#      `includeClosedPrs:true` reveals. So this arm guards the OPEN pole and that read guards the CLOSED
+#      one, and neither substitutes for the other. ⛔ AND THE STATE HAS TO BE PRINTED TO SEE IT — `gh issue view <n> --json
+#      closedByPullRequestsReferences` returns these nodes with NO `state` key at all, so the read that
+#      classifies is the GraphQL one in the loop below, not that line. ⛔ Its `commit_id` is NOT fixed: it reads
+#      NULL for #11001 ([11213]) and #10997 ([11212]), and that PR's own merge sha for #10684 ([11105])
+#      and #10698 ([10738]) — the same shape, both outcomes. A non-null sha here does NOT demote it to
+#      arm 2, which is exactly why the field above is read FIRST and commit_id cannot classify alone.
+#   2. empty + commit_id = SHA => the keyword rode the COMMIT message, and no MERGED PR named it
+#      (#10999 -> 316a572ce2, whose message carries `Closes #10999`). ⛔ "MERGED" is load-bearing, not
+#      decoration: the default read carries no reference from a PR closed WITHOUT merging, so #10812
+#      reads `[]` + a sha (c4a369b011) here while PR **10850** — CLOSED, `mergedAt: null` — opens with
+#      `Closes #10812.`. Read `includeClosedPrs:true` (the block below the loop) before calling a row
+#      arm 2, or the recipe re-creates the very mistake it exists to prevent, one arm over.
+#   3. empty + commit_id = null => no MERGED PR named it, and nothing in the DEFAULT set attributes the
+#      close (#11021: [] and null). ⛔ "in the DEFAULT set" is exact, not hedging: #8447 reads `[]` here
+#      AND is named in the tree (next sentence), so "nothing attributes this close" would be false of
+#      arm 3's own row. ⛔ "MERGED" is load-bearing HERE TOO, for arm 2's reason: #8447 reads
+#      `[]` + null + a human actor, yet PR **10562** — CLOSED, `mergedAt: null` — opens with
+#      `Closes #8447`, so a PR DOES name that close and only the default read hides it. Read
+#      `includeClosedPrs:true` here as well before writing the word "manual". ⚠️ "manual" is
+#      a partial label — a bot or a `not_planned` close reads the same [] + null — so the loop below prints
+#      the closed event's `actor` beside the sha: #11021's is a human (daniel-ospina), one second after
+#      #11211 merged, which is what makes the word a checked fact rather than an assumption.
+# ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 reads null in two of its four examples. And an
+#   empty closingIssuesReferences on the MERGED PR is not evidence either: that PR-body field stays empty
+#   in arms 2 and 3 while the PR merged (#11205 -> []). ⛔ It is NOT empty on a CLOSED-UNMERGED PR —
+#   #10850 reads [10812] and #10562 reads [8447] — so there it corroborates nothing either way; the field
+#   that stays empty is the ISSUE-side one above, and that is the one this section reads.
+# The loop BELOW re-derives every row above — arm 1's four named issues, one arm 2, one arm 3, and the
+# two counter-examples that NARROW arms 2 and 3 (#10812 and #8447: each reads `[]` here, and each is
+# named by a PR that never merged, which is why both tests say "MERGED" rather than "no PR"), plus
+# #11337, which is in the loop to re-derive the OPEN pole — the row that shows the default set is not
+# "merged only" whenever it reads OPEN. ⛔ The loop PRINTS every row's `state`; the prose must not
+# quote one, because a quoted state drifts: #10848/#11392 was this row until PR 11392 merged (#10848
+# closed two seconds later), and the quote then contradicted the command printed beside it.
+# Everything below is read, never recalled.
+# Every issue AND every PR the arms name is read here, and so are the facts that are
+# neither an issue nor a PR — arm 2's commit message, and arm 1's user-linked filter with the schema
+# names it rests on — so no row, and no equality a row rests on, is asserted without a command:
+# ⛔ the first read is GraphQL, not `gh issue view`, precisely because it has to print `state`: the
+# `gh issue view <n> --json closedByPullRequestsReferences` line returns the SAME set with no `state`
+# on its nodes, so it can show a row is non-empty but never whether the referring PR merged.
+for n in 11001 10997 10684 10698 10999 11021 10812 8447 10848 11337; do
+  echo "#$n"
+  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){state closedByPullRequestsReferences(first:10){nodes{number state}}}}}" \
+    --jq '.data.repository.issue | "issue=\(.state) refs=\([.closedByPullRequestsReferences.nodes[] | "\(.number):\(.state)"] | join(","))"'
+  gh api "repos/daniel-ospina/tortoise/issues/$n/timeline?per_page=100" --paginate \
+    --jq '.[] | select(.event=="closed") | {created_at, commit_id, actor: .actor.login}'
+done
+                                                          # The POSITION the note below rests on is a
+                                                          # read too, not a claim — the SAME timeline with
+                                                          # NO --paginate, reporting the closed event's INDEX
+                                                          # within the first page:
+gh api "repos/daniel-ospina/tortoise/issues/11021/timeline?per_page=100" \
+  --jq 'to_entries|map(select(.value.event=="closed"))|.[].key'
+                                                          # 27 — an index INSIDE page 1, which is why the
+                                                          # paginated read above prints for this issue; push
+                                                          # that same close past the page size and the
+                                                          # unpaginated read prints nothing at all
+                                                          # ⛔ --paginate is MANDATORY: without it gh
+                                                          # returns only the FIRST 100 events, and the
+                                                          # closed event is one line among many — a close
+                                                          # that happened late is not on page 1, so the
+                                                          # command prints NOTHING and "nothing" reads as
+                                                          # "no closed event". The failure is POSITIONAL,
+                                                          # not "timeline over 100 events": #11021's close
+                                                          # sits inside page 1, so the command prints — push
+                                                          # that same close past event 100 and it would print
+                                                          # nothing. No count is quoted here on purpose: a
+                                                          # count drifts, and quoting one is how this note
+                                                          # got it wrong twice. A truncated check is worse
+                                                          # than none.
+                                                          # ⛔ the `closedByPullRequestsReferences` read
+                                                          # above is the DEFAULT set: OPEN + MERGED
+                                                          # references; only a PR closed WITHOUT merging is
+                                                          # omitted. The same field with `includeClosedPrs:true`
+                                                          # is the full set — #10997 gains 11281 (CLOSED,
+                                                          # never merged) beside [11212], #10812 goes from
+                                                          # `[]` to [10850] (CLOSED), and #8447 is the same
+                                                          # shape one arm over: it reads `[]` + null, which
+                                                          # is arm 3's test, yet 10562 (CLOSED, never merged)
+                                                          # is in the set. The two PRs' first body lines are
+                                                          # the keywords that read cannot see, and their
+                                                          # PR-side closingIssuesReferences is the field the
+                                                          # paragraph above says is NOT empty — measured in
+                                                          # the same command. ⛔ The loop reads BOTH poles:
+                                                          # the three rows that GAIN an entry (10997, 10812,
+                                                          # 8447) and the two arm examples that must NOT
+                                                          # (#10999 is arm 2, #11021 is arm 3). Both arms
+                                                          # tell the reader to run this read BEFORE naming
+                                                          # the arm, so the negative result for their own
+                                                          # rows has to be printed here — arm 2's and arm
+                                                          # 3's classifications rest on it:
+for n in 10997 10812 8447 10999 11021; do
+  echo "#$n — includeClosedPrs:true"
+  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state}}}}}" \
+    --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
+done
+gh pr view 10850 --json state,mergedAt,closingIssuesReferences,body \
+  --jq '{state, mergedAt, closing: [.closingIssuesReferences[].number], firstLine: (.body|split("\n")[0])}'   # CLOSED, null, [10812], "Closes #10812."
+gh pr view 10562 --json state,mergedAt,closingIssuesReferences,body \
+  --jq '{state, mergedAt, closing: [.closingIssuesReferences[].number], firstLine: (.body|split("\n")[0])}'   # CLOSED, null, [8447], "Closes #8447"
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
@@ -416,6 +603,19 @@ git cat-file -e origin/main:tortoise/identity_hold.py && echo PRESENT   # not `l
 gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
 
+# §0/§2 — the sha-pinned cites, each re-derived AT THE SHA IT NAMES (the one read that decides them;
+# a live grep cannot: `git grep -n 'vet_enabled = '` prints :12779 here, which is none of these numbers)
+for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
+  git show "$s":tortoise/extractor_v2.py | grep -n 'vet_enabled = (\|os.environ.get("TORTOISE_VET")\|def _hold_endpoint\|_hold_endpoint(hold_store\|def _mint_endpoint\|payload_entities.append({'; done
+# aa414b4d5 → 1153, 8784, 9401, 11351 · 8e49ae909 → 1153, 8785, 9402, 11358
+# 80c912244 → 1154, 3103, 8880, 9497, 9617, 11731 · d69faaf38 → 1154, 3104, 9433, 10052, 10172, 12302
+#   (no `_hold_endpoint` before 80c912244 — #11212 is what landed it)
+# deltas: 11731−11351=380 · 11731−11358=373 · 12302−11731=571 · 1154−1154=0 · 1154−1153=1
+# §0's four `create_operator` MENTIONS are base-dependent too — the CALL count is 0 either way:
+git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
+git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
+git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :8938 :8956 :8963 :9343
+
 # A1 (§1) — the declaration reads, and nothing production writes it
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
 git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
@@ -425,6 +625,17 @@ git grep -nE '\.(create_edge|create_about_edge|create_operator)\(' tortoise/extr
                                                           # origin/main since #11205 (four COMMENTS naming
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
+git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :10815 — no production
+                                                          # consumer of #11205's channel (⚠️ the `-- tortoise/`
+                                                          # scope is the claim: unscoped it also matches the
+                                                          # reader below)
+git grep -c 'result\["relations"\]' -- tests/          # tree-wide reader: tests/test_10999_batch_story_
+                                                          # relations.py — 56 LINES (`-c` counts lines), a
+                                                          # contract pin, not a producer
+git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 59 OCCURRENCES (both halves of the count are
+                                                          # `origin/main`'s, `62248db88`)
+git grep -n -o 'result\["relations"\]' -- tests/ \
+  | cut -d: -f2 | sort | uniq -d                          # the 3 extra: the doubly-named :1551, :1579, :161
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
 tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer (2 holders on a
                                                           # clean checkout); exit 2 = a surface could not
@@ -444,8 +655,9 @@ git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-caps
     > /tmp/e1e2.log 2>&1                                   # exits 3 = UNPREREGISTERED, by design
 grep -E '^e1 |metric=objects|vet-downgrades|metric=real_facts' /tmp/e1e2.log
 grep -n -E 'after_share <= 0.50|>= 90 of 90' docs/evidence/7949-capstone/PRE-REGISTRATION.md
-sed -n '11731,11732p' tortoise/extractor_v2.py; sed -n '81p' tortoise/value_gate.py   # the default-ON composition
-sed -n '1154p' tortoise/extractor_v2.py                      # the `TORTOISE_VET` toggle (OFF by default)
+git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py   # the default-ON composition (symbol, not a line)
+git grep -n 'ENV_FLAG, "1"' -- tortoise/value_gate.py      # the default-ON itself (value_gate.py:81)
+git grep -n 'os.environ.get("TORTOISE_VET")' -- tortoise/extractor_v2.py   # the toggle (OFF by default)
 # the 62.3 % share is QUOTED from a research record, re-read (not re-derived):
 sed -n '192p;314p' docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md
 sed -n '45p' docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md   # "#4894 is the mechanism audit"
@@ -453,7 +665,9 @@ sed -n '45p' docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md   # "#
 # A5 (§3) — Subject 19, three of four families at zero
 grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
-sed -n '16414,16428p' tortoise/sdk.py        # the kind→label routing at the write seam (#5230/#1370's fix)
+git grep -n -A 14 '_ekind = _payload_entity_kind(e)' -- tortoise/sdk.py   # the kind→label routing at the
+                                                          # write seam (#5230/#1370's fix); symbol, not a
+                                                          # line — the -A 14 reproduces sdk.py:16414-16428
 for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 # #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
 gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'
