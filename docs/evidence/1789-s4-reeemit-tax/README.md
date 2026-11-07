@@ -277,7 +277,7 @@ corrected items with the cap/census accounting above, composition totals, and th
 per-arm `s4_delta_empty` / `s4_delta_reemit_suspect` flags derived with
 production's own predicates) and `ab-20261107T024226Z.json` (the re-run).
 
-Instrument tests: `tests/test_s4_reeemit_tax.py` (**32** tests, offline, fake
+Instrument tests: `tests/test_s4_reeemit_tax.py` (**33** tests, offline, fake
 model) — they pin the ways a number like this goes wrong silently: a vacuous A/B, the
 two arms receiving different inputs, a mis-attributed cost (a per-call total
 rather than the final call; `null` rather than 0 when the provider reports

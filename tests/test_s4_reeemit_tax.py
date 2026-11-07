@@ -656,6 +656,26 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
             for arm in ("legacy", "delta"):
                 assert row[f"{arm}_out_tokens"] == a[arm].get("out_tokens"), (
                     path.name, a["session"], arm)
+                # ⛔ EVERY field the summary copies, not just the token total:
+                # `delta_added_by_s4` is what the published "no new tax-surface
+                # item in 5 of 7 sessions" rides on, and a summary edited to
+                # disagree with its own rows is the corruption this pin exists
+                # for (#11385 review P2).
+                assert row[f"{arm}_s4_items"] == a[arm].get("s4_items"), (
+                    path.name, a["session"], arm, "s4_items")
+                assert row[f"{arm}_truncated"] == a[arm].get("truncated"), (
+                    path.name, a["session"], arm, "truncated")
+                assert row[f"{arm}_error"] == a[arm].get("error"), (
+                    path.name, a["session"], arm, "error")
+            assert row["s2_items"] == a["legacy"].get("s2_items"), (
+                path.name, a["session"], "s2_items")
+            for key, field in (("delta_verbatim_reemissions", "verbatim_reemissions"),
+                               ("delta_added_by_s4", "added_by_s4"),
+                               ("delta_corrected_by_s4", "corrected_by_s4")):
+                assert row[key] == a["delta"].get(field), (path.name, a["session"], key)
+            assert row["delta_corrected_items"] == (
+                (a["delta"].get("corrected_items") or {}).get("count")), (
+                path.name, a["session"], "delta_corrected_items")
         # ⛔ over the MEASURED pairs, mirroring `compare`'s `usable_pairs` —
         # summing every arm here would red a legitimate artifact that contains
         # one failed arm, which is the shape this pin must tolerate (a failed
@@ -829,6 +849,25 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
     assert (f"{_thousands(ps['sum_legacy_out_tokens'])} → "
             f"{_thousands(ps['sum_delta_out_tokens'])} output tokens over 7 "
             "sessions") in flat_all
+    # the input provenance the README states, from `inputs[]`; the multiples it
+    # quotes; the per-row gap channel behind "5 of 7 sessions"; and the test count
+    refs = sorted(i["s2_reference"]["completion_tokens"] for i in pri["inputs"])
+    assert refs == sorted(i["s2_reference"]["completion_tokens"] for i in rer["inputs"])
+    assert (f"{_thousands(refs[0])}–{_thousands(refs[-1])} tokens, median "
+            f"{_thousands(round(__import__('statistics').median(refs)))}") in flat_all
+    assert f"{ps['token_weighted_reduction'] / 0.40:.1f}× the threshold" in flat_all
+    _spread = round((prs["token_weighted_reduction"]
+                     - ps["token_weighted_reduction"]) * 100, 2)
+    assert f"differ by {_spread:.2f} points" in flat_all
+    _count = sum(1 for k in globals() if k.startswith("test_"))
+    assert f"**{_count}** tests" in flat_all, _count
+    _zeros = sum(1 for a in pri["arms"] if a["delta"].get("added_by_s4") == 0)
+    assert (f"in {_zeros} of {len(pri['arms'])} sessions in both runs") in flat_all
+    assert sum(1 for a in rer["arms"] if a["delta"].get("added_by_s4") == 0) == _zeros
+    assert (f"`merged_items` is {pri['summary']['composition']['delta']['merged_items']} "
+            "vs an S2 base of "
+            f"{pri['summary']['composition']['legacy']['s2_items']}") in flat_all
+
     assert (f"Re-run (`ab-20261107T024226Z`): "
             f"{_thousands(prs['sum_legacy_out_tokens'])} → "
             f"{_thousands(prs['sum_delta_out_tokens'])} tokens, **−"
@@ -1013,3 +1052,14 @@ def test_a_partial_run_is_flagged_not_silently_published():
     assert none["partial"] is True
     assert none["sessions_measured"] == 0
     assert none["sessions_failed"] == 1
+
+
+def test_the_partial_flag_counts_UNMEASURED_arms_not_only_errored_ones():
+    """`sessions_failed` is documented as the EXCLUDED population, so it must
+    count an arm that is unmeasured with NO error — the shape the null polarity
+    exists to create (a tokenless / rejected-count / deadline-aborted call).
+    Counting errors alone reported "nothing excluded" in exactly that shape."""
+    mixed = tool.compare([_pair("a", 1000, 100), _pair("b", 2000, None)])
+    assert mixed["sessions_failed"] == 1
+    assert mixed["sessions_measured"] == 1
+    assert mixed["partial"] is True
