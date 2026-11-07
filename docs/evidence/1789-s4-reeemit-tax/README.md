@@ -252,13 +252,18 @@ artifact.
   channel is structurally zero for them)
   and already emits nothing (0), so production has no room to add to it — while
   its gap channel can only *grow it*, since that channel is measured at its
-  **minimum**. So the delta arm's TAX-SURFACE output is a **floor** — production cannot
-  emit less of the two channels this section names than the **1 498** (primary) /
-  **1 480** (re-run) tokens they account for. ⚠️ That is deliberately NOT the
-  whole-output total (2 038 / 2 047): `s4_items` counts the four tax sections, and
-  `s4_delta_empty` is `false` on all 7 delta rows, so the other **540** / **567**
-  tokens sit on the 5 rows whose `s4_items` is 0 — a third channel this instrument
-  does not classify, and therefore one the floor above does not cover. The **legacy** arm carries the SAME gap channel, and it
+  **minimum**. So production cannot emit LESS of the two channels this section names than
+  the delta arm did: the delta RESPONSES that carried tax-surface items cost **1 498**
+  (primary) / **1 480** (re-run) in whole-output terms. ⚠️ Whole-output terms is all this
+  artifact can offer — `out_tokens` is the provider's `completion_tokens` for the whole
+  response and the artifact records item COUNTS, never a per-section token split. So that
+  figure is an upper bound on the tax-surface component (the component is at most the
+  response) and a floor only on those responses' total; the residual is visible in the
+  data the artifact does keep: wp05 and wp07 emitted identical channel content (3 gap
+  items, 0 corrections each) and cost 968 vs 530, and the other **540** / **567** tokens
+  sit on the 5 rows whose `s4_items` is 0, with `s4_delta_empty` `false` on all 7 delta
+  rows — a third channel this instrument does not classify, present on every row and
+  therefore not excluded from the figures above. The **legacy** arm carries the SAME gap channel, and it
   is the larger one measured here — 12 / 9 gap additions in the primary / re-run
   against the delta arm's 6 / 6 — so the same production input moves its cost as
   well. Neither arm's sensitivity to the real geometry is measured, so the

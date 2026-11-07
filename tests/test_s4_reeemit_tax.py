@@ -1110,13 +1110,26 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # cannot bound the total — the previous wording said "production cost is ≥
         # the measured 2 038", which the artifact cannot support (#11385 review
         # P2). Derived here, never typed.
+        # ⛔ `out_tokens` is the provider's WHOLE-response token count and the
+        # artifact records item COUNTS, never a per-section token split — so these
+        # are a ROW PARTITION of whole-output tokens, not a channel split, and the
+        # sentence must not call them "tokens the channels account for" (the
+        # earlier wording did, which inverted the bound: the component is AT MOST
+        # the response). The artifact itself shows the residual: wp05/wp07 emitted
+        # identical channel content for 968 vs 530 (#11385 review P2).
         _zero_tok = sum(a["delta"]["out_tokens"] for a in pri["arms"]
                         if (a["delta"].get("s4_items") or 0) == 0)
         _tax_tok = sum(a["delta"]["out_tokens"] for a in pri["arms"]) - _zero_tok
         assert (_zero_tok, _tax_tok) == (540, 1498), (_zero_tok, _tax_tok)
-        assert (f"than the **{_thousands(_tax_tok)}** (primary)" in flat_all), _tax_tok
+        assert (f"cost **{_thousands(_tax_tok)}**" in flat_all), _tax_tok
         assert (f"the other **{_thousands(_zero_tok)}**" in flat_all), _zero_tok
-        assert "So the delta arm's TAX-SURFACE output is a **floor**" in flat_all
+        assert "the delta RESPONSES that carried tax-surface items" in flat_all
+        assert "upper bound on the tax-surface component" in flat_all
+        _wp = {a["session"]: a["delta"] for a in pri["arms"]}
+        _a, _b = _wp["wp05_retro_writeup"], _wp["wp07_bluepeak_followup"]
+        assert _a["s4_items"] == _b["s4_items"] == 3, "the identical-content case"
+        assert (_a["out_tokens"], _b["out_tokens"]) == (968, 530), (
+            _a["out_tokens"], _b["out_tokens"])
         # ⛔ two more artifact-derivable figures the index row claims are
         # "re-derived": 29-49 -> 30-49 and 12/9 -> 12/8 were both green
         # (#11385 review P3).
