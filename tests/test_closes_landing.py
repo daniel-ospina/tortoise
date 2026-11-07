@@ -5950,10 +5950,12 @@ def test_the_INDENT_pops_DECLARED_strict_false_PASS_is_PINNED():
     ⛔ THIS IS A SHARED DECLARED TRADE WITH `main`, NOT A REGRESSION FROM IT, and pinning both sides'
     SHA is the point. `strict` is the arm `issue_process_lint` reads a carrier body through, so
     `[100]` there is a CLASS-A false PASS in that gate — the SAME answer `main` gives.
-    `tools/closes_landing.py` declares the mechanism and its cost (the record would have to survive
-    the one-line clearing at the top of the loop, and both candidate terms measured ~110 lost closes
-    each in the arm `in_flight_markers` and the comment-body read go through); **#11358** owns this
-    body and is OPEN. This pin does not decide that fix.
+    `tools/closes_landing.py` ONCE DECLARED a mechanism and a cost for this family, and BOTH are
+    retracted: the note now marks the mechanism FALSIFIED (see the next paragraph) and the
+    `+116 / +112` two-term grid it cited is no longer in the tree. The `~110 lost closes` that DOES
+    survive in that function belongs to a DIFFERENT question — the price of un-gating the dedent
+    pop — and must not be read as this body's fix cost. **#11358** owns this body and is OPEN. This
+    pin does not decide that fix.
 
     ⛔ BUT THE MECHANISM THAT SENTENCE PROPOSES IS FALSIFIED FOR THIS BODY, and recording that is the
     most useful thing this pin can do. "The record would have to survive the one-line clearing at the

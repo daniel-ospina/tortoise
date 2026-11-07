@@ -1976,9 +1976,14 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 # ⚠️ GATED ON `prev_prose`, AND THE GATE IS LOAD-BEARING HERE (measured: un-gating it
                 # changes 93 of 60,000 fuzz bodies, +98 lenient / +39 strict lost closes). The record
                 # only says anything while a paragraph is open above this line, which is what the
-                # gate states — the residual it leaves (`- 2.` + `    - x` + `x` + wide-gap marker)
-                # needs the record to survive the one-line clearing at the top of the loop, a
-                # separate mechanism, and is declared open rather than paid for with ~110 lost closes.
+                # gate states. ⛔ THE RESIDUAL THIS POP LEAVES (`- 2.` + `    - x` + `x` + wide-gap
+                # marker) IS NOT FIXED BY UN-GATING IT — nor by letting the record survive the
+                # one-line clearing at the top of the loop, which was claimed here earlier and is
+                # FALSIFIED for that body: both directions leave it at `[F, F, T, T]` (measured),
+                # and #11358 — which owns the residual and whose repro is that exact body — reports
+                # the same for dropping this assignment. Its measured root is `own_code`'s
+                # `not ordered_continuation` term, not the record. It is declared open rather than
+                # paid for with ~110 lost closes.
                 if prev_prose and prev_container is _popped and _popped.real:
                     dropped_paragraph_item = _popped
             # An item that was empty on its marker line gains CONTENT from the first line that stays
