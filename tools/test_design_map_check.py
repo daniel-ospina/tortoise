@@ -370,23 +370,68 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     # ungraded — two document edits (drop the header, blank a cell) graded CLEAN
     # (measured). Re-armed per table, a deleted header just leaves the first row
     # graded like any other.
-    table_lines = crosswalk.splitlines()
+    # Grade every data row of every CROSSWALK-HEADED table in §5 — and nothing
+    # else. Three shapes had to be got right here, each measured:
+    #
+    # 1. A positional header skip was one-shot for the whole section, so deleting
+    #    the header made the first DATA row the "header" and left it ungraded
+    #    (measured: header deleted + §5 row 1's cell blanked -> CLEAN).
+    # 2. Breaking at the first non-`|` line graded only the FIRST table, so a
+    #    second validly-headed crosswalk table's rows were never read (measured:
+    #    §5 split into two headed tables, one cell blanked in the second -> CLEAN),
+    #    and a decorative table ABOVE the crosswalk produced false violations
+    #    (measured: three invented `R5 …: names no surface` on a clean map).
+    # 3. Selecting by header CONTENT only (not position) is what makes both
+    #    directions right: a 2-column table has no `_is_crosswalk_header` row, so
+    #    it is not graded wherever it sits.
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in crosswalk.splitlines():
+        if line.startswith("|"):
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+
+    def _separator(block: list[str]) -> int | None:
+        return next(
+            (
+                index
+                for index, line in enumerate(block)
+                if all(set(cell) <= {"-", ":", ""} for cell in cells(line))
+            ),
+            None,
+        )
+
+    def _is_crosswalk_block(block: list[str]) -> bool:
+        separator = _separator(block)
+        return separator is not None and separator > 0 and _is_crosswalk_header(block[separator - 1])
+
+    # Fail CLOSED when §5 no longer holds a crosswalk header: the header itself is the
+    # thing a shrinker deletes, and once it is gone no block can be told apart from
+    # the crosswalk. Grading nothing would be a false PASS on every remaining row
+    # (measured: header deleted + a cell blanked -> CLEAN before this fallback), so
+    # every block in the section is graded instead. A decorative table sharing §5
+    # with a MISSING crosswalk header is therefore a false RED — the direction that
+    # costs a re-run, never a gate that reports green over an ungraded row.
+    headed = [block for block in blocks if _is_crosswalk_block(block)]
+    if headed:
+        # A block with NO separator is a continuation of the table above it (a blank
+        # line splits the markdown table in the parser but not on the page). Grading
+        # only the headed blocks left a split table's tail ungraded — measured: a
+        # blank line before §6.4 plus a blanked §6.4 cell graded CLEAN.
+        graded_blocks = [block for block in blocks if _is_crosswalk_block(block) or _separator(block) is None]
+    else:
+        graded_blocks = blocks
+
     rows: list[str] = []
-    for line in table_lines:
-        if not line.startswith("|"):
-            if rows:
-                break  # a non-table line ends the table
-            continue
-        row = cells(line)
-        if row and all(set(cell) <= {"-", ":", ""} for cell in row):
-            # Drop the header this separator proves — but only when the row above
-            # really is a header. With the header DELETED, the row above is a data
-            # row, and dropping it unconditionally left that row ungraded (measured:
-            # header deleted + §5 row 1's cell blanked graded CLEAN).
-            if rows and _is_crosswalk_header(rows[-1]):
-                rows = rows[:-1]
-            continue  # the table continues below its separator
-        rows.append(line)
+    for block in graded_blocks:
+        separator = _separator(block)
+        start = 0 if separator is None else separator + 1
+        rows.extend(block[start:])
+
     for line in rows:
         row = cells(line)
         if not row:
@@ -405,10 +450,11 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
         # line form of this arm does not fire (measured: `expected violation, got
         # clean`).
         #
-        # EVERY data row is tested, not just rows whose label starts with `§`: a
-        # label-based gate let two shrink edits through, both measured CLEAN —
-        # renaming `| §7 |` to `| 7 |` and blanking its cell, and deleting the `§7`
-        # row outright. `§7` is now in PLAN_SEAMS so its existence is pinned too.
+        # EVERY data row of a crosswalk-headed table is tested, not only rows whose
+        # label starts with `§`: a label-based gate let two shrink edits through, both
+        # measured CLEAN — renaming `| §7 |` to `| 7 |` and blanking its cell, and
+        # deleting the `§7` row outright. `§7` is now in PLAN_SEAMS so its existence is
+        # pinned too.
         surface_cell = row[2] if len(row) > 2 else ""
         if not surface_tokens(surface_cell):
             violations.append(f"R5 {label}: names no surface")
