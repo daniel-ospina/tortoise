@@ -684,19 +684,27 @@ def test_a_third_party_wrapper_on_thread_start_is_not_a_double_wrap(monkeypatch)
         "a non-idempotent installer passed the census — the idempotence "
         "assertion is vacuous")
 
-    # TEETH 3: the MARKER wiped while our wrapper is still reachable — the one
-    # state the reachability check cannot see (a leaked TEST_MODE env that got
-    # the wrapper installed without conftest's marker), so the marker branch is
-    # the census's only witness. The installer is stubbed to a no-op for this
-    # arm: calling the REAL one with the marker off would legitimately re-wrap,
-    # and that re-wrap is TEETH 2's subject, not this one's — isolating it here
-    # is what makes the row attributable to the marker branch alone.
+    # TEETH 3: the MARKER cleared while our wrapper is still reachable. The
+    # marker and the install are two SEPARATE facts that the installer sets
+    # together (`projection.install_thread_stamp` assigns `Thread.start` and
+    # `_tortoise_stamp_installed` in the same branch), so this arm pins that the
+    # census NOTICES if they ever diverge — a future install path, or a
+    # reload/restore that clears the class attribute.
+    # ⛔ It is deliberately NOT reachable today by a leaked `TORTOISE_TEST_MODE`
+    # env: the installer refuses without conftest's `_TEST_SESSION_ACTIVE`, so
+    # "installed without the marker" cannot happen (that is why the helper says a
+    # leaked env cannot patch stdlib). The arm exists so a divergence is not
+    # SILENT if one is ever introduced — not because one is possible now.
+    # The installer is stubbed to a no-op for this arm: the REAL one with the
+    # marker off would legitimately re-wrap, and that re-wrap is TEETH 2's
+    # subject, not this one's — isolating it here is what makes the row
+    # attributable to the marker branch alone.
     monkeypatch.setattr(proj_mod, "install_thread_stamp", lambda: None)
     monkeypatch.setattr(threading.Thread, "_tortoise_stamp_installed", False)
     monkeypatch.setattr(threading.Thread, "start", _sentry_style_start)
     assert any("not installed" in v for v in _thread_start_stamp_violations()), (
-        "a WIPED install marker passed the census — a leaked TEST_MODE env that "
-        "installed the wrapper without conftest's marker would go unreported")
+        "a CLEARED install marker passed the census — the marker and the install "
+        "are separate facts, and the census must notice when they diverge")
 
 
 def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):

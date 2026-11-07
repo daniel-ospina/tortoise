@@ -419,9 +419,11 @@ git log -1 --format=%B 316a572ce2 | grep '^Closes #10999' # arm 2's keyword, in 
 # is "every reference except a PR closed without merging" — narrower than "any PR named it", not the same
 # as "only merged ones". #11337 is in the loop below, so whichever row holds the OPEN pole is
 # RE-DERIVED on every run rather than named here.
-# ⛔ No row's state is quoted anywhere in this note, on purpose: a row's state DRIFTS, and an earlier
-# draft of this very sentence cited #10848/11392 that way — it merged and closed within the day, leaving
-# the sentence re-deriving to its own opposite, beside the command that disproves it.
+# ⛔ No row's state is used as the BASIS of a classification here, on purpose: a row's state DRIFTS, and
+# an earlier draft cited #10848/11392 that way — it merged and closed within the day, leaving the sentence
+# re-deriving to its own opposite, beside the command that disproves it. The states quoted further down
+# sit beside the command that PRINTS them, which is the opposite contract: they are that loop's own
+# output, re-derived on every run, never relied on.
 gh api graphql -f query='{__type(name:"Issue"){fields{name args{name defaultValue}}}}' \
   --jq '.data.__type.fields[]|select(.name=="closedByPullRequestsReferences")|.args[]|select(.name|test("Linked|ClosedPrs"))'
                                                           # all three default FALSE — the inverse Linked
