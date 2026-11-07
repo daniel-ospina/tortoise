@@ -1394,29 +1394,52 @@ def _mutated_from_a_nested_scope(scope, key: str) -> bool:
     """True when a scope INSIDE `scope` can change `key` — so `scope`'s own
     bindings do not describe the value a call sees (#11217 review round 6).
 
-    Two mechanisms, both measured GREEN before this guard and both journaling an
+    Three mechanisms, all measured GREEN before this guard and all journaling an
     outside name while the census certified an owned one:
 
-    * `nonlocal name` (or `global name`) in a nested def, then a rebinding
+    * `nonlocal name` (or `global name`) in a nested scope, then a rebinding
       there — the OUTER binding is rewritten between two source-ordered
       statements of the outer scope. A plain nested `name = …` is NOT this: it
       binds a local of the nested scope and cannot touch the outer name, which is
-      what keeps a compliant outer handle from reding (round 3's mirror);
+      what keeps a compliant outer handle from reding (round 3's mirror).
+      ⛔ The declaration is honoured at ANY DEPTH, because that is how PEP 227
+      resolves it: `nonlocal` binds the name in the NEAREST enclosing scope that
+      binds it, walking the whole chain — so a `nonlocal` TWO (or three) scopes
+      down binds `scope`'s name whenever the scopes in between do not bind it
+      themselves. Stopping after one level was a measured false PASS (#11217
+      review round 13): the grandchild shape certified the stale OWNED prefix,
+      the journal received `evict_…`, `_sweep_drop` classified it `preserved` and
+      consumed the journal — a leaked graph under a GREEN census;
     * a `NamedExpr` inside a comprehension, which PEP 572 binds in the scope
       ENCLOSING the comprehension (so `[x for … if (name := …)]` rewrites
-      `name` without appearing in that scope's own statements at all).
+      `name` without appearing in that scope's own statements at all). This one
+      is depth-1 ONLY, and so is the defaults/decorators rule below: at depth 2
+      the enclosing scope is the intermediate one, so the binding lands THERE —
+      it can only reach `scope` through a `nonlocal`/`global`, which the first
+      rule already catches (flagging it twice would be a false BLOCK on a
+      compliant site);
+    * a walrus in a nested scope's DEFAULTS/decorators/bases, evaluated in the
+      ENCLOSING scope (round 7, finding 3).
 
     Whether such a mutation RUNS is not decidable here, so the answer is "could",
     and the caller fails closed."""
-    for node, _depth in _own_statements(scope):
-        if not isinstance(node, _NESTED_SCOPES):
-            continue
+    top = [(node, 1) for node, _depth in _own_statements(scope)
+           if isinstance(node, _NESTED_SCOPES)]
+    # The declarations themselves: every nested scope at ANY depth (PEP 227's
+    # chain), plus the depth-1-only comprehension walrus.
+    pending = list(top)
+    while pending:
+        node, depth = pending.pop()
         for inner, _inner_depth in _own_statements(node):
             if isinstance(inner, (ast.Nonlocal, ast.Global)) and key in inner.names:
                 return True
-            if isinstance(inner, ast.NamedExpr) and isinstance(node, _COMPREHENSIONS) \
+            if depth == 1 and isinstance(node, _COMPREHENSIONS) \
+                    and isinstance(inner, ast.NamedExpr) \
                     and key in _target_keys(inner.target):
                 return True
+        pending.extend((child, depth + 1) for child, _d in _own_statements(node)
+                       if isinstance(child, _NESTED_SCOPES))
+    for node, _depth in top:
         # A nested scope's DEFAULTS, decorators, bases and keywords are evaluated
         # in the ENCLOSING scope, so a walrus there rebinds the outer name. It is
         # not in `_own_statements(node)`, which begins at the nested BODY
@@ -1431,12 +1454,12 @@ def _mutated_from_a_nested_scope(scope, key: str) -> bool:
             for expression in expressions:
                 if not isinstance(expression, ast.AST):
                     continue
-                pending = [expression]
-                while pending:
-                    inner = pending.pop()
-                    if isinstance(inner, ast.NamedExpr) and key in _target_keys(inner.target):
+                walk = [expression]
+                while walk:
+                    child = walk.pop()
+                    if isinstance(child, ast.NamedExpr) and key in _target_keys(child.target):
                         return True
-                    pending.extend(ast.iter_child_nodes(inner))
+                    walk.extend(ast.iter_child_nodes(child))
     return False
 
 
@@ -2679,6 +2702,150 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
                _journal_prefixes(site.read_text(encoding="utf-8"))]
     assert starred == [""], (
         f"a STARRED target was paired positionally instead of failing open: {starred}")
+
+
+def test_a_NONLOCAL_at_ANY_depth_rewrites_the_outer_binding(tmp_path):
+    """#11217 review round 13 (P1): the nested-scope walk honoured ONE level.
+
+    PEP 227 resolves `nonlocal`/`global` through the WHOLE enclosing chain: the
+    declaration binds the name in the NEAREST enclosing scope that binds it, so
+    a declaration two (or three) scopes down binds THIS scope's binding whenever
+    the scopes in between do not bind it themselves. `_mutated_from_a_nested_scope`
+    stopped at `_own_statements(node)`, which stops at the next nested scope, so
+    the shape below certified the stale OWNED prefix while the journal received
+    `evict_<hex>` — a graph `_sweep_drop` classifies `preserved` and then forgets,
+    i.e. a permanent leak under a GREEN census. Measured `[]` (clean) at the
+    pre-fix head for all four variants; the one-level control was already RED.
+
+    Pinned as BEHAVIOUR — the resolved PREFIX, plus the census verdict — and each
+    mutating shape sits beside its own compliant MIRROR (same nesting, plain
+    nested binding instead of the declaration), so neither direction can go
+    vacuous: the mirror reds a guard that fails closed on any nested scope, and
+    the mutating case reds the one-level stop."""
+    site = tmp_path / "test_round13_nested_nonlocal.py"
+
+    def _prefixes(*lines: str) -> list[str]:
+        return [prefix for _line, prefix in
+                _journal_prefixes(_raw_client_site(*lines))]
+
+    owned = '    name = f"test_ok_{os.urandom(4).hex()}"'
+    evict = '        name = f"evict_{os.urandom(4).hex()}"'
+    bodies: tuple = (
+        # ── control: the ONE-level shape round 6 added this guard for ─────
+        ("one-level nonlocal",
+         (owned,
+          "    def helper():",
+          "        nonlocal name",
+          evict,
+          "    helper()",
+          "    _journal_append(name)"),
+         (owned,
+          "    def helper():",
+          evict.strip("\n"),
+          "    helper()",
+          "    _journal_append(name)")),
+        # ── the finding: the declaration is TWO scopes down ────────────────
+        ("grandchild nonlocal (2 levels)",
+         (owned,
+          "    def helper():",
+          "        def inner():",
+          "            nonlocal name",
+          '            name = f"evict_{os.urandom(4).hex()}"',
+          "        inner()",
+          "    helper()",
+          "    _journal_append(name)"),
+         (owned,
+          "    def helper():",
+          "        def inner():",
+          '            name = f"evict_{os.urandom(4).hex()}"',
+          "        inner()",
+          "    helper()",
+          "    _journal_append(name)")),
+        # ── three levels, the same chain one hop further down ─────────────
+        ("great-grandchild nonlocal (3 levels)",
+         (owned,
+          "    def a():",
+          "        def b():",
+          "            def c():",
+          "                nonlocal name",
+          '                name = f"evict_{os.urandom(4).hex()}"',
+          "            c()",
+          "        b()",
+          "    a()",
+          "    _journal_append(name)"),
+         (owned,
+          "    def a():",
+          "        def b():",
+          "            def c():",
+          '                name = f"evict_{os.urandom(4).hex()}"',
+          "            c()",
+          "        b()",
+          "    a()",
+          "    _journal_append(name)")),
+        # ── a METHOD of a nested class is a scope two levels down as well ──
+        ("nested-class method nonlocal",
+         (owned,
+          "    class Helper:",
+          "        def go(self):",
+          "            nonlocal name",
+          '            name = f"evict_{os.urandom(4).hex()}"',
+          "    Helper().go()",
+          "    _journal_append(name)"),
+         (owned,
+          "    class Helper:",
+          "        def go(self):",
+          '            name = f"evict_{os.urandom(4).hex()}"',
+          "    Helper().go()",
+          "    _journal_append(name)")),
+    )
+    for label, mutating, mirror in bodies:
+        site.write_text(_raw_client_site(*mutating), encoding="utf-8")
+        assert _prefixes(*mutating) == [""], (
+            f"{label}: the outer binding is rewritten from inside a nested "
+            f"scope, so no prefix is provable — the arm certified "
+            f"{_prefixes(*mutating)}")
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad and "UNDECIDABLE" in bad[0], (
+            f"{label}: the census must fail CLOSED on a mutated handle, "
+            f"not report it owned/clean: {bad}")
+        # The MIRROR: identical nesting, no declaration — a plain nested
+        # binding cannot touch the outer name, so the owned prefix stands. A
+        # guard that fails closed on any nested scope reds here.
+        assert _prefixes(*mirror) == ["test_ok_"], (
+            f"{label}: the compliant mirror (no nonlocal/global) lost its "
+            f"provable prefix — a false BLOCK: {_prefixes(*mirror)}")
+        site.write_text(_raw_client_site(*mirror), encoding="utf-8")
+        assert not _raw_detach_violations(root=tmp_path), (
+            f"{label}: a plain nested binding was treated as a mutation of the "
+            f"outer name: {_raw_detach_violations(root=tmp_path)}")
+
+    # ── a MODULE-level binding, rewritten through a grandchild `global` ─────
+    # `_bound_prefix` resolves a name up the whole scope chain, so the MODULE is
+    # a scope too, and `global` reaches it from any depth.
+    module_level = (
+        'GNAME = f"test_ok_{os.urandom(4).hex()}"\n'
+        "\n"
+        "\n"
+        "def test_evictor_lane():\n"
+        "    import os\n"
+        "    from falkordb import FalkorDB\n"
+        "    def helper():\n"
+        "        def inner():\n"
+        "            global GNAME\n"
+        '            GNAME = f"evict_{os.urandom(4).hex()}"\n'
+        "        inner()\n"
+        "    helper()\n"
+        "    _journal_append(GNAME)\n"
+        '    c = FalkorDB(host="h")\n'
+        '    c.query("MATCH (n) DETACH DELETE n")\n'
+    )
+    site.write_text(module_level, encoding="utf-8")
+    assert [prefix for _line, prefix in _journal_prefixes(module_level)] == [""], (
+        "a grandchild `global` on a MODULE-level binding was certified: "
+        f"{_journal_prefixes(module_level)}")
+    assert _raw_detach_violations(root=tmp_path), (
+        "the census reported a module-level handle rewritten by a grandchild "
+        "`global` as owned/clean")
 
 
 def _block_end(masked: str, start: int, indent: int) -> int:

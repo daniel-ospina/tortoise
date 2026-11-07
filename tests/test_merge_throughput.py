@@ -4069,11 +4069,19 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         # one that checks out at `fetch-depth: 0` (#5086 review P1-1). It is
         # listed INSIDE the exact list rather than exempted — the exactness of
         # this assertion is the whole point.
-        "python3 tools/substrate_map_check.py --check"
+        "python3 tools/substrate_map_check.py --check\n"
+        # #11084: the #5090 integration-surface map's own guard joins for the same
+        # `#4454` reason — a docs-only edit of the map selects no surface, so the
+        # map's checklist could lose a row with nothing running. It is the ONE
+        # entry here with no `--check` flag: the tool is verify-only by
+        # construction (it re-renders nothing; `main()` parses, checks and
+        # returns 0/1/2 — no write path at all), so the bare invocation is the
+        # fail-on-drift form the sibling `--check`s spell out explicitly.
+        "python3 tools/test_design_map_check.py"
     )
     assert code.strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the four "
-        "`--check` commands — no shell operator, no wrapper, no trailing "
+        "the drift step must invoke EXACTLY the installer plus the five "
+        "verify-only commands — no shell operator, no wrapper, no trailing "
         f"anything, or a real failure reports green (#2656); got {code!r}"
     )
     # The step may carry only the keys that cannot silence it. Enumerating the
