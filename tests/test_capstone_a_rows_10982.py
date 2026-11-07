@@ -701,9 +701,27 @@ def test_a_row_ABSENT_from_the_floor_map_never_has_a_floor_clause_stripped():
     # An unbound row strips NOTHING — the comparator survives and reds the arm.
     assert check._strip_the_rows_own_floor("floor of >= 0.5 x", None) == "floor of >= 0.5 x"
     assert check._strip_the_rows_own_floor("floor of >= 30 x", None) == "floor of >= 30 x"
-    # A pinned row strips only the value the record pins.
-    assert check._strip_the_rows_own_floor("floor of >= 0.5 x", 30.0) == "floor of >= 0.5 x"
-    assert check._strip_the_rows_own_floor("floor of >= 30 x", 30.0) == " x"
+    # A pinned row strips only the value the record pins — in the row's own UNIT of measure.
+    assert (
+        check._strip_the_rows_own_floor("floor of >= 0.5 typed statements", 30.0, "typed statements")
+        == "floor of >= 0.5 typed statements"
+    )
+    assert (
+        check._strip_the_rows_own_floor("floor of >= 30 typed statements", 30.0, "typed statements")
+        == " typed statements"
+    )
+    # ⛔ THE SAME NUMBER IN ANOTHER UNIT IS A BAR, NOT THE FLOOR (#11331 review round 10). `>= 30`
+    # typed statements is a population count; `>= 30 % typed` is a RATE that reuses the number, and
+    # it is the A4-vs-D3 bar the owner has not ruled on.
+    assert (
+        check._strip_the_rows_own_floor("floor of >= 30 % typed statements", 30.0, "typed statements")
+        == "floor of >= 30 % typed statements"
+    )
+    # …and with NO unit supplied nothing is classifiable, so it fails CLOSED rather than lenient.
+    assert (
+        check._strip_the_rows_own_floor("floor of >= 30 typed statements", 30.0)
+        == "floor of >= 30 typed statements"
+    )
     # …and through the CHECKER: an EMPTY map is the unreadable-record / absent-pointer case, and it
     # must refuse a laundered bar rather than excuse it.
     rows = check.parse_criteria_rows(PREREG.read_text())
@@ -716,6 +734,19 @@ def test_a_row_ABSENT_from_the_floor_map_never_has_a_floor_clause_stripped():
         f"unreadable record takes: {failures}")
     # The real map still accepts the record, so the fail-closed direction did not red the artifact.
     assert check.check_completeness(rows, check._registered_floor_values(PREREG_DIR)) == []
+
+    # ⛔ ROUND 10 — the SAME pinned NUMBER spent as a RATE is still a bar, and only the real map can
+    # prove it (the `{}` case above strips nothing for a different reason). `>= 30 % typed` reuses
+    # `A4`'s count floor, so binding on the bare number excused exactly the A4-vs-D3 bar the record
+    # says may not be invented — with `criteria[A4].floor` left untouched.
+    real = check._registered_floor_values(PREREG_DIR)
+    assert real.units.get("A4") == "typed statements", real.units
+    rate = "UNMEASURED(#10988 decides) floor of >= 30 % typed and compared to no bar)"
+    assert any(
+        "outside its floor" in f
+        for f in check.check_completeness(
+            [dict(r, threshold=rate) if r is a4 else r for r in rows], real)
+    ), "a RATE reusing the floor's number is a bar, not the floor"
 
 
 def test_a_REQUIRED_row_cannot_declare_itself_a_non_bar():

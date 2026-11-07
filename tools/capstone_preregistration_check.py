@@ -420,13 +420,42 @@ FLOOR_CLAUSE = re.compile(
 )
 
 
-def _strip_the_rows_own_floor(text: str, value: float | None) -> str:
+def _floor_unit(key: str) -> str:
+    """The denominator phrase a floor is expressed in, derived from its record KEY.
+
+    `a4_typed_statements` -> `"typed statements"`. The row id prefix (`a<digits>_`) carries no
+    meaning for the unit, so it is stripped.
+    """
+    return re.sub(r"^a\d+_", "", key).replace("_", " ").strip()
+
+
+class FloorMap(dict):
+    """`{row_id: pinned_value}` that ALSO carries each row's floor UNIT (`units[row_id]`).
+
+    ⛔ THE VALUE ALONE CANNOT TELL A FLOOR FROM A BAR (#11331 review round 10). `>= 30` typed
+    statements is `A4`'s registered floor — a population count. `>= 30 %` typed is a RATE bar that
+    reuses the same number, and binding only on the number excused it: measured, `A4`'s cell
+    rewritten to `floor of >= 30 % typed and compared to no bar` left the gate at `exit=0` with
+    `criteria[A4].floor` untouched, while the identical bar with the words `floor of` removed was
+    refused at `exit=1`. `A4` is the row the record registers as having NO bar, and this is the
+    owner-gated `A4`-vs-`D3` decision (`#10988` BLOCKED, `#1022` carries it), so excusing it
+    settles an owner decision this registration has no authority over (§3.7, §10.10).
+
+    A plain `dict` still works, but it carries no units, so its floor clauses cannot be classified
+    and are NOT exempted — fail CLOSED.
+    """
+
+    def __init__(self, values=None, units=None) -> None:
+        super().__init__(values or {})
+        self.units: dict[str, str] = dict(units or {})
+
+
+def _strip_the_rows_own_floor(text: str, value: float | None, unit: str | None = None) -> str:
     """`text` with the row's OWN registered floor clause removed — and NOTHING when it has no pin.
 
-    ⛔ THE CLAUSE IS IDENTIFIED BY ITS VALUE, not by the words in front of it. Only a number the
-    record PINS is a floor (a refusal boundary, §3.7); a number it does not pin is a bar however
-    it is spelled. So a clause is stripped only when its number equals the pinned value of the
-    floor this row's own registration names, and every other comparator stays in the cell and
+    ⛔ THE CLAUSE IS IDENTIFIED BY ITS VALUE **AND ITS UNIT**, not by the words in front of it.
+    Only a number the record PINS, expressed in the row's own denominator, is a floor (a refusal
+    boundary, §3.7); anything else is a bar however it is spelled, and it stays in the cell and
     reds the arm.
 
     ⛔ `value is None` STRIPS NOTHING — that is the absent-row case, and it must fail CLOSED.
@@ -434,28 +463,40 @@ def _strip_the_rows_own_floor(text: str, value: float | None) -> str:
     laundering branch: measured at #11331 review round 9, deleting `criteria[A4].floor` while
     writing a bar into A4's cell left the gate at exit 0, while the identical cell with the
     pointer kept exited 1 — i.e. a record-only edit REMOVED the refusal, and both this function
-    and `_registered_floor_values` documented the opposite. A row the map does not name can never
-    have a clause stripped, so the comparator survives and the arm reds.
+    and `_registered_floor_values` documented the opposite.
+
+    ⛔ `unit` IS PART OF THE BINDING, NOT DECORATION (round 10). Binding on the bare number excused
+    `floor of >= 30 % typed`, which reuses `A4`'s pinned 30 as a RATE — the bar the owner has not
+    ruled on. A clause is therefore exempted only when the text following its number names the
+    row's own floor denominator (`a4_typed_statements` -> "typed statements"). No unit ⇒ strip
+    nothing ⇒ the comparator reds.
 
     The no-record caller (a unit test on a bare row list) is the CHECKER's concern, not this
     function's: `check_completeness` strips by shape alone only when it was handed no map at all.
     The gate always hands it one (`check()` reads the map from the same record it validates), so
-    the value binding is what runs on every real check — and an unreadable record yields `{}`,
+    the value+unit binding is what runs on every real check — and an unreadable record yields `{}`,
     which strips nothing, which fails CLOSED.
     """
-    if value is None:
+    if value is None or not unit:
         return text
+
+    wanted = unit.strip().lower()
 
     def _drop(match: re.Match[str]) -> str:
         try:
-            return "" if abs(float(match.group(1)) - value) < 1e-9 else match.group(0)
+            if abs(float(match.group(1)) - value) >= 1e-9:
+                return match.group(0)
         except (TypeError, ValueError):
             return match.group(0)
+        # The denominator the floor is expressed in must FOLLOW the number, ignoring the markdown
+        # that usually wraps the value (`` `>= 30` typed statements ``).
+        tail = re.sub(r"[`*_\s]+", " ", text[match.end():]).strip().lower()
+        return "" if tail.startswith(wanted) else match.group(0)
 
     return FLOOR_CLAUSE.sub(_drop, text)
 
 
-def _registered_floor_values(directory: Path) -> dict[str, float]:
+def _registered_floor_values(directory: Path) -> FloorMap | None:
     """Row id → the PINNED value of the floor that row's own registration names.
 
     One direction only: `criteria[].floor` names a key in `denominator_floors`, and the pair is
@@ -474,7 +515,7 @@ def _registered_floor_values(directory: Path) -> dict[str, float]:
     floors = record.get("denominator_floors")
     if not isinstance(floors, dict):
         return {}
-    out: dict[str, float] = {}
+    out: FloorMap = FloorMap()
     for crit in record.get("criteria") or []:
         if not isinstance(crit, dict):
             continue
@@ -485,6 +526,7 @@ def _registered_floor_values(directory: Path) -> dict[str, float]:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
         out[row_id] = float(value)
+        out.units[row_id] = _floor_unit(key)
     return out
 #: A registered non-bar must name WHO gates it. ⛔ The check is `#\d+` — "names an issue" — NOT "names
 #: the row's registered decision": the record's cells and §7 item 1 were restated to claim exactly
@@ -3907,10 +3949,12 @@ def check_completeness(rows: list[dict[str, str]],
             # the one row whose registration is that it has NO bar, and its threshold cell is
             # what the run/scoring child reads, so a bar surviving here is the owner-decision
             # bypass this arm exists to close (§7 item 1, §3.7, §10.10).
-            # ⛔ AND THE EXEMPTION IS THE PINNED VALUE, NOT THE PHRASE (#11331 review round 8):
-            # stripping any `floor of <comparator> <number>` let the two words launder a bar
-            # (`floor of >= 0.5 typed_share` exited OK with no finding), which is a record-only
-            # edit giving A4 a bar — the thing §7 item 1 says cannot happen.
+            # ⛔ AND THE EXEMPTION IS THE PINNED VALUE **AND ITS UNIT**, not the phrase (#11331
+            # review rounds 8 and 10): stripping any `floor of <comparator> <number>` let the two
+            # words launder a bar (`floor of >= 0.5 typed_share` exited OK), and binding on the
+            # bare NUMBER still excused `floor of >= 30 % typed` — the same 30 as `A4`'s count
+            # floor, spent as a RATE. `A4` is the row whose registration is that it has NO bar, so
+            # either variant is an owner-decision bypass (§7 item 1, §3.7, §10.10).
             remainder = (
                 # ⛔ NO MAP AT ALL is a unit test on a bare row list: strip by shape, the legacy
                 # behaviour. A map that is PRESENT but does not name this row is the absent-row
@@ -3918,7 +3962,12 @@ def check_completeness(rows: list[dict[str, str]],
                 # docstring promises. The gate always supplies a map, so `None` never reaches here
                 # on a real check (#11331 review round 9: `{}` used to fall into `None`).
                 FLOOR_CLAUSE.sub("", plain) if row_floors is None
-                else _strip_the_rows_own_floor(plain, row_floors.get(row["id"])))
+                else _strip_the_rows_own_floor(
+                    plain,
+                    row_floors.get(row["id"]),
+                    getattr(row_floors, "units", {}).get(row["id"]),
+                )
+            )
             if any(c in remainder for c in COMPARATORS):
                 failures.append(
                     f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "

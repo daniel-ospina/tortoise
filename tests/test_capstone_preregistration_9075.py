@@ -6068,6 +6068,35 @@ def _measurement_only(monkeypatch):
                         lambda directory: _real_floor_values(PREREG_DIR))
 
 
+def test_the_gate_SUPPLIES_the_floor_map_so_a_missing_pin_cannot_excuse_a_bar(tmp_path, monkeypatch):
+    """FAILS IF `check()` stops handing the floor map to `check_completeness`.
+
+    ⛔ The fail-closed binding is only as good as its WIRING. `check()` passes
+    `_registered_floor_values(directory)` into `check_completeness`, and reverting that one call to
+    `check_completeness(rows)` leaves every other capstone arm GREEN — measured at #11331 review
+    round 10 (`552 passed` either way), because with no map the checker takes the legacy
+    strip-by-shape branch and the real `A4` cell still passes.
+
+    So this drives the WHOLE gate with a map that OMITS `A4` — the state a record-only edit
+    produces by deleting `criteria[A4].floor`. The real `A4` cell's legitimate
+    `floor of >= 30 typed statements` can then no longer be told from a bar, so the gate must
+    REFUSE. If the wiring is removed, `run()` returns ok and this test reds.
+    """
+    _repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    _measurement_only(monkeypatch)
+    real = check._registered_floor_values(PREREG_DIR)
+    assert real is not None and "A4" in real, real
+    without_a4 = check.FloorMap(
+        {k: v for k, v in real.items() if k != "A4"},
+        {k: v for k, v in real.units.items() if k != "A4"},
+    )
+    monkeypatch.setattr(check, "_registered_floor_values", lambda directory: without_a4)
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert report["ok"] is False, "the gate must refuse when A4's floor pin is missing"
+    assert any("outside its floor" in f for f in report["failures"]), report["failures"]
+
+
 def test_a_bundle_with_no_log_does_not_claim_a_measured_ordering(tmp_path, monkeypatch, capsys):
     """A registration on the base and ZERO logs: the loop compares nothing, so nothing was measured.
 
