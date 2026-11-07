@@ -10368,6 +10368,24 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "`ff6379eb2`.",
         "The tree immediately before #9548 is `ff6379eb2`, though the figure was corrected "
         "at `047c91f7a`.",
+        # ⛔ THE `for`/`or`/`nor`/`so` MEMBERS AND THE `--` DASH WERE UNPINNED (#11191
+        # review r34, P2 — MEASURED vacuity, the class the standard above calls P1). r13
+        # added all five to `_CLAUSE_DELIM` and its comment said "MEASURED both ways",
+        # but the row it measured lived ONLY in that comment: dropping `for|or|nor|so`
+        # from the set flipped the quoted sentence and changed NONE of this file's rows
+        # (796 literals probed), so a revert left the suite GREEN. Each row below is one
+        # member's own discriminating control, measured one member at a time at this
+        # head: REFUSED here, and ADMITTED when THAT member alone is dropped.
+        "The note never calls `ff6379eb2` the #9601 merge, for `ff6379eb2` is the tree "
+        "before #9548.",
+        "The note never calls `ff6379eb2` the #9601 merge, or `ff6379eb2` is the tree "
+        "before #9548.",
+        "The note never calls `ff6379eb2` the #9601 merge, nor `ff6379eb2` is the tree "
+        "before #9548.",
+        "The note never calls `ff6379eb2` the #9601 merge, so `ff6379eb2` is the tree "
+        "before #9548.",
+        "The note never calls `ff6379eb2` the #9601 merge -- `ff6379eb2` is the tree "
+        "before #9548.",
     )
     _subordinate_passed = [
         s for s in _subordinate_alibi if not _refuses_before_9548(s)
@@ -10391,6 +10409,20 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "the subordinator boundary refuses a TRUTHFUL sentence — a false RED in the arm "
         "that closes the alibi (#11191 review r12, P1)"
     )
+    # ⛔ AND THE `which`/`who` REMOVAL HAS ITS OWN CONTROL (#11191 review r34, P3 — the
+    # r13 comment justified removing them with a sentence nothing pinned). They were
+    # tried in the set and removed because they cut a denial off its own phrase; that
+    # sentence is ACCEPTED here and `origin/main` accepts it too, so re-adding either
+    # word is a false RED the suite must catch.
+    for _relative in (
+        "`ff6379eb2` is not the tree WHICH is immediately before #9548.",
+        "`ff6379eb2` is not the tree WHO is immediately before #9548.",
+    ):
+        assert not _refuses_before_9548(_relative), (
+            "`which`/`who` are in the clause-boundary set and cut a denial off its own "
+            "phrase — a false RED in the direction this file refuses to trade for a "
+            "fail-open (#11191 review r13/r34):\n  " + _relative
+        )
     #
     # (2) A FIGURE BOUND TO THE APPOSITIVE IS THE READING AT THAT TREE. Refusing any
     # figure between the phrase and a true-sha appositive read the binding backwards and
