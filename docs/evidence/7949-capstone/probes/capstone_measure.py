@@ -57,9 +57,11 @@ the measured arm — IN PROCESS, with the previous values restored in a ``finall
 and the set values READ BACK from ``os.environ`` before the pass, the way
 ``e1_e2_probe.run_arm`` does it (they default OFF in the deployed config), so
 S2.2/S2.3 are ON-PATH for this pass — the convention #9076's E1/E2 run used ("the
-gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned
-UNSET for the same reason: it also switches S2.2 on, so an ambient value would
-silently change the arm. The ``arm:`` line is that read-back, never a typed
+gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned to an
+EXPLICIT ``"0"`` (``ARM_OFF``, NOT popped) for the same reason: it also switches
+S2.2 on, so an ambient value would silently change the arm — and since ``#10996``
+an ABSENT ``TORTOISE_VALUE_GATE`` IS the ON arm, so popping it would arm the
+predicate this arm declares OFF. The ``arm:`` line is that read-back, never a typed
 literal — a run that cannot read a flag back as set REFUSES rather than printing a
 claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
