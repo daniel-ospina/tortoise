@@ -4697,7 +4697,7 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         so the two channels cannot disagree about what a doubt frame is.
         """
         for _figure in list(re.finditer(_WORD_FIGURE_IN_POSITION, text)) + list(
-            re.finditer(r"\d", text)
+            re.finditer(r"\d{1,5}", text)
         ):
             _cue_start = max(0, _figure.start() - 16)
             _cue = _DENIED_FIGURE.search(text[_cue_start : _figure.start()])
@@ -6184,7 +6184,16 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 return True
             if _RETIRED_ATTRIBUTION.search(own):  # "no longer calls it"
                 return True
-            if _INFERENCE_DENIAL.search(own):  # "does not mean the census is 5"
+            # ⛔ …AND THE TRUE TREE MUST BE NAMED (#11191 review r30 F1, P1 — MEASURED
+            # fail-open that left the pin GREEN on the real §A8 cell). A `that`-complement is
+            # FACTIVE: "That `ff6379eb2` is the tree before #9548 does not mean the census is
+            # 5" PRESUPPOSES the false equivalence and denies only a consequence nobody
+            # stated. Appended to the real §A8 row it leaves offenders 0 (guard GREEN) while
+            # the bare defect gives offenders 1 (guard RED), and `origin/main` REFUSES it —
+            # so without this requirement the arm is a blank cheque on the pin's own cell.
+            # With the true tree named the sentence is a genuine correction
+            # ("… (not `047c91f7a`) does not mean the census is 5") and stays GREEN.
+            if _INFERENCE_DENIAL.search(own) and _TRUE_TREE in own:
                 return True
             # ⛔ A CORRECTION WHOSE OBJECT IS THE FALSE TREE IS THE CLAIM, NOT A CORRECTION OF
             # IT (#11191 review r18, P1 — MEASURED fail-open, and it defeated the pin on
@@ -8872,7 +8881,6 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "The retired reading was `ff6379eb2` for the tree before #9548, replaced with "
         "`047c91f7a`.",
         "That `ff6379eb2` is the tree before #9548 is disproven by `047c91f7a`.",
-        "That `ff6379eb2` is the tree before #9548 does not mean the census is 5.",
     )
     _restored_reds = [s for s in _restored_corrections if _refuses_before_9548(s)]
     assert not _restored_reds, (
@@ -9066,14 +9074,29 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "subject-bound for this reason (#11191 review, F3, P1):\n  "
         + "\n  ".join(_inference_passed)
     )
-    # …and the QUOTED-claim shape the arm was written for stays GREEN: the denied
-    # inference's subject must be the claimed equivalence.
+    # …and the QUOTED-claim shape the arm was written for stays GREEN — but ONLY when the
+    # true tree is named, because a `that`-complement is FACTIVE (#11191 review r30 F1, P1 —
+    # MEASURED). Without the true tree, "That `ff6379eb2` is the tree before #9548 does not
+    # mean the census is 5" PRESUPPOSES the false equivalence and denies only a consequence
+    # nobody stated: appended to the real §A8 row it left offenders at 0 (guard GREEN) while
+    # the bare defect gives offenders 1 (guard RED), and `origin/main` REFUSES it. With the
+    # true tree in the clause the presupposition is corrected and the sentence is truthful.
     assert not _refuses_before_9548(
-        "That `ff6379eb2` is the tree before #9548 does not mean the census is 5."
+        "That `ff6379eb2` is the tree before #9548 (not `047c91f7a`) does not mean the "
+        "census is 5."
     ), (
         "binding the inference denial to its `that`-clause subject also removed the "
         "quoted-claim correction it exists for — the fix must not red its own purpose "
         "(#11191 review, F3)"
+    )
+    # ⛔ …AND THE FACTIVE FORM WITH NO TRUE TREE IS THE DEFECT, NOT A CORRECTION
+    # (#11191 review r30 F1, P1). This is the row the pin must never let through.
+    assert _refuses_before_9548(
+        "That `ff6379eb2` is the tree before #9548 does not mean the census is 5."
+    ), (
+        "the factive `that`-complement asserts the false equivalence as GIVEN and denies "
+        "only a consequence — with no true tree in the clause it is the defect, and "
+        "`origin/main` refuses it (#11191 review r30 F1)"
     )
     # …and the binding is genuinely load-bearing: without it BOTH spellings pass, so the
     # pair above is a discrimination test, not two independent assertions.
@@ -9187,9 +9210,14 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #     so it is a redundant second line of defence here, never the deciding one. r29's
     #     suite-level mutation agrees: deleting that loop leaves **111 passed**.
     #   • neutering `_FALSE_SHA_ADJACENT.search(clause)` ALSO changes no verdict on these
-    #     three, so naming that arm would be a second false coverage claim. The shapes are
-    #     refused by the deeper cascade; WHICH single arm is load-bearing is UNDETERMINED
-    #     here and is stated as undetermined rather than guessed.
+    #     three, so naming that arm would be a second false coverage claim.
+    #   • AND THE CLASS IS NOT MERELY "undetermined": it is OVER-DETERMINED by at least
+    #     four arms. MEASURED at this head, taking the `_COREF_ASSERTS_FALSE` veto, the
+    #     `_FALSE_SHA_ADJACENT` decision, AND the `_INVERTED_FALSE` decision offline
+    #     TOGETHER leaves all three shapes still REFUSED. So no single arm is "the" deciding
+    #     one, and any comment naming one would be false in the way this block is fixing.
+    #     (r30 F4 asserted the arm IS determinable and named two; turning either off here
+    #     leaves every verdict unchanged, so that claim is falsified — see the PR comment.)
     # ⛔ SO THE ASSERTION BELOW IS A PATTERN TEST ONLY: it proves the regex matches the
     # string, never that the arm is REACHED — which is exactly the failure its own message
     # names ("the control above proves nothing about which arm reads it"). Do not read it as
