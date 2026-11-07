@@ -182,6 +182,7 @@ from tools.longmem_eval.guard_measured_revision import (  # noqa: E402
 )
 from tools.longmem_eval.judge import (  # noqa: E402
     DEFAULT_JUDGE_MODEL,
+    VARIANT_CONTAINMENT_SPEC,
     MockJudge,
     build_judge,
 )
@@ -313,7 +314,7 @@ INJECTED_SPEC_PREFIX = "injected:"
 #:
 #: **OVERRIDES:** the LongMemEval official judge (``gpt-4o-2024-08-06``, the
 #: paper's judge) — the owner ruled DeepSeek as our eval judge, so this
-#: benchmark records ``unpinned:deepseek/deepseek-v4-pro`` instead of claiming
+#: benchmark records ``unpinned:deepseek:deepseek-v4-pro`` instead of claiming
 #: an official-judge pin it did not run under.
 PREREGISTERED_JUDGE_SPEC = "deepseek:deepseek-v4-pro"
 
@@ -361,15 +362,20 @@ def judge_key_env_name(spec: str) -> str | None:
     transport uses (``reader._resolve_provider``), never the secret itself and
     never a prefix of it.
 
-    ``None`` for a judge with no credential, for a SYNTHETIC identity, or when
-    the resolution finds no configured provider — an unnamed key is recorded as
-    unnamed, never guessed. ⛔ The synthetic case is load-bearing: ``score``
-    records an injected judge object as ``injected:<model-id>``, and feeding
-    ``injected`` to the provider table raises ``KeyError`` — turning the
-    honest-identity guard into a crash in the scorer.
+    ``None`` whenever there is no credential to name, and naming one anyway
+    would be a FALSE provenance statement:
+
+    * the offline mock (``mock``) and the keyless deterministic judge
+      (``variant-containment``) send no request and hold no key;
+    * a SYNTHETIC identity — ``score`` records an injected judge object as
+      ``injected:<model-id>``, and feeding ``injected`` to the provider table
+      raised ``KeyError``, turning the honest-identity guard into a crash in
+      the scorer; an unknown provider name is the same shape;
+    * no configured provider at all.
     """
     spec = (spec or "").strip()
-    if not spec or spec == MOCK_JUDGE_SPEC or spec.startswith(INJECTED_SPEC_PREFIX):
+    if (not spec or spec in (MOCK_JUDGE_SPEC, VARIANT_CONTAINMENT_SPEC)
+            or spec.startswith(INJECTED_SPEC_PREFIX)):
         return None
     provider, _ = _parse_model_spec(spec)
     try:
@@ -475,10 +481,13 @@ def protocol(*, reader_spec: str | None = None,
                                             "rate; reported, never gated "
                                             "(D8)",
                 "not_a_metric": "the judge's semantic grade is never "
-                                "published as a rate and never enters an "
-                                "absolute claim. It enters `metrics` only "
-                                "as the per-arm `committed` count behind "
-                                "the paired within-run comparison — see "
+                                "THRESHOLDED and never enters an "
+                                "absolute/comparability claim. It enters "
+                                "`metrics` as the per-arm `committed` "
+                                "count, which the report PRINTS as the "
+                                "knowledge-update rate (reported, no pass "
+                                "threshold) and reads as the paired "
+                                "within-run comparison — see "
                                 "`scoring.two_number_split`",
             },
             "population": {
@@ -559,11 +568,16 @@ def protocol(*, reader_spec: str | None = None,
                  "train/test split — the corpus is hand-authored and every case "
                  "is scored, so there is nothing to fit.",
         "scoring": {
-            "committed": "the official anscheck semantic judge "
-                         "(build_judge) grades the reader's answer against the "
-                         "SEALED gold answer, per case per arm, using the "
-                         "official template the sealed gold names "
-                         "(knowledge-update | single-session-user)",
+            "committed": "the anscheck semantic judge built from THIS "
+                         "record's `judge.model_spec` (build_judge) grades "
+                         "the reader's answer against the SEALED gold "
+                         "answer, per case per arm, using the official "
+                         "TEMPLATE the sealed gold names (knowledge-update "
+                         "| single-session-user). ⛔ The TEMPLATE stays "
+                         "official; the JUDGE is this record's "
+                         "(`deepseek:deepseek-v4-pro`, pin "
+                         "`unpinned:`), never the official model — the "
+                         "pin is what says so",
             "superseded_live": "the assembled READER EVIDENCE is searched for "
                                "the superseded claim's own text "
                                "(ask_spotcheck._superseded_live_state): "
@@ -598,16 +612,20 @@ def protocol(*, reader_spec: str | None = None,
                                   "run, so a SYSTEMATIC judge bias "
                                   "cancels across the arms; a PERMISSIVE "
                                   "judge does not, which is why no "
-                                  "absolute rate is published from this "
-                                  "half and why the judge is pinned",
+                                  "THRESHOLD and no comparability claim "
+                                  "are published for that rate (it is "
+                                  "printed as a REPORTED number, §3) and "
+                                  "why the judge is pinned",
                 "d14_5085_shape": "the write-path harness keeps the judged "
                                   "arm entirely out of `metrics` "
                                   "(`tests/eval/write_path/runner.py`); "
                                   "this benchmark cannot — its `committed` "
                                   "IS the judge's grade — so the "
                                   "equivalent guarantee is pre-registered "
-                                  "explicitly instead: no rate is "
-                                  "published, and the judge-labelled half "
+                                  "explicitly instead: no threshold and "
+                                  "no comparability claim for the "
+                                  "judge-labelled rate, and the "
+                                  "judge-labelled half "
                                   "is only ever a paired comparison "
                                   "between the two arms of one run",
                 "what_it_does_not_mean": "the judge-free D8 half is NOT a "
@@ -2123,14 +2141,24 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
         "two-number split (D14/#5085 shape): the D8 supersession gate and "
         "the corpus verification are judge-free and AUTHORITATIVE; the "
         "judge-labelled half is only ever the paired within-run "
-        "comparison, and no rate is published from it",
+        "comparison (the KU rate is printed as REPORTED, never "
+        "thresholded), so no threshold and no comparability claim are "
+        "published for it",
     ]
     key_env = scored.get("judge_key_env")
     if key_env:
         # NAME only. Never the value, never a fragment of it (#2281 ruling).
+        # ⚠️ "the credential the run resolved" — NOT "the eval's dedicated
+        # credential": what is recorded is the provider's env var NAME, and
+        # nothing here can tell a dedicated per-eval VALUE from the product's
+        # shared one behind the same name. The dedicated-key clause is an
+        # operational requirement on the box (#2281), not a checked property of
+        # this receipt, and saying otherwise would be prose evidence.
         note_list.append(
-            f"the eval's dedicated credential, by name: {key_env} "
-            f"(the value is deliberately not recorded)")
+            f"the judge credential the run resolved, by env var NAME only: "
+            f"{key_env} (the value is deliberately not recorded; whether that "
+            f"name holds the eval-dedicated key or the shared one is an "
+            f"operational fact this receipt cannot establish)")
     if prereg_sha256:
         note_list.append(f"pre-registration sha256: {prereg_sha256}")
     note_list.extend(notes or [])
@@ -2790,7 +2818,10 @@ def _main(argv: list[str] | None = None) -> int:
                           "the product default)")
     pre.add_argument("--judge", default=None,
                      help="judge model spec (default: TORTOISE_LME_JUDGE_MODEL "
-                          "or the official judge)")
+                          "or THIS benchmark's pre-registered judge, "
+                          f"{PREREGISTERED_JUDGE_SPEC} — NOT the LongMemEval "
+                          "official judge, which is another benchmark's "
+                          "default)")
 
     run = sub.add_parser("run", help="run the sealed corpus (fixtures only)")
     run.add_argument("--out", required=True)

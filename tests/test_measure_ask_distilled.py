@@ -580,6 +580,17 @@ def test_the_protocol_states_its_target_metric_population_bar_and_falsifier():
     # judge-derived clause as mechanical (#11460 review P1-4).
     assert "never enters `metrics`" not in json.dumps(split)
     assert "permissive" in json.dumps(split).lower()
+    # …and it must not claim the judge-labelled RATE is unpublished: §3 PRINTS
+    # it (reported, never thresholded). Saying otherwise makes the record
+    # contradict the report it ships with (#11460 review cycle 2, P1).
+    assert "no rate is published" not in json.dumps(split)
+    assert "REPORTED" in split["judge_labelled"]
+    assert "no threshold and no comparability claim" in json.dumps(split)
+    # the gate's TEMPLATE stays official while the JUDGE is this record's —
+    # `scoring.committed` may not describe the official JUDGE
+    assert "official anscheck semantic judge (build_judge) grades" not in (
+        record["scoring"]["committed"])
+    assert "judge.model_spec" in record["scoring"]["committed"]
     # …and the per-category ROW SURFACE is pre-registered, with #2516 declared
     per_category = record["decision_rule"]["per_category"]
     assert len(per_category["rows"]) == 2
@@ -683,6 +694,11 @@ def test_an_injected_judge_does_not_crash_the_key_name_lookup(tmp_path):
     the score step. An unnamed key is recorded as unnamed, never guessed."""
     assert m.judge_key_env_name(f"{m.INJECTED_SPEC_PREFIX}test-stub-judge") is None
     assert m.judge_key_env_name("not-a-provider:whatever") is None
+    # the KEYLESS deterministic judge sends no request: naming a credential for
+    # it is a false provenance statement in the artifact that exists for
+    # provenance only (#11460 review cycle 2)
+    assert m.judge_key_env_name(m.VARIANT_CONTAINMENT_SPEC) is None
+    assert m.judge_key_env_name(m.MOCK_JUDGE_SPEC) is None
     root = _small_corpus(tmp_path)
     run = m.run_sealed(corpus_root=root,
                        reader_factory=_factory(

@@ -79,7 +79,7 @@
     "metric": {
       "gate": "superseded_live@<gate_arm> \u2014 per planted superseded claim: seen / rendered_live / flagged, attributed by the validity window",
       "no_regression": "verbatim_no_regression \u2014 per verbatim case: raw.committed vs distilled.committed, and the list of cases the gate arm lost",
-      "not_a_metric": "the judge's semantic grade is never published as a rate and never enters an absolute claim. It enters `metrics` only as the per-arm `committed` count behind the paired within-run comparison \u2014 see `scoring.two_number_split`",
+      "not_a_metric": "the judge's semantic grade is never THRESHOLDED and never enters an absolute/comparability claim. It enters `metrics` as the per-arm `committed` count, which the report PRINTS as the knowledge-update rate (reported, no pass threshold) and reads as the paired within-run comparison \u2014 see `scoring.two_number_split`",
       "reported_not_thresholded": "current_state@<arm> \u2014 the knowledge-update current-state rate; reported, never gated (D8)"
     },
     "not_claimed": "no rate is published as a benchmark result, and no absolute judge-scored accuracy is claimed. The published claim is the two mechanical clauses above; the judge's reading is additive and the D8 rate is reported without a threshold",
@@ -106,11 +106,11 @@
   },
   "schema": "ask-distilled-preregistration/v1",
   "scoring": {
-    "committed": "the official anscheck semantic judge (build_judge) grades the reader's answer against the SEALED gold answer, per case per arm, using the official template the sealed gold names (knowledge-update | single-session-user)",
+    "committed": "the anscheck semantic judge built from THIS record's `judge.model_spec` (build_judge) grades the reader's answer against the SEALED gold answer, per case per arm, using the official TEMPLATE the sealed gold names (knowledge-update | single-session-user). \u26d4 The TEMPLATE stays official; the JUDGE is this record's (`deepseek:deepseek-v4-pro`, pin `unpinned:`), never the official model \u2014 the pin is what says so",
     "superseded_live": "the assembled READER EVIDENCE is searched for the superseded claim's own text (ask_spotcheck._superseded_live_state): seen / rendered_live / flagged, attribution by the validity window so a raw turn is never mistaken for a distilled claim",
     "two_number_split": {
-      "d14_5085_shape": "the write-path harness keeps the judged arm entirely out of `metrics` (`tests/eval/write_path/runner.py`); this benchmark cannot \u2014 its `committed` IS the judge's grade \u2014 so the equivalent guarantee is pre-registered explicitly instead: no rate is published, and the judge-labelled half is only ever a paired comparison between the two arms of one run",
-      "judge_labelled": "`committed` \u2014 whether the reader's answer matched the sealed gold \u2014 is the anscheck judge's grade. It feeds the knowledge-update rate (REPORTED, never thresholded) and the paired verbatim/raw comparison. Both arms are graded by the SAME judge inside ONE run, so a SYSTEMATIC judge bias cancels across the arms; a PERMISSIVE judge does not, which is why no absolute rate is published from this half and why the judge is pinned",
+      "d14_5085_shape": "the write-path harness keeps the judged arm entirely out of `metrics` (`tests/eval/write_path/runner.py`); this benchmark cannot \u2014 its `committed` IS the judge's grade \u2014 so the equivalent guarantee is pre-registered explicitly instead: no threshold and no comparability claim for the judge-labelled rate, and the judge-labelled half is only ever a paired comparison between the two arms of one run",
+      "judge_labelled": "`committed` \u2014 whether the reader's answer matched the sealed gold \u2014 is the anscheck judge's grade. It feeds the knowledge-update rate (REPORTED, never thresholded) and the paired verbatim/raw comparison. Both arms are graded by the SAME judge inside ONE run, so a SYSTEMATIC judge bias cancels across the arms; a PERMISSIVE judge does not, which is why no THRESHOLD and no comparability claim are published for that rate (it is printed as a REPORTED number, \u00a73) and why the judge is pinned",
       "mechanical_and_authoritative": "corpus verification (manifest + hashes) and the D8 supersession gate (seen / rendered_live / flagged, from the validity window) need NO judge and are AUTHORITATIVE",
       "what_it_does_not_mean": "the judge-free D8 half is NOT a makeshift substitute for a judge that was skipped \u2014 it is the bar's authoritative half, and the judge-labelled half is declared as such"
     },

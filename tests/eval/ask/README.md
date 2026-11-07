@@ -62,7 +62,7 @@ enforced gate unless it is one of those six.
 | judge | `deepseek:deepseek-v4-pro` (provider **named** — see below) |
 | pin | `unpinned:deepseek:deepseek-v4-pro` (an honest label — see below) |
 | rubric | `longmemeval-official`, hash `82d07b0de05daa48` (**unchanged**: only *who* grades moved, not *what* they grade with) |
-| credential | the eval's dedicated key, **by name only** — `judge_key_env` in the receipt/report, never its value and never a fragment of it |
+| credential | the judge credential the run resolved, **by env var name only** — `judge_key_env` in the receipt/report, never its value and never a fragment of it. ⚠️ The name is the provider's standard env var; whether it holds a key dedicated to this eval or a shared one is an **operational** fact the receipt cannot establish, and it is not claimed. |
 
 > **OVERRIDES:** the LongMemEval official judge (`gpt-4o-2024-08-06`, the
 > paper's judge, and what this record pinned until 2026-11-07) — the owner
@@ -97,8 +97,10 @@ report printed that name.
   `verbatim_no_regression` (per verbatim case: `raw.committed` vs
   `distilled.committed`, plus the list of cases the gate arm lost).
   `current_state@<arm>` — the knowledge-update current-state **rate** — is
-  **reported, never thresholded** (D8). The judge's semantic grade is **not** a
-  metric (see the two-number split below).
+  **reported, never thresholded** (D8). The judge's semantic grade is **not a
+  thresholded or comparable metric** (see the two-number split below): it is
+  printed as the reported rate and read as the paired within-run comparison,
+  and no pass line or comparability claim is derived from it.
 - **Population and denominator.** Every case `corpus.cases` names, in **both**
   arms inside **one** invocation; every class `corpus.classes` names. The
   denominators are read from the corpus itself (`n_cases`, `seen`/`n`,
@@ -150,8 +152,9 @@ The **judge-labelled half** is `committed` — whether the reader's answer match
 the sealed gold — which feeds the knowledge-update **rate** (reported, never
 thresholded) and the paired verbatim/raw comparison. Both arms are graded by the
 **same** judge inside **one** run, so a *systematic* judge bias cancels across
-the arms; a *permissive* judge does not, which is why **no absolute rate is
-published** from this half and why the judge is pinned at all.
+the arms; a *permissive* judge does not, which is why **no threshold and no
+comparability claim are published** for that rate — it is printed as a
+*reported* number in §3, with no pass line attached.
 
 ⚠️ The write-path harness keeps its judged arm entirely out of `metrics`
 (`tests/eval/write_path/runner.py`). **This benchmark cannot** — its `committed`
