@@ -426,7 +426,7 @@ def test_a_sha_that_names_no_commit_is_invalid(monkeypatch):
     arm genuinely cannot fire here, and a test that pretended otherwise would be
     green for the wrong reason.
     """
-    monkeypatch.setattr(cl, "_commit_state", lambda sha: "absent")
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root=cl.REPO_ROOT: "absent")
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "deadbeef" * 5
     with pytest.raises(cl.InvalidLedger) as excinfo:
@@ -442,12 +442,11 @@ def test_an_unprovable_sha_is_not_a_defect(monkeypatch):
     record. `_commit_state`'s third outcome is what stops that — but a pin on the
     state MACHINE never asserts the DECISION: `validate` could go back to
     appending a problem for `unprovable` and every other test in this file would
-    still pass, because a full clone resolves the real ledger's sha to `exists`
-    and the shallow test SKIPS here (this checkout is not shallow). Asserted on
-    the wiring, for the same reason the `absent` arm is: a shallow clone cannot
-    produce the input that decides it.
+    still pass, because the shallow test below drives `_commit_state` DIRECTLY and
+    this one asserts on the wiring for the same reason the `absent` arm does —
+    `validate` is the caller that could start blaming.
     """
-    monkeypatch.setattr(cl, "_commit_state", lambda sha: "unprovable")
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root=cl.REPO_ROOT: "unprovable")
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "0" * 40
     # `validate` RAISES on a problem and returns the normalized rows otherwise, so
@@ -475,18 +474,117 @@ def test_the_committed_ledger_pins_its_denominator():
     assert len(data["criteria"]) == 22
 
 
-def test_a_shallow_checkout_is_unprovable_never_absent(monkeypatch):
+def test_a_shallow_checkout_is_unprovable_never_absent(tmp_path):
     """CI test jobs check out at `fetch-depth: 1`, where an ANCESTOR sha is not in
     the object database. Blaming the record for that reds the required check on a
-    legitimate ledger (#9075 r4 P1), so the third outcome must exist."""
-    monkeypatch.setattr(cl, "_commit_state", cl._commit_state)  # real impl, no stub
-    assert cl._commit_state("0" * 40) in {"absent", "unprovable"}
-    # The shallow probe is what decides: a missing object in a shallow clone is
-    # `unprovable`, and only a full clone may say `absent`.
-    shallow = cl._commit_state("0" * 40)
-    if shallow == "absent":
-        pytest.skip("this checkout is not shallow, so `absent` is the correct answer here")
-    assert shallow == "unprovable"
+    legitimate ledger (#9075 r4 P1), so the third outcome must exist.
+
+    Built as a REAL depth-1 clone rather than skipped. The previous version ran
+    against the live checkout and skipped whenever it was not shallow — which is
+    every developer box and most CI legs — so it asserted nothing on the path that
+    decides. This also pins `_commit_state`'s `repo_root` argument: the same sha is
+    `unprovable` in the shallow clone and `exists` in the full one, so a function
+    that ignored the tree it was asked about could not return both.
+    """
+
+    def git(*args: str, cwd: Path) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git("init", "-q", cwd=origin)
+    git("config", "user.email", "pins@example.com", cwd=origin)
+    git("config", "user.name", "pins", cwd=origin)
+    git("config", "commit.gpgsign", "false", cwd=origin)
+    (origin / "f.txt").write_text("one", encoding="utf-8")
+    git("add", "f.txt", cwd=origin)
+    git("commit", "-qm", "one", cwd=origin)
+    ancestor = git("rev-parse", "HEAD", cwd=origin)
+    (origin / "f.txt").write_text("two", encoding="utf-8")
+    git("commit", "-qam", "two", cwd=origin)
+
+    # `file://` forces the real transport; a plain local-path clone silently
+    # ignores `--depth` and would make this test pass for the wrong reason.
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(shallow)],
+        check=True,
+        capture_output=True,
+    )
+    full = tmp_path / "full"
+    subprocess.run(
+        ["git", "clone", "-q", f"file://{origin}", str(full)], check=True, capture_output=True
+    )
+
+    assert cl._commit_state("0" * 40, repo_root=shallow) == "unprovable"
+    assert cl._commit_state("0" * 40, repo_root=full) == "absent"
+    # The ancestor the ledger legitimately cites: unprovable where history is
+    # truncated, and NOT blamed there — which is the whole fix.
+    assert cl._commit_state(ancestor, repo_root=shallow) == "unprovable"
+    assert cl._commit_state(ancestor, repo_root=full) == "exists"
+
+
+def test_usage_outcomes_never_borrow_a_verdict_code():
+    """`--help` exited 0 (== CLEAN) and a bad flag exited 2 (== UNCOVERED).
+
+    A caller branching on the exit status read "a help screen was printed" as "the
+    ledger is clean", and a typo'd flag as "uncovered rows exist". Both mean "no
+    verdict was computed", so both now answer EXIT_USAGE and the other four codes
+    keep one meaning each.
+    """
+    for argv in (["--help"], ["-h"], ["check", "--nope"]):
+        proc = subprocess.run(
+            [sys.executable, str(TOOL), *argv],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            check=False,
+        )
+        assert proc.returncode == cl.EXIT_USAGE, (argv, proc.returncode, proc.stderr)
+        assert proc.returncode not in {cl.EXIT_CLEAN, cl.EXIT_UNCOVERED}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Unparseable YAML: `load_ledger`'s `except Exception` is the only guard.
+        "not: [valid: yaml",
+        # A root-level list: `isinstance(data, dict)` is the only guard.
+        "- just\n- a list\n",
+        # `measured_at` not a mapping, and a row that is not a mapping: each has its
+        # own `isinstance(…, dict)` guard, and neither was pinned.
+        "version: 1\nissue: 9664\ncriteria_expected: 1\nmeasured_at: garbage\ncriteria: []\n",
+        "version: 1\nissue: 9664\ncriteria_expected: 1\nmeasured_at: {ref: r, sha: "
+        + SHA
+        + ", date: 2026-11-07}\ncriteria:\n  - 42\n",
+    ],
+)
+def test_a_malformed_ledger_is_invalid_with_no_traceback(tmp_path, payload):
+    """T7 for the LEDGER SHAPE, not just for evidence entries.
+
+    Dropping any one of those four guards left the suite green and made the CLI
+    print an `AttributeError`/`yaml.YAMLError` traceback instead of the
+    `CAPSTONE-LEDGER: INVALID` marker that a log reader — and an in-process caller
+    catching `InvalidLedger` — keys on.
+    """
+    ledger = tmp_path / "ledger.yml"
+    ledger.write_text(payload, encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "check", "--ledger", str(ledger)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        check=False,
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "CAPSTONE-LEDGER: INVALID" in proc.stderr, proc.stderr
 
 
 def test_a_ledger_without_criteria_expected_is_invalid(tmp_path):

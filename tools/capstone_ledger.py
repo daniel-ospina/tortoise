@@ -76,6 +76,7 @@ Exit codes (a CLOSED set — a caller may branch on them):
     2  UNCOVERED   valid ledger, uncovered list non-empty (the real finding)
     3  DISABLED    the off-switch was set; NO verdict was computed
     4  ADVISORY    the report was rendered and NOT enforced
+    5  USAGE       `--help` or a bad invocation; NO verdict was computed
 
 Off-switch: `TORTOISE_CAPSTONE_LEDGER=off` (kill-switch — exits 3, never 0, so
 "disabled" can never be mistaken for "clean"), or `=advisory` (prints the full
@@ -94,7 +95,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 DEFAULT_LEDGER: Final[Path] = (
@@ -126,6 +127,30 @@ EXIT_DISABLED: Final[int] = 3
 #: `EXIT_CLEAN`: a caller that branches on the exit code would then read
 #: "advisory, 11 rows uncovered" as "clean".
 EXIT_ADVISORY: Final[int] = 4
+#: Argparse's own outcomes were colliding with two verdict codes: `--help` exits 0
+#: (indistinguishable from CLEAN) and a usage error exits 2 (indistinguishable from
+#: UNCOVERED). Both mean "no verdict was computed", so both get their own code and
+#: the other four keep one meaning each.
+EXIT_USAGE: Final[int] = 5
+
+
+class _Parser(argparse.ArgumentParser):
+    """An `ArgumentParser` that never borrows a VERDICT code for a usage outcome.
+
+    Without this, `capstone_ledger.py check --nope` exits **2** — the code a caller
+    branches on to mean "valid ledger, uncovered rows exist" — and `--help` exits
+    **0**, the code that means "every row is covered". The closed set must not carry
+    two meanings for one number.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+    def exit(self, status: int = 0, message: str | None = None) -> NoReturn:
+        # `--help`/`-h` reaches here with status 0; a help screen is not a verdict.
+        super().exit(EXIT_USAGE if status == 0 else status, message)
+
 
 _CMD_PREFIX: Final[str] = "cmd:"
 
@@ -212,7 +237,7 @@ def load_ledger(path: Path) -> dict[str, Any]:
 #: hold at least one artifact IN THE TREE. `cmd:` entries stay in the record
 #: because they are useful to a reader, and they are checked only for being a
 #: recorded command rather than an empty string.
-def _commit_state(sha: str) -> str:
+def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:
     """`exists` | `absent` | `unprovable` for a measured-at sha.
 
     The 40-hex shape check alone lets `measured_at.sha: deadbeef…` through, and
@@ -226,11 +251,17 @@ def _commit_state(sha: str) -> str:
     the sibling capstone's (`tools/capstone_preregistration_check.py`: "a verdict it
     cannot support is never given", #9075 r4 P1): a shallow checkout CANNOT answer,
     so it answers `unprovable` and the record is not blamed.
+
+    `repo_root` is honoured for the same reason `_evidence_is_real` honours it: a
+    validator asked to judge a DIFFERENT tree must not answer against this one. It
+    is also what makes the shallow arm testable AT ALL — a depth-1 clone built in
+    `tmp_path` can be asked directly, instead of the test skipping on every box
+    whose own checkout is full (which is every developer box and most CI legs).
     """
     try:
         proc = subprocess.run(
             ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
-            cwd=str(REPO_ROOT),
+            cwd=str(repo_root),
             capture_output=True,
             text=True,
             check=False,
@@ -239,7 +270,7 @@ def _commit_state(sha: str) -> str:
             return "exists"
         shallow = subprocess.run(
             ["git", "rev-parse", "--is-shallow-repository"],
-            cwd=str(REPO_ROOT),
+            cwd=str(repo_root),
             capture_output=True,
             text=True,
             check=False,
@@ -381,7 +412,7 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
             problems.append(f"`measured_at.sha` must be a 40-hex sha, got {sha!r}")
         else:
-            state = _commit_state(sha)
+            state = _commit_state(sha, repo_root)
             if state == "absent":
                 # Shape is not existence: a fabricated sha renders as provenance.
                 problems.append(f"`measured_at.sha` names no commit in this repository: {sha}")
@@ -620,7 +651,7 @@ def render(rows: list[dict[str, Any]], measured_at: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         description="Compute #9664's uncovered list from the committed verdict ledger."
     )
     parser.add_argument("command", nargs="?", default="check", choices=["check"])
