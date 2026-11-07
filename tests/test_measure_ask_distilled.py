@@ -582,10 +582,18 @@ def test_the_protocol_states_its_target_metric_population_bar_and_falsifier():
     assert "permissive" in json.dumps(split).lower()
     # …and it must not claim the judge-labelled RATE is unpublished: §3 PRINTS
     # it (reported, never thresholded). Saying otherwise makes the record
-    # contradict the report it ships with (#11460 review cycle 2, P1).
+    # contradict the report it ships with (#11460 review cycles 2 and 3).
     assert "no rate is published" not in json.dumps(split)
     assert "REPORTED" in split["judge_labelled"]
-    assert "no threshold and no comparability claim" in json.dumps(split)
+    assert "no THRESHOLD" in json.dumps(split)
+    # the D14 comparison field is the one a methodology author cites: it must
+    # say the rate IS printed, not that it does not exist
+    assert "REPORTED number" in split["d14_5085_shape"]
+    assert "no rate is published" not in split["d14_5085_shape"]
+    # …nor anywhere else in the record (the `not_claimed` field carried the same
+    # stale phrase until a verifier caught it: "no rate is published … the D8
+    # rate is reported" is self-contradictory in one sentence)
+    assert "no rate is published" not in json.dumps(record)
     # the gate's TEMPLATE stays official while the JUDGE is this record's —
     # `scoring.committed` may not describe the official JUDGE
     assert "official anscheck semantic judge (build_judge) grades" not in (
@@ -617,6 +625,20 @@ def _scored_deepseek(tmp_path: Path):
         scored=scored, manifest=ask_corpus.verify_manifest(root),
         prereg=_mock_prereg(root, judge_spec=m.PREREGISTERED_JUDGE_SPEC))
     return root, run, scored
+
+
+def test_the_two_number_split_does_not_claim_a_power_the_bar_does_not_have():
+    """#11460 review cycle 3 — the MODULE DOCSTRING used to promise that every
+    field the protocol fixes is a field the bar refuses to run without.
+
+    It is not: `evaluate_exit_bar` reads `corpus`, `reader`, `judge`, `seed`,
+    `arms`, `gate_arm`. The `measurement` / `per_category` / `two_number_split`
+    blocks are documentation of what those clauses ARE, and a reader who treats
+    them as gates believes a post-hoc edit of the pass line is impossible.
+    """
+    doc = m.__doc__ or ""
+    assert "every field the protocol fixes is a field the bar refuses" not in doc
+    assert "not** read by the bar" in doc
 
 
 def test_a_run_graded_by_the_pre_registered_judge_is_not_a_config_mismatch(

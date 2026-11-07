@@ -123,9 +123,11 @@ report printed that name.
   or a raw arm that committed none (the clauses would hold **vacuously**); a
   corpus whose manifest or hash does not verify; a run whose judge, reader,
   pin, rubric hash, seed flags, arm set or gate arm differ from this record.
-- **Not claimed.** No rate is published as a benchmark result and no absolute
-  judge-scored accuracy is claimed. The published claim is the two mechanical
-  clauses; the D8 rate is reported without a threshold.
+- **Not claimed.** No rate is claimed as a *thresholded* benchmark result and no
+  absolute or cross-benchmark accuracy is claimed. The published claim is the two
+  mechanical clauses; the D8 rate is **printed as a reported number** (§3 of the
+  report) with no pass threshold attached, and the judge's reading is never
+  presented as an absolute.
 
 ### Per-category rows (#11460 row surface; mechanism #2516)
 
@@ -159,8 +161,10 @@ comparability claim are published** for that rate — it is printed as a
 ⚠️ The write-path harness keeps its judged arm entirely out of `metrics`
 (`tests/eval/write_path/runner.py`). **This benchmark cannot** — its `committed`
 IS the judge's grade — so the record states the equivalent guarantee instead of
-borrowing a stronger claim: no rate is published, and the judge-labelled half is
-only ever a paired comparison between two arms of one run. The judge-free half
+borrowing a stronger claim: no **threshold** and no **comparability claim** are
+published for that rate — it IS printed as a *reported* number in §3 — and the
+judge-labelled half is only ever a paired comparison between two arms of one
+run. The judge-free half
 is **not** a makeshift substitute for a skipped judge; it is the bar's
 authoritative half, and the judge-labelled half is labelled as such.
 

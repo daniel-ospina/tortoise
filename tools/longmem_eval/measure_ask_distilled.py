@@ -54,10 +54,14 @@ stronger than they are:
   by this module.** The ordering claim ("the protocol commit is an ancestor of
   the run commit") lives in git, and the run report's Reproduction section
   points at ``git log -- tests/eval/ask/preregistration.json``. What the bar
-  DOES enforce is the content: corpus hash, case and class coverage, reader and
-  judge spec, judge pin and rubric hash, seed flags, arms, and the gate arm —
-  every field the protocol fixes is a field the bar refuses to run without, so
-  the protocol cannot be quietly re-worded after the fact and still pass.
+  DOES enforce is the content it READS: corpus hash, case and class coverage,
+  reader and judge spec, judge pin and rubric hash, seed flags, arms, and the
+  gate arm. The ``measurement``, ``per_category`` and ``two_number_split``
+  blocks are **not** read by the bar — they state what those enforced clauses
+  ARE (and what the bar deliberately does not threshold), so they must not be
+  cited as gates. What keeps them honest is the record's byte identity: the
+  committed file is compared to a fresh render, so none of it can be re-worded
+  after the fact without a commit that says so.
 
 5. **A verified commit binding** (:func:`verify_commit_binding`) — the run's
    ``--commit`` is not free text. At publish time the repository itself is
@@ -541,12 +545,14 @@ def protocol(*, reader_spec: str | None = None,
                 "arm set other than this record's is INCONCLUSIVE "
                 "(`config_mismatch`), never a pass",
             ],
-            "not_claimed": "no rate is published as a benchmark result, and "
-                           "no absolute judge-scored accuracy is claimed. "
-                           "The published claim is the two mechanical "
-                           "clauses above; the judge's reading is additive "
-                           "and the D8 rate is reported without a "
-                           "threshold",
+            "not_claimed": "no rate is claimed as a THRESHOLDED benchmark "
+                           "result and no absolute or cross-benchmark "
+                           "accuracy is claimed. The published claim is the "
+                           "two mechanical clauses above; the D8 rate is "
+                           "PRINTED as a reported number (§3 of the report) "
+                           "with no pass threshold attached to it, and the "
+                           "judge's reading is never presented as an "
+                           "absolute",
         },
         "corpus": {
             "path": "tests/eval/ask",
@@ -622,10 +628,10 @@ def protocol(*, reader_spec: str | None = None,
                                   "this benchmark cannot — its `committed` "
                                   "IS the judge's grade — so the "
                                   "equivalent guarantee is pre-registered "
-                                  "explicitly instead: no threshold and "
+                                  "explicitly instead: no THRESHOLD and "
                                   "no comparability claim for the "
-                                  "judge-labelled rate, and the "
-                                  "judge-labelled half "
+                                  "judge-labelled rate (it IS printed as a "
+                                  "REPORTED number, §3), and that half "
                                   "is only ever a paired comparison "
                                   "between the two arms of one run",
                 "what_it_does_not_mean": "the judge-free D8 half is NOT a "
