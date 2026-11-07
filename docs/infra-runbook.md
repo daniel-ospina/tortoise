@@ -2780,12 +2780,26 @@ undone.
   NOT IN EFFECT` — the entry is a false record *and* it freezes that secret's
   rotation) and an **expired** entry (`MITIGATION LAPSED`).
 - **Exit classes.** Exit 2 (never bypassable): the ledger is missing, malformed,
-  duplicates a name, names a name the manifest does not declare, names a
-  non-`gh-secret:` source, or names one of the app's **mandatory** secrets
+  **indented**, duplicates a name, names a name the manifest does not declare,
+  names a non-`gh-secret:` source, names one of the app's **mandatory** secrets
   (`FASTAPI_INTERNAL_KEY`, `TORTOISE_SECRET_PEPPER`, `FALKORDB_CLOUD_URI`,
   `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` — removing one of those is an
-  outage, not a mitigation). Exit 1 (incident-bypassable): expired, or not in
+  outage, not a mitigation), **or records a name the deploy's payload still stages
+  (`LEDGER NOT HONOURED`)**. Exit 1 (incident-bypassable): expired, or not in
   effect because the name is on Fly.
+  ⛔ `LEDGER NOT HONOURED` is exit 2 on purpose, and it is the one distinction in
+  this block that matters operationally: exit 1 is the `skip-fly-secret-provenance`
+  lane, so putting a broken sync filter there would let an operator arming that
+  bypass for an unrelated stale declaration re-stage every mitigated secret —
+  silently, because the bypass report speaks only about declarations.
+- **The window is real.** The filter knows a name only once the entry has **merged**:
+  between the `flyctl secrets unset` and the merge, a push to `main` re-stages the
+  secret from its GitHub secret, which is #11122 verbatim. Land the entry in the same
+  window and hold deploys to `main` until it merges. The reverse order is not a fix
+  either — an entry for a name still on Fly fails the deploy
+  (`MITIGATION NOT IN EFFECT`).
+- **`reason` is a review note, never the value.** The ledger is tracked and public,
+  and the gate prints every entry's `reason` on each deploy.
 - **A lapsed entry KEEPS suppressing on purpose.** Silently re-arming on a date
   is the same unannounced overwrite with extra steps; the deploy goes RED and the
   remedy is one line either way — re-affirm with a new `expires`, or delete the

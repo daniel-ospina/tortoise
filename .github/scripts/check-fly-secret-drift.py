@@ -96,16 +96,26 @@ Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
   0 — every Fly secret is declared and every declaration is honoured
   1 — drift found (undeclared Fly secret, a declaration the deploy does not
       honour, a name whose declaration names NO managing source, a guarded
-      declaration whose GitHub secret does not exist, a ledger entry the deploy
-      does not suppress, a ledger entry whose name is live on Fly, or an expired
-      ledger entry)
-  2 — could not determine state (missing/unparsable manifest, unreadable or
-      EMPTY secret list, malformed entry — including a `fly-only:` declaration
-      whose issue ref is empty or malformed — absent GH_SECRETS_PRESENT, a
-      payload that cannot be read, a ledger that is missing, malformed, names a
-      name the manifest does not declare, names a non-`gh-secret:` source, or
-      names one of the app's MANDATORY secrets). Fail-closed: an unreadable
-      state is never clean.
+      declaration whose GitHub secret does not exist, a ledger entry whose name
+      is live on Fly, or an expired ledger entry)
+  2 — the state cannot be determined or the ledger cannot be HONOURED (missing/
+      unparsable manifest, unreadable or EMPTY secret list, malformed entry —
+      including a `fly-only:` declaration whose issue ref is empty or malformed
+      — absent GH_SECRETS_PRESENT, a payload that cannot be read, a ledger that
+      is missing, malformed, indented, names a name the manifest does not
+      declare, names a non-`gh-secret:` source, names one of the app's MANDATORY
+      secrets, **or a ledgered name the payload still stages**). Fail-closed: an
+      unreadable state is never clean.
+
+      #11122: `LEDGER NOT HONOURED` is exit 2, NOT exit 1, and that distinction is
+      the whole protection. Exit 1 is the deploy's documented bypass lane
+      (`skip-fly-secret-provenance`), so classifying a broken sync filter there
+      would let the one bypass an operator arms for an UNRELATED stale
+      declaration re-stage every mitigated secret — silently, because the bypass
+      report speaks about declarations, never about mitigations. The ledger's own
+      header states the rule: a ledger the machinery cannot honour is worse than
+      no ledger, because the entry reads as a decision while the deploy does the
+      opposite.
 
 Env seams (all optional; used by the hermetic test suite):
   FLY_SECRETS_FILE          fixture path holding the ``--json`` secret list
@@ -123,7 +133,9 @@ Env seams (all optional; used by the hermetic test suite):
   FLY_MITIGATION_LEDGER     mitigation-ledger path override (#11122). Also
                             seeded into the stubbed payload run, so the sample
                             the gate classifies is filtered by the SAME ledger a
-                            real deploy would read.
+                            real deploy would read. NOTE it is not test-only: the
+                            `Set all app secrets on Fly.io` step reads it too,
+                            so there it is a PRODUCTION seam.
   FLY_MITIGATION_TODAY      ``YYYY-MM-DD`` override for "today" when judging
                             ledger expiry (hermetic tests; production uses UTC).
   FLY_STUB_TIMEOUT          seconds before the stubbed payload run is treated as
@@ -262,9 +274,14 @@ _SECRET_TMPL_RE = re.compile(r"\$\{\{\s*secrets\.([A-Za-z0-9_]+)\s*\}\}")
 # (`#11092`), and comment-stripping at the first `#` truncated exactly the field
 # that makes the entry reviewable.
 _LEDGER_RE = re.compile(
-    r"^(?P<name>[A-Z][A-Z0-9_]*)\s+owner=(?P<owner>\S+)\s+"
-    r"expires=(?P<expires>\d{4}-\d{2}-\d{2})\s+reason=(?P<reason>.+)$"
+    r"^(?P<name>[A-Z][A-Z0-9_]*)[ \t]+owner=(?P<owner>\S+)[ \t]+"
+    r"expires=(?P<expires>\d{4}-\d{2}-\d{2})[ \t]+reason=(?P<reason>.+)$"
 )
+# The separators are SPACE/TAB only, never ``\s``: the sync filter in the workflow
+# tokenises with bash's ``[[:space:]]``, so a separator the glob class does not
+# match (U+00A0 and friends) would be a name to this parser and a fragment of the
+# name to bash — the two readers must accept the SAME lines or an entry is
+# honoured in one place and ignored in the other (#11122 review F6).
 
 
 def _yaml_module():
@@ -696,7 +713,7 @@ def _today() -> dt.date:
 
 
 def read_mitigation_ledger(
-    path: Path, declared: dict[str, str], today: dt.date
+    path: Path, declared: dict[str, str]
 ) -> dict[str, Mitigation]:
     """Parse the ledger, refusing every entry the mechanism could not honour.
 
@@ -708,12 +725,32 @@ def read_mitigation_ledger(
     Every rejection here is exit-2 (unreadable state), never a bypassable
     violation, and the reason is the same in each case: an entry that reads as a
     decision while the deploy does the opposite is worse than no entry at all.
+
+    The grammar is shared with a bash reader (the sync filter in
+    ``deploy-hosted.yml``, which takes the line's first whitespace-delimited token
+    as the name). Anything the two readers would disagree about is therefore
+    REFUSED here rather than parsed generously — see the INDENT check below.
     """
     entries: dict[str, Mitigation] = {}
     for lineno, raw in enumerate(path.read_text().splitlines(), start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        if raw != raw.lstrip():
+            # An INDENTED entry parses fine here (the line is stripped first) and is
+            # silently ignored by the sync filter (which takes the first
+            # whitespace-delimited token of the RAW line, gets an empty string, and
+            # skips it). Letting that through produced the worst possible report: the
+            # gate accepted the entry, saw the payload still stage the name, and told
+            # the operator to fix `deploy-hosted.yml` — a fault that is not there —
+            # while the plausible remedy (arm the bypass) re-arms the mitigation.
+            # Exit 2, and name the real fault.
+            raise ValueError(
+                f"{path.name}:{lineno}: entry starts with whitespace — the sync filter "
+                "in deploy-hosted.yml reads the FIRST whitespace-delimited token of "
+                "each line, so an indented entry names an empty secret and would be "
+                "silently ignored (write the name at column 0)"
+            )
         match = _LEDGER_RE.match(line)
         if not match:
             raise ValueError(
@@ -741,7 +778,7 @@ def read_mitigation_ledger(
                 "manifest, so there is no managing source for the ledger to suppress "
                 "(declare it gh-secret:<GH_NAME> first, or drop the entry)"
             )
-        kind, _, gh_name = source.partition(":")
+        kind = source.partition(":")[0]
         if kind != "gh-secret":
             raise ValueError(
                 f"{path.name}:{lineno}: {name} is declared {kind}, and the ledger only "
@@ -856,7 +893,7 @@ def main() -> int:
     ledger_file = ledger_path()
     try:
         today = _today()
-        ledger = read_mitigation_ledger(ledger_file, declared, today)
+        ledger = read_mitigation_ledger(ledger_file, declared)
     except (OSError, ValueError) as exc:
         _err(f"cannot determine secret provenance: mitigation ledger unusable ({exc})")
         return 2
@@ -906,6 +943,12 @@ def main() -> int:
     )
 
     violations: list[str] = []
+    #: Exit-2 class: the ledger cannot be HONOURED by this tree. Kept separate from
+    #: `violations` because the two classes are not the same kind of fact — see the
+    #: module docstring's exit-code block. A violation is a drift you may release
+    #: with the documented bypass; this one may never be released, because
+    #: releasing it is what re-arms the mitigation.
+    unhonourable: list[str] = []
     conditional: list[str] = []
     mitigated = set(ledger)
 
@@ -914,15 +957,25 @@ def main() -> int:
     # actually suppressed the name. Without this, deleting the filter re-arms
     # every mitigation and the ledger keeps reading as a decision — the same
     # "declaration the deploy no longer honours" rot the manifest half already
-    # refuses. BOTH synthetic samples: a `-z`-guarded assignment shows up only in
-    # the no-secret run, and it would re-arm the name just as well.
-    for name in sorted(mitigated & (assigned | unconditional)):
-        violations.append(
+    # refuses. BOTH synthetic samples AND the run sample: a `-z`-guarded assignment
+    # shows up only in the no-secret run, and a guard neither synthetic sample
+    # reproduces (e.g. `A present AND B absent`) shows up only in `live` — either
+    # one would re-arm the name just as well.
+    #
+    # NOT a `violations` entry: this is the exit-2 class. Exit 1 is the deploy's
+    # documented bypass lane, and a broken sync filter released by an operator's
+    # unrelated `skip-fly-secret-provenance` re-stages every mitigated secret —
+    # silently, because that bypass's report speaks about declarations, never
+    # about mitigations. The ledger's own header states the rule this enforces:
+    # a ledger the machinery cannot honour is worse than no ledger.
+    for name in sorted(mitigated & (assigned | unconditional | live)):
+        unhonourable.append(
             f"LEDGER NOT HONOURED — {name!r} is recorded as deliberately absent in "
             f"{ledger_file.name} but deploy-hosted.yml still stages it (the payload "
             "carries the assignment), so the next deploy would re-arm the mitigation. "
             "The `Set all app secrets on Fly.io` step must filter ledger names out of "
-            "ARGS before `flyctl secrets set`"
+            "ARGS before `flyctl secrets set`. Exit 2: this is never bypassable — "
+            "releasing it is the re-arm"
         )
 
     # (0b) A ledgered name that is still LIVE on Fly is a false record: the removal
@@ -1176,6 +1229,17 @@ def main() -> int:
             "secret is absent is the #4126 defect — make the assignment unconditional, or "
             "record the value in version control."
         )
+
+    if unhonourable:
+        print("::error::Fly secret provenance CANNOT BE HONOURED (exit-2, never bypassable):")
+        for v in unhonourable:
+            print(f"  - {v}")
+        print(
+            "The ledger records a deliberate absence the deploy would undo, so the two "
+            "halves have rotted apart. Fix the SYNC step (or the entry) — a bypass is "
+            "the one action that re-arms every mitigation it names."
+        )
+        return 2
 
     if violations:
         print("::error::Fly secret provenance FAILED:")
