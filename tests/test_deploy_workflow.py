@@ -5588,6 +5588,27 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             # figure dated to the phrase and every truthful attribution went RED.
             return norm[start:pos]
 
+        _ABBREVIATION_PERIOD = re.compile(r"\b(i\.e|e\.g|viz|cf|vs)\.", re.I)
+
+        def _ends_a_sentence(text: str) -> bool:
+            """True when `text` ends at a SENTENCE-ENDING full stop, not an abbreviation's.
+
+            ⛔ ONE PRIMITIVE, TWO CALLERS (#11191 review r26, P2/P3 — MEASURED both ways).
+            This is the same sentinel substitution `_sentence_tail_hard` uses, applied to
+            the BOUNDARY instead of to the cut: `i.e.`/`e.g.`/`viz.`/`cf.`/`vs.` keep their
+            period, so an appositive cannot open a clause (`…, i.e. the commit for #9601,
+            is `ff6379eb2`.` must stay REFUSED) — and the test is CASE-INDEPENDENT, so
+            `…, i.e. The commit …` is refused as well and a genuinely lower-case sentence
+            start is still a boundary. Both directions were measured at three trees before
+            this replaced a capitalisation test.
+            """
+            return bool(
+                re.search(
+                    r"\.\s*$",
+                    _ABBREVIATION_PERIOD.sub(lambda _m: _m.group(1) + "\ue000", text),
+                )
+            )
+
         def _sentence_tail_hard(text: str) -> str:
             """`text` cut at its first SENTENCE-ENDING full stop, abbreviations protected.
 
@@ -5606,11 +5627,9 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             Cutting the tail at `;` would accept the second.
             """
             sentinel = "\ue000"
-            src = re.sub(
-                r"\b(i\.e|e\.g|viz|cf|vs)\.",
+            src = _ABBREVIATION_PERIOD.sub(
                 lambda _m: _m.group(1) + sentinel,
                 text,
-                flags=re.I,
             )
             return re.split(r"\.(?=\s|$)", src, maxsplit=1)[0].replace(sentinel, ".")
 
@@ -5787,7 +5806,14 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                     # Requiring the co-reference to START A SENTENCE distinguishes a full
                     # stop from `i.e.`/`e.g.`/`cf.` without maintaining a closed list of
                     # abbreviations (a list would be the same spelling-keyed bet this
-                    # predicate keeps losing).
+                    # predicate keeps losing). The abbreviation SENTINEL is the primitive
+                    # `_sentence_tail_hard` already uses (`_ABBREVIATION_PERIOD`), so this is
+                    # one definition with two callers, not a second spelling list — and it
+                    # is CASE-INDEPENDENT, which the first cut of this rule was not
+                    # (#11191 review r26, P2/P3 — MEASURED both ways: keying on
+                    # `isupper()` ACCEPTED `…, i.e. The commit for #9601, is `ff6379eb2`.`
+                    # while `origin/main` refuses it, and REFUSED a lower-case sentence
+                    # start that `origin/main` accepts).
                     _opens_clause = bool(
                         not _before.strip()
                         or re.search(
@@ -5798,18 +5824,20 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                             _before,
                             re.I,
                         )
-                        or (
-                            re.search(r"\.\s*$", _before)
-                            and tail[_hit.start() : _hit.start() + 1].isupper()
-                        )
+                        or _ends_a_sentence(_before)
                     )
                     if _opens_clause:
                         # ⛔ …AND NOTHING BOUNDS (a) TO A SINGLE MENTION (#11191 review
                         # r25, P1 — MEASURED FALSE RED, TWICE). The bound r24 added here
                         # sliced `tail[_hit.end():]` to the END of the tail, so a second,
                         # TRUTHFUL mention of the #9601 merge in a LATER clause read as the
-                        # equivalence restated. Both rows are ACCEPTED by `origin/main` and
-                        # by `1895c94a7`, and were REFUSED here:
+                        # equivalence restated. Row 1 is accepted by `origin/main` AND by
+                        # `1895c94a7` (a regression the last push introduced); row 2 is
+                        # accepted by `origin/main` but was REFUSED by `1895c94a7`, i.e. a
+                        # false RED the branch had already carried since r23 — both are
+                        # REFUSED here and are closed by the deletion below (#11191 review
+                        # r26, P3 — this line said BOTH were accepted by `1895c94a7`, which
+                        # the measurement does not support):
                         #   "…is false; the tree is `047c91f7a`, and the commit for #9601
                         #    is `ff6379eb2`; the census at `ff6379eb2` returned 5 lines."
                         #   "…is false; the true tree is `047c91f7a`, while the commit for
@@ -7489,6 +7517,13 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     _abbreviation_appositive_known_open = (
         f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
         f"e.g. the #9601 merge, is `{_FALSE_TREE}`.",
+        # …and the SAME label spelling behind `i.e.` (#11191 review r26, P2 — MEASURED):
+        # the r25 fix closed `i.e. THE COMMIT FOR #9601` (the subject `_COREF_ASSERTS_FALSE`
+        # can see); the `the #<n> merge` label is invisible to it whatever the abbreviation,
+        # so recording one spelling and not the other would present a partial residue as a
+        # complete one. The mechanism is abbreviation-INDEPENDENT, so the row set is too.
+        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
+        f"i.e. the #9601 merge, is `{_FALSE_TREE}`.",
     )
     _abbreviation_appositive_now_refused = [
         s for s in _abbreviation_appositive_known_open if _refuses_before_9548(s)
@@ -7498,6 +7533,32 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "residual has been CLOSED and this characterisation should be inverted "
         "(#11191 review r25, P2):\n  "
         + "\n  ".join(_abbreviation_appositive_now_refused)
+    )
+    # ⚠️ …AND A POSSESSIVE-RELATION SUBJECT IS A FOURTH OPEN SHAPE, with a DIFFERENT and
+    # harder diagnosis (#11191 review r25 F1 / r26 — MEASURED at `origin/main`,
+    # `1895c94a7` and this head): the refutation tail `…its parent is `ff6379eb2`.` is
+    # ACCEPTED here while `origin/main` REFUSES it, because `_COREF_ASSERTS_FALSE`'s subject
+    # alternation has no possessive form (`its parent`, `the tree's parent`) — so neither
+    # the veto nor `_tail_reasserts_equivalence` can see the co-reference.
+    # ⛔ THE OBVIOUS FIX IS A MEASURED TRADE, NOT A FIX (r26): adding the possessive forms
+    # closes this row AND turns the TRUTHFUL
+    #   "The tree before #9548 is `047c91f7a`; its parent is `ff6379eb2`."
+    # into a REFUSAL, which `origin/main` accepts. Whether `its` refers to the denied false
+    # mention or to the true tree is a fact about the repository, not a shape a regex reads —
+    # so the class is pinned here as open instead of being half-fixed into a new false RED.
+    _possessive_relation_known_open = (
+        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; its parent is "
+        f"`{_FALSE_TREE}`.",
+    )
+    _possessive_relation_now_refused = [
+        s for s in _possessive_relation_known_open if _refuses_before_9548(s)
+    ]
+    assert not _possessive_relation_now_refused, (
+        "the possessive-relation alibi is now REFUSED — if that refusal is correct, and it "
+        "does not refuse the truthful `…; its parent is `ff6379eb2`.` after a POSITIVE "
+        "first clause, this residual has been CLOSED and this characterisation should be "
+        "inverted (#11191 review r26, P2):\n  "
+        + "\n  ".join(_possessive_relation_now_refused)
     )
     # ⛔ …AND THE ARM READS THE OCCURRENCE, NOT THE SENTENCE (#11191 review r21 P3 / r22 P3
     # — MEASURED). r21 measured that reverting `_REFUTED_INVERTED.search(own)` to
