@@ -10095,8 +10095,10 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "The note never says, as the row records, that the tree immediately before #9548 "
         "was wrong.",
         # ⛔ …AND A PARENTHETICAL ASIDE DOES NOT DECIDE IT EITHER (#11191 review r6, P2 —
-        # MEASURED fail-open vs `origin/main`, 3/3 rows: all three were ADMITTED before the
-        # `(`/`)` exclusion was removed from the gap, and `origin/main` REFUSES all three).
+        # MEASURED fail-open vs `origin/main`, which REFUSES both rows below as it refuses the
+        # bare spellings above). Putting `(`/`)` back into the gap reds EXACTLY these two rows
+        # and nothing else, so the exclusion buys these two — not asides' punctuation
+        # generally.
         "The note never says (as the row records) that the tree immediately before #9548 "
         "was wrong.",
         "The note never says the tree (which the census names) immediately before #9548 "
@@ -10160,8 +10162,12 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # the next round gets a truth-RED.
         # ⛔ THE CONTRACTION FAMILY (#11191 review r33-R3, P2 — MEASURED inert leg). The
         # first cut listed `n't` inside a `\b(?:…|n't)\b` alternation, which CANNOT match:
-        # a word boundary cannot sit between `n` and `'` inside a contraction, so all three
-        # of these PASSED at every head while their `does not say` twin was refused.
+        # the LEADING `\b` asserts a boundary before `n`, and in a contraction `n` follows a
+        # letter, so the branch is dead. (Note `n\b'` alone DOES match — the boundary sits
+        # between `n` and `'`; it is the leading anchor, not the apostrophe, that was the
+        # defect.) Each row below is pinned by the branch that carries it: reverting the
+        # `isn't` branch reds only the `It isn't the case` row, and dropping `true` from the
+        # `it's not <X>` alternation reds only the `It's not true` row.
         "The note doesn't say the tree immediately before #9548 was wrong.",
         "It isn't said anywhere that the tree immediately before #9548 was wrong.",
     )
@@ -10181,11 +10187,11 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "The note records that the tree immediately before #9548 was false.",
         "The claim that `ff6379eb2` is the tree before #9548 is false.",
         # ⛔ A DISTRACTOR NEGATOR MUST NOT VETO A POSITIVE FRAME (#11191 review r33-R3, P1 —
-        # MEASURED NEW FALSE RED, 8/8 rows, all ACCEPTED pre-patch and REFUSED by the first
+        # MEASURED NEW FALSE RED, 7/7 rows, all ACCEPTED pre-patch and REFUSED by the first
         # cut). The permissive gap let ANY negator within 40 characters negate the verb, so
         # every one of these reddened a truthful sentence — the exact false-RED class this
         # pin set exists for. Each row carries a DIFFERENT construction, because one spelling
-        # would leave the other seven open (the mistake the first cut made in reverse).
+        # would leave the other six open (the mistake the first cut made in reverse).
         "No doubt the note says the tree immediately before #9548 was wrong.",
         "Nobody denies that the note says the tree immediately before #9548 was wrong.",
         "None of this changes that the note says the tree immediately before #9548 was wrong.",
