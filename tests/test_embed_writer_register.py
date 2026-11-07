@@ -754,9 +754,13 @@ def test_every_declaration_cites_a_seam_and_an_owning_issue():
     assert _resolve_module("tortoise.projection") == (
         REPO_ROOT / "tortoise" / "projection" / "__init__.py"
     ), "a package must win over a same-named module — `tortoise/projection.py` is a shim"
-    assert _resolve_module("tortoise.config") == REPO_ROOT / "tortoise" / "config.py", (
-        "`tortoise/config/` carries no `__init__.py`, so the module is the only candidate"
-    )
+    # ⛔ NO second arm on `tortoise.config` (round-17 review). It was written as "the module is the
+    # only candidate", but no edit to the resolver can move it: an order revert reds the
+    # `tortoise.projection` arm above first (that is the arm with two candidates), and the tree
+    # change it nominally guards — gaining `tortoise/config/__init__.py` — cannot be reached at all
+    # now (`tests/conftest.py` fails at import, `cannot import name 'RELATIVE_PATH_ERROR'`). An
+    # assertion no mutation of this artifact can red is dead weight, so the ORDER is pinned by the
+    # arm that has two candidates, and nothing else.
 
 
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
@@ -846,6 +850,30 @@ INVISIBLE_SHAPES = {
     ),
 }
 
+#: The shape names `INVISIBLE_SHAPES` must hold — pinned by NAME SET, not by size. A size pin is
+#: replaced by substitution (drop one shape, duplicate another, `len` unchanged), and the loop in
+#: `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` is SILENT over a table that lost
+#: an entry: measured in review round 17, deleting `module_scope_container_key` left this file green,
+#: and replacing the whole table with `{}` left it green too — so the register's "pinned as
+#: `INVISIBLE_SHAPES`' `module_scope_container_key` and `class_scope_container_key`" sentence would
+#: have outlived the pins it names. A new blind shape belongs here AND in the register's "What the
+#: closure claim does NOT cover" block.
+INVISIBLE_SHAPE_NAMES = (
+    # shapes neither pass can decide (the regex sees no `embedding =`/`set_embedding_clause(`,
+    # and the AST pass inspects assignment targets only)
+    "map_merge",
+    "inline_property_map",
+    "whole_node_replace",
+    "interpolated_property",
+    "container_helper",
+    "computed_key",
+    "module_constant_clause",
+    "dict_literal_embedding_key",
+    # positions the walk never enters (it visits `def`s only)
+    "module_scope_container_key",
+    "class_scope_container_key",
+)
+
 
 def _scratch_root(tmp_path: Path, name: str, body: str) -> Path:
     """A `tortoise/`-shaped root the probe can walk — no repo copy, one module file."""
@@ -911,6 +939,32 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
         "a container-key store inside a `def`-nested class body is no longer CAUGHT as "
         f"`unresolved_write` ({nested}) — the register's class-scope caveat now over-claims in the "
         "other direction; repair discovery or restate the caveat, do not drop this row"
+    )
+    # ⛔ NON-VACUITY + MEMBERSHIP (round-17 review). The loop below is SILENT over a table that lost
+    # an entry, so without these rows deleting a shape — or emptying the table — leaves this file
+    # green while the register still says "pinned as `INVISIBLE_SHAPES`' …".
+    assert INVISIBLE_SHAPES, (
+        "`INVISIBLE_SHAPES` is empty, so the loop below proves nothing — every 'the detector does "
+        "not see this shape' claim in the register is then unpinned"
+    )
+    assert set(INVISIBLE_SHAPES) == set(INVISIBLE_SHAPE_NAMES), (
+        f"the blind-spot table is {sorted(INVISIBLE_SHAPES)}, not {sorted(INVISIBLE_SHAPE_NAMES)} — "
+        "add or remove the shape HERE and in the register's 'What the closure claim does NOT "
+        "cover' block together; the register cites two of these by name as pinned"
+    )
+    # The register cites shapes BY NAME ("pinned as `INVISIBLE_SHAPES`' `module_scope_container_key`
+    # and `class_scope_container_key`"), so READ the citation out of the artifact and require it to
+    # land on an entry. Derived rather than restated here: a name added to the prose with no pin
+    # reds this row, and so does a pin deleted while the prose keeps citing it.
+    cited = set(re.findall(r"`([a-z][a-z0-9_]*_key)`", register.__doc__))
+    assert cited, (
+        "the register's docstring no longer cites a `*_key` blind shape by name — if that citation "
+        "was removed deliberately, remove this row with it; leaving it means nothing couples the "
+        "prose to `INVISIBLE_SHAPES`"
+    )
+    assert cited <= set(INVISIBLE_SHAPES), (
+        f"the register cites {sorted(cited - set(INVISIBLE_SHAPES))} as pinned by "
+        "`INVISIBLE_SHAPES` and no such entry exists — the claim would outlive its pin"
     )
     for shape, body in INVISIBLE_SHAPES.items():
         found = probe._embedding_writers(_scratch_root(tmp_path, shape, body))

@@ -1158,20 +1158,20 @@ def test_the_installer_guard_clauses_each_decline_by_effect(monkeypatch):
     # (0) NON-VACUITY — all three clauses satisfied, marker absent: the installer
     # MUST install. Without this row each "declines" assertion below is
     # satisfiable by an installer that never assigns anything at all.
+    # ⛔ NO local "and it recorded the marker" row (round-17 review). `_arm_the_installer`
+    # clears `_tortoise_stamp_installed`, so a post-install `True` here LOOKS like
+    # the installer's own record — but the precondition at the top of this test
+    # already asserted that same attribute, set by conftest's install through the
+    # SAME `install_thread_stamp`, so deleting the product's record line reds the
+    # PRECONDITION before this arm is ever reached. The row could not fail on its
+    # own, and the behaviour it named is pinned by that precondition plus the
+    # idempotence row in `test_stem_registry_prod_parity_and_patch_idempotence`.
     _arm_the_installer(monkeypatch, session=True, mode="1")
     proj_mod.install_thread_stamp()
     assert threading.Thread.start is proj_mod._thread_start_inherit_stem, (
         "with the session live, the test-mode signal set and the marker absent, "
         "the installer must install the stamp — otherwise the decline arms below "
         "prove nothing about the guards that are supposed to fire")
-    # …and it must RECORD the marker, which is what makes the NEXT re-invocation
-    # idempotent. Asserted here rather than inferred: the marker clause's own pin
-    # reads only the marker's PRESENCE, so an installer that assigns without
-    # recording would leave that clause unable to fire on a second call.
-    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, (
-        "the installer installed the stamp but did not record "
-        "`_tortoise_stamp_installed`, so the marker clause can never fire on a "
-        "re-invocation")
 
     # (d) the SESSION-FLAG clause: marker absent (so the marker clause would let
     # the install through) and `_TEST_SESSION_ACTIVE` off. This is the signal a
