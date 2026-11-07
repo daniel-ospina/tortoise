@@ -2816,7 +2816,9 @@ undone.
   enabled-with-missing-secrets, and the sweep plus the staleness watcher start
   disabled. That is not "the mitigation working", so it is reported as
   `MITIGATION NOT IN EFFECT` (exit 1) with the one-command remedy — unset the flag on
-  Fly so the fail-closed value is what the next boot reads.
+  Fly so the fail-closed value is what the next boot reads. The same arm fires when a
+  **non-empty `fly.toml [env]` value** supplies the name — that path applies whatever
+  the secret list says, so the omission is equally not in effect.
 - **The gate's half is the reverse check**, so the two cannot rot apart: a ledger
   entry the payload still carries is `LEDGER NOT HONOURED` (dropping the filter
   would otherwise re-arm every mitigation while the ledger kept reading as a
