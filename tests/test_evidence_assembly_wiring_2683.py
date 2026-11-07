@@ -197,10 +197,13 @@ def _question(*, qtype: str = "multi-session", qid: str = "q2683w") -> dict:
     }
 
 
-def _stub_pool(monkeypatch, monkeypatch_target) -> list[dict]:
+def _stub_pool(monkeypatch, target) -> None:
     """A DETERMINISTIC pool: the raw source chunk ranked ABOVE its own distilled
     point (so the collapse must be order-independent, not arrival-ordered), the
-    cross-session restatement second, the unrelated statement last."""
+    cross-session restatement second, the unrelated statement last.
+
+    ``target`` is the MODULE the caller patches (``tools.longmem_eval.retrieve``),
+    never a monkeypatch object: the patch has to land on the name the SUT calls."""
     chunk = {"id": CHUNK_ID, "content": f"user: {QUOTE}\nthe buyer paid cash.",
              "match_source": "fts"}
     point = {"id": POINT_ID, "content": QUOTE, "match_source": "fts"}
@@ -208,14 +211,11 @@ def _stub_pool(monkeypatch, monkeypatch_target) -> list[dict]:
     other = {"id": OTHER_ID, "content": "i live in lisbon",
              "match_source": "fts"}
     pool = [dict(chunk), dict(point), dict(dup), dict(other)]
-    calls: list[dict] = []
 
     def _fake(sdk, query, **kw):
-        calls.append(kw)
         return [dict(h) for h in pool]
 
-    monkeypatch.setattr(monkeypatch_target, "hybrid_search", _fake)
-    return calls
+    monkeypatch.setattr(target, "hybrid_search", _fake)
 
 
 def _ids(items: list[dict]) -> list[str]:
@@ -247,6 +247,15 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     # the arm marker + the census the run config records (D2: ON only)
     assert on["evidence_assembly"] is True
     stats = on["evidence_assembly_stats"]
+    # THE WHOLE CENSUS, not a sample of it: this dict IS the run config's
+    # record of the arm, so a key that grows or disappears is a behaviour
+    # change the lane would otherwise ship unseen.
+    assert set(stats) == {
+        "on", "applied", "tr_excluded", "pool_items", "package_items",
+        "packages", "collapsed_duplicates", "verbatim_refs_kept",
+        "value_first_packages",
+    }, sorted(stats)
+    assert stats["on"] is True, stats
     assert stats["applied"] is True, stats
     assert stats["tr_excluded"] is False, stats
     assert stats["pool_items"] == 4, stats
@@ -256,6 +265,11 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     assert stats["collapsed_duplicates"] == 1, stats
     assert stats["verbatim_refs_kept"] == 1, stats
     assert stats["package_items"] == 3, stats
+    # #9092's mark census (#1763/#1945 value classes): NONE of these four hits
+    # carries a value mark, so the count is 0 — pinned rather than left
+    # unasserted, or a regression that credited every anchor as value-first
+    # would read as "census present" in the run record.
+    assert stats["value_first_packages"] == 0, stats
 
     # the READER WINDOW is the package: the duplicate is gone and the point's
     # own chunk sits immediately after its anchor (a flat anchor-then-refs
@@ -309,6 +323,14 @@ def test_the_off_switch_leaves_the_old_path_unchanged(seeded_sdk, monkeypatch):
         "the OFF path must keep today's exact outcome shape (D2)")
     assert _ids(default["context_points"]) == _ids(
         explicit_off["context_points"])
+    # the EXPLICIT-FALSE arm keeps today's shape too (D2): the arm keys are
+    # ON-only, so a regression that emits them whenever the kwarg is PASSED
+    # reds here instead of shipping under window-equality alone.
+    assert "evidence_assembly" not in explicit_off, (
+        "the OFF path must keep today's exact outcome shape (D2): the arm key "
+        "is ON-only, not a False marker")
+    assert "evidence_assembly_stats" not in explicit_off, (
+        "the OFF path must keep today's exact outcome shape (D2)")
 
     # garbage never arms (fail-safe, no raising)
     monkeypatch.setenv("TORTOISE_LME_EVIDENCE_ASSEMBLY", "maybe")
