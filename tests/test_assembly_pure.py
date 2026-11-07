@@ -746,10 +746,12 @@ def test_recency_narrative_latest_is_not_an_ordering_instruction():
     cleanly and CAPTURES both anchors. The narrative clause is carried into the
     term VERBATIM (``extract_subject_terms`` does not strip it — see
     ``test_recency_relative_clause_selector_residual_is_declared_8775``), so the
-    justification is not "no arm re-reads it": it is that the token is
-    ATTRIBUTIVE — it neither orders nor SELECTS the anchor's referent — which is
-    the only thing #8775 exempts. Before the narrowing it returned ``None``; the
-    shape is ``interval`` with its 2 anchor terms intact.
+    justification is not "no arm re-reads it". It is also not attributive-ness:
+    the exemption tests NO semantics at all — it is purely STRUCTURAL (an opener
+    in the token's own clause of a captured anchor), which is why a `latest` that
+    SELECTS its referent is exempted too and is the declared residual, not a
+    veto. Before the narrowing this returned ``None``; the shape is ``interval``
+    with its 2 anchor terms intact.
 
     Non-vacuous: the off-switch test below shows the same question returning
     ``None`` under the pre-fix guard, so this assertion is the fix, not a
@@ -1011,6 +1013,30 @@ def test_recency_relative_clause_selector_residual_is_declared_8775():
         mp.setenv(RECENCY_NARRATIVE_LATEST_ENV, "0")
         for q in _RELATIVE_CLAUSE_SELECTOR_RESIDUAL:
             assert classify_question(q) is None, q
+
+
+def test_recency_opener_set_is_the_relative_pronouns_only():
+    """#8775 (review round 4, P3): the exemption's opener set is the RELATIVE
+    pronouns (``where|which|who|whom|whose``) and NOT the wider subordinate set.
+
+    Nothing pinned this boundary: widening `_RE_RELATIVE_CLAUSE` to
+    `when|that|while|because` (the "obvious simplification" the docstrings warn
+    against) left the whole suite green while routing these anchors to
+    ``interval`` — an anchor the shape arms cannot resolve, i.e. the hazard the
+    guard exists for. A `latest` governed by a subordinating conjunction with no
+    relative pronoun before it in its own clause therefore still VETOES.
+    """
+    for q in (
+        "How many days passed between the exam, that my latest tutor set, and "
+        "my birthday?",
+        "How many days passed between the book, because my latest tutor said "
+        "so, and my birthday?",
+        "How many days passed between the day when I passed my latest exam and "
+        "my birthday?",
+        "How many days passed between the term while my latest tutor taught and "
+        "my birthday?",
+    ):
+        assert classify_question(q) is None, q
 
 
 def test_recency_latest_selecting_an_interval_anchor_still_rejects():

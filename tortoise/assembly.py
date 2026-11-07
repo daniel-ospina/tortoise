@@ -638,10 +638,15 @@ _RE_OR_CHAIN = re.compile(r"\sor\s.+?\sor\s", re.IGNORECASE | re.DOTALL)
 # The "earliest to latest" head form is deliberately NOT an alternative here:
 # a question containing it never reaches this pattern. The class-plural HEAD
 # (what/which "is the order of …") claims its windowed spelling, and every
-# OTHER spelling — windowed or not — is rejected by the R13 guard's
-# ORDERING-BOUND arm (``_RE_RECENCY_LATEST_BOUND``, #8775), which is checked
-# ahead of ``_RE_RECENCY_LATEST`` so even an interval-owned question keeps
-# rejecting. So the alternative would be dead code contradicting that guard.
+# OTHER spelling — windowed or not — is rejected by the R13 guard, but NOT
+# always by the same arm the next sentence names: an ordering BOUND
+# (``_RE_RECENCY_LATEST_BOUND``) rejects the covered spellings
+# ("from earliest to latest"), while an INTERPOSED one
+# ("first to last: the earliest one, the latest one") falls outside the bound
+# arm and is rejected by the BARE-``latest`` arm instead — an ordering-list head
+# can never own an interval template (they anchor on ``how many`` / ``between``),
+# so ``_recency_vetoes`` never takes the exemption. Either way the question is
+# rejected, so the alternative would be dead code contradicting that guard.
 _RE_ORDERING_LIST = re.compile(
     r"^\s*(?:which|who|what)\b[^?:]*?"
     r"(?:\border\b|\bsequence\b|\bfirst\s+to\s+last\b)"
