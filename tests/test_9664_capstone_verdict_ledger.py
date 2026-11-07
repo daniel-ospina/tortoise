@@ -575,6 +575,67 @@ def test_a_cmd_entry_naming_an_absolute_path_outside_the_tree_is_invalid(tmp_pat
         assert "`cmd:` evidence" in str(excinfo.value)
 
 
+def test_a_cmd_target_that_is_not_a_regular_file_is_invalid(tmp_path):
+    """T6 in the `cmd:` arm via a BARE PATH — the member that had no pin.
+
+    The glob half is pinned (`test_a_glob_whose_matches_are_all_directories_…`),
+    but `_names_artifact`'s `is_file()` is a SEPARATE clause for bare paths, and
+    nothing pinned it: changing it to `exists()` left the suite 105/105 green while
+    a one-row `verified` ledger citing `cmd:sh docs` exited **0** with
+    `UNCOVERED LIST: empty — the only clean exit` — a directory (or a FIFO) counted
+    as held evidence. That is the false PASS this artifact exists to refuse.
+    """
+    tree = tmp_path / "tree"
+    (tree / "docs" / "sub").mkdir(parents=True)
+    os.mkfifo(tree / "pipe")
+
+    for entry in ("cmd:sh docs", "cmd:sh pipe"):
+        with pytest.raises(cl.InvalidLedger):
+            cl.validate(_ledger([_row("A", evidence=[entry])]), repo_root=tree)
+
+    # End to end: the empty-uncovered-list shape must not be reachable at all.
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=["cmd:sh docs"])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "UNCOVERED LIST" not in proc.stdout, proc.stdout
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Unparseable YAML: `load_ledger`'s `except Exception` is the only guard.
+        "not: [valid: yaml",
+        # A root-level list: `isinstance(data, dict)` is the only guard.
+        "- just\n- a list\n",
+        # `measured_at` not a mapping, and a row that is not a mapping: each has its
+        # own `isinstance(…, dict)` guard, and neither was pinned.
+        "version: 1\nissue: 9664\ncriteria_expected: 1\nmeasured_at: garbage\ncriteria: []\n",
+        "version: 1\nissue: 9664\ncriteria_expected: 1\nmeasured_at: {ref: r, sha: "
+        + SHA
+        + ", date: 2026-11-07}\ncriteria:\n  - 42\n",
+    ],
+)
+def test_a_malformed_ledger_is_invalid_with_no_traceback(tmp_path, payload):
+    """T7 for the LEDGER SHAPE, not just for evidence entries.
+
+    Dropping any one of those four guards left the suite green and made the CLI
+    print an `AttributeError`/`yaml.YAMLError` traceback instead of the
+    `CAPSTONE-LEDGER: INVALID` marker that a log reader — and an in-process caller
+    catching `InvalidLedger` — keys on.
+    """
+    ledger = tmp_path / "ledger.yml"
+    ledger.write_text(payload, encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "check", "--ledger", str(ledger)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        check=False,
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "CAPSTONE-LEDGER: INVALID" in proc.stderr, proc.stderr
+
+
 def test_a_glob_whose_matches_are_all_directories_names_no_artifact(tmp_path):
     """T6 in the GLOB arm, which had NO pin: `is_file()` is the only clause
     refusing a glob whose in-tree matches are all DIRECTORIES.
