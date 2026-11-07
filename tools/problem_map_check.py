@@ -125,6 +125,11 @@ _TOTAL = re.compile(r"^\|\s*\*\*Total tracked\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|",
 #: at all), and the residual is a naming convention violation, not a stale map.
 _DEF_TEST = re.compile(r"^\s*(?:async\s+)?def test_", re.MULTILINE)
 
+#: The rc `_git` mints when git could not RUN (absent, or the call timed
+#: out) — distinct from any rc git itself returns, so a caller can tell
+#: "no answer" from git's own negative verdict (1 = no, 128 = bad object).
+_GIT_UNRUNNABLE = 127
+
 
 @dataclass
 class Row:
@@ -215,8 +220,10 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     both used to raise (`FileNotFoundError`, `TimeoutExpired`) straight out of
     `main()`, so python's own traceback exit — **1** — was returned: the DRIFT
     code, over a document that was never read. Both are state errors. The rc used
-    here (127, the shell's "command not found") makes every caller's existing
-    "could not answer" arm fire.
+    here (`_GIT_UNRUNNABLE`, 127 — the shell's "command not found") is what BOTH
+    callers map to "no answer": `is_ancestor` returns `None` for any rc outside
+    {0, 1}, and `commit_exists` returns `None` for exactly this sentinel. Neither
+    could be a bare `== 0` for that reason: a git failure is not a document defect.
     """
     try:
         return subprocess.run(
@@ -225,12 +232,28 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     except (OSError, subprocess.SubprocessError) as exc:
         # FileNotFoundError (no git), PermissionError, TimeoutExpired, ...
         return subprocess.CompletedProcess(
-            args=["git", *args], returncode=127, stdout="", stderr=str(exc)
+            args=["git", *args], returncode=_GIT_UNRUNNABLE, stdout="", stderr=str(exc)
         )
 
 
-def commit_exists(repo: Path, sha: str) -> bool:
-    return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+def commit_exists(repo: Path, sha: str) -> bool | None:
+    """True/False, or **None** when git could not be ASKED.
+
+    The mirror of `is_ancestor`'s tri-state, and it was the remaining hole in the
+    same contract: `_git` mints rc 127 for "git could not run at all" (absent, or
+    the call timed out), and a bare `== 0` turned that into `False` — so with a
+    READABLE shallow answer (`rev-parse` says `false`) but an unanswerable
+    `cat-file`, `check_anchors` took its `shallow is False` branch and reported
+    `anchor X is not a commit`, i.e. **DRIFT over a run that measured no history**.
+    Measured with only `subprocess.run` faked (shallow -> `false`, `cat-file` ->
+    `TimeoutExpired`): 29 DRIFT errors, exit 1, about a correct document.
+    """
+    rc = _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode
+    if rc == 0:
+        return True
+    if rc == _GIT_UNRUNNABLE:
+        return None
+    return False
 
 
 def is_ancestor(repo: Path, sha: str) -> bool | None:
@@ -338,7 +361,14 @@ def check_anchors(repo: Path, rows: list[Row], report: Report) -> list[str]:
     shallow = is_shallow(repo)
     for row in rows:
         for sha in row.anchors:
-            if not commit_exists(repo, sha):
+            exists = commit_exists(repo, sha)
+            if exists is None:
+                report.unverified.append(
+                    f"#{row.issue}: anchor {sha} — git could not answer whether the "
+                    f"object exists, so the drift verdict is withheld"
+                )
+                continue
+            if not exists:
                 if shallow is not False:
                     report.unverified.append(
                         f"#{row.issue}: anchor {sha} is not in this clone "

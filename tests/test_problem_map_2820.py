@@ -682,6 +682,41 @@ def test_a_document_that_cannot_be_READ_is_a_state_error_not_drift(tmp_path):
     assert report.state_errors and "could not be read" in report.state_errors[0]
 
 
+def test_a_cat_file_that_cannot_answer_withholds_the_verdict(monkeypatch):
+    """The reachable failing state the no-git control does NOT cover.
+
+    `test_git_absent_is_a_state_error_not_a_traceback` makes EVERY call raise, so
+    `is_shallow` also answers `None` and the `shallow is not False` arm fires no
+    matter what `commit_exists` does. The state that reaches the hole is ONE call
+    answering and another failing: `rev-parse --is-shallow-repository` answers
+    `false` normally, and `cat-file` cannot answer (a timeout, a signalled
+    process). With `commit_exists` a bare `== 0`, that produced **29 DRIFT errors
+    and exit 1** — "anchor X is not a commit" about a correct document, over a run
+    that measured no history. Both callers must be tri-state.
+    """
+    def _fake_run(argv, **kwargs):
+        if "cat-file" in argv:
+            raise pmc.subprocess.TimeoutExpired(cmd=argv, timeout=60)
+        if "--is-shallow-repository" in argv:
+            return pmc.subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="false\n", stderr=""
+            )
+        return pmc.subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(pmc.subprocess, "run", _fake_run)
+    assert pmc.commit_exists(REPO, "deadbeefdeadbeef") is None
+
+    report = pmc.run(REPO, DOC)
+    assert report.errors == [], report.errors[:3]
+    assert report.state_errors == []
+    assert report.unverified and "could not answer whether the object exists" in (
+        report.unverified[0]
+    )
+    assert report.code == 2
+
+
 def test_git_absent_is_a_state_error_not_a_traceback(monkeypatch):
     """Fails if a `git` that cannot be EXECUTED escapes as python's exit 1.
 
