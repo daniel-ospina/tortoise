@@ -1386,9 +1386,10 @@ def test_every_overrides_marker_the_design_documents_cite_is_the_one_the_code_ci
 
 # The two statements the entry once attributed to §9.1 *"in that place"* and that
 # `STORAGE-ARCHITECTURE.md` does NOT carry: the torn-tail TOLERATED decision (its
-# home is `tortoise/log.py:204`) and the tenant precedence the store decision asks
-# (its home is `tortoise/record_writer.py:842`/`:875`). Each token is the
-# statement's own identifier, so the split can be checked without reading prose.
+# home is `tortoise/log.py`) and the tenant precedence the store decision asks
+# (`record_tenant_effective`/`is_usable_tenant` in `tortoise/record_writer.py`).
+# Each token is the statement's own identifier, so the split can be checked
+# without reading prose.
 _CODE_SETTLED_TOKENS = ("torn", "record_tenant_effective", "is_usable_tenant")
 
 # A lead-in that points the bullets at the design document as their home. It is
@@ -1403,7 +1404,18 @@ _OUTSIDE_HOME_CAVEAT = re.compile(
     r"outside (?:the|this) design document",
     re.I,
 )
-_NAME_HOME = re.compile(r"((?:[\w.-]+/)*[\w-]+\.py):(\d+)")
+#: A home citation in either form the documents allow: `file.py:NNN` (line
+#: anchored) or `file.py` (SYMBOL anchored). Group 2 is absent for the symbol
+#: form — that absence is the whole point of it. The documents' own rule is
+#: *"the symbol name is authoritative, the line number is a convenience"* (this
+#: file's head, and `docs/product/canonical-mcp-tools.md`: *"Cited by symbol, not
+#: line: line numbers go stale on every rebase"*), and #11440 is what the line
+#: form cost: #11386 inserted 47 lines above `record_tenant_effective`, this
+#: entry's `record_writer.py:842` then named a helper in another function, and
+#: the guard reddened the citation — correctly, but against a pointer that never
+#: needed to be a line. A symbol citation survives any edit above its statement,
+#: so it is the form a bullet should reach for when the statement has a name.
+_HOME_CITE = re.compile(r"((?:[\w.-]+/)*[\w-]+\.py)(?::(\d+))?")
 #: How far either side of a cited line the carried token may sit. A statement's
 #: home is a comment block or a short function, not one physical line: the
 #: torn-tail tolerance's block header is `log.py:204` and the word `torn` first
@@ -1445,6 +1457,75 @@ def _entry_bullet_blocks(entry: str) -> list[tuple[str, list[str]]]:
             j -= 1
         blocks.append((" ".join(lead), bullets))
     return blocks
+
+
+def _carried_home_offenders(label: str, bullet: str, carried: list[str]) -> list[str]:
+    """Why `bullet`'s own `file.py[:NNN]` homes do not carry `carried` — `[]` if they do.
+
+    Both citation forms are checked for what they actually claim. A LINE home is
+    checked against the `_HOME_WINDOW` lines around the cited one, because the
+    claim is *"the statement is HERE"*. A SYMBOL home is checked against the file
+    the symbol lives in, because the claim is *"the statement is in this file"* —
+    it asserts no position, so no line can rot it and no line is read.
+
+    Whichever form is used, EVERY carried token has to resolve somewhere among the
+    homes the bullet names: a bullet that points a reader at a file carrying only
+    half its statement has still left the other half unverifiable, and naming two
+    files does not license one of them to be empty.
+    """
+    offenders: list[str] = []
+    resolved: set[str] = set()
+    cites = _HOME_CITE.findall(bullet)
+    if not cites:
+        return [
+            f"{label} — {carried} is not in §9.1 and this bullet names no "
+            "`file.py` home, so the reader has nowhere to verify it"
+        ]
+    for rel, lineno in cites:
+        path = ROOT / rel
+        if not path.is_file():
+            offenders.append(
+                f"{label} — names `{rel}`, which is not a file in this repo")
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not lineno:
+            found = [token for token in carried if token in text]
+            if not found:
+                offenders.append(
+                    f"{label} — `{rel}` is named as the home, but it carries "
+                    f"none of {carried} anywhere, so a reader cannot verify the "
+                    "statement in it")
+            resolved.update(found)
+            continue
+        lines = text.splitlines()
+        total = len(lines)
+        if not 1 <= int(lineno) <= total:
+            offenders.append(
+                f"{label} — `{path.name}:{lineno}` is past the end of the "
+                f"file ({total} lines)")
+            continue
+        # ⛔ THE LINE MUST CARRY THE STATEMENT, not merely exist (review P3).
+        # `file.py:1` on a shebang satisfied "file exists, line in range", so a
+        # bullet could point a reader at an unrelated line and stay green — the
+        # claim-outruns-its-check class this file's own ledger records at
+        # `#10149` round 14. The window is a statement's own neighbourhood, so a
+        # correct citation into a multi-line block is not a false red.
+        window = lines[max(0, int(lineno) - 1 - _HOME_WINDOW):
+                       min(total, int(lineno) + _HOME_WINDOW)]
+        found = [token for token in carried
+                 if any(token in line for line in window)]
+        if not found:
+            offenders.append(
+                f"{label} — `{path.name}:{lineno}` is in the file, but the "
+                f"{_HOME_WINDOW} lines either side of it carry none of "
+                f"{carried}, so a reader cannot verify the statement there")
+        resolved.update(found)
+    unverified = [token for token in carried if token not in resolved]
+    if unverified:
+        offenders.append(
+            f"{label} — {unverified} is not in §9.1 and none of the homes this "
+            "bullet names carries it")
+    return offenders
 
 
 def test_the_carrier_entry_claims_91_only_for_what_91_carries():
@@ -1510,39 +1591,7 @@ def test_the_carrier_entry_claims_91_only_for_what_91_carries():
                     f"(«{lead_in.strip()[:90]}…») points the whole list at the "
                     "design document with no caveat")
                 continue
-            named = _NAME_HOME.findall(bullet)
-            if not named:
-                offenders.append(
-                    f"{label} — {carried} is not in §9.1 and this bullet names no "
-                    "`file.py:line` home, so the reader has nowhere to verify it")
-                continue
-            for rel, lineno in named:
-                path = ROOT / rel
-                if not path.is_file():
-                    offenders.append(f"{label} — names `{rel}`, which is not a "
-                                     "file in this repo")
-                    continue
-                lines = path.read_text(encoding="utf-8").splitlines()
-                total = len(lines)
-                if not 1 <= int(lineno) <= total:
-                    offenders.append(
-                        f"{label} — `{path.name}:{lineno}` is past the end of the "
-                        f"file ({total} lines)")
-                    continue
-                # ⛔ THE LINE MUST CARRY THE STATEMENT, not merely exist (review
-                # P3). `file.py:1` on a shebang satisfied "file exists, line in
-                # range", so a bullet could point a reader at an unrelated line
-                # and stay green — the claim-outruns-its-check class this file's
-                # own ledger records at `#10149` round 14. The window is a
-                # statement's own neighbourhood, so a correct citation into a
-                # multi-line block is not a false red.
-                window = lines[max(0, int(lineno) - 1 - _HOME_WINDOW):
-                               min(total, int(lineno) + _HOME_WINDOW)]
-                if not any(token in line for line in window for token in carried):
-                    offenders.append(
-                        f"{label} — `{path.name}:{lineno}` is in the file, but the "
-                        f"{_HOME_WINDOW} lines either side of it carry none of "
-                        f"{carried}, so a reader cannot verify the statement there")
+            offenders.extend(_carried_home_offenders(label, bullet, carried))
     assert not offenders, (
         "the entry puts these statements in §9.1's home, or names no home a "
         "reader can open — `docs/architecture/STORAGE-ARCHITECTURE.md` §9.1 "
@@ -1552,6 +1601,65 @@ def test_the_carrier_entry_claims_91_only_for_what_91_carries():
     assert not missing, (
         f"the entry no longer reports {missing} at all — the repair is to say "
         "WHERE those statements live, not to stop recording them"
+    )
+
+
+def test_a_symbol_home_is_checked_against_the_file_it_names():
+    """The symbol form is the durable one, and it must still have teeth.
+
+    `#11440` is why the form exists: the carrier entry cited
+    `record_tenant_effective` at `record_writer.py:842`, `#11386` inserted 47
+    lines above the symbol, and the guard reddened a citation whose STATEMENT had
+    not moved — the pointer did. A symbol citation (`tortoise/record_writer.py`)
+    asserts membership rather than position, so no edit above it can rot it.
+
+    What a symbol citation may NOT become is unfalsifiable. This pins the check
+    arm by arm, on the real repository files so nothing here is synthetic:
+    naming a file that carries none of the bullet's tokens is an offender, naming
+    a file that does not exist is an offender, naming a file that carries only
+    part of the statement leaves the rest unverified, and a correct symbol home
+    clears — while the LINE form keeps the window discipline it had.
+    """
+    tenant = ["record_tenant_effective", "is_usable_tenant"]
+    bullet = ("- **The tenant.** `record_tenant_effective` "
+              "(`tortoise/record_writer.py`) is **carried > scope > env pair**")
+
+    assert _carried_home_offenders("the tenant", bullet, tenant) == [], (
+        "a symbol home whose file carries the statement must clear — otherwise "
+        "this arm is a false red that teaches the next lane to move the claim"
+    )
+
+    wrong_file = bullet.replace("record_writer.py", "log.py")
+    assert any("log.py" in offender and "carries none of" in offender
+               for offender in _carried_home_offenders("the tenant", wrong_file, tenant)), (
+        "naming a file that carries NONE of the bullet's tokens must red — "
+        "otherwise a symbol home is unfalsifiable and the guard accepts any path"
+    )
+
+    absent = bullet.replace("record_writer.py", "record_writer_gone.py")
+    assert any("not a file in this repo" in offender
+               for offender in _carried_home_offenders("the tenant", absent, tenant)), (
+        "a symbol home naming a file that does not exist must red"
+    )
+
+    half = "- **The tenant.** `record_tenant_effective` (`tortoise/log.py`) "
+    assert any("none of the homes this bullet names carries it" in offender
+               for offender in _carried_home_offenders("the tenant", half, tenant)), (
+        "a bullet whose named home resolves only PART of its statement must "
+        "red on the rest — the reader cannot verify the omitted half anywhere"
+    )
+
+    # The line form is unchanged: the surviving torn-tail citation is checked
+    # around its block header, and moving it onto an unrelated line reds.
+    torn = "- **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:204`)"
+    assert _carried_home_offenders("the torn tail", torn, ["torn"]) == [], (
+        "the torn-tail block header is a correct line citation and must clear"
+    )
+    moved = "- **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:1`)"
+    assert any("carry none of" in offender
+               for offender in _carried_home_offenders("the torn tail", moved, ["torn"])), (
+        "a line citation whose window does not carry the statement must still "
+        "red — the symbol arm does not relax the line arm"
     )
 
 

@@ -1797,8 +1797,8 @@ is the record for:
   refusing the tail would cost the whole journal while recovering nothing. The R1 removal record
   (`EntityMutated` op=delete) stays REFUSED, because a tolerated torn delete is a resurrection.
 - **The tenant.** The store decision asks the tenant the SEAM will file under, not the ambient one:
-  `record_tenant_effective` (`tortoise/record_writer.py:842`) is **carried > scope > env pair**, and
-  `is_usable_tenant` (`tortoise/record_writer.py:875`) is the seam's own admissibility test, so the
+  `record_tenant_effective` (`tortoise/record_writer.py`) is **carried > scope > env pair**, and
+  `is_usable_tenant` (`tortoise/record_writer.py`) is the seam's own admissibility test, so the
   decision that picks the store and the write that fills it cannot disagree about who the row
   belongs to. A write the record cannot attribute keeps the turns in the graph, and a scratch buffer
   is not a journal.
