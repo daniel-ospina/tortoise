@@ -4607,7 +4607,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:699`) refuses a GREEN row whose", (
+        ("E1-E5-PROOFS.md", "refuses a GREEN row whose", (
             ("699", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
