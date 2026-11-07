@@ -531,8 +531,16 @@ def check_registration(
     caught it; this check is that catch, mechanised.
     """
     index = repo / INDEX_REL
-    if _path_state(index, report, INDEX_REL) == "missing":
+    # Dispatch on the FULL state, not just `missing`: falling through an
+    # `unreadable` index into the read guard below recorded the SAME fault twice
+    # (`could not be examined`, then `could not be read`), so one unreadable
+    # index read as two distinct faults (#11384 review round 15).
+    index_state = _path_state(index, report, INDEX_REL)
+    if index_state == "missing":
         return [f"{INDEX_REL} does not exist — cannot check registration"]
+    if index_state == "unreadable":
+        message = f"{INDEX_REL} could not be examined — nothing was measured"
+        return [] if report is not None else [message]
     try:
         body = index.read_text(encoding="utf-8", errors="replace")
     except (OSError, UnicodeDecodeError) as exc:
@@ -563,10 +571,15 @@ def check_registration(
         # `main()` hands `--doc` straight to `run()`, whose own guard reads it.
         state = _path_state(doc, report, str(doc))
         if state == "unreadable":
-            return errors
-        if state in ("missing", "not-file"):
+            message = f"{doc} could not be examined — nothing was measured"
+            return errors if report is not None else [message]
+        if state == "missing":
             text = ""
         else:
+            # `not-file` deliberately falls into the read: a directory at the
+            # document path must hit the read guard and be recorded, not silently
+            # become `text = ""` (which reported agreement for a directory —
+            # #11384 review round 15).
             try:
                 text = doc.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
