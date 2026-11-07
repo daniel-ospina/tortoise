@@ -103,8 +103,9 @@ Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
       including a `fly-only:` declaration whose issue ref is empty or malformed
       — absent GH_SECRETS_PRESENT, a payload that cannot be read, a ledger that
       is missing, malformed, indented, names a name the manifest does not
-      declare, names a non-`gh-secret:` source, names one of the app's MANDATORY
-      secrets, **or a ledgered name the payload still stages** — `LEDGER NOT
+      declare, names a non-`gh-secret:` source (the manifest's `workflow` /
+      `fly-toml-env` / `fly-only:` / `unmanaged` kinds are all refused), names one of
+      the app's MANDATORY secrets, **or a ledgered name the payload still stages** — `LEDGER NOT
       HONOURED`, which also covers a ledgered name `fly.toml [env]` assigns a
       **NON-EMPTY** value — the deploy applies that value whatever the secret list
       says. An `[env] = ""` PLACEHOLDER is not that: a Fly secret shadows `[env]`,
@@ -462,7 +463,10 @@ def _payload_assignments(groups: list[list[str]]) -> dict[str, str]:
 
 
 def _capture_payload(
-    script: str, present: dict[str, str], step_env: dict[str, str] | None = None
+    script: str,
+    present: dict[str, str],
+    step_env: dict[str, str] | None = None,
+    ledger_override: Path | None = None,
 ) -> dict[str, str]:
     """Run the propagation shell with a stubbed flyctl; return ``NAME -> value``.
 
@@ -529,7 +533,19 @@ def _capture_payload(
         # `LEDGER NOT HONOURED` tripwire stayed green over exactly the edit it
         # exists to catch (#11332 review). A seam that cannot be declared is a
         # fail-open, so the ordering is the fix and the assertion below states it.
-        env.setdefault("FLY_MITIGATION_LEDGER", str(ledger_path()))
+        if ledger_override is None:
+            # A workflow binding of the seam WINS, because the deploy's own shell
+            # resolves `${FLY_MITIGATION_LEDGER:-<default>}` from that binding.
+            env.setdefault("FLY_MITIGATION_LEDGER", str(ledger_path()))
+        else:
+            # ⛔ BUT AN EXPLICIT OVERRIDE MUST WIN OVER THE BINDING. The gate runs the
+            # payload a SECOND time against a known ledger (the empty-ledger world,
+            # `unmitigated`), and a workflow that binds the seam made `setdefault` a
+            # no-op — so that second run was classified against the workflow's ledger
+            # and the "world without mitigations" silently became the same world,
+            # turning `LEDGER-EMPTIED` into a false `STALE DECLARATION`
+            # (#11332 review round 6, P1).
+            env["FLY_MITIGATION_LEDGER"] = str(ledger_override)
         # ⛔ ValueError, NOT `assert`: an AssertionError is caught by NO call site,
         # so it escapes as exit 1 — the class `deploy-hosted.yml` turns into the
         # `skip-fly-secret-provenance` bypass. The whole point of the fail-closed
@@ -596,7 +612,9 @@ def _capture_payload(
 
 
 def payload_partition(
-    scripts: list[tuple[str, dict[str, str]]], gh_present: set[str]
+    scripts: list[tuple[str, dict[str, str]]],
+    gh_present: set[str],
+    ledger_override: Path | None = None,
 ) -> tuple[set[str], set[str], set[str], dict[str, set[str]]]:
     """``(assigned, unconditional, live, sources)`` over EVERY payload block.
 
@@ -639,13 +657,20 @@ def payload_partition(
         for value in (step_env or {}).values():
             sample_names.update(_SECRET_REF_RE.findall(str(value)))
         all_present = _capture_payload(
-            script, {name: name for name in sorted(sample_names)}, step_env
+            script,
+            {name: name for name in sorted(sample_names)},
+            step_env,
+            ledger_override,
         )
         # The payload THIS run builds — markers only for the secrets the runner
         # actually carries. One more execution of the same shell.
-        in_run = _capture_payload(script, {name: name for name in gh_present}, step_env)
+        in_run = _capture_payload(
+            script, {name: name for name in gh_present}, step_env, ledger_override
+        )
         block_assigned = set(all_present)
-        block_unconditional = set(_capture_payload(script, {}, step_env))
+        block_unconditional = set(
+            _capture_payload(script, {}, step_env, ledger_override)
+        )
         guarded |= block_assigned - block_unconditional
         unconditional |= block_unconditional
         assigned |= block_assigned
@@ -930,11 +955,19 @@ def fly_toml_env_assignments(text: str) -> dict[str, str]:
         match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", code)
         if match:
             raw = match.group(2).strip()
+            # ⛔ A VALUE THAT DOES NOT START ON THIS LINE IS *NOT* EMPTY. TOML allows
+            # `X =` / newline / `"real value"`, and taking only this line's text read
+            # that as `""` — i.e. as the `[env] = ""` PLACEHOLDER — so check (0b-ii)
+            # skipped a name `[env]` really assigns and the ledger certified a
+            # mitigation that was not in effect (#11332 review round 6, P1). The
+            # sentinel is non-empty on purpose: it can only cause a REFUSAL.
+            if not raw:
+                raw = "<value on a following line>"
             # Normalise the quoting so `X = ""` and `X = ''` are EMPTY, not a
             # two-character value: a quoted-empty placeholder is exactly what the
             # real `fly.toml` carries, and reading it as non-empty reproduced the
             # unrecordable-mitigation defect the value test exists to fix.
-            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+            elif len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
                 raw = raw[1:-1]
             values[match.group(1)] = raw
     return values
@@ -1043,8 +1076,9 @@ def main() -> int:
             with tempfile.TemporaryDirectory(prefix="fly-secret-empty-ledger-") as tmp:
                 empty = Path(tmp) / "empty-ledger.txt"
                 empty.write_text("# no entries\n")
-                with _ledger_path_override(empty):
-                    a0, u0, live0, _ = payload_partition(blocks, gh_present)
+                a0, u0, live0, _ = payload_partition(
+                    blocks, gh_present, ledger_override=empty
+                )
             unmitigated = frozenset(a0 | u0 | live0)
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             _err(
@@ -1238,8 +1272,10 @@ def main() -> int:
                     # the recorded absence is not in effect (#11332 review round 4, P1).
                     if name in set(fly_names) or env_assignments.get(name):
                         violations.append(
-                            f"MITIGATION NOT IN EFFECT — the ledger empties {name!r} "
-                            "from the payload, but the omission is not what the app "
+                            f"MITIGATION NOT IN EFFECT — {name!r} is declared "
+                            "workflow-set and is composed from ledgered input(s), so "
+                            "the ledger stops stating it — but the omission is not "
+                            "what the app "
                             "reads. Either `flyctl secrets set` is ADDITIVE and the "
                             "value already on Fly SURVIVES it "
                             f"(fly secret: {name in set(fly_names)}), or `fly.toml` "

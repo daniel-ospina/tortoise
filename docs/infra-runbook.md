@@ -2822,7 +2822,12 @@ undone.
 - **The gate's half is the reverse check**, so the two cannot rot apart: a ledger
   entry the payload still carries is `LEDGER NOT HONOURED` (dropping the filter
   would otherwise re-arm every mitigation while the ledger kept reading as a
-  decision). It also fails an entry whose name is **live on Fly** (`MITIGATION
+  decision). ⛔ **Its bound, stated rather than implied:** it proves the name does not
+  reach the `flyctl secrets set` **argv**. The environment-blanking half — that derived
+  values were composed from the deliberate absence — is enforced by the block's
+  POSITION, and pinned by
+  `tests/test_fly_secret_drift.py::test_the_ledger_ENVIRONMENT_block_precedes_the_payload_composition`,
+  not by this gate. A reordering that kept the argv clean would pass the gate. It also fails an entry whose name is **live on Fly** (`MITIGATION
   NOT IN EFFECT` — the entry is a false record *and* it freezes that secret's
   rotation) and an **expired** entry (`MITIGATION LAPSED`).
 - **Exit classes.** Exit 2 (never bypassable): the ledger is missing, malformed,

@@ -1308,7 +1308,12 @@ jobs:
           # exception is enforced where the WRITE happens, and
           # `.github/scripts/check-fly-secret-drift.py` proves this filter suppressed
           # the name (a ledger entry the payload still carries FAILS the deploy), so
-          # the two halves cannot rot apart.
+          # the two halves cannot rot apart. ⛔ Its bound, stated rather than implied:
+          # the gate proves the name does not reach the ARGV. That the ENVIRONMENT
+          # block at the top ran FIRST — so derived values saw the absence — is
+          # enforced by POSITION and pinned by
+          # `tests/test_fly_secret_drift.py::test_the_ledger_ENVIRONMENT_block_precedes_the_payload_composition`,
+          # not by the gate; a reordering that kept the argv clean would pass it.
           STAGED_ARGS=()
           for ARG in "${ARGS[@]}"; do
             ARG_NAME="${ARG%%=*}"

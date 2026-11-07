@@ -3551,6 +3551,114 @@ class TestTheMitigationLedger:
             assert "LEDGER NOT HONOURED" in proc.stdout, proc.stdout
             assert "assigns it a NON-EMPTY value" in proc.stdout, proc.stdout
 
+    def test_a_MULTI_LINE_fly_toml_env_value_is_not_read_as_a_placeholder(self):
+        """TOML allows the value on the following line; that is a VALUE, not `""`.
+
+        Taking only the text after `=` on the assignment's own line read
+        `SENTRY_DSN =` / newline / `"https://…"` as EMPTY — i.e. as the `[env] = ""`
+        PLACEHOLDER — so check (0b-ii) was skipped and the ledger certified a
+        mitigation while the app kept reading the `[env]` value. Measured end to end
+        on the shipped fixtures: exit 0 + `MITIGATED` (#11332 review round 6, P1).
+        """
+        toml = _fixture(
+            "ledger-env-multiline.toml",
+            _FLY_TOML.replace(
+                "[env]\n",
+                '[env]\n  SENTRY_DSN =\n    "https://real.invalid/dsn"\n',
+                1,
+            ),
+        )
+        assert 'SENTRY_DSN =\n    "https://real.invalid/dsn"' in toml.read_text()
+        proc = _run(
+            _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], "ledger-env-ml-secrets.json"),
+            manifest=LEDGER_MANIFEST,
+            workflow=LEDGER_WORKFLOW,
+            toml=toml,
+            present={"SENTRY_DSN", "FASTAPI_INTERNAL_KEY", "OPT_SECRET"},
+            extra_env={
+                "FLY_MITIGATION_LEDGER": str(_ledger(_entry())),
+                "FLY_MITIGATION_TODAY": "2026-11-07",
+            },
+        )
+        assert proc.returncode == 2, (
+            "a multi-line `[env]` value was read as the `\"\"` placeholder, so a name "
+            f"`fly.toml` really assigns was certified as mitigaable: {proc.stdout}"
+        )
+        assert "LEDGER NOT HONOURED" in proc.stdout, proc.stdout
+
+    def test_an_env_HEADER_with_a_trailing_comment_still_parses(self):
+        """`[env] # versioned config` is legal TOML — it must not disable the table.
+
+        Requiring the stripped line to END with `]` left `in_env` False for the whole
+        file, so `fly_toml_env_assignments` returned `{}` and the ledger accepted an
+        entry for a name `[env]` assigns a real value to. Round 5 fixed it; nothing
+        pinned it, so a revert was silent (#11332 review round 6, P2).
+        """
+        toml = _fixture(
+            "ledger-env-header-comment.toml",
+            _FLY_TOML.replace(
+                "[env]\n",
+                '[env] # versioned config\n  SENTRY_DSN = "https://real.invalid/dsn"\n',
+                1,
+            ),
+        )
+        assert "[env] # versioned config" in toml.read_text()
+        proc = _run(
+            _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], "ledger-env-hc-secrets.json"),
+            manifest=LEDGER_MANIFEST,
+            workflow=LEDGER_WORKFLOW,
+            toml=toml,
+            present={"SENTRY_DSN", "FASTAPI_INTERNAL_KEY", "OPT_SECRET"},
+            extra_env={
+                "FLY_MITIGATION_LEDGER": str(_ledger(_entry())),
+                "FLY_MITIGATION_TODAY": "2026-11-07",
+            },
+        )
+        assert proc.returncode == 2, (
+            "a trailing comment on the `[env]` header disabled the table, so a name it "
+            f"assigns was accepted as mitigaable: {proc.stdout}"
+        )
+        assert "LEDGER NOT HONOURED" in proc.stdout, proc.stdout
+
+    def test_a_workflow_binding_of_PATH_cannot_break_the_classification(self):
+        """The harness keeps its OWN PATH/HOME, so a step env cannot empty the stubs.
+
+        `_capture_payload` merges the step/job `env:` with `env.setdefault`, which
+        leaves PATH/HOME authoritative — and that is load-bearing: the payload is
+        classified on a stub PATH holding only `fly`/`flyctl`, so a workflow that
+        bound `PATH: /usr/bin` would make `flyctl` unfindable and the payload
+        unclassifiable. The guard after the merge raises `ValueError` (exit-2 class,
+        never the bypassable exit 1) if that ever stops being true.
+
+        Measured: with `PATH` bound in the step env the run is a normal rc 0 whose
+        payload was actually captured — which is only possible through the stubs, so
+        this is the pin that the harness wins. (#11332 review round 6 raised both the
+        guard and its class; the guard is unreachable TODAY, which is the property
+        worth pinning.)
+        """
+        bound = _fixture(
+            "path-bound-workflow.yml",
+            _LEDGER_WORKFLOW.replace(
+                "      - name: Set all app secrets on Fly.io\n",
+                "      - name: Set all app secrets on Fly.io\n"
+                "        env:\n"
+                "          PATH: /usr/bin:/bin\n"
+                "          HOME: /tmp\n",
+                1,
+            ),
+        )
+        assert "PATH: /usr/bin:/bin" in bound.read_text()
+        proc = _ledger_run(_ledger(_entry(), name="pb.txt"), workflow=bound)
+        assert proc.returncode == 0, (
+            "a workflow binding of PATH/HOME leaked into the classification — the stub "
+            f"`fly`/`flyctl` would be unfindable: rc={proc.returncode} "
+            f"{proc.stdout}{proc.stderr}"
+        )
+        # A classification actually happened (so the stubs ran), and it is not the
+        # harness's failure path.
+        assert "MITIGATED — 1 secret(s)" in proc.stdout, proc.stdout
+        assert "cannot determine secret provenance" not in proc.stdout + proc.stderr
+
     def test_a_ledgered_CONJUNCTION_MEMBER_does_not_report_the_derived_name_STALE(self):
         """The ledger emptying a derived name is the MITIGATION, not a stale declaration.
 
