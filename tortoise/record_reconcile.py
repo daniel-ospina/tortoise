@@ -156,7 +156,7 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
   forbids every RECORD→CACHE projection from writing it into the graph and no
   in-tree route re-derives it on either ANCHOR (the ``:Point`` journal REPLAY
-  half is ``#10429``'s, below), so no repair can put the value back. ⛔ Not "no
+  half is ``#10429``'s own), so no repair can put the value back. ⛔ Not "no
   IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
   clear — what is missing is a route that KEEPS the value. ⚠️ No shipped
   instrument performs that removal for THIS class: ``#10017``'s purge
