@@ -2513,8 +2513,11 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # would turn all three GREEN, which is round 2's measured regression again).
     "the ADJACENCY half is no longer merely open.",
     "the ADJACENCY half is no longer only open.",
-    # round 14: the row's OWN `, in practice, ` interpolation pushes the
-    # filler past the arm's 30-char bound, so the flipper bar never ran.
+    # round 14: an interpolated `, in practice, ` pushes the filler past the arm's
+    # 30-char bound, so the flipper bar never ran. ⛔ NOT "the row's OWN `, in
+    # practice, ` interpolation" — the row writes no `in practice` at all (0
+    # occurrences, exact AND flattened, and `git log -S` is empty; #11258 round
+    # 21, MEASURED). The form is pinned here because the language offers it.
     "the ADJACENCY half is no longer, in practice, merely open.",
     "the ADJACENCY half is no longer, in practice, simply open.",
     "the ADJACENCY half is no longer far from open.",
@@ -3357,22 +3360,24 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
 def test_the_filler_windows_are_justified_by_the_language_not_by_the_row():
     """The interpolation notes cite a MEASUREMENT, not "the row's own register" (#11258 round 21).
 
-    ⛔ MEASURED, and this is the correction: six notes in this file called
-    `, in practice, ` / `, after the widen, ` / `, for now, ` "the row's own
-    register" — and `config/v4-mechanisms.yml` writes NONE of them (0 occurrences
-    each, exact AND whitespace-flattened; no commit ever added one, `git log -S`
-    is empty for all three). The class is the one this file polices: a lane reading
-    the note looks for the form in the row and does not find it. Round 20's `P3`
-    severity argument inherited the false half verbatim ("the row writes it"),
-    which is why the correction belongs on the artifact rather than in a comment.
+    ⛔ MEASURED, and this is the correction: SEVEN notes in this file said
+    `, in practice, ` / `, after the widen, ` / `, for now, ` is "the row's own
+    register" (or "the row's OWN interpolation") — and `config/v4-mechanisms.yml`
+    writes NONE of them (0 occurrences each, exact AND whitespace-flattened; no
+    commit ever added one, `git log -S` is empty for all three). The class is the
+    one this file polices: a lane reading the note looks for the form in the row
+    and does not find it. Round 20's `P3` severity argument inherited the false half
+    verbatim ("the row writes it"), which is why the correction belongs on the
+    artifact rather than in a comment.
 
     What the notes claim now is TWO-SIDED, and both sides are pinned here:
       * the row does not contain the comma-delimited forms — so the cost is met by
         a lane EDITING the row, not by the row's current text, and
       * each form is still pinned RED in `_RESIDUAL_REOPENING_MUTATIONS` — THAT
-        list, not the row, is what justifies the filler windows. Deleting one of
-        those mutations would otherwise leave the windows justified by nothing a
-        reader can re-measure.
+        list, not the row, is what justifies the filler windows. The pin is
+        per-FORM, not per-mutation (`in practice` is carried by six mutations and
+        the others by one each): deleting EVERY mutation carrying a form is what
+        leaves the window justified by nothing a reader can re-measure.
 
     ⛔ PRE-FIX BEHAVIOUR: with the "row's own register" prose restored, the suite
     stayed green (105 passed at `7cfb51aa0d4`) — nothing re-measured the claim, so
