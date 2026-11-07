@@ -1100,15 +1100,24 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
     # constrains a name IT builds. Measured during this fix — reverting the fixture to
     # `f"evict_{…}"` left every assertion above GREEN, i.e. a pin that does not pin.
     # The live module cannot be imported here (its `allow_module_level` skip fires at
-    # import), so the coupling is resolved STRUCTURALLY off its AST: the owned name must
-    # be BUILT and JOURNALLED inside `lane` itself.
-    # ⛔ STRUCTURAL, not a substring of the whole file. A first draft asserted
-    # `'graph_name = f"test_evict_{…}"' in live_module`; measured here, that is wrong in
-    # BOTH directions (#11373 review): it stays GREEN when the f-string is extracted to a
-    # module-level helper that still contains that exact line — green over the very
-    # extraction it claims to forbid — and it REDs a correct rename of the local inside
-    # `lane`, which the property does not care about. Resolving `lane` and walking its own
-    # AST pins the property without pinning a spelling.
+    # import), so the coupling is read off its AST.
+    # ⛔ Read EVERY REPLAY, not "some name is owned somewhere". Two drafts were measured
+    # GREEN over #11373 P1 itself (#11373 review):
+    #   * a whole-file substring — green when the f-string is extracted to a helper that
+    #     still contains the line, and red when the local is merely renamed;
+    #   * a set of identifier NAMES that are assigned an owned name somewhere in `lane`
+    #     — green when the owned assignment is FOLLOWED by an `evict_…` one
+    #     (`graph_name = f"test_evict_…"` then `graph_name = f"evict_…"`), or when the
+    #     two sit in different branches of an `if`. At runtime the journalled name is
+    #     then unowned, the sweep preserves it and still consumes the journal, and the
+    #     graph leaks permanently — with the pin green.
+    # So every assignment reaching the journalled identifier must carry BOTH halves.
+    # Aliases (`graph_name = name`) are followed, so a rename stays green.
+    # ⛔ POSITION MATTERS, and it is checked: `owns_by_ownership_record` is a PREFIX
+    # predicate, so `f"{os.urandom(6).hex()}_test_evict"` is UNOWNED at runtime however
+    # much owned vocabulary it contains. The owned literal must therefore begin the
+    # expression (`_starts_owned` resolves an f-string's first element, an `+` chain's
+    # left operand, and a named prefix constant) — not merely appear in it.
     # ⛔ What the sibling census does and does not catch — measured, not assumed:
     # `_raw_detach_violations` matches `os.urandom` on the RAW enclosing block, so
     # extraction to a helper REDs it (it fails CLOSED) **unless** the block keeps prose
@@ -1117,49 +1126,83 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
     # about the vocabulary, and this pin is what settles it.
     live_module = (Path(__file__).resolve().parent / "test_cache_eviction_evictor.py").read_text(
         encoding="utf-8")
+    module_ast = ast.parse(live_module)
     lane = next(
-        (n for n in ast.walk(ast.parse(live_module))
+        (n for n in ast.walk(module_ast)
          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "lane"),
         None)
     assert lane is not None, (
         "`test_cache_eviction_evictor.py` no longer defines a `lane` fixture, so this "
         "coupling no longer locates the block it pins — re-read #11373 P1 instead of "
         "deleting it")
-    built = [n for n in ast.walk(lane)
-             if isinstance(n, ast.JoinedStr) and n.values
-             and isinstance(n.values[0], ast.Constant)
-             and isinstance(n.values[0].value, str)
-             and n.values[0].value.startswith("test_evict_")
-             and any(isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
-                     and v.func.attr == "urandom" for v in ast.walk(n))]
-    assert len(built) == 1, (
-        f"the `lane` fixture builds {len(built)} `test_evict_…{{os.urandom}}` names; it "
-        "must build exactly one INLINE — a name built in a helper moves the code out of "
-        "the block the raw-client census inspects, and a name outside the `test_` family "
-        "leaves the journal INERT for reclamation (#11373 P1)")
-    holders = {t.id for a in ast.walk(lane) if isinstance(a, ast.Assign)
-               and a.value is built[0]
-               for t in a.targets if isinstance(t, ast.Name)}
-    assert holders, (
-        "the `lane` fixture's owned graph name is not assigned to a name, so the "
-        "journal cannot be checked against the thing it journals")
-    # Follow plain `x = owned` aliases, so RENAMING the local (a correct edit this
-    # property does not care about) stays green — the false red the whole-file
-    # substring produced, which is what motivated resolving the block structurally.
-    grew = True
-    while grew:
-        grew = False
-        for a in ast.walk(lane):
-            if (isinstance(a, ast.Assign) and isinstance(a.value, ast.Name)
-                    and a.value.id in holders):
-                for t in a.targets:
-                    if isinstance(t, ast.Name) and t.id not in holders:
-                        holders.add(t.id)
-                        grew = True
-    assert [c for c in ast.walk(lane)
-            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-            and c.func.id == "_journal_append" and c.args
-            and isinstance(c.args[0], ast.Name) and c.args[0].id in holders], (
-        f"`lane` journals something other than the owned name it builds "
-        f"({sorted(holders)}) — journalling an UNOWNED name buys the peer-protection "
-        "half only, and the graph still leaks (#11373 P1)")
+
+    # Every simple `NAME = "literal"` in the module, so an owned prefix may be named
+    # rather than repeated (`_PREFIX = "test_evict_"`; f-string form included). Only
+    # OWNED constants can ever make an expression pass, so a lookup miss is fail-closed.
+    constants = {a.targets[0].id: a.value.value
+                 for a in ast.walk(module_ast)
+                 if isinstance(a, ast.Assign) and len(a.targets) == 1
+                 and isinstance(a.targets[0], ast.Name)
+                 and isinstance(a.value, ast.Constant)
+                 and isinstance(a.value.value, str)}
+
+    def _starts_owned(node) -> bool:
+        """Does the value this expression produces BEGIN with owned vocabulary?"""
+        if isinstance(node, ast.JoinedStr):
+            if not node.values:
+                return False
+            head = node.values[0]
+            return _starts_owned(head.value if isinstance(head, ast.FormattedValue) else head)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return _starts_owned(node.left)
+        if isinstance(node, ast.Constant):
+            return owns_by_ownership_record(node.value)
+        if isinstance(node, ast.Name):
+            return owns_by_ownership_record(constants.get(node.id))
+        return False
+
+    def _per_run(node) -> bool:
+        return any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "urandom" for n in ast.walk(node))
+
+    assigns: dict[str, list] = {}
+    for a in ast.walk(lane):
+        if isinstance(a, ast.Assign):
+            for t in a.targets:
+                if isinstance(t, ast.Name):
+                    assigns.setdefault(t.id, []).append(a.value)
+
+    def _every_replay_is_owned(name, seen=()):
+        """EVERY assignment to `name` in `lane` builds an owned, per-run name."""
+        if name in seen:
+            return False  # a cycle cannot launder an unowned name into an owned one
+        values = assigns.get(name)
+        if not values:
+            return False
+        for value in values:
+            if isinstance(value, ast.Name):
+                if not _every_replay_is_owned(value.id, (*seen, name)):
+                    return False
+            elif not (_starts_owned(value) and _per_run(value)):
+                return False
+        return True
+
+    journal_calls = [c for c in ast.walk(lane)
+                     if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                     and c.func.id == "_journal_append"]
+    assert journal_calls, (
+        "the `lane` fixture no longer journals its graph name, so the ownership "
+        "contract the sweep reads is gone — re-read #11373 P1")
+    for call in journal_calls:
+        assert call.args and isinstance(call.args[0], ast.Name), (
+            "the `lane` fixture journals an EXPRESSION, not the name it builds, so "
+            "this coupling cannot check what is journalled — journal the name "
+            "(#11373 P1)")
+        target = call.args[0].id
+        assert _every_replay_is_owned(target), (
+            f"`lane` journals {target!r}, but not every assignment to it builds a name "
+            "carrying owned vocabulary (`test_`/`tortoise_test`/`team_`/`org_`) AND "
+            "per-run entropy (`os.urandom`). A later `evict_…` reassignment, an "
+            "unowned branch, or a helper-built name all leave the journal INERT for "
+            "reclamation: the sweep preserves the graph and still consumes the record, "
+            "so it leaks permanently (#11373 P1)")
