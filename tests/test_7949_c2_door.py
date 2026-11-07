@@ -1177,8 +1177,10 @@ def test_a_capture_that_ENTERED_the_door_and_FAILED_is_not_a_BYPASS():
     failure mode a refusal must not have.
     """
     probe = _load_probe()
-    # The REAL shape: ``sdk.py:15639`` sets ok=False whenever extraction_errors
-    # is non-empty, so an ``error`` receipt can never carry ok=True. The previous
+    # The REAL shape: ``sdk.capture_session``'s ok-assembly sets ok=False
+    # whenever ``extraction_errors`` is non-empty (``ok = not extraction_errors
+    # and meta.get("mode") != "empty"``), so an ``error`` receipt can never carry
+    # ok=True. The previous
     # version of this pin fed ``ok=True`` and was therefore asserting over an
     # input the SDK cannot produce.
     failed = {"session_id": "wp02", "extraction_mode": "error",

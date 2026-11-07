@@ -279,7 +279,8 @@ surface, not hand-listed beside it. That list grew one review round at a time (t
 `TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
 `TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, each found by a
 measured mutation that left the previous derivation green), which is the honest reason to state
-it as a CLOSURE over what the path reaches rather than as a list somebody curated. Every one is written in-process, **read back**, and a run whose read-back
+it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
+a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
 unpinned until the `#10983` reviews (rounds 1 and 2), which is the same declaration-versus-control gap one layer below
 the lane. The arm pins `TORTOISE_VALUE_GATE=0` on purpose: with the
