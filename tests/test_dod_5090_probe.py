@@ -3225,6 +3225,14 @@ def _byref_sdk_source() -> str:
         "        return [_review_pool for _review_pool in rows]\n"
         "    def references_a_COMPREHENSION_TARGET_in_its_if(self, rows):\n"
         "        return [r for _review_pool in rows if _review_pool]\n"
+        # ⛔ Every generator AFTER the first is evaluated in the comprehension's
+        # OWN scope, so the later target's `Load` is the comprehension's local,
+        # not the method's (#11389 review round 2, P3). The element and `if`
+        # halves were pinned; this one was not, so over-generalising the fix to
+        # "generator iterables are the enclosing scope's" left the doc's
+        # sentence false with the suite still green.
+        "    def references_a_LATER_generators_target(self, rows):\n"
+        "        return [r for _ in rows for _review_pool in _review_pool]\n"
         "    def assigns_the_attr(self, v):\n"
         "        self._review_pool = v\n"
         "    def augments_the_attr(self, v):\n"
@@ -3402,6 +3410,11 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                       # (#11389 review, P2).
                       "references_a_COMPREHENSION_TARGET_in_its_element",
                       "references_a_COMPREHENSION_TARGET_in_its_if",
+                      # …and a LATER generator's iterable is the
+                      # comprehension's own scope too — the natural
+                      # over-generalisation of the outermost-iterable rule
+                      # (#11389 review round 2, P3).
+                      "references_a_LATER_generators_target",
                       # An attribute BINDING is not a mention either.
                       "assigns_the_attr", "augments_the_attr", "deletes_the_attr"):
         assert shadowing not in declared, (
