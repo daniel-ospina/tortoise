@@ -138,7 +138,7 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   carries the pair keeps it across an incremental projection
   (``cache_projection``'s own stated bound, #10852 review); and the
   NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
-  — which the record's TABLE ALSO holds and which no projection may ever write,
+  — which the record's TABLE can hold and which no projection may ever write,
   because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE
   CLEAR: the graph-side removal of the column itself (``REMOVE n.story_arc``) or
   ``record-restore`` / ``rebuild_from_record``, which wipe the graph first
