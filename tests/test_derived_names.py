@@ -668,8 +668,8 @@ _RAW_CLIENT_IMPORT = re.compile(
 #: site and the block's unowned, un-journaled DETACH read CLEAN (measured:
 #: `sites=0`, `violations=[]`). The unaliased relative form was already covered
 #: by the conventional `FalkorDB` name; the ALIASED one was not. Cost measured
-#: over the judged population (1183 non-exempt top-level `tests/test_*.py`,
-#: and all 1428 `.py` files under `tests/`): construction sites **unchanged**,
+#: over the judged population (1187 non-exempt top-level `tests/test_*.py`,
+#: and all 1432 `.py` files under `tests/`): construction sites **unchanged**,
 #: `_raw_detach_violations()` stays EMPTY, and no relative aliased `FalkorDB`
 #: re-export exists in this tree yet — which is the point: it costs nothing
 #: today and cannot become the next switch-off.
@@ -777,7 +777,7 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # makes a QUALIFIED construction (`fdb.FalkorDB(`, `falkordb.falkordb.FalkorDB(`,
     # `import_module("falkordb").FalkorDB(`) a site, and `FakeFalkorDB(` is still
     # excluded because `e`/`_` are word chars. Cost measured before taking it:
-    # over the 1183 non-exempt corpus files this newly judges ZERO sites.
+    # over the 1187 non-exempt corpus files this newly judges ZERO sites.
     # ⛔ A RENAMED RE-EXPORT (#11217 review round-11 P2). `_RAW_CLIENT_IMPORT`
     # matches only statements naming `falkordb`, so `from tortoise import
     # FalkorDB` resolved no name (closed below) and `from tortoise import
@@ -834,9 +834,9 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # this function's own docstring names as closed, re-opened one spelling over
     # — measured on a fixture: `sites=0`, `violations=[]`. Naming the CLASS here
     # restores it. Cost measured over the exact population the census JUDGES
-    # (`tests/test_*.py`, non-exempt: 1183 files): construction sites **7 -> 7**,
+    # (`tests/test_*.py`, non-exempt: 1187 files): construction sites **7 -> 7**,
     # unchanged, and `_raw_detach_violations()` stays EMPTY — so the wider gate
-    # costs no false BLOCK. (Across ALL 1428 `.py` files under `tests/` the count
+    # costs no false BLOCK. (Across ALL 1432 `.py` files under `tests/` the count
     # goes 10 -> 51, 41 previously-invisible sites: 27
     # `test_embedded_lifecycle.py` + 8 `test_guard.py` — both census-EXEMPT — and
     # 6 in `tests/repro/reproduce_redislite_leak.py`, which the census does not
@@ -2045,15 +2045,16 @@ def _journal_sites(source: str) -> list[tuple[int, int, str]]:
         # nothing. ⛔ THREE populations, three different numbers — keeping them
         # apart is the whole point of this comment, and the reason its last two
         # versions were both wrong (#11217 review rounds 14-15 P2):
-        #   * WALKED: 1,183 non-exempt top-level `tests/test_*.py` (`test_*.py`
-        #     globs to 1,244; the exempt check `continue`s before this function is
+        #   * WALKED: 1,187 non-exempt top-level `tests/test_*.py` (`test_*.py`
+        #     globs to 1,248; the exempt check `continue`s before this function is
         #     reached, so a larger number can only be the all-`.py` population of
-        #     1,428).
-        #   * PARSED: **9**. 1,174 short-circuit on the substring test above, so
-        #     "the census parses 1,183 files" is false — and self-refuting, since
+        #     1,432).
+        #   * PARSED: **9**. The other 1,178 (1,187 − 9) short-circuit on the
+        #     substring test above, so "the census parses 1,187 files" is false — and self-refuting, since
         #     it would make this fast path pointless. Measured at 45a1404cd8:
-        #     walked=1183, fast_path=1174, parsed=9, 9 calls in 5 files.
-        #   * COST: parsing ALL 1,183 would cost ~+14 s (measured: 0.38 s with
+        #     walked=1187, parsed=9, 9 calls in 5 files (steady shape; the split
+        #     above is arithmetic on this head, not a re-instrumentation).
+        #   * COST: parsing ALL 1,187 would cost ~+14 s (measured: 0.38 s with
         #     this guard, 14.73 s without). The earlier "~+12 s" is the same
         #     figure quoted differently — cite the pair, not the delta alone.
         return []
