@@ -1128,11 +1128,19 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
         # `measured_at_commit` ancestry claim needs HISTORY, and this job is the
         # one that checks out at `fetch-depth: 0` (#5086 review P1-1). Listed
         # here, not exempted: the exactness of this assertion is the point.
-        "python3 tools/substrate_map_check.py --check"
+        "python3 tools/substrate_map_check.py --check\n"
+        # #11084: the #5090 test-design surface map's guard is the FIFTH
+        # invocation and takes NO `--check` (it verifies by default) — the
+        # reason the "four `--check` commands" wording below could not absorb it
+        # and red the required `docs` job for every PR. This pin and its sibling
+        # in `tests/test_merge_throughput.py` are the same assertion over the
+        # same step: both must name every invocation.
+        "python3 tools/test_design_map_check.py"
     )
     assert _code(str(step.get("run", ""))).strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the four "
-        "`--check` commands — no shell operator, no `echo` decoy, no wrapper, no "
+        "the drift step must invoke EXACTLY the installer plus the five guard "
+        "commands (four take `--check`, `test_design_map_check.py` verifies by "
+        "default) — no shell operator, no `echo` decoy, no wrapper, no "
         f"trailing anything, or a real failure reports green (#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
     )
