@@ -444,6 +444,23 @@ def test_the_trace_attributes_a_guard_refusal_instead_of_laundering_it():
     assert tl.temporal_leg_empty_reason(
         dated=5, anchors=2, weight=1.0, budget=2) == \
         "no_promotable_anchor_match"
+    # ⚠️ THE PRECEDENCE ITSELF (cycle 9, finding 2): the guard branch must sit
+    # BEFORE the window/anchor branches, because "a guard refusal is a true
+    # statement about the run whatever targeted it" (the docstring's words). The
+    # case above only has ``anchors=0``, so a rewrite nesting the guard branch
+    # inside ``if anchors <= 0 and date_window`` kept every suite green while
+    # laundering a real guard refusal on an ANCHORED window question as an
+    # ordinary ``no_promotable_anchor_match`` — which is what invites "fixing" a
+    # working guard. Anchors > 0 AND date_window, so both rival branches are
+    # live when the guard's must win.
+    assert tl.temporal_leg_empty_reason(
+        dated=5, anchors=1, weight=1.0, budget=2, date_window=True,
+        guard_rejected=2) == "non_eviction_guard"
+    # ...and with no refusals that anchored-window row still reads its own
+    # reason, so the assertion above is about the guard and not the shape.
+    assert tl.temporal_leg_empty_reason(
+        dated=5, anchors=1, weight=1.0, budget=2, date_window=True) == \
+        "no_promotable_anchor_match"
 
 
 # ── 8. declared scope: the anchor arm and the head counterfactual ──────────
@@ -542,16 +559,35 @@ def test_the_receipt_carries_the_guard_and_its_refusals():
             if not (isinstance(key, ast.Constant)
                     and key.value == "non_eviction_targeting"):
                 continue
-            # the value may be wrapped (``trace.get("targeting") or "none"``),
-            # so search ITS subtree — still key-scoped, which is the point.
-            return any(
-                isinstance(node, ast.Call)
+            return _emits_targeting(value)
+        return False
+
+    def _is_targeting_get(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "get"
                 and bool(node.args)
                 and isinstance(node.args[0], ast.Constant)
-                and node.args[0].value == "targeting"
-                for node in ast.walk(value))
+                and node.args[0].value == "targeting")
+
+    def _emits_targeting(value: ast.AST) -> bool:
+        """Is the EMITTED value the targeting lookup?
+
+        ⚠️ TOP-LEVEL, not a subtree search (cycle 9, finding 1): `any(… for node
+        in ast.walk(value))` also matched ``not trace.get("targeting")`` and
+        ``(trace.get("targeting") if False else …)``, so a one-token polarity
+        inversion shipped the inverse receipt with every gate green. The value
+        may legitimately be wrapped by the documented ``or "none"``
+        normalisation, so an ``or`` chain is accepted — but only when its FIRST
+        operand is the lookup and no ``not`` sits anywhere in the emitted
+        expression.
+        """
+        if _is_targeting_get(value):
+            return True
+        if isinstance(value, ast.BoolOp) and isinstance(value.op, ast.Or):
+            return bool(value.values) and _is_targeting_get(value.values[0])
+        if isinstance(value, ast.BinOp):        # `get(...) or "none"` lowered
+            return _is_targeting_get(getattr(value, "left", None))
         return False
 
     assert any(_binds(node) for node in stats), (
@@ -559,19 +595,19 @@ def test_the_receipt_carries_the_guard_and_its_refusals():
     # ...and the APPLIED slot must carry the applied PREDICATE — the mirror of
     # `_binds`. ⚠️ The first version of this assertion named a symbol that does
     # not exist (`_non_eviction_targeting`), so its conjunction was permanently
-    # False and the assertion could never fire: the documented swap
-    # (`"non_eviction_applied": trace.get("targeting") or "none"`) passed every
-    # gate in the tree (review cycle 8, finding 1). `"none"` is TRUTHY, so that
-    # swap would report a guard-enforced `True`-shaped value on a row the guard
-    # never ran — the false PASS cycle 3 removed from this exact field. So this
-    # asserts the POSITIVE (a call to `non_eviction_applied`), which cannot be
-    # satisfied by any other expression.
+    # False and the assertion could never fire (review cycle 8, finding 1). The
+    # second version searched the SUBTREE for a call, which caught the swap but
+    # not the POLARITY: ``not non_eviction_applied(trace)`` — the inverse receipt
+    # on every row — stayed green (cycle 9, finding 1). So the check is on the
+    # TOP-LEVEL expression: exactly a call to the predicate over the guard trace,
+    # with no unary/branch wrapper. That is what the field emits, and a
+    # semantics-preserving rewrite must update this pin — which is the point.
     def _is_applied_predicate(value: ast.AST) -> bool:
-        return any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "non_eviction_applied"
-            for node in ast.walk(value))
+        return (isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "non_eviction_applied"
+                and len(value.args) == 1
+                and isinstance(value.args[0], ast.Name))
 
     applied_slots = 0
     for node in stats:
@@ -580,8 +616,8 @@ def test_the_receipt_carries_the_guard_and_its_refusals():
                     and key.value == "non_eviction_applied"):
                 applied_slots += 1
                 assert _is_applied_predicate(value), (
-                    "non_eviction_applied must be non_eviction_applied(trace), "
-                    f"not {ast.dump(value)}")
+                    "non_eviction_applied must BE non_eviction_applied(trace) "
+                    f"— polarity included — not {ast.unparse(value)}")
     assert applied_slots == 1, applied_slots
 
 
