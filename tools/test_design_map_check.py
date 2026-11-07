@@ -715,6 +715,32 @@ def _delete_crosswalk_cell(text: str, seam: str, column: int) -> str:
     return "".join(out)
 
 
+def _relabel_seam(text: str, seam: str, label: str) -> str:
+    r"""Re-label a pinned seam's first cell, keeping everything else — the decoy a
+    PREFIX match cannot tell from the pinned seam.
+
+    R5's presence arm used `re.match(r"^\|\s*" + re.escape(seam), line)`, so renaming
+    `| §5 row 1 |` to `| §5 row 10 |` still "matched" the pinned `§5 row 1`: the
+    SF1/SF2 crosswalk was gone and the map graded CLEAN (exit 0, measured), and the
+    same held for `§6.1` masked by `§6.10`. The label is the only cell this edits, so
+    a whole-cell match is the ONLY thing that can refuse it — which is why this case
+    exists: before it, reverting the fix reddened no row at all (`--self-test` stayed
+    green and the decoy graded clean).
+    """
+    out: list[str] = []
+    hit = False
+    for line in text.splitlines(keepends=True):
+        if line.startswith(f"| {seam} |"):
+            row = cells(line)
+            row[0] = f" {label} "
+            line = "| " + " | ".join(row) + " |\n"
+            hit = True
+        out.append(line)
+    if not hit:
+        raise AssertionError(f"self-test mutation target {seam!r} not found")
+    return "".join(out)
+
+
 def _rename_and_blank_crosswalk_row(text: str, seam: str, label: str) -> str:
     """Re-label one crosswalk row AND blank its surface cell — the evasion primitive.
 
@@ -991,6 +1017,11 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         _drop_section_heading,
         "refusal",
     ),
+    (
+        "relabel `§5 row 1` as `§5 row 10` (a pinned seam one digit off — only a whole-cell match refuses it)",
+        lambda t: _relabel_seam(t, "§5 row 1", "§5 row 10"),
+        "violation",
+    ),
 )
 
 
@@ -1000,7 +1031,7 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 #: exit 0 (measured), which is the false PASS this arm exists to prevent. The
 #: map's own residual covers a THREE-place edit (row + pin + case together), so
 #: the shrink that is two places short of that must still be loud.
-MIN_SELF_TEST_MUTATIONS = 20
+MIN_SELF_TEST_MUTATIONS = 21
 
 
 def self_test(text: str) -> int:
