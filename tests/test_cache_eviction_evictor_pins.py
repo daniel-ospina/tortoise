@@ -1071,15 +1071,16 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
     Hermetic on purpose (no engine): the live suite `test_cache_eviction_evictor.py`
     `allow_module_level`-skips without a URI, so a pin living there would not run in
     the PR lane that this defect would have merged through. It cannot import that
-    module's builder for the same reason — the skip fires at import.
+    module for the same reason — the skip fires at import — so the coupling is read off
+    its SOURCE below.
     """
     import os
     from pathlib import Path
 
     from tests._embedded import _SWEEP_OWNED_PREFIXES, owns_by_ownership_record
 
-    # The shape `test_cache_eviction_evictor.py::_lane_graph_name` builds (they must
-    # agree; that module's own comment cites this pin).
+    # The shape `test_cache_eviction_evictor.py`'s `lane` fixture builds INLINE (they
+    # must agree; that module's own comment cites this pin).
     name = f"test_evict_{os.urandom(6).hex()}"
     assert name.startswith("test_"), (
         f"{name!r} does not start with the `test_` family member: "
@@ -1098,13 +1099,17 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
     # constrains a name IT builds. Measured during this fix — reverting the fixture to
     # `f"evict_{…}"` left every assertion above GREEN, i.e. a pin that does not pin.
     # The live module cannot be imported here (its `allow_module_level` skip fires at
-    # import), so the coupling is read off its source: the fixture must CALL the builder
-    # and the builder must RETURN an owned name.
+    # import), so the coupling is read off its source: the fixture must BUILD the owned
+    # name, INLINE in the `lane` block.
+    # ⛔ INLINE IS PART OF THE PROPERTY, not style: `tests/test_derived_names.py`'s
+    # `_raw_detach_violations` matches `os.urandom` against the fixture's raw text, so a
+    # name built in a module-level helper moves the only code-side `os.urandom` out of
+    # the block it inspects and leaves that census reading a COMMENT. Do not re-extract
+    # it into `_lane_graph_name()`.
     live_module = (Path(__file__).resolve().parent / "test_cache_eviction_evictor.py").read_text(
         encoding="utf-8")
-    assert "graph_name = _lane_graph_name()" in live_module, (
-        "the live suite's `lane` fixture no longer takes its graph name from "
-        "`_lane_graph_name()` — reconcile it with this pin")
-    assert 'f"test_evict_{os.urandom(6).hex()}"' in live_module, (
-        "`_lane_graph_name()` no longer builds a `test_`-prefixed name — the journal "
-        "would be INERT for reclamation (#11373 P1)")
+    assert 'graph_name = f"test_evict_{os.urandom(6).hex()}"' in live_module, (
+        "the live suite's `lane` fixture no longer builds an owned, per-run graph name "
+        "INLINE — either the prefix left the vocabulary (the journal would be INERT "
+        "for reclamation, #11373 P1) or the f-string moved into a helper (which hides "
+        "`os.urandom` from the raw-client census's enclosing block)")
