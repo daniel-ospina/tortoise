@@ -298,12 +298,32 @@ def _sdk_lane_branch() -> ast.If | None:
     return None
 
 
+def _extraction_bindings(func: ast.AST) -> list[ast.Assign]:
+    """Every assignment in ``func`` that BINDS ``extracted`` — the extractor's output.
+
+    ⛔ Anchored on the VALUE FLOW, never on a callee spelling. Whatever a lane is
+    called, its result has to reach ``extracted`` to be used for anything, so a
+    third dispatch is visible even when its name shares no prefix with the two
+    published ones. MEASURED at the #10983 review (cycle 8): the previous
+    predicate matched ``ast.unparse(node.func).startswith("self._extract")``, so
+    an ``elif`` dispatching ``self._dispatch_lane("v3", ...)`` — which of course
+    assigns to ``extracted`` — left ``len(capture_ifs) == 1`` GREEN while it
+    rerouted every capture. A callee this test cannot name must red, not pass.
+    """
+    def _binds(node: ast.Assign) -> bool:
+        return any(isinstance(n, ast.Name) and n.id == "extracted"
+                   for target in node.targets for n in ast.walk(target))
+
+    return [node for node in ast.walk(func)
+            if isinstance(node, ast.Assign) and _binds(node)]
+
+
 def _lane_dispatch_ifs(func: ast.AST) -> list[ast.If]:
     """Every ``if`` in ``capture_session`` whose BODY dispatches an SDK lane.
 
-    ⛔ Prefix-matched on ``self._extract`` rather than
-    ``endswith("_extract_session_llm")``: the arm that made this necessary called
-    ``self._extract_session_llm_variant``, which the narrower match cannot see.
+    A "dispatch" is an assignment that binds ``extracted`` from a CALL (see
+    ``_extraction_bindings``) — a structural fact about the value flow, not a
+    name prefix, so a renamed second lane is counted like any other.
 
     Why the SET and not just the resolved arm (``_sdk_lane_branch``): that helper
     returns the FIRST If whose body calls the m2 extractor — the INNERMOST arm —
@@ -313,14 +333,39 @@ def _lane_dispatch_ifs(func: ast.AST) -> list[ast.If]:
     == "1": extracted, meta = self._extract_session_llm_variant(...)`` inserted
     above the m2 arm left BOTH door tests passing.
     """
-    def _dispatches(node: ast.AST) -> bool:
-        return (isinstance(node, ast.Call)
-                and ast.unparse(node.func).startswith("self._extract"))
+    dispatched = {id(binding) for binding in _extraction_bindings(func)
+                  if isinstance(binding.value, ast.Call)}
+
+    def _dispatches(node: ast.If) -> bool:
+        return any(id(stmt) in dispatched for stmt in node.body)
 
     return [node for node in ast.walk(func)
-            if isinstance(node, ast.If)
-            and any(_dispatches(call) for stmt in node.body
-                    for call in ast.walk(stmt))]
+            if isinstance(node, ast.If) and _dispatches(node)]
+
+
+def _lane_chain_gates(func: ast.AST, target: ast.If) -> list[ast.If]:
+    """Every ``If`` between the function body and ``target``, via ``orelse`` links.
+
+    The door is a CHAIN: ``if no_provider … elif replay … elif m2 … else v2``.
+    An arm woven in ABOVE ``target`` becomes one of its ANCESTORS, so the length
+    of this list is the chain's shape — the dimension a third arm that returns
+    a payload without binding ``extracted`` would otherwise hide in (#10983
+    review, cycle 8). Outermost last.
+    """
+    parent: dict[int, ast.AST] = {}
+    for node in ast.walk(func):
+        for child in ast.iter_child_nodes(node):
+            parent[id(child)] = node
+    gates: list[ast.If] = []
+    cursor: ast.AST = target
+    while True:
+        ancestor = parent.get(id(cursor))
+        if (isinstance(ancestor, ast.If) and len(ancestor.orelse) == 1
+                and ancestor.orelse[0] is cursor):
+            gates.append(ancestor)
+            cursor = ancestor
+        else:
+            return gates
 
 
 def _env_reads(path: Path) -> set[str]:
@@ -440,12 +485,53 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
     # behaviourally-identical variant rerouted every capture by ambient env while
     # both door tests stayed green. The door is the CHAIN, so require that
     # exactly one branch in capture_session dispatches an SDK extractor at all.
-    capture_ifs = _lane_dispatch_ifs(_funcs(SDK)["capture_session"])
+    capture_func = _funcs(SDK)["capture_session"]
+    capture_ifs = _lane_dispatch_ifs(capture_func)
     assert len(capture_ifs) == 1, (
         "sdk.capture_session dispatches an SDK extractor from "
         f"{len(capture_ifs)} branches — a third arm is a second door, and the "
         "acceptance pins exactly two lanes (#10983): "
         f"{[ast.unparse(node.test) for node in capture_ifs]}")
+    # ⛔ The CALLEE SET, not a spelling. `len(capture_ifs) == 1` above is computed
+    # from the value flow (an arm that binds `extracted` from a call), so this
+    # pair is what names the two lanes the acceptance is allowed to run. A third
+    # callable that feeds the extraction reds here even if it shares no prefix
+    # with these two — a name the test cannot pronounce is a FAIL, never a pass
+    # (#10983 review, cycle 8: `self._dispatch_lane(...)` in a third arm left the
+    # previous prefix-matched predicate green).
+    bindings = _extraction_bindings(capture_func)
+    dispatched = [b for b in bindings if isinstance(b.value, ast.Call)]
+    assert {ast.unparse(b.value.func) for b in dispatched} == {
+            "self._extract_session_llm", "self._extract_session_v2"}, (
+        "sdk.capture_session feeds `extracted` from "
+        f"{sorted(ast.unparse(b.value) for b in dispatched)} — the acceptance "
+        "pins exactly two lanes (self._extract_session_llm / "
+        "self._extract_session_v2), so any other callee is a second door the "
+        "record would still declare as v2 (#10983)")
+    assert len(dispatched) == 2, (
+        f"sdk.capture_session dispatches {len(dispatched)} extractors into "
+        "`extracted` — exactly two are pinned, one per lane (#10983): "
+        f"{[ast.unparse(b.value) for b in dispatched]}")
+    indirect = [b for b in bindings if not isinstance(b.value, ast.Call)]
+    laundered = [b for b in indirect
+                 if not (isinstance(b.value, ast.List) and not b.value.elts)]
+    assert not laundered, (
+        "sdk.capture_session binds `extracted` without calling an extractor: "
+        f"{[ast.unparse(b) for b in laundered]} — only the two empty "
+        "short-circuit arms (no provider / replay) may do that; a dispatch "
+        "laundered through a temporary is still a second door (#10983)")
+    # ⛔ The CHAIN's shape above the door. An arm woven in above the m2 branch is
+    # an ANCESTOR of it, whatever its body does, so the count is the door's own
+    # geometry: `no_provider`, then `session_existed`, then the door. A third
+    # gate here reds even if it returns a payload without binding `extracted`.
+    gates = _lane_chain_gates(capture_func, capture_ifs[0])
+    assert len(gates) == 2, (
+        "sdk.capture_session's lane chain has "
+        f"{len(gates)} gates above the door, not the two pinned "
+        "(no_provider, session_existed) — an arm woven in ABOVE the door "
+        "reroutes captures the record still declares v2; re-derive this count "
+        "deliberately rather than bumping it (#10983): "
+        f"{[ast.unparse(g.test) for g in gates]}")
     assert ast.unparse(capture_ifs[0].test) == sdk_test, (
         "the only lane-dispatching branch in sdk.capture_session tests "
         f"{ast.unparse(capture_ifs[0].test)!r}, not the m2 selector "
