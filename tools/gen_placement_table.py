@@ -34,14 +34,14 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below, so the refusal is
-# attributable rather than an `ImportError` surfacing from some module-level
-# 3.11+-only import further down the file.
-# ⛔ Status is 2, NOT `SystemExit(<str>)`'s 1 (#4053). 1 already means STALE
-# under `--check` (:21, :106, :119), so a caller keying on the status would read
-# an interpreter refusal as "regenerate the table". `SystemExit(<int>)` carries
-# no message, so the message is printed explicitly — the one other shape the
-# #5128 census accepts.
+# The #5128 interpreter guard MUST precede every other import: a module-level
+# 3.12-only import raises ImportError on an older interpreter BEFORE a later
+# guard could run, and the refusal then looks like a broken tool rather than a
+# floor. Print-then-`SystemExit(int)` is the shape the #5128 census's detector
+# accepts (`tests/test_entry_point_python_guard.py`), and exit 2 is reserved
+# here for "cannot answer" — 1 already means STALE under `--check`, and a
+# caller must never read an interpreter refusal as "regenerate the table".
+# Mirrors `tools/test_design_map_check.py`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     print(
         f"tools/gen_placement_table.py requires Python >= 3.12 (got "

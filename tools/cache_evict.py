@@ -76,20 +76,22 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below, so the refusal is
-# attributable rather than an `ImportError` surfacing from some module-level
-# 3.11+-only import further down the file. The HISTORICAL `raise
-# SystemExit(<str>)` shape is correct HERE and only here: CPython exits 1 for it,
-# which is exactly `CACHE_EVICTION_EXIT_USAGE` (`tortoise/cache_eviction.py:137`,
-# "flag/IO mistake") — a wrong interpreter is a usage mistake for this verb —
-# and this tool's verdict codes are 2/3/4, so status 1 stays unambiguous. The
-# two sibling tools whose exit 1 is a VERDICT cannot use this shape (#4053).
+# The #5128 interpreter guard MUST precede every other import: a module-level
+# 3.12-only import raises ImportError on an older interpreter BEFORE a later
+# guard could run, and the refusal then looks like a broken tool rather than a
+# floor. Print-then-`SystemExit(int)` is the shape the #5128 census's detector
+# accepts (`tests/test_entry_point_python_guard.py`), and exit 1 is this tool's
+# usage code. It must NOT be 2/3/4: those are this verb's PLAN / REFUSED /
+# UNBOUNDED codes, and a scheduler acting on them would read an interpreter
+# refusal as "a sweep may have deleted nodes". Mirrors `tools/substrate_map_check.py`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/cache_evict.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/cache_evict.py`"
+        f"`uv run python tools/cache_evict.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(1)
 
 import argparse
 import contextlib
