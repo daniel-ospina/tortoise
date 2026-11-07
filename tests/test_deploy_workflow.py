@@ -5064,7 +5064,7 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: false" — the phrase-first spelling — and nothing else. The equally natural order puts
     #: the sha last, and it was REFUSED while its twin was a pinned control:
     #:   "The claim that `ff6379eb2` is the tree before #9548 is false; the true tree is
-    #:    `047c91f7a`."                                        -> accept (pinned at :7284)
+    #:    `047c91f7a`."                                        -> accept (pinned in `_refutations`)
     #:   "The claim that the tree before #9548 is `ff6379eb2` is false; the true tree is
     #:    `047c91f7a`."                                        -> REFUSED
     #:   "The statement that the tree before #9548 was `ff6379eb2` was wrong; it is
@@ -5240,10 +5240,10 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: ⛔ THE GAP AFTER THE NEGATOR MAY NOT CROSS A COORDINATE, AND IT IS NOT A
     #: 40-CHARACTER CUTOFF (#11191 review r18, P1 — MEASURED false RED, a REGRESSION
     #: against `origin/main`). The window was `[^.;—–]{0,40}?`, i.e. a DISTANCE cutoff —
-    #: the class this predicate's own structural decision 3 refuses (`:5426`, "REFERENCE,
-    #: NOT TOKENS OR DISTANCE … a distance cutoff refused the sentence a fixer should
-    #: write") — and the control that pins the natural repair GREEN (`:6451`) is written in
-    #: the SHORTER quoted spelling, so it passed while the ordinary sentence did not. One
+    #: the class this predicate's own structural decision 3 refuses ("REFERENCE, NOT TOKENS
+    #: OR DISTANCE … a distance cutoff refused the sentence a fixer should write"). That is
+    #: why the natural repair passed only in its SHORTER quoted spelling, while the ordinary
+    #: sentence did not: a cutoff is a distance, not a property of the grammar. One
     #: adverb overflows the old cap (45 gap characters, 51 counting the negator):
     #:   "`ff6379eb2` is not what the note means by the tree before #9548; that tree is
     #:    `047c91f7a`."                                             -> accepted (33 chars)
@@ -7434,11 +7434,11 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     )
     # ⛔ ONE CONTROL PER FIXED DIRECTION (#11191 review r18, P1 — MEASURED vacuity). The
     # r18 changes to this predicate were made without a test-body hunk, so REVERTING ANY
-    # OF THEM LEFT THE SUITE GREEN — the standard this file states for itself at `:7626`
-    # and labels P1 at `:6335`. Each spelling below is a sentence that was measured WRONG
-    # at `e51fe7a37`; each now flips with the arm it pins. BOTH directions are pinned,
-    # because every one of these arms has produced an opposite-proposition bug when only
-    # one direction was written down.
+    # OF THEM LEFT THE SUITE GREEN — the standard this file states in its control blocks and
+    # has labelled P1 (a fix whose revert leaves the suite green has no test). Each spelling
+    # below is a sentence that was measured WRONG at `e51fe7a37`; each now flips with the
+    # arm it pins. BOTH directions are pinned, because every one of these arms has produced
+    # an opposite-proposition bug when only one direction was written down.
     _r18_admitted = (
         # the fronted `#9601` twin: the SUBJECT direction must skip a named other subject
         # exactly as the PREDICATE direction already did, one adverb or not.
@@ -9306,7 +9306,7 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "`ff6379eb2` cannot be the tree immediately before #9548.",
         "`ff6379eb2` is an ancestor rather than the tree before #9548.",
         # ⛔ THE LONG-GAP REPAIR (#11191 review r29 F1, P2 — MEASURED both ways).
-        # `:5043` records that `_DENIAL_GAP`'s no-comma window was widened {0,40} →
+        # `_DENIAL_GAP`'s own comment records that its no-comma window was widened {0,40} →
         # {0,90} BECAUSE this exact sentence (45 gap characters) was REFUSED; the
         # comment carried the measurement but NO row did, so reverting the window to
         # {0,40} left the suite green while restoring the r18 P1 false RED. Measured at
