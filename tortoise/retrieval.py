@@ -733,9 +733,10 @@ def session_key_of(hit: dict) -> str:
       and the guard COSTS ``evidence_recall@5 0.527 → 0.4706``. Quoting the
       gain alone — as an earlier draft of this docstring did — inverts the
       attribution this fix exists to keep straight and re-arms the arm
-      #8713 refuted. Pre-change the PRODUCT grain had no seed, so no group
-      existed to place there (the eval grain DID fire: 354 seeds above); a
-      group whose key the merge does not expect is DROPPED, not tailed
+      #8713 refuted. Pre-change the RAW product search pool had no seed, and
+      an ASK-lane pool only via ``annotate_ask_hits``'s re-attached snake id
+      (the eval grain DID fire: 354 seeds above); a group whose key the merge
+      does not expect is DROPPED, not tailed
       (see ``session_reinjection.source_session_chunk_pass``). The identity
       the READER already renders (``hit_session_id``) was dropped one layer
       below it;
@@ -812,11 +813,14 @@ def session_key_of(hit: dict) -> str:
     seed would be spent and its group DROPPED (groups are built over
     ``seed_order``: ``session_reinjection.reinjection_merge_order``) — the
     strip would CAUSE that, not prevent it. That configuration is
-    unreachable through every in-repo edge writer, because an indexed key
+    unreachable wherever the ``:Session(id)`` index is SERVED: an indexed key
     with surrounding whitespace cannot be matched (#9599), so a padded
-    ``:Session`` never carries the ``CONTAINS`` edge the fetch traverses
-    and no group key is ever produced. Normalising both sides is #9599's
-    decision, not a rider here.
+    ``:Session`` never carries the ``CONTAINS`` edge the fetch traverses.
+    ⛔ It is NOT unreachable in the label-scan form — index creation is
+    BEST-EFFORT (a swallowed ``try/except``), and a label scan compares
+    STORED bytes, where the padded id matches its own spelling, the edge IS
+    wired, and the group key comes back RAW. So #9599's normalise-both-sides
+    decision is not moot, and this strip is no substitute for it.
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all
@@ -2330,8 +2334,8 @@ def _session_admission_key(
 
     ⛔ The camel leg is here so this grain AGREES with the pool authority
     (:func:`session_key_of`) on every hit whose identity BOTH grains read in
-    the SAME spelling (the snake-id and camel-id shapes; the divergences
-    below are where one grain reads an identity the other does not) — before
+    the SAME spelling AND the same normalisation (neither padded nor
+    whitespace-only; the divergences below are where they part) — before
     it, a camel-only pool was N per-hit phantom buckets whose cap never bound
     and which ``seeded_sessions`` read as NO session, while ``session_blocks``
     built N singleton blocks, so ``assemble_session_context`` degraded to the
