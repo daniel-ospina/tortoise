@@ -1892,6 +1892,222 @@ def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE(monkeypatch
         f"measuring content, not the door: {door['objects']}")
 
 
+# ── 6. the guard's call site is UNCONDITIONAL, and only where it really is ─
+
+#: The ONE line in the acceptance probe that arms the door witness. Every mutant
+#: row below is a textual replacement of it, so each mutant is the REAL probe
+#: with one wrapper added or removed — never a hand-built AST that could differ
+#: from the tree that ships.
+DOOR_GUARD_LINE = "    require_door_entered(runs)\n"
+
+#: Exception names a handler needs in order to SWALLOW the witness's refusal.
+#: `require_door_entered` raises `SystemExit`, whose MRO is
+#: `(SystemExit, BaseException, object)` — it derives from `BaseException` and
+#: NOT from `Exception` (Python docs, "Built-in Exceptions"; verified against
+#: `SystemExit.__mro__`). So `except Exception:` lets the refusal propagate and
+#: is a CORRECT implementation, while a bare `except:` or one naming
+#: `SystemExit`/`BaseException` hides it.
+_SWALLOWING_EXCEPTIONS = frozenset({"SystemExit", "BaseException"})
+
+_TRY_NODES = tuple(
+    node for node in (ast.Try, getattr(ast, "TryStar", None))
+    if node is not None)
+
+
+def _own_scope(node: ast.AST):
+    """`node`'s children, never descending into a nested def/lambda/class.
+
+    ONE walk, shared by the pin and by its mutant rows: two implementations
+    would be two answers to "is this call in `main`'s own scope".
+    """
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.Lambda, ast.ClassDef)):
+            continue
+        yield child
+        yield from _own_scope(child)
+
+
+def _probe_main(mutated_src: str | None = None) -> ast.FunctionDef:
+    """`main` from the acceptance probe, or from a source-level mutant of it."""
+    tree = ast.parse(_source(PROBE) if mutated_src is None else mutated_src)
+    return {node.name: node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}["main"]
+
+
+def _door_guard_call(main: ast.AST) -> tuple[ast.Call, ast.AST]:
+    """`main`'s single own-scope `require_door_entered(...)` call, and its arg."""
+    calls = [node for node in _own_scope(main)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "require_door_entered"]
+    assert len(calls) == 1, (
+        f"`main` must call require_door_entered(...) exactly once in its own "
+        f"scope, called {len(calls)} time(s) — the witness exists but nothing "
+        "arms it, so a bypassed capture is written as a measured one "
+        "(#10983 review P2)")
+    call = calls[0]
+    positionals = call.args
+    assert positionals or call.keywords, (
+        "require_door_entered() is called with NO argument — the guard cannot "
+        "see the runs it is supposed to refuse (#10983)")
+    return call, (positionals[0] if positionals
+                  else next(kw.value for kw in call.keywords))
+
+
+def _handler_swallows_the_refusal(handler: ast.ExceptHandler) -> bool:
+    """Can this handler catch the `SystemExit` the witness raises?"""
+    if handler.type is None:          # bare `except:` catches BaseException
+        return True
+    return any(
+        (isinstance(node, ast.Name) and node.id in _SWALLOWING_EXCEPTIONS)
+        or (isinstance(node, ast.Attribute)
+            and node.attr in _SWALLOWING_EXCEPTIONS)
+        for node in ast.walk(handler.type))
+
+
+def _test_still_runs_the_guard(wrapper: ast.AST, runs_arg: ast.AST) -> bool:
+    """Does `wrapper.test` provably NOT skip the call?
+
+    Only two shapes qualify: a TRUTHY literal (`if True:`, `while True:`), and
+    the guard's own argument as the test — `if runs: require_door_entered(runs)`
+    is behaviourally identical to calling it unconditionally, because
+    `require_door_entered([])` returns `entered=0` / `bypassed=[]` and raises
+    nothing. Everything else (`if False:`, `if os.environ.get(...) != "1":`,
+    `if runs and also_this:`) is left UNPROVEN and blocks — a pin that guesses
+    "probably fine" is the fail-open shape this row exists to prevent.
+    """
+    test = getattr(wrapper, "test", None)
+    if isinstance(test, ast.Constant):
+        return bool(test.value)
+    return (isinstance(test, ast.Name) and isinstance(runs_arg, ast.Name)
+            and test.id == runs_arg.id)
+
+
+def _wrapper_can_hide_the_guard(wrapper: ast.AST, child: ast.AST,
+                                runs_arg: ast.AST) -> bool:
+    """Can this wrapper SKIP the call, or SUPPRESS the refusal it raises?
+
+    ⛔ The wrappers are INSPECTED, not merely named (review at `68efe7e0`,
+    residual 2). An `ast.Try` says nothing on its own: `try: guard` +
+    `finally:` runs the guard on every pass and lets its `SystemExit`
+    propagate, and so does `except Exception:` — which cannot catch
+    `SystemExit` at all. Naming the node type alone called both "guarded", so
+    two CORRECT implementations red while the message asserted one "never runs
+    it": over-block is fail-closed, but it is a false red with a false
+    diagnosis, and it teaches the next reader to edit the probe until the pin
+    is quiet.
+    """
+    if isinstance(wrapper, _TRY_NODES):
+        return any(_handler_swallows_the_refusal(handler)
+                   for handler in wrapper.handlers)
+    if isinstance(wrapper, (ast.If, ast.IfExp, ast.While)):
+        return not _test_still_runs_the_guard(wrapper, runs_arg)
+    return isinstance(wrapper, (ast.For, ast.AsyncFor, ast.Match,
+                                ast.comprehension, ast.BoolOp))
+
+
+def _door_guard_wrappers(main: ast.AST, call: ast.Call,
+                         runs_arg: ast.AST) -> list[str]:
+    """The wrappers above `call` that can skip it or swallow its refusal."""
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(main):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    chain: list[tuple[ast.AST, ast.AST]] = []
+    child: ast.AST = call
+    anchor = parents.get(id(child))
+    while anchor is not None and anchor is not main:
+        chain.append((anchor, child))
+        child, anchor = anchor, parents.get(id(anchor))
+    # ⛔ No `assert anchor is main` here (review at `68efe7e0`, residual 1). It
+    # could never fire and advertised a diagnosis it could not produce: the
+    # chain starts at `call`, which `_own_scope(main)` drew from `main`'s own
+    # subtree, and `parents` is built from `ast.walk(main)` — the same subtree —
+    # so the walk always terminates at `main`. Every mutation that breaks the
+    # parent chain (a nested `def`/`lambda`/`class`) reds arm (a) first, with
+    # "called 0 time(s)". Deleting dead weight is this file's own precedent
+    # (`:805-810`), and `#11424` carries the rule-3 finding.
+    return [type(node).__name__ for node, child in chain
+            if _wrapper_can_hide_the_guard(node, child, runs_arg)]
+
+
+#: The unconditional arm's discrimination matrix (review at `68efe7e0`). Each
+#: row replaces `DOOR_GUARD_LINE` in the REAL probe source, so `expected` is what
+#: the arm must report about a tree that really has that shape. The first block
+#: is the mutant class the arm exists to RED; the second is the over-block class
+#: it used to red as well — the same wrapper node types, in a CORRECT
+#: implementation — which is why both directions are pinned here.
+DOOR_GUARD_MUTANTS = (
+    # (label, expected wrappers, the replacement for DOOR_GUARD_LINE)
+    ("an `if False:` arm never runs the guard",
+     ["If"], "    if False:\n        require_door_entered(runs)\n"),
+    ("a conditional env arm re-creates the inert enforcer (#11424 item 1)",
+     ["If"],
+     "    if os.environ.get(\"TORTOISE_SKIP_DOOR_GUARD\") != \"1\":\n"
+     "        require_door_entered(runs)\n"),
+    ("`try` + `except SystemExit: pass` swallows the refusal",
+     ["Try"],
+     "    try:\n        require_door_entered(runs)\n"
+     "    except SystemExit:\n        pass\n"),
+    ("a bare `except:` swallows the refusal too",
+     ["Try"],
+     "    try:\n        require_door_entered(runs)\n"
+     "    except:\n        pass\n"),
+    ("a tuple handler naming SystemExit is still a swallow",
+     ["Try"],
+     "    try:\n        require_door_entered(runs)\n"
+     "    except (ValueError, SystemExit):\n        pass\n"),
+    ("a `while False:` arm never runs the guard",
+     ["While"], "    while False:\n        require_door_entered(runs)\n"),
+    # ── the over-block class: CORRECT implementations, pinned GREEN ─────────
+    ("`try/finally` runs the guard on every pass and propagates its refusal",
+     [],
+     "    try:\n        require_door_entered(runs)\n    finally:\n        pass\n"),
+    ("`except Exception:` cannot catch SystemExit, so the refusal propagates",
+     [],
+     "    try:\n        require_door_entered(runs)\n"
+     "    except Exception:\n        pass\n"),
+    ("`if runs:` is a no-op guard — an empty run list refuses nothing",
+     [], "    if runs:\n        require_door_entered(runs)\n"),
+    ("`while True:` runs the guard on every pass",
+     [], "    while True:\n        require_door_entered(runs)\n        break\n"),
+)
+
+
+def test_the_unconditional_door_arm_reds_on_guards_and_not_on_no_op_wrappers():
+    """Arm (d) of the call-site row must discriminate in BOTH directions.
+
+    The pre-fix arm collected the ancestors' NODE TYPES (`ast.Try`, `ast.If`, …)
+    and red on any of them. That caught the two mutants it was written for, and
+    also red on `try: guard` + `finally:` and on `if runs: guard` — both correct
+    (review at `68efe7e0`, residual 2). Each `DOOR_GUARD_MUTANTS` row below is a
+    mutation of the real probe source, so this row is the arm's own mutation
+    table: the GREEN rows fail on the pre-fix arm (they reported `['Try']` /
+    `['If']` where `[]` is correct) and the RED rows pin what the arm must never
+    stop catching.
+    """
+    src = _source(PROBE)
+    assert src.count(DOOR_GUARD_LINE) == 1, (
+        "the mutant rows below replace exactly one line, but the probe carries "
+        f"{src.count(DOOR_GUARD_LINE)} line(s) reading "
+        f"{DOOR_GUARD_LINE.strip()!r} — the table cannot say which one it "
+        "mutated (#10983)")
+
+    classified = []
+    for label, expected, replacement in DOOR_GUARD_MUTANTS:
+        main = _probe_main(src.replace(DOOR_GUARD_LINE, replacement, 1))
+        call, runs_arg = _door_guard_call(main)
+        classified.append(
+            (label, expected, _door_guard_wrappers(main, call, runs_arg)))
+    wrong = [(label, expected, actual)
+             for label, expected, actual in classified if actual != expected]
+    assert not wrong, (
+        "the UNCONDITIONAL arm mis-classifies the wrappers it exists for "
+        "(#10983 review at `68efe7e0`, residuals 1-2):\n"
+        + "\n".join(f"  {label}\n    expected {expected}, got {actual}"
+                    for label, expected, actual in wrong))
+
+
 def test_the_run_REFUSES_a_bypassed_capture_at_the_CALL_SITE_that_arms_the_witness():
     """`require_door_entered(runs)` is the guard; its CALL SITE is what arms it.
 
@@ -1917,55 +2133,33 @@ def test_the_run_REFUSES_a_bypassed_capture_at_the_CALL_SITE_that_arms_the_witne
     * it is UNCONDITIONAL — an `if`/`try` body is still "in `main`'s own scope"
       for the walk above, so a call that can never run (`if False:`) or whose
       `SystemExit` is swallowed (`try: … except SystemExit: pass`) has to be a
-      separate mutant of this same row (review at `7eb4a042`).
+      separate mutant of this same row (review at `7eb4a042`). The wrappers are
+      INSPECTED rather than merely named (`_wrapper_can_hide_the_guard`), so a
+      `try/finally` wrapper or an `if runs:` no-op guard — both CORRECT — no
+      longer red, with their own rows in `DOOR_GUARD_MUTANTS` (review at
+      `68efe7e0`, residual 2).
     """
-    tree = _tree(PROBE)
-    functions = {node.name: node for node in tree.body
-                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    main = functions["main"]
-
-    def own_scope(node: ast.AST):
-        """`node`'s children, never descending into a nested def/lambda/class."""
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.Lambda, ast.ClassDef)):
-                continue
-            yield child
-            yield from own_scope(child)
-
-    calls = [node for node in own_scope(main)
-             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-             and node.func.id == "require_door_entered"]
-    assert len(calls) == 1, (
-        f"`main` must call require_door_entered(...) exactly once in its own scope, "
-        f"called {len(calls)} time(s) — the witness exists but nothing arms it, so a "
-        "bypassed capture is written as a measured one (#10983 review P2)")
-    call = calls[0]
-
-    # (b) the argument is the run list, not a literal (``[]`` / ``None``).
-    positionals = call.args
-    assert positionals or call.keywords, (
-        "require_door_entered() is called with NO argument — the guard cannot see "
-        "the runs it is supposed to refuse (#10983)")
-    runs_arg = positionals[0] if positionals else next(
-        kw.value for kw in call.keywords)
+    main = _probe_main()
+    call, runs_arg = _door_guard_call(main)
     assert isinstance(runs_arg, ast.Name), (
         f"require_door_entered(...) is handed "
         f"{type(runs_arg).__name__} ({ast.dump(runs_arg)[:80]}), not the run LIST — "
         "`require_door_entered([])` returns entered=0/bypassed=[] and refuses "
         "nothing, so this call site would be green and inert (#10983)")
-    bound = {n.id for n in own_scope(main)
+    bound = {n.id for n in _own_scope(main)
              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
     assert runs_arg.id in bound or any(
-        isinstance(n, ast.arg) and n.arg == runs_arg.id for n in own_scope(main)), (
+        isinstance(n, ast.arg) and n.arg == runs_arg.id
+        for n in _own_scope(main)), (
         f"require_door_entered({runs_arg.id}) is handed a name `main` never binds — "
         "a module-level empty list refuses nothing either (#10983)")
 
     # (c) the refusal precedes the artifact. ``render_log`` both BUILDS the text
     # and (at the next statement) its caller writes it, so a guard placed after
     # either one refuses nothing that has not already been produced.
-    render_calls = [node for node in own_scope(main)
-                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    render_calls = [node for node in _own_scope(main)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
                     and node.func.id == "render_log"]
     assert len(render_calls) == 1, (
         f"`main` must call render_log(...) exactly once: {len(render_calls)}")
@@ -1976,31 +2170,16 @@ def test_the_run_REFUSES_a_bypassed_capture_at_the_CALL_SITE_that_arms_the_witne
         "(#10983 review P2)")
 
     # (d) the call is UNCONDITIONAL — reached on every run, not merely PRESENT.
-    # `own_scope` skips only a nested `def`/`lambda`/`class`, so it descends
+    # `_own_scope` skips only a nested `def`/`lambda`/`class`, so it descends
     # straight through `if` and `try` bodies: `if False: require_door_entered(
     # runs)` guards nothing, and `try: require_door_entered(runs)` +
     # `except SystemExit: pass` lets the refusal the witness exists for fall
     # through — while every assertion above stays green (review at `7eb4a042`,
-    # P2). Both mutants red here.
-    parents: dict[int, ast.AST] = {}
-    for parent in ast.walk(main):
-        for child in ast.iter_child_nodes(parent):
-            parents[id(child)] = parent
-    branch = (ast.If, ast.IfExp, ast.Try, ast.While, ast.For, ast.AsyncFor,
-              ast.Match, ast.comprehension, ast.BoolOp)
-    try_star = getattr(ast, "TryStar", None)
-    if try_star is not None:
-        branch += (try_star,)
-    chain: list[ast.AST] = []
-    anchor = parents.get(id(call))
-    while anchor is not None and anchor is not main:
-        chain.append(anchor)
-        anchor = parents.get(id(anchor))
-    assert anchor is main, (
-        "require_door_entered(...) does not resolve back to `main` — the "
-        "call-site pin is reading a node it cannot place (#10983)")
-    guarded = [type(node).__name__ for node in chain
-               if isinstance(node, branch)]
+    # P2). Both mutants red here; the wrapper inspection that keeps this arm
+    # from ALSO reding on a correct `try/finally` or `if runs:` lives in
+    # `_wrapper_can_hide_the_guard`, and its two-direction mutation table is
+    # `test_the_unconditional_door_arm_reds_on_guards_and_not_on_no_op_wrappers`.
+    guarded = _door_guard_wrappers(main, call, runs_arg)
     assert not guarded, (
         f"the require_door_entered(...) call at line {call.lineno} sits inside "
         f"{guarded}, so it is present but NOT unconditional — an `if False:` "
