@@ -528,14 +528,120 @@ def test_the_shipped_call_forwards_the_resolved_guard():
             "lie while the receipt still echoed it")
 
 
-def test_the_receipt_carries_the_guard_and_its_refusals():
+def _shipped_call() -> dict:
+    calls = _call_keywords("retrieve_for_question", "temporal_leg_fusion_order")
+    assert len(calls) == 1, calls
+    return calls[0]
+
+
+def test_the_shipped_call_forwards_the_GUARD_TRACE_too():
+    """#10538 (cycle 10, finding 1): the `guard_trace=` forward was unpinned.
+
+    Deleting it kept every suite green - the PICK filter still runs, so nothing
+    looks broken - while every row's receipt degraded to ``applied: False``,
+    ``targeting: "none"``, ``rejected: []`` and a guard-caused empty leg reverted
+    to ``no_window_candidates``. That is the false PASS this field pair exists to
+    prevent, one line up in the wiring from the pins that check the values.
+    """
+    keywords = _shipped_call()
+    assert "guard_trace" in keywords, (
+        "the leg is called without guard_trace= - every receipt row would "
+        "report the guard as never applied (#10538)")
+    passed = keywords["guard_trace"]
+    assert isinstance(passed, ast.Name) and passed.id == "_tl_guard_trace", (
+        ast.unparse(passed))
+
+
+def test_the_shipped_call_RESOLVES_the_switch_instead_of_using_the_constant():
+    """#10538 (cycle 10, finding 2a): replacing the resolver with
+    ``DEFAULT_TEMPORAL_LEG_NON_EVICTION`` kept 89/89 green, which turns the
+    ``TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION=0`` off-switch into a no-op while
+    ``run.py`` still resolves that env into the fingerprint - so a checkpoint
+    stamped guard-OFF becomes resumable by a build that ran the guard.
+    """
     src = Path(r.__file__).read_text()
-    stats = [
+    tree = ast.parse(src)
+    resolver_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "resolve_temporal_leg_non_eviction"
+    ]
+    assert resolver_calls, (
+        "retrieve.py no longer resolves the non-eviction switch - the env "
+        "off-switch is dead (#10538)")
+    assert any(
+        any(ast.unparse(arg).startswith("os.environ.get(") for arg in node.args)
+        for node in resolver_calls
+    ), (
+        "the resolver must be handed the SAME env the fingerprint reads "
+        "(os.environ.get)")
+    # ...and the resolved name is what gets forwarded
+    assert _shipped_call()["non_eviction"].id == "_tl_non_eviction"
+
+
+def test_the_receipt_ECHOES_the_resolved_switch_not_a_literal():
+    """#10538 (cycle 10, finding 2b): ``"non_eviction": _tl_non_eviction`` ->
+    ``True`` kept every gate green, so every guard-OFF row - the off-switch's
+    whole purpose - would attest the ruling as ON."""
+    slots = 0
+    for node in _stats_dicts():
+        for key, value in zip(node.keys, node.values, strict=True):
+            if isinstance(key, ast.Constant) and key.value == "non_eviction":
+                slots += 1
+                assert (isinstance(value, ast.Name)
+                        and value.id == "_tl_non_eviction"), (
+                    "non_eviction must echo the RESOLVED switch: "
+                    f"{ast.unparse(value)}")
+    assert slots == 1, slots
+
+
+def test_the_receipt_REJECTION_list_comes_from_the_trace():
+    """#10538 (cycle 10, finding 4): ``non_eviction_rejected`` could be emptied
+    to ``[]`` with every gate green - the field the design calls "where the ids
+    come from" would carry none."""
+    found = False
+    for node in _stats_dicts():
+        for key, value in zip(node.keys, node.values, strict=True):
+            if not (isinstance(key, ast.Constant)
+                    and key.value == "non_eviction_rejected"):
+                continue
+            found = True
+            assert isinstance(value, ast.Call) and isinstance(
+                value.func, ast.Name) and value.func.id == "list", (
+                f"non_eviction_rejected must be list(...): {ast.unparse(value)}")
+            assert "rejected" in ast.unparse(value), ast.unparse(value)
+    assert found, "the receipt lost non_eviction_rejected"
+
+
+def test_the_empty_leg_reason_gets_the_REAL_refusal_count():
+    """#10538 (cycle 10, finding 3): only the keyword NAME was pinned, so
+    ``guard_rejected=len(trace.get("rejected") or [])`` -> ``0`` survived -
+    making ``non_eviction_guard`` unproducible at the shipped surface and
+    turning a guard refusal into ``no_window_candidates``."""
+    calls = _call_keywords("retrieve_for_question",
+                           "temporal_leg_empty_reason")
+    assert calls, "the empty-reason call site vanished - re-anchor this pin"
+    assert any(
+        ast.unparse(kw["guard_rejected"]).replace(" ", "").startswith(
+            "len(_tl_guard_trace.get(")
+        for kw in calls if "guard_rejected" in kw
+    ), [ast.unparse(kw["guard_rejected"]) for kw in calls
+        if "guard_rejected" in kw]
+
+
+def _stats_dicts() -> list[ast.Dict]:
+    src = Path(r.__file__).read_text()
+    return [
         node for node in ast.walk(ast.parse(src))
         if isinstance(node, ast.Dict)
         and any(isinstance(k, ast.Constant) and k.value == "non_eviction"
                 for k in node.keys)
     ]
+
+
+def test_the_receipt_carries_the_guard_and_its_refusals():
+    stats = _stats_dicts()
     assert stats, "temporal_leg_stats lost the non_eviction field (#10538)"
     keys = {k.value for node in stats for k in node.keys
             if isinstance(k, ast.Constant)}
@@ -814,6 +920,59 @@ def test_the_baseline_instrument_does_not_still_call_the_ruling_open():
     assert "PLACEMENT" in doc
 
 
+def test_both_switches_DEFAULT_to_the_shipped_arm():
+    """#10538 (cycle 10, findings 5 and 6): the DEFAULTS were unpinned.
+
+    Flipping the replay CLI's ``--non-eviction`` ``default="on"`` -> ``"off"``
+    kept every test green (the CLI pin only exercises explicit flags), so the
+    instrument's no-flag run would measure the PRE-RULING splice while
+    ``replay()``'s own API default stayed guarded; relaxing
+    ``temporal_leg_fusion_order``'s ``max_chunks_per_session`` default to
+    ``None`` also survived, silently reverting every non-threading caller (the
+    replay passes no cap) to the pre-reader view the docstring warns against.
+
+    Both are DEFAULTS, so they are pinned on the signature/argparse node - no
+    behavioural call can see them without a different fixture for each.
+    """
+    from tools.longmem_eval import temporal_leg_replay as rep
+
+    src = Path(rep.__file__).read_text()
+    defaults = [
+        node for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_argument"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "--non-eviction"
+    ]
+    assert defaults, "the replay lost its --non-eviction flag"
+    for call in defaults:
+        kw = {k.arg: k.value for k in call.keywords}
+        assert isinstance(kw.get("default"), ast.Constant) and \
+            kw["default"].value == "on", (
+                f"--non-eviction defaults to {ast.unparse(kw.get('default'))}, "
+                "but the shipped arm is ON (#10538)")
+
+    # the fusion signature's cap default
+    src = Path(tl.__file__).read_text()
+    fns = [
+        node for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "temporal_leg_fusion_order"
+    ]
+    assert fns, "temporal_leg_fusion_order vanished"
+    args = fns[0].args
+    names = [a.arg for a in args.kwonlyargs]
+    assert "max_chunks_per_session" in names, names
+    default = args.kw_defaults[names.index("max_chunks_per_session")]
+    assert isinstance(default, ast.Name) and \
+        default.id == "DEFAULT_MAX_CHUNKS_PER_SESSION", (
+            "the fusion default must be the reader's real cap, not "
+            f"{ast.unparse(default)} - a None default reverts every caller that "
+            "does not thread the run's cap to the pre-reader view (#10538)")
+
+
 # ── 11. the REPLAY instrument's switch and stamp ───────────────────────────
 
 def _replay_question() -> dict:
@@ -936,8 +1095,11 @@ def test_an_anchorless_leg_stamps_the_documented_none_target():
     # (c) a degenerate budget returns before any targeting work
     assert _trace(dated, anchors=(), window=3, limit=0)["targeting"] == "none"
     # The FIRING arms keep naming themselves — ``"anchor"`` and ``"window"``
-    # already have their own discriminating pins (this file:103/:461 and
-    # ``test_temporal_leg_placement_10538.py:154``), so this case only has to
+    # already have their own discriminating pins
+    # (``test_the_issue_probe_pool_is_net_zero_unguarded_and_additive_guarded``,
+    # ``test_the_anchor_arm_is_not_guarded_and_says_so`` and
+    # ``test_temporal_leg_placement_10538.py``'s guarded-arm case), so this
+    # case only has to
     # prove the up-front stamp does not CLOBBER them.
     assert _trace(ISSUE_POOL, anchors=(), window=WINDOW, limit=LIMIT,
                   head=WINDOW - LIMIT, date_window=RANGE)["targeting"] == "window"
