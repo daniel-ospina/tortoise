@@ -117,8 +117,19 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the three consult medians and write nothing")
     parser.add_argument("--reps", type=int, default=200)
     parser.add_argument("--tree", type=Path, default=None,
-                        help="the tree to measure (default: this checkout)")
+                        help=("the tree to measure (default: this checkout); NOT "
+                              "valid with --column-consult, which measures the "
+                              "module THIS PROCESS imported"))
     args = parser.parse_args(argv)
+
+    if args.tree is not None and args.column_consult:
+        # ⛔ Refused rather than silently ignored: `--column-consult` measures
+        # `_migrations_dir()`/`table_columns()` of the module already imported, so
+        # a `--tree` here would print THIS tree's medians under the other tree's
+        # name — the exact mislabelling the artifact's print-don't-commit rule
+        # exists to prevent. Run the probe FROM the tree you mean to measure.
+        parser.error("--tree does not apply to --column-consult; "
+                     "run the probe from the tree you want to measure")
 
     if args.column_consult:
         print(json.dumps(column_consult_medians(args.reps), indent=2, sort_keys=True))

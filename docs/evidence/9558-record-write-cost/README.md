@@ -155,14 +155,15 @@ BEFORE means a few per cent). 1.546–1.588 →
 0.332–0.353 ms = **1.193–1.256 ms per consult**, ×2 = **2.386–2.512 ms**. The
 connection half is therefore the rest — **12.5–13.9 ms**, pairing the win's lower
 end with the column half's UPPER end and its upper end with the column half's
-lower end — i.e. **83.2–85.3 %**, ~84 % of the win. ⚠️ That agrees with this
-bullet's ORIGINAL "~80-85 % of the ~15 ms saved", and the agreement is the
-arithmetic, not a coincidence to be waved off: that revision already charged the
-schema consult TWICE. What it got wrong was the INPUTS to the charge (an
-uncommitted 0.135–0.166 ms fingerprint band, and `_migrations_dir()`'s resolution
-never priced at all), never the shape — so the intervening ~92 %, which charged
-ONE consult, is the anomaly in this history and this figure is the original
-magnitude restored.
+lower end — i.e. **83.2–85.3 %**, ~84 % of the win. ⚠️ This lands near the
+ORIGINAL "~80-85 % of the ~15 ms saved", and that is a coincidence of BAND, not
+arithmetic: the original did charge the consult twice, but at 0.27–0.33 ms of stat
+(an uncommitted 0.135–0.166 ms band, with `_migrations_dir()`'s resolution never
+priced at all), which against a ~15 ms win puts the connection half at ~98 % — so
+its own inputs never produced 80–85 % either. What the two-consult model fixes is
+the SHAPE (both cached readers charged, at committed prices); the magnitude here
+follows from the committed medians, and the intervening one-consult ~92 % is the
+anomaly in this history.
 `_default_connect` returns an idle handle when it has one, so the live
 door's per-record "open, commit, close" became "borrow, commit, return". The
 remaining 3.82–3.91 ms/record is one transaction boundary (prologue + plan + COMMIT)
@@ -172,11 +173,11 @@ bullet used to conflate**: `replay_plan` drives BOTH cached readers, and each
 consult costs (i) `_migrations_dir()` → `_complete()`, fifteen `Path.exists()`
 calls resolving the base **before** the key is built (`record_projection.py:1659`
 with `:1497`/`:1502`), and (ii) one `_migrations_fingerprint` pass over the same
-fifteen files (0.160–0.169 ms, `fingerprint-cost.json`). The three consult
-medians are item 6 of the list at the top — taken on one box at `d51c7897d6`,
-re-takeable by the command there: resolution median **0.169 ms**, fingerprint
-median **0.166 ms**, and
-a warm `table_columns()` **0.341 ms** — i.e. the committed warm medians
+fifteen files (0.160–0.169 ms, `fingerprint-cost.json`). The RESOLUTION half is
+item 6 of the list at the top — taken on one box at `d51c7897d6`, re-takeable by
+the command there: median **0.169 ms**; its siblings are committed (the fingerprint
+pass in `fingerprint-cost.json`, the warm total in `runs/*.json`'s
+`table_columns_isolated_ms.median`, 0.332–0.353 ms) — i.e. the committed warm medians
 (0.332–0.353 ms) ARE those two halves summed, not the fingerprint alone. So the
 residual is ≈**0.68 ms/record** (2 × 0.34), ≈0.33 ms resolution + ≈0.33 ms
 fingerprint. The known fix — compute the fingerprint once per plan build — saves
@@ -185,16 +186,16 @@ must not be read as removing the whole residual; it is filed rather than hidden 
 "the work the record is for".
 
 ⛔ **Five earlier revisions of this bullet, and why each was wrong.** It said
-"~80-85 % of the ~15 ms saved" — the ORIGINAL, whose magnitude this bullet now
-reproduces (83.2–85.3 %) because it already charged the consult twice; what was
-wrong was its inputs (an uncommitted 0.135–0.166 ms fingerprint band, resolution
-unpriced), so the agreement was luckier than it was sound. ⛔ **CORRECTED:** an
-earlier revision of THIS erratum read that 80-85 % as "the connection half as a
-share of the BEFORE TOTAL, not of the win" — falsified by its own text,
-`git show 6ab6848b8b:docs/evidence/9558-record-write-cost/README.md` reading
-"~80-85 % of the ~15 ms saved" (a share OF the win) and charging two fingerprints
-in the same bullet; no denominator puts the connection half at 80-85 %
-except the win. It also said "~92-94 %" (94 % only falls out of the
+"~80-85 % of the ~15 ms saved" — the ORIGINAL. Its own inputs do not yield it
+(two 0.135–0.166 ms passes against a ~15 ms win is ~98 %), and it charged the
+consult twice at a band no committed file carries while leaving resolution
+unpriced; the band this bullet now reports agrees with it by coincidence, not
+arithmetic. ⛔ **CORRECTED:** an earlier revision of THIS erratum read that
+80-85 % as "the connection half as a share of the BEFORE TOTAL, not of the win" —
+falsified by its own text, `git show
+6ab6848b8b:docs/evidence/9558-record-write-cost/README.md` reading "~80-85 % of the
+~15 ms saved" (a share OF the win) and charging two fingerprints in the same
+bullet. It also said "~92-94 %" (94 % only falls out of the
 superseded ~0.9–1.0 ms column-half estimate the same bullet replaced). It said
 "~91.6–92.7 %" — **the revision immediately before this one**, which charged ONE
 column consult while the per-record path pays TWO (both cached readers, above), so
