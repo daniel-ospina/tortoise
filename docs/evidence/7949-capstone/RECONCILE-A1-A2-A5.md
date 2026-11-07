@@ -454,10 +454,12 @@ done
 # ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 reads null in two of its four examples. And an
 #   empty closingIssuesReferences is not evidence either: that PR-body field stays empty in arms 2 and 3.
 # The matrix above is this loop's OUTPUT, not prose — arm 1's four named issues, plus one arm 2 and
-# one arm 3. Every issue AND every PR the arms name is read here, and so are the facts that are
-# neither an issue nor a PR — arm 2's commit message, and arm 1's user-linked filter with the schema
-# names it rests on — so no row, and no equality a row rests on, is asserted without a command:
-for n in 11001 10997 10684 10698 10999 11021; do
+# one arm 3, plus #10812 (the counter-example that NARROWS arm 2 below: it reads `[]` here and a sha,
+# which is why the arm-2 test is "no MERGED PR named it" and not "no PR named it"). Every issue AND
+# every PR the arms name is read here, and so are the facts that are neither an issue nor a PR —
+# arm 2's commit message, and arm 1's user-linked filter with the schema names it rests on — so no
+# row, and no equality a row rests on, is asserted without a command:
+for n in 11001 10997 10684 10698 10999 11021 10812; do
   echo "#$n"
   gh issue view $n --json state,closedByPullRequestsReferences --jq '[.closedByPullRequestsReferences[].number]'
   gh api "repos/daniel-ospina/tortoise/issues/$n/timeline?per_page=100" --paginate \
