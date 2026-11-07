@@ -2935,6 +2935,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # TOOL_CARVEOUTS) because the gate is hermetic (a committed JSON snapshot, no
              # graph, no URI, no network) and `core` is where its suite is registered.
              "tools/ci_runner_labels.py",
+             # #11435 review P1: the topology/reconcile tool, the same shape one file over.
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+             # `tools/ci_runner_topology.py`, so `select(["tools/ci_runner_topology.py"],
+             # "pull_request", load_manifest())` returns `surfaces: []` and
+             # `tests/test_ci_runner_topology.py` is ABSENT from `test_files` — the
+             # `config/ci-surfaces.yml` row is CLASSIFICATION only and does not select the arm.
+             # MEASURED at this head: surfaces=[], the suite absent. Consequence: a PR reverting
+             # the engage-capacity gate, the dry-run projection or the fixture refusal would merge
+             # GREEN with none of its own pins executed — the #1349/#3332/#3616 silent-drop class.
+             # CORE_ALSO (not TOOL_CARVEOUTS) because the suite is hermetic (a committed fixture,
+             # a stubbed transport; no graph, no URI, no network) and `core` is where it is
+             # registered. Pinned by
+             # tests/test_ci_selection.py::test_runner_topology_tool_change_selects_core_not_tier1.
+             "tools/ci_runner_topology.py",
              # #11047: `tools/gh_read_cache.py` is the SAME shape — a hermetic tool whose entire
              # guard (`tests/test_gh_read_cache.py`) lives in `core`. ⛔ No case count is stated:
              # this note said "241 collected cases" while the suite already collected 276 at

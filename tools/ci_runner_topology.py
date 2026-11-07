@@ -134,7 +134,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -245,6 +245,8 @@ class Plan:
 
     changes: dict[str, tuple[int, list[str], list[str]]] = field(default_factory=dict)
     unclassified: dict[str, str] = field(default_factory=dict)
+    #: A defect this tool MUST NOT heal by default (owner-gated), keyed by runner name.
+    owner_gated: dict[str, str] = field(default_factory=dict)
 
     def add(self, runner: Runner, desired: Sequence[str]) -> None:
         # Both sides are the CUSTOM set, because that is the only set a write can change.
@@ -411,7 +413,7 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
     return found
 
 
-def desired_label_set(runner: Runner, *, engage: bool) -> list[str]:
+def desired_label_set(runner: Runner, *, engage: bool, strip_non_x64: bool = False) -> list[str]:
     """The CUSTOM label set this runner SHOULD carry, under the x64-only invariant.
 
     Only labels a write may carry: GitHub's read-only ones (`self-hosted`, the platform,
@@ -441,17 +443,22 @@ def desired_label_set(runner: Runner, *, engage: bool) -> list[str]:
     # advertising the OTHER arch's pool (`self-hosted-x64` on an ARM64 box), which `runs-on`'s AND
     # semantics turns into an x64 job landing on ARM64 — and it made `apply` and
     # `ci_runner_gate.sh` disagree about the same runner's label set.
-    out = {
-        label for label in runner.custom_labels
-        if label != FALLBACK_LABEL and label not in POOL_MARKERS
-    }
+    out = {label for label in runner.custom_labels if label not in POOL_MARKERS}
     out.add(marker)
-    # ⛔ x64 ONLY. An ARM64 runner never carries the hosted x86_64 fallback: that is the
-    # whole point of this file, and it is the same disarm `ci_runner_gate.sh` performs on
-    # `off` for every managed runner (`:882` — "in mode=github the pool is stripped by
-    # design"). Widening this to `if engage` alone would re-open #6897.
-    if engage and host == HOST_LABEL_X64:
+    # ⛔ THE DIRECTION IS EXPLICIT, AND THE OWNER-GATED HALF IS NEVER THE DEFAULT.
+    if not engage:
+        # `--disengage`: the explicit disarm, every managed runner (`ci_runner_gate.sh:882`).
+        out.discard(FALLBACK_LABEL)
+    elif host == HOST_LABEL_X64:
+        # The ADDITIVE half — the reason this PR exists. It contradicts nothing.
         out.add(FALLBACK_LABEL)
+    elif strip_non_x64:
+        # ⛔ The x64-ONLY half, and only on request. Stripping the label off a non-x64
+        # runner is the step #6897/#9878 reserve (see `tools/ci_runner_labels.py` R2), so it
+        # is `--strip-non-x64`, never a default: an `apply` an operator runs to ADD capacity
+        # must not silently remove the label from the only boxes a job can reach.
+        out.discard(FALLBACK_LABEL)
+    # else: a non-x64 carrier KEEPS the label — `plan` reports it as owner-gated.
     return sorted(out)
 
 
@@ -478,7 +485,7 @@ def unmanaged_reason(runner: Runner) -> str | None:
     return None
 
 
-def plan(runners: Sequence[Runner], *, engage: bool) -> Plan:
+def plan(runners: Sequence[Runner], *, engage: bool, strip_non_x64: bool = False) -> Plan:
     """The reconcile. Idempotent: an already-correct pool yields an empty Plan."""
     result = Plan()
     for runner in sorted(runners, key=lambda r: r.name):
@@ -486,7 +493,19 @@ def plan(runners: Sequence[Runner], *, engage: bool) -> Plan:
         if why is not None:
             result.unclassified[runner.name] = why
             continue
-        result.add(runner, desired_label_set(runner, engage=engage))
+        result.add(runner, desired_label_set(runner, engage=engage, strip_non_x64=strip_non_x64))
+        if engage and not strip_non_x64 and runner.host == HOST_LABEL_ARM64 and runner.serves_fallback:
+            # ⛔ THE STRIP IS NOT OURS TO PERFORM BY DEFAULT. Removing `ubuntu-latest` from a
+            # non-x64 runner is the step #6897/#9878 reserve (`tools/ci_runner_labels.py` R2:
+            # "removing the label is the step that can strand a job, and #6897/#9878 own that
+            # decision"), and this PR's own body records it as "not adoptable without a reopen".
+            # So it is REPORTED as owner-gated — visible, never silent — and performed only when
+            # the operator names it (`--strip-non-x64`). A silent skip would be the "diff no write
+            # can close" failure the `unclassified` channel exists to prevent.
+            result.owner_gated[runner.name] = (
+                f"is an {HOST_LABEL_ARM64} runner carrying {FALLBACK_LABEL!r}; stripping it is "
+                f"owner-gated (#6897/#9878) — re-run with `--strip-non-x64` to perform it"
+            )
     return result
 
 
@@ -496,6 +515,7 @@ def check(
     queued_oldest_seconds: int | None = None,
     queued_floor_seconds: int = 1800,
     engage: bool = True,
+    strip_non_x64: bool = False,
 ) -> dict[str, Any]:
     """The verdict. `ok` is False ONLY for a named violation — never for "idle pool".
 
@@ -523,10 +543,11 @@ def check(
             "starvation_suspected": False,
             "planned_changes": {},
             "unclassified": {},
+            "owner_gated": {},
             "engage": engage,
         }
     found = violations(runners)
-    pending = plan(runners, engage=engage)
+    pending = plan(runners, engage=engage, strip_non_x64=strip_non_x64)
     # ⛔ "ENGAGED" IS NOT "USABLE". Counting an OFFLINE carrier as engagement made the exact state
     # this tool exists to surface — label armed, nothing ONLINE can serve it, queue absorbing —
     # emit zero signal: verdict OK, starvation_suspected False, an absorbing queue and no note.
@@ -548,6 +569,7 @@ def check(
             name: {"before": before, "after": after} for name, (_id, before, after) in pending.changes.items()
         },
         "unclassified": dict(pending.unclassified),
+        "owner_gated": dict(pending.owner_gated),
         "engage": engage,
     }
 
@@ -587,25 +609,99 @@ def fetch_runners(repo: str = REPO) -> list[Runner]:
 
 
 def fetch_oldest_queued_seconds(repo: str = REPO) -> int | None:
-    """Age of the oldest QUEUED run, or None when unreadable. Never guesses."""
-    out = _gh(
+    """Age of the oldest QUEUED run, or None when unreadable. Never guesses.
+
+    ⛔ `List workflow runs` takes **no** `sort`/`direction` parameter — an earlier version
+    sent `per_page=1&sort=created&direction=asc` and got the NEWEST queued run (measured:
+    2026-11-07T17:51Z returned for a queue whose oldest entry was 2026-11-05T16:29Z). The
+    tool then printed a fresh-looking age beside a two-day-old queue and
+    `starvation_suspected` — the one signal this verb exists to emit — could never fire.
+    So take the MINIMUM over every queued run, and read them all.
+    """
+    proc = subprocess.run(
         [
+            "gh",
             "api",
-            f"repos/{repo}/actions/runs?status=queued&per_page=1&sort=created&direction=asc",
+            "--paginate",
+            f"repos/{repo}/actions/runs?status=queued&per_page=100",
             "--jq",
-            ".workflow_runs[0].created_at // empty",
+            ".workflow_runs[].created_at // empty",
         ],
-        check_rc=False,
-    ).strip()
-    if not out:
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
         return None
     import datetime as _dt
 
-    try:
-        created = _dt.datetime.strptime(out, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.UTC)
-    except ValueError:
+    created: _dt.datetime | None = None
+    for line in proc.stdout.splitlines():
+        stamp = line.strip()
+        if not stamp:
+            continue
+        try:
+            one = _dt.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.UTC)
+        except ValueError:
+            continue
+        created = one if created is None or one < created else created
+    if created is None:
+        # A successful call whose payload carried no readable timestamp measured NOTHING; it
+        # is not "no queue", which is why it yields None rather than 0.
         return None
     return max(0, int((_dt.datetime.now(_dt.UTC) - created).total_seconds()))
+
+
+def project(runners: Sequence[Runner], pending: Plan) -> list[Runner]:
+    """The pool AS IT WOULD READ after `pending` is written. Pure; performs no I/O.
+
+    This is what makes `--dry-run` a PRE-FLIGHT rather than a printout: the documented
+    operator sequence is "dry-run first, then apply", so the dry run must be judged by the
+    same gates the write will be, on the state the write will produce.
+    """
+    out: list[Runner] = []
+    for runner in runners:
+        change = pending.changes.get(runner.name)
+        if change is None:
+            out.append(runner)
+            continue
+        _id, _before, after = change
+        # The read-only labels cannot be written, so they are carried over unchanged.
+        out.append(replace(runner, labels=frozenset((runner.labels - runner.custom_labels) | set(after))))
+    return out
+
+
+def serving_x64(post_runners: Sequence[Runner]) -> list[Runner]:
+    """ONLINE x64 Linux runners that can actually serve the fallback label."""
+    return [
+        r for r in post_runners
+        if r.online and r.serves_fallback and r.host == HOST_LABEL_X64 and PLATFORM_LINUX in r.labels
+    ]
+
+
+def engage_gate(post: Mapping[str, Any] | None, post_runners: Sequence[Runner], *, engage: bool) -> dict[str, str] | None:
+    """⛔ AN ENGAGE THAT DELIVERED NO *ONLINE X64* SERVICE IS NOT A RECONCILE.
+
+    `check` cannot judge this: "the fallback is engaged nowhere" is a legitimate steady state
+    (mode=github strips the pool by design), so it must not red there. But `apply --engage`
+    promised CAPACITY, and on a pool whose x64 arm is empty — or entirely offline — the write
+    lands, the read-back is clean, and the queue still cannot get a runner: the same false
+    PASS the default-direction fix closed, one layer down. A READ FAILURE outranks a capacity
+    reading — "I could not look" must never be the last word — so the gate is suppressed when
+    the pool is UNMEASURED.
+    """
+    if post is None or not engage or serving_x64(post_runners):
+        return None
+    if post.get("verdict") == VIOLATION_UNMEASURED_EMPTY_POOL:
+        return None
+    return {
+        "kind": VIOLATION_ENGAGE_NO_X64_SERVER,
+        "runner": "<pool>",
+        "why": (
+            f"engage attaches {FALLBACK_LABEL!r} and NOT ONE online x64 runner serves it after "
+            f"the write ({len(post_runners)} runner(s) read back) — the reconcile delivers no "
+            f"capacity, however clean the label state looks."
+        ),
+    }
 
 
 def apply_plan(pending: Plan, *, dry_run: bool, repo: str = REPO) -> list[dict[str, Any]]:
@@ -703,6 +799,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="desired topology STRIPS the fallback from every managed runner — explicit, never the default",
     )
+    # ⛔ `--strip-non-x64` deliberately is NOT in this group. It QUALIFIES the direction
+    # (`--engage --strip-non-x64` is the x64-only topology), so putting it here rejected the one
+    # combination the help text describes — argparse answered `not allowed with argument
+    # '--engage'` to the operator who asked for exactly the documented thing.
+    parser.add_argument(
+        "--strip-non-x64",
+        action="store_true",
+        help=(
+            "apply: additionally REMOVE the fallback from non-x64 runners (the x64-only "
+            "topology). Owner-gated (#6897/#9878 own that decision), so it is never performed "
+            "by a bare `apply`; without it such a carrier is reported as `owner_gated`"
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="apply: print the changes, write nothing")
     parser.add_argument("--queued-floor-seconds", type=int, default=1800)
     parser.add_argument("--from-fixture", type=Path, help="read a runners JSON payload instead of the API")
@@ -714,6 +823,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     # is the direction #10912 needs (the pool is the capacity), so it is the default; the
     # strip is `--disengage`.
     engage = not args.disengage
+    # ⛔ THE OWNER-GATED HALF IS OPT-IN, AND `--disengage` IMPLIES IT. `--disengage` already IS
+    # the explicit strip direction, so asking for it and not stripping non-x64 runners would make
+    # the flag mean something other than its name.
+    strip_non_x64 = bool(args.strip_non_x64) or not engage
 
     # ⛔ A FIXTURE'S IDS ARE NOT THIS REPO'S RUNNERS. The measured fixture carries the real
     # production ids 1-21, so `apply --from-fixture` without `--dry-run` would PUT label sets
@@ -745,6 +858,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         queued_oldest_seconds=oldest,
         queued_floor_seconds=args.queued_floor_seconds,
         engage=engage,
+        strip_non_x64=strip_non_x64,
     )
 
     if args.verb == "check":
@@ -754,7 +868,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_human(report)
         return 0 if report["ok"] else 1
 
-    pending = plan(runners, engage=engage)
+    pending = plan(runners, engage=engage, strip_non_x64=strip_non_x64)
     records = apply_plan(pending, dry_run=args.dry_run, repo=args.repo)
 
     # ⛔ A 200 ON THE PUT IS NOT THE POOL'S STATE. `rc == 0` says the API accepted a body; it
@@ -762,20 +876,49 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the pool now serves anyone. So RE-READ after the write and report the POST verdict — the
     # pre-state verdict is the one thing that is certainly stale once we have written.
     post: dict[str, Any] | None = None
+    post_runners: list[Runner] = []
     serving_post: list[Runner] = []
     ok = report["ok"]
-    if not args.dry_run:
+    if args.dry_run:
+        # ⛔ A DRY RUN IS A PRE-FLIGHT, NOT A PRINTOUT. The USAGE block tells an operator to run
+        # `apply --dry-run` FIRST, so the dry run has to be judged by the SAME gates the write
+        # will be, on the state the write will produce. It used to `return 0` unconditionally
+        # (`0 if args.dry_run or ok else 1`), which green-lit exactly the destructive write it
+        # exists to screen: measured on an ARM-only pool, a dry run exited 0 and printed
+        # "already at the desired topology" while the real apply then reported
+        # ENGAGE_PRODUCED_NO_X64_SERVER *after* the writes.
+        post_runners = project(runners, pending)
+        post = check(
+            post_runners,
+            queued_oldest_seconds=oldest,
+            queued_floor_seconds=args.queued_floor_seconds,
+            engage=engage,
+            strip_non_x64=strip_non_x64,
+        )
+        serving_post = serving_x64(post_runners)
+        ok = post["ok"]
+        gate = engage_gate(post, post_runners, engage=engage)
+        if gate is not None:
+            ok = False
+            post = {**post, "ok": False, "verdict": gate["kind"], "violations": [*post["violations"], gate]}
+            print(
+                f"❌ {gate['kind']} (projected): not one online x64 runner would serve "
+                f"{FALLBACK_LABEL!r} — this apply would deliver NO capacity.",
+                file=sys.stderr,
+            )
+    else:
         # Every write took, AND the pool reads back clean. The PRE-state verdict is deliberately
         # not part of this: after a successful reconcile the pre-state is exactly what is no
         # longer true.
         ok = all(rec["applied"] for rec in records)
-        post_runners: list[Runner] = []
+        post_runners = []
         try:
             post_runners = fetch_runners(args.repo)
             post = check(
                 post_runners,
                 queued_oldest_seconds=fetch_oldest_queued_seconds(args.repo),
                 engage=engage,
+                strip_non_x64=strip_non_x64,
             )
         except (SystemExit, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
             # `--paginate` can also yield a truncated stream (JSONDecodeError) or a malformed page
@@ -791,53 +934,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         # A WRITE WE COULD NOT READ BACK IS NOT A SUCCESS: fail closed, the same direction
         # `ci_runner_gate.sh` fails when its enumeration is unreadable.
         ok = ok and post is not None and post["ok"]
-        # ⛔ AN ENGAGE THAT DELIVERED NO *ONLINE X64* SERVICE IS NOT A RECONCILE. `check` cannot
-        # judge this: "the fallback is engaged nowhere" is a legitimate steady state (mode=github
-        # strips the pool by design), so it must not red there. But `apply --engage` promised
-        # CAPACITY, and on a pool whose x64 arm is empty — or entirely offline — the plan strips
-        # the label off the only carriers and attaches it where nobody online can serve it. The
-        # write lands, the read-back is clean, and the queue still cannot get a runner: the same
-        # false PASS the default-direction fix closed, one layer down.
-        serving_post = [
-            r for r in post_runners if r.online and r.serves_fallback and r.host == HOST_LABEL_X64
-            and PLATFORM_LINUX in r.labels
-        ]
-        if post is not None and engage and not serving_post:
+        serving_post = serving_x64(post_runners)
+        gate = engage_gate(post, post_runners, engage=engage)
+        if gate is not None:
             ok = False
-            gate = {
-                "kind": VIOLATION_ENGAGE_NO_X64_SERVER,
-                "runner": "<pool>",
-                "why": (
-                    f"engage attached {FALLBACK_LABEL!r} and NOT ONE online x64 runner serves it after "
-                    f"the write ({len(post_runners)} runner(s) read back) — the reconcile delivered no "
-                    f"capacity, however clean the label state looks."
-                ),
-            }
-            # ⛔ `verdict` IS the field every other reader keys on (`ok` is never printed in the
-            # human render), so leaving it "OK" here makes the payload contradict itself. But a
-            # READ FAILURE outranks a capacity reading: asserting a measured defect about a pool
-            # nobody measured inverts the doctrine this file states — "I could not look must
-            # never be the last word". So the gate's kind wins only over a real verdict.
-            already_unmeasured = post["verdict"] == VIOLATION_UNMEASURED_EMPTY_POOL
+            already_unmeasured = post is not None and post.get("verdict") == VIOLATION_UNMEASURED_EMPTY_POOL
             if already_unmeasured:
-                # ⛔ A READ FAILURE IS NOT A CAPACITY READING. Appending the gate's violation (and
-                # printing its `❌`) asserted a measured capacity defect about a pool nobody read,
-                # while the comment above claimed the opposite. Keep the read failure, keep
-                # `ok: false`, and say nothing about capacity.
                 print(
                     f"❌ {VIOLATION_UNMEASURED_EMPTY_POOL}: the read-back returned no runners — "
                     f"capacity is UNMEASURED, so this reconcile is not verified.",
                     file=sys.stderr,
                 )
-            else:
-                post = {
-                    **post,
-                    "ok": False,
-                    "verdict": VIOLATION_ENGAGE_NO_X64_SERVER,
-                    "violations": [*post["violations"], gate],
-                }
+            elif post is not None:
+                post = {**post, "ok": False, "verdict": gate["kind"], "violations": [*post["violations"], gate]}
                 print(
-                    f"❌ {VIOLATION_ENGAGE_NO_X64_SERVER}: no online x64 runner serves "
+                    f"❌ {gate['kind']}: no online x64 runner serves "
                     f"{FALLBACK_LABEL!r} after the write — engage delivered NO capacity.",
                     file=sys.stderr,
                 )
@@ -846,9 +957,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "ok": ok,
         "ok_before": report["ok"],
         "dry_run": args.dry_run,
+        # ⛔ NAME THE PROVENANCE. On a dry run `post` is the PROJECTION of the plan onto the
+        # pre-state, not a read-back; a reader that cannot tell the two apart will treat an
+        # unperformed write as verified.
+        "post_is_projection": args.dry_run,
         "engage": engage,
+        "strip_non_x64": strip_non_x64,
         "changes": records,
         "unclassified": dict(pending.unclassified),
+        "owner_gated": dict(pending.owner_gated),
         "post": post,
     }
     if args.json:
@@ -864,6 +981,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("  (already at the desired topology — idempotent, nothing to do)")
         for name, why in sorted(pending.unclassified.items()):
             print(f"  ⚠️  {name}: left untouched — {why}")
+        for name, why in sorted(pending.owner_gated.items()):
+            print(f"  ⚠️  {name}: left untouched — {why}")
         if post is not None:
             # ⛔ THE COUNT MUST USE THE GATE'S DEFINITION. `census`'s `serving_fallback` has no
             # `online` filter (deliberately: it is a raw census), so printing it here produced
@@ -876,11 +995,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             others_serving = len(
                 [r for r in post_runners if r.online and r.serves_fallback and r.host != HOST_LABEL_X64]
             )
+            where = "projected (nothing written)" if args.dry_run else "read back after the write"
             print(
                 f"post-state verdict: {post['verdict']} "
-                f"(x64 serving={x64_serving}, non-x64 serving={others_serving} — read back after the write)"
+                f"(x64 serving={x64_serving}, non-x64 serving={others_serving} — {where})"
             )
-    return 0 if args.dry_run or ok else 1
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

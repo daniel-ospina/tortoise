@@ -163,12 +163,42 @@ def test_the_planned_topology_puts_the_fallback_on_x64_only():
 
 
 def test_applying_the_plan_satisfies_the_invariant():
-    """Round-trip: the produced topology passes `check` — the fix is a fix, not a mutation."""
-    desired = topo.plan(measured(), engage=True)
+    """Round-trip: the produced topology passes `check` — the fix is a fix, not a mutation.
+
+    ⛔ `strip_non_x64=True` is REQUIRED for the round trip to close, and that is the point: the
+    ARM64 half of the topology is owner-gated (#6897/#9878), so a bare `engage` plan cannot
+    produce a clean pool and does not pretend to. The remaining violation is visible, not
+    silent — see the companion test below.
+    """
+    desired = topo.plan(measured(), engage=True, strip_non_x64=True)
     post = _post_pool(desired)
     assert topo.violations(post) == []
-    assert topo.check(post)["ok"] is True
-    assert topo.check(post)["census"]["by_host"]["X64"]["serving_fallback"] == 16
+    assert topo.check(post, strip_non_x64=True)["ok"] is True
+    assert topo.check(post, strip_non_x64=True)["census"]["by_host"]["X64"]["serving_fallback"] == 16
+
+
+def test_a_bare_engage_never_strips_a_non_x64_carrier_and_says_so():
+    """REGRESSION (#10912 review P1): the owner-gated ARCH strip was the DEFAULT.
+
+    Removing `ubuntu-latest` from a non-x64 runner is the step #6897/#9878 reserve
+    (`tools/ci_runner_labels.py` R2: "removing the label is the step that can strand a job, and
+    #6897/#9878 own that decision"), and this PR's own body records it as "not adoptable
+    without a reopen". A bare `apply` performed it anyway. Now it is reported as owner-gated and
+    performed only when the operator names it.
+    """
+    desired = topo.plan(measured(), engage=True)
+    post = _post_pool(desired)
+    for name in ("pi-runner-vm-2", "pi-runner-vm-5", "pi-runner-vm-6"):
+        assert name not in desired.changes, f"{name} carries the fallback on ARM64 and must be left alone"
+        assert name in desired.owner_gated, f"the skipped strip for {name} must be REPORTED, never silent"
+        assert topo.FALLBACK_LABEL in next(r for r in post if r.name == name).labels
+    # The additive half still happens, and the un-healed defect is still a named violation.
+    assert "pi-runner-x64-1" in desired.changes
+    assert {v.kind for v in topo.violations(post)} == {topo.VIOLATION_FALLBACK_ON_NON_X64}
+    # …and the explicit flag closes it, so the owner-gated half is reachable, not dropped.
+    stripped = topo.plan(measured(), engage=True, strip_non_x64=True)
+    assert set(stripped.changes) == set(desired.changes) | {"pi-runner-vm-2", "pi-runner-vm-5", "pi-runner-vm-6"}
+    assert stripped.owner_gated == {}
 
 
 def test_the_plan_is_idempotent():
@@ -266,13 +296,21 @@ def test_cli_apply_dry_run_writes_nothing(tmp_path: Path):
         capture_output=True,
         text=True,
     )
-    assert proc.returncode == 0, proc.stderr
+    assert proc.returncode == 1, (
+        "a bare apply CANNOT reach a clean pool: the ARM64 strip is owner-gated, so the remaining "
+        "FALLBACK_ON_NON_X64 is reported and the exit code says so rather than reading as success"
+    )
     payload = json.loads(proc.stdout)
     assert payload["dry_run"] is True
     assert payload["changes"], "the measured pool is not at the desired topology, so a plan must exist"
     assert all(record["applied"] is False for record in payload["changes"]), "a dry run must apply nothing"
-    # 3 ARM64 strip + 16 x64 attach = 19 runners change (no x64 runner carries the label yet).
-    assert len(payload["changes"]) == 19
+    # 16 x64 attach ONLY: the 3 ARM64 carriers are owner-gated and left byte-identical.
+    assert len(payload["changes"]) == 16
+    assert set(payload["owner_gated"]) == {"pi-runner-vm-2", "pi-runner-vm-5", "pi-runner-vm-6"}
+    # ⛔ THE PRE-FLIGHT MUST SPEAK BEFORE THE WRITE DOES. The projection is judged by the same
+    # gates, so the dry run reports the violation the apply would leave behind.
+    assert payload["post_is_projection"] is True
+    assert payload["post"]["verdict"] == topo.VIOLATION_FALLBACK_ON_NON_X64 or payload["post"]["ok"] is False
 
 
 # ------------------------------------------------- the direction is never implicit
@@ -288,13 +326,19 @@ def test_bare_apply_engages_by_default_and_never_strips_the_only_capacity(tmp_pa
         capture_output=True,
         text=True,
     )
-    assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
+    assert proc.returncode == 1, (
+        "the owner-gated ARM64 carrier is still a named violation after a bare engage, so a "
+        "success exit code would be a false PASS"
+    )
     assert payload["engage"] is True, "the default direction must be the one that ADDS capacity"
     after = {record["runner"]: record["after"] for record in payload["changes"]}
     assert topo.FALLBACK_LABEL in after["pi-runner-x64-1"], (
         "a bare apply must attach the fallback to the x64 pool, not merely strip it elsewhere"
     )
+    # ⛔ AND IT MUST NOT STRIP THE ARM64 CARRIERS. Their absence from `changes` is the fix; the
+    # `owner_gated` entry is what keeps that skip VISIBLE instead of silent.
+    assert set(payload["owner_gated"]) == {"pi-runner-vm-2", "pi-runner-vm-5", "pi-runner-vm-6"}
 
 
 def test_disengage_is_explicit_and_removes_the_fallback_everywhere(tmp_path: Path):
@@ -409,7 +453,7 @@ def test_apply_reports_the_post_state_not_the_pre_state(monkeypatch, capsys):
     `ci_runner_gate.sh` reversed) read as a successful reconcile.
     """
     pre = measured()
-    post = _post_pool(topo.plan(pre, engage=True))
+    post = _post_pool(topo.plan(pre, engage=True, strip_non_x64=True))
     reads = [pre, post]
     monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO: reads.pop(0))
     monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
@@ -933,3 +977,30 @@ def test_an_empty_read_back_reports_only_the_read_failure(monkeypatch, capsys):
         f"nothing was measured, so nothing may be claimed about capacity: {kinds}"
     )
     assert payload["post"]["verdict"] == topo.VIOLATION_UNMEASURED_EMPTY_POOL
+
+
+def test_engage_and_strip_non_x64_are_ONE_topology_not_a_conflict(tmp_path: Path):
+    """REGRESSION (VGATE, #11435 review round 2): `--strip-non-x64` was added to the
+    `--engage | --disengage` exclusive group, so the ONE combination its own help text
+    describes — "additionally" — was rejected by argparse (`not allowed with argument
+    '--engage'`). A flag that can only be used by *not* naming the default it qualifies is a
+    trap: the operator who asks for the documented thing gets a usage error.
+    """
+    fixture = tmp_path / "runners.json"
+    fixture.write_text(json.dumps(MEASURED_2026_11_07))
+    proc = subprocess.run(
+        [
+            sys.executable, str(TOOL), "apply", "--dry-run", "--engage", "--strip-non-x64",
+            "--from-fixture", str(fixture), "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["strip_non_x64"] is True
+    # The x64-only topology reaches a clean pool — the owner-gated half is reachable BY FLAG.
+    assert payload["post"]["ok"] is True, payload["post"]
+    assert payload["owner_gated"] == {}
+    # 16 attaches + 3 strips.
+    assert len(payload["changes"]) == 19

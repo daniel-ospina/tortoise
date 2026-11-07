@@ -18965,6 +18965,23 @@ def test_runner_label_gate_runs_on_a_tools_only_change():
     assert "test_ci_runner_label_coverage.py" in r["test_files"], r
 
 
+def test_runner_topology_tool_change_selects_core_not_tier1():
+    # #11435 review P1: `tests/test_ci_runner_topology.py` (registered `core`) is the ONLY
+    # thing that pins this PR's guards — the engage-capacity gate, the dry-run projection,
+    # the fixture refusal, and the owner-gated (never default) ARCH strip. `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and `tools/ci_runner_topology.py` matches no SOURCE_PATTERNS
+    # row, so before the CORE_ALSO entry a tool-only diff returned `surfaces: []` and the pin
+    # was ABSENT: a PR that reverted any of those gates would run `python-ci-gate` GREEN with
+    # none of its own pins (the #1349/#3332/#3616 silent-drop class).
+    # MEASURED at the reviewed head: `select(["tools/ci_runner_topology.py"])` ->
+    # `{"surfaces": [], ...}` with `test_ci_runner_topology.py` missing from `test_files`.
+    # Mutation check: removing the CORE_ALSO entry fails both arms below.
+    r = _sel(["tools/ci_runner_topology.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_ci_runner_topology.py" in r["test_files"], r
+
+
 def test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it():
     # #10976: `tests/test_cache_eviction_census.py` pins the egress census —
     # `tortoise/cache_eviction.py` (an unproven population may not be swept) and its
