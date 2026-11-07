@@ -267,6 +267,40 @@ def test_D1_every_record_table_exists_on_the_armed_record(armed, monkeypatch):
     )
 
 
+def test_the_record_table_set_is_the_one_this_capstone_declares():
+    """The SET half of D1's pin — and the home of D8's own falsifier.
+
+    `RECORD_TABLES_DECLARED` is a literal in this file; `record_tables()` is the
+    tuple the drill dumps and compares. Because they are independent, this pin can
+    only pass while the record's table set is the one this capstone states, and it
+    NAMES the divergence.
+
+    ⛔ Why it exists beside D8's in-drill comparison (#11429 review P1): that
+    comparison cannot be the only detector. A table dropped from
+    `THE_RECORD_TABLES` leaves the dump's `--table=` list AND the comparison
+    together, so the drill's own verdict has nothing left to disagree with — and
+    where the dropped table references one that is still truncated,
+    `reset_record_tables` refuses first (measured 2026-11-07 on `subject`:
+    ``cannot truncate a table referenced in a foreign key constraint … Table
+    "subject" references "node_identity"``), so the in-drill assertion is never
+    even reached. This pin needs no database, so nothing can pre-empt it.
+
+    Falsifier: drop, rename or add a table in `THE_RECORD_TABLES`
+    (`tortoise/record_projection.py`) → this reds naming it in well under a
+    second.
+    """
+    from tortoise import record_backup as rb
+
+    runtime = set(rb.record_tables())
+    declared = set(RECORD_TABLES_DECLARED)
+    assert runtime == declared, (
+        f"the record measures {sorted(runtime)} but this capstone declares "
+        f"{sorted(declared)} — the drill no longer covers "
+        f"{sorted(declared - runtime)}, and this file declares tables the record "
+        f"does not have: {sorted(runtime - declared)}"
+    )
+
+
 def test_D1_an_unset_dsn_reports_NOT_ARMED_and_writes_nothing(monkeypatch):
     """D1's second half: unset DSN ⇒ `NOT_ARMED`, never a silent pass.
 
@@ -735,13 +769,23 @@ def test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires(
     record — the false red that window exists to remove. `RESTORED` IS that
     assertion; repeating it here in a weaker form would only look like coverage.
 
-    Falsifier: drop a table from `THE_RECORD_TABLES` (`tortoise/record_backup.py`)
-    → it leaves the dump's `--table=` list and the comparison together, so the
-    drill still says `RESTORED` — and the DECLARED set above reds naming the
-    table, which is the only assertion that can see it. Pointing the drill at the
-    record itself is the other falsifier, and it is a refusal by design
-    (`refuse_same_database`) — which is why this leg needs a second server rather
-    than a second database on one.
+    Falsifier: change the record's table set — drop, rename or add a table in
+    `THE_RECORD_TABLES` (`tortoise/record_projection.py`) — and
+    `test_the_record_table_set_is_the_one_this_capstone_declares` reds naming the
+    divergence with no database at all. That static pin is where this half's
+    falsifier actually fires, and the reason it must exist beside this one is
+    measured, not stylistic: a table dropped from `THE_RECORD_TABLES` leaves the
+    dump's `--table=` list AND the comparison together, so the drill's own verdict
+    has nothing left to disagree with, and where the dropped table references one
+    that is still truncated, `reset_record_tables` refuses FIRST (measured
+    2026-11-07 on `subject`: `cannot truncate a table referenced in a foreign key
+    constraint … Table "subject" references "node_identity"`) — so the set
+    comparison below is never reached. Read it as the set check at the verdict,
+    not as the leg's only detector; the static pin is what NAMES a coverage loss,
+    and an earlier red is still a red. Pointing the drill at the record itself is
+    the other falsifier, and it is a refusal by design (`refuse_same_database`) —
+    which is why this leg needs a second server rather than a second database on
+    one.
     """
     from tortoise import record_backup as rb
 
