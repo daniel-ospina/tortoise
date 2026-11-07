@@ -976,6 +976,43 @@ def test_a_refusal_with_TWO_causes_names_BOTH_of_them():
     assert "stored width" in other, other
 
 
+    # (c) unreadable dimension + an UNREADABLE STORED COUNT (#11389 review, P2:
+    # the two-cause rule was applied to the dim/width pair only, so this arm —
+    # one branch up in `vector_census` — still reported the count alone while
+    # `indexed: true` sat beside it, and repairing the count refuses again on
+    # the dimension. Measured before the fix with this fake.)
+    class _CountUnreadable(_CensusGraph):
+        def _answer(self, cypher):
+            if "RETURN count(n)" in cypher:
+                raise RuntimeError("count unreadable")
+            return super()._answer(cypher)
+
+    uncountable = _CountUnreadable(
+        catalogue=[_index_row("Point", "embedding", None)],
+        labels=["Point"],
+        vectors={"Point": (6, [[0.0] * 384])},
+    )
+    third = probe.vector_census(uncountable, "g", at="2026-11-07T00:00:00Z",
+                                graph_names=["g"])["labels"]["Point"]
+    refusal = str(third["unindexed"])
+    assert third["indexed"] is True, third
+    assert "stored count unreadable" in refusal, refusal
+    assert "index dimension" in refusal, (
+        f"the unreadable-dimension cause is masked by the count cause: {refusal}")
+    # ⛔ THE SINGLE-CAUSE TEXT IS BYTE-IDENTICAL: a count failure with a READABLE
+    # dimension still refuses in exactly the old words, because the third
+    # single-cause text is part of this change's contract.
+    readable_dim = _CountUnreadable(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"],
+        vectors={"Point": (6, [[0.0] * 384])},
+    )
+    alone = str(probe.vector_census(
+        readable_dim, "g", at="2026-11-07T00:00:00Z",
+        graph_names=["g"])["labels"]["Point"]["unindexed"])
+    assert alone == "UNMEASURED(stored count unreadable)", alone
+
+
 def test_the_census_still_reports_zero_when_there_is_nothing_to_cover():
     """The refusal above must not over-refuse: 0 stored vectors needs no width.
 
@@ -3690,7 +3727,7 @@ def test_the_width_probe_report_says_the_rows_were_ENGINE_CHOSEN():
 
 
 def _doc_section(text: str, start: str, end: str) -> str:
-    """The slice of a markdown doc between two H2 headings, both halves required.
+    r"""The slice of a markdown doc between two H2 headings, both halves required.
 
     A pin that claims "the doc's §3 states this" must read §3, not the whole
     file: every string in a pasted transcript is also "in the document", so a
@@ -3720,6 +3757,41 @@ def _doc_section(text: str, start: str, end: str) -> str:
     stop = _boundary(end)
     assert stop > begin, f"{end!r} precedes {start!r} in the census doc"
     return text[begin:stop]
+
+
+def test_the_doc_slice_requires_a_UNIQUE_LINE_ANCHORED_H2():
+    """`_doc_section`'s anchoring and uniqueness must be PINNED, not just prose.
+
+    The `#11389` round-3 fix replaced a bare-substring boundary with
+    `(?m)^<heading>` plus an exactly-one-match rule, because `"## 4."` is a
+    substring of `"### 4.1"` — so renaming the §4 H2 kept the slice running past
+    §4's note and the pasted transcript, and a DELETED §3 statement stayed green.
+    That measurement lived only in the docstring: reverting `_boundary` to
+    `assert heading in text; return text.index(heading)` left the whole file
+    green (measured), i.e. the improvement was unpinned and a one-line refactor
+    silently reinstated the defect.
+
+    So this test pins the MECHANISM on synthetic text, which needs no edit to the
+    real doc and cannot be satisfied by the transcript mentions the slice exists
+    to exclude.
+    """
+    # ⛔ A heading that has been RENAMED away must red, not widen. `## 4.` is a
+    # substring of `### 4.1`, so the old form returned here and sliced to EOF.
+    renamed = "## 3. a\nstet\n### 4.1 sub\nstet\n"
+    with pytest.raises(AssertionError):
+        _doc_section(renamed, "## 3.", "## 4.")
+    # ⛔ A heading repeated inside a pasted block must red, not pick the first.
+    duplicated = "## 3. a\n## 3. pasted\n## 4. b\n"
+    with pytest.raises(AssertionError):
+        _doc_section(duplicated, "## 3.", "## 4.")
+    # ⛔ A DEEPER heading must never satisfy a shallower one: `#### 4.1` is not
+    # the §4 H2, so with no real §4 H2 present the boundary is ABSENT and must
+    # red (this is the `### 4.1` case that made the substring form widen).
+    with pytest.raises(AssertionError):
+        _doc_section("## 3. a\n#### 4.1 deep\n", "## 3.", "## 4.")
+    # …and the ordinary case still cuts exactly this section.
+    assert _doc_section("x\n## 3. a\nb\n## 4. c\n", "## 3.",
+                        "## 4.") == "## 3. a\nb\n"
 
 
 def test_the_census_doc_states_the_same_probe_bound_the_report_does():

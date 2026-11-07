@@ -2969,7 +2969,25 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             except Exception:
                 width = None
         if isinstance(stored, str):
-            unindexed = "UNMEASURED(stored count unreadable)"
+            # ⛔ THE SAME MASKING, ONE BRANCH UP (#11389 review, P2). The
+            # two-cause rule below was wired only to the `dim`/`width` pair, so
+            # a row whose stored-count read FAILED **and** whose covering index
+            # `dimension` was unreadable still reported the count ALONE, with
+            # `indexed: true` beside it — the identical round trip this change
+            # exists to remove: repair the count, re-run, be refused again on
+            # the dimension, never told both causes existed. Measured with a
+            # fake that raises on `count(n)`.
+            # ⚠️ The WIDTH is deliberately NOT named here, unlike the
+            # dim/width arm: a width probe can only measure rows, and the count
+            # is exactly the fact that could not be read, so "no rows, nothing
+            # to probe" and "the probe failed" are indistinguishable and naming
+            # it would be a guess. The `dimension` is a CATALOGUE cell and
+            # independent of the count, so it is a cause we can name.
+            # The single-cause text is byte-identical to before.
+            unindexed = (
+                "UNMEASURED(stored count unreadable and the index dimension "
+                "unreadable)" if covering and dim is None
+                else "UNMEASURED(stored count unreadable)")
         elif covering and width is not None and dim is not None and width != dim:
             unindexed = f"UNMEASURED(index dim {dim} != stored width {width})"
         elif covering and stored != 0 and (width is None or dim is None):
