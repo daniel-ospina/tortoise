@@ -801,7 +801,22 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # (`importorskip("falkordb")`), which masking erases. A comment naming it
     # also passes, which is harmless — a file with no construction yields no
     # site.
-    if not gated and not re.search(r"\bfalkordb\b", source):
+    #
+    # ⛔ BOTH SPELLINGS, not just the module name (#11217 review round-10 P2).
+    # `gated` is `bool(names)` taken BEFORE the conventional `FalkorDB` is added,
+    # so a file whose client arrives by RE-EXPORT (`from tortoise import
+    # FalkorDB` — 28 sites in `tests/`, and `tortoise/__init__.py` documents
+    # `tortoise.FalkorDB` as the public name) with no lowercase `falkordb`
+    # anywhere resolved NO name AND failed a module-name-only mention test: the
+    # whole file returned `[]`, so every raw-DETACH site in it read CLEAN. That
+    # is the file-level switch-off this function's own docstring names as
+    # closed, re-opened one spelling over — measured on a fixture: `sites=0`,
+    # `violations=[]`. Naming the CLASS here restores it: measured over the 1428
+    # files under `tests/`, the total site count is unchanged (10) and
+    # `_raw_detach_violations()` stays empty, so the wider gate costs no false
+    # BLOCK. Pinned by `test_no_IMPORT_SPELLING_can_switch_the_census_gate_off`'s
+    # `re-export from tortoise` case.
+    if not gated and not re.search(r"\b(?:falkordb|FalkorDB)\b", source):
         return []
     pattern = "|".join(re.escape(n) for n in sorted(names))
     return [m.start()
@@ -2167,6 +2182,14 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         "import_module, inline": (
             "import importlib\n",
             "importlib.import_module('falkordb').FalkorDB"),
+        # Round-10 P2: the client arrives by RE-EXPORT, so no import STATEMENT
+        # matches and the file never writes lowercase `falkordb` either — the
+        # module-name-only mention test sent the whole file to `return []`.
+        # Measured before the fix: `sites=0`, `violations=[]` for a real unowned,
+        # un-journaled DETACH. `tortoise/__init__.py` documents this as the
+        # public spelling and `tests/` uses it 28 times.
+        "re-export from tortoise": (
+            "from tortoise import FalkorDB\n", "FalkorDB"),
     }
     site = tmp_path / "test_spelling.py"
     for label, (header, construct) in spellings.items():
