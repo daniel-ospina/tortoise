@@ -42,6 +42,7 @@ importable there, and this file must not undo it by importing the driver itself.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -180,30 +181,65 @@ def test_the_column_map_is_parsed_once_for_an_unchanged_schema(
     assert first == second == third
 
 
-def test_the_migrations_are_read_once_for_an_unchanged_schema(monkeypatch, tmp_path):
-    """The other half of the per-record migration read is cached too.
+class _CountingPattern:
+    """A compiled regex whose `findall` passes are counted.
+
+    The second reader parses INLINE over module-level patterns, so the pattern is
+    the only seam its parse crosses — there is no `_parse_…` function to wrap the
+    way `table_columns` has `_parse_record_tables`.
+    """
+
+    def __init__(self, pattern: re.Pattern[str], counter: dict[str, int]) -> None:
+        self._pattern = pattern
+        self._counter = counter
+
+    def findall(self, *args: Any, **kwargs: Any) -> Any:
+        self._counter["n"] += 1
+        return self._pattern.findall(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pattern, name)
+
+
+def test_the_second_reader_parses_once_for_an_unchanged_schema(
+        monkeypatch, tmp_path):
+    """The other half of the per-record migration cost is cached too.
 
     `replay_plan` calls `table_columns()` AND `refused_props_names()` for every
-    record; a cache on one and not the other would leave half the per-record file
-    read in place.
+    record; a cache on one and not the other would leave half the per-record
+    migration work in place.
 
-    FALSIFIER: drop the short-circuit in `refused_props_names` — the counted
-    read becomes 2.
+    ⚠️ This pin counts the PARSE, and the distinction is the whole point: BOTH
+    readers take the SQL from `_entry_sql`, which memoises it on the schema entry,
+    so counting `_read_migrations` stays at 1 even with this reader's short-circuit
+    DELETED — that is a pin which can never fail on the mutation it names (review
+    at `eee6bc92bc5`). What each reader repeats for ITSELF is the parse over the
+    shared SQL, so the parse is what is counted here; the read count is asserted
+    too, because it is a real invariant, just not a discriminating one.
+
+    FALSIFIER: drop the `entry["parsed"]` short-circuit in `refused_props_names`
+    and `_TABLE_RE` runs 2 times for two calls on an unchanged tree.
     """
     tree = _tree(tmp_path)
+    parses = {"n": 0}
     reads = {"n": 0}
-    real = rp._read_migrations
+    real_read = rp._read_migrations
 
-    def counting(base: Path | None = None) -> str:
+    def counting_read(base: Path | None = None) -> str:
         reads["n"] += 1
-        return real(base)
+        return real_read(base)
 
-    monkeypatch.setattr(rp, "_read_migrations", counting)
-    rp.refused_props_names(tree)
-    rp.refused_props_names(tree)
+    monkeypatch.setattr(rp, "_TABLE_RE", _CountingPattern(rp._TABLE_RE, parses))
+    monkeypatch.setattr(rp, "_read_migrations", counting_read)
+    first = rp.refused_props_names(tree)
+    second = rp.refused_props_names(tree)
+    assert parses["n"] == 1, (
+        f"the second reader's parse ran {parses['n']} time(s) for two calls on "
+        f"an UNCHANGED tree — its cache is not taking effect (#9558)")
     assert reads["n"] == 1, (
         f"the migrations were read {reads['n']} time(s) for two calls on the "
         f"same unchanged tree (#9558)")
+    assert first == second
 
 
 def test_an_edited_migration_is_seen_immediately(tmp_path):

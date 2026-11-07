@@ -922,7 +922,7 @@ holds for a label named there. Re-measure `actions/runners` before pinning anyth
 ### Residual: the #10237 canary is a POOL-ONLY pin — and it is non-required on purpose
 
 **OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `repo-harnesses`
-(`ci.yml:1473`) now reads `runs-on: [self-hosted, self-hosted-x64]`. Its accepted cost is a WAIT with
+(`ci.yml:1556`) now reads `runs-on: [self-hosted, self-hosted-x64]`. Its accepted cost is a WAIT with
 no hosted half — and ⛔ that IS a landing cost: the rail (`admin-merge.sh`) merges with `--admin`, so
 required-ness decides nothing, every code-measuring red on the PR's tree BLOCKS, and this job is on
 that tree. `.mergify.yml` names it in neither `queue_conditions` nor `merge_conditions` and
