@@ -168,41 +168,58 @@ comparables now say what that measurement will probably show, and how to run it:
 
 ---
 
-## Extractor-v4 alignment — the check this brief originally omitted (2026-11-05)
+## Extractor-v4 alignment — the check this brief originally omitted (2026-11-05; corrected 2026-11-06)
 
-**Why this section exists.** The first version of this brief never read `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (1,882 lines, the design of record for the write path, home `#4894`). That was a Research-stage omission, and it matters because the epic's rule lives **inside** that write path. Reading it produced three findings, one of which is a genuine gap in what the epic asked for.
+**Why this section exists.** The first version of this brief never read `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (the design of record for the write path, home `#4894`). That was a Research-stage omission, and it matters because the epic's rule lives **inside** that write path. Reading it produced one genuine gap in what the epic asked for — and two corrections to this brief's own first draft, which had believed the design document's citations over the code.
 
-### ⛔ v4 ALREADY RECORDS THE CONTRADICTION, as G2 — and it names more than a flag
+### ⛔ v4 ALREADY RECORDS THE GAP, as G2
 
 `EXTRACTOR-V4-ARCHITECTURE.md` §4.3, requirement **G2** (owner `#5008`, CLOSED COMPLETED):
 
 > *"**No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists … and this step list has no home for it. S2.3's kNN path **silently assumes every candidate is embedded.** ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list."*
 
-**⇒ So the epic's S1 was under-specified.** Arming a default does not resolve G2: the step list **S0–S6** still has no EMBED decision point, and `S2.3 — CLASSIFY` collects from `embed_list` (the whole candidate set) while `classify_consolidation` **never removes items from it** — so a `DISCARD` would be classified anyway and embedded anyway.
+**⇒ So the epic's S1 was under-specified — but not in the way this section first said.** Arming a default does not resolve G2: the step list is the **eight steps of §4.1** — `S0`, `S1`, `S2.1`, `S2.2`, `S2.3`, `S3`, `S5`, `S6` (⛔ *"There is no S4 — do not restore one"*) — and **none of them is an EMBED decision**. `S2.2` is the VET/`DISCARD` point; the EMBED question ("is this row worth an embedding?") has no home at all. That is a **step-list** gap, and no flag can close it.
 
-### ⛔ The VALUE gate is off too, and v4 requires it ON
+### ✅ The VALUE gate's default half is ALREADY satisfied (`#10996`)
 
-v4 §S2.2, verbatim: *"the mechanical half is `tortoise/value_gate.py` (`#4899`), and it **must default ON and stay subordinate to VET** (`TORTOISE_VALUE_GATE` unset must not mean "the predicate never runs"). So the work is a **default and a subordination**, not a missing slot."*
+This section first claimed *"the VALUE gate is off too"*. ⛔ **That was false at this head**, and it is the defect this repository keeps re-earning: a design-document citation believed over the code. §S2.2's code citations belong to commit `c79ba1cf2`, so that passage predates `#10996`, which **flipped the value gate ON**.
 
-Verified at this head: `tortoise/value_gate.py` declares `ENV_FLAG = "TORTOISE_VALUE_GATE"`; `tortoise/embed_gate.py`'s module docstring records **both** as *"off by default"*. Since `embed_gate.RULE_SET` is assigned `value_gate.RULES` (one rule set, two enforcement points), **arming only the EMBED flag leaves the DISCARD question unenforced while the EMBED one reads green** — a rule enforced at one of its two points, reported as enforced. That is the same failure shape the epic's own research pass calls out repeatedly.
+Verified at this head:
 
-### The ordering, as three constraints (v4 §4.2, §S2.2, §S2.3)
+- `tortoise/value_gate.py` resolves the flag as `is_truthy(os.environ.get(ENV_FLAG, "1"))` — **unset means ON**, and its own comment says so: *"The predicate is ON unless this says otherwise (`#10996`)"*, citing this very §S2.2 sentence as the reason.
+- `tortoise/embed_gate.py` is the one still off by default — and its docstring says exactly that of the other flag: `TORTOISE_VALUE_GATE` *"was the third member of that precedent until `#10996` flipped it ON by default — copy this pattern, not that one."*
+- `tests/test_value_gate_4899.py::test_unset_arms_the_predicate` pins it, and states the rule as *"unset must not mean 'the predicate never runs'"*.
+
+⇒ **Requiring `TORTOISE_VALUE_GATE` to be "set" is a criterion that measures nothing**: unset already means ON, so an explicit set has a zero delta by construction, and no shipped config sets it. What S1 owes is (i) `TORTOISE_EMBED_GATE`, the second enforcement point, and (ii) G2's step-list home.
+
+### ✅ The DISCARD-before-EMBED wiring is IMPLEMENTED
+
+This section first repeated v4's wiring note as an open defect. At this head the prune happens **before** the classify pass:
+
+- `_run_vet_pass` **returns** the list and the caller assigns it back (`tortoise/extractor_v2.py`), and `_collect_classify_items` is called **after** that assignment — so it collects from the already-pruned candidate set, not the whole one;
+- `apply_vet`'s Rule 1 is *"Only an explicit `DISCARD` removes anything"* (`tortoise/vet_gate.py`);
+- `vet_s2_pool` carries the S2 pass's removals forward, so an item the **live** `S4` gap-filler re-added after `S2.2` discarded it is **not** re-minted by `execute_embed` (`S4` here is the code's second extraction pass, which is not the design's removed *"S4 — granularity review"*).
+
+⇒ `DISCARD` already precedes `EMBED`. (`classify_consolidation` is a per-point dedup API, not the pruning site — citing it for this was wrong twice over.) v4's wiring note still **reads** as outstanding because its citations belong to the `c79ba1cf2` pin; that passage is stale at this head, and re-asserting it here is how the stale claim would have propagated.
+
+### The ordering, as two live constraints (v4 §4.2, §S2.2)
 
 | constraint | source |
 |---|---|
 | both gates stay **subordinate to VET** | v4 §S2.2: the gates are the mechanical half of the step whose adversarial question is VET's |
-| **DISCARD before EMBED** | v4's wiring note: *"a discarded candidate must be removed from (or marked in) `embed_list`, or `_collect_classify_items` must skip it … S2.3 pays for `#4899`'s savings"* |
 | **EMBED before `execute_embed`** | v4 §4.2's order table: the embed pass is last, and `classify_consolidation` lives **inside** it (`tortoise/extractor_v2.py`) |
+
+(`DISCARD` before `EMBED` is the third, and it is **implemented** — see above.)
 
 ### Two v4 passages that CONFIRM the epic's sequencing
 
-- **The entity vector is an entry key, not a reasoning mechanism** (§5's traversal measurement, `:1045`; and storage §12.2c): *"Traversal is cheap enough to be the default … measured 1.55–2.35 ms … the why/who/when value does **not depend on vectorising the entity at all**. What a vector is for is FINDING the entry node, not reasoning from it."*
-- **The definite-description problem is upstream of the vector** (§1:108, §4.3 G5; measured 2026-09-25 under **`#5059`**): 62.3% of Objects are `the <X>`; and measured, **≈52% of the `the <X>` rows are load-bearing** (2,570 of 4,901), so a bare name-pattern delete carries **≈48% precision on an irreversible delete**. ⇒ **Any census that proposes deleting rows by name pattern is at coin-flip precision and must not be built.** #11088's census is about *vectors on labels with no index*, which is a different population — that distinction must be stated in the issue, and this is the number that makes it non-negotiable.
+- **The entity vector is an entry key, not a reasoning mechanism** (§5, the traversal measurement at `:1053`; and storage §12.2c): *"Traversal is cheap enough to be the default … measured 1.55–2.35 ms … the why/who/when value does **not depend on vectorising the entity at all**. What a vector is for is FINDING the entry node, not reasoning from it."*
+- **The definite-description problem is upstream of the vector** (§1:108, §4.3 G5; measured 2026-09-25 under **`#5059`**): 62.3% of Objects are `the <X>`; and measured, **≈52% of the `the <X>` rows are load-bearing** (2,570 of 4,901), so a bare name-pattern delete carries **≈48% precision on an irreversible delete**. ⇒ **Any census that proposes deleting rows by name pattern is at coin-flip precision and must not be built.** `#11088`'s census is about *vectors on labels with no index*, which is a different population — and it removes **vectors, never rows**.
 
 ### What this changes for the epic
 
-- **S1 / #11086** — now arms **both** gates (`03-scope.md`, S1) and requires the EMBED decision to have a home in the v4 step list; the issue body carries the same.
-- **S3 / #11088** — now states that it removes **vectors**, never rows, and cites the 48%-precision measurement as the reason that distinction is not negotiable (`03-scope.md`, S3).
+- **S1 / #11086** — arms `TORTOISE_EMBED_GATE` (the second enforcement point) and gives the EMBED decision a home in the step list (**G2**). It does **not** need `TORTOISE_VALUE_GATE` set: that is already ON by default since `#10996` (`03-scope.md`, S1).
+- **S3 / #11088** — states that it removes **vectors**, never rows, and cites the 48%-precision measurement as the reason that distinction is not negotiable (`03-scope.md`, S3; the issue body carries the same).
 - **V1 stays out of scope** and unaffected: v4 is silent on where the index lives, and §14.3 remains the decision's home.
 
 ## Review gate
