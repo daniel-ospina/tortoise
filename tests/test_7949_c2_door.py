@@ -1831,3 +1831,83 @@ def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE(monkeypatch
     assert door["objects"] != other["objects"], (
         "the two lanes minted the same :Object names — the control is "
         f"measuring content, not the door: {door['objects']}")
+
+
+def test_the_run_REFUSES_a_bypassed_capture_at_the_CALL_SITE_that_arms_the_witness():
+    """`require_door_entered(runs)` is the guard; its CALL SITE is what arms it.
+
+    #10983 review (P2 at `d410d45bbb`): every existing row asserts the witness's
+    own RETURN VALUE (`:1140`, `:1202`), and nothing asserted that `main` ever
+    CALLS it. Deleting the call — or moving it after `render_log(...)` — left the
+    whole suite green while a run whose capture never reached
+    `_extract_session_v2` went back to writing a table with a `door:` line saying
+    `lane: v2`, `measured: true`, and exit 0. That is this repo's own category-A
+    "inert enforcer": the condition is present in the module, can never fire, and
+    the artifact says it protected something.
+
+    Three properties, each with the mutant that reds it:
+
+    * the call EXISTS in `main`'s OWN scope — a bare `Call`, not a name in a
+      comment or a docstring (`_body()`'s docstrings record three rounds lost to
+      the substring shape, so a nested `def` is not allowed to satisfy this
+      either);
+    * it is handed the RUN LIST — `require_door_entered([])` returns
+      `{"entered": 0, "bypassed": []}` and refuses nothing, so a literal must red;
+    * it runs BEFORE `render_log(...)`, so the refusal precedes the artifact it
+      is refusing to write.
+    """
+    tree = _tree(PROBE)
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    main = functions["main"]
+
+    def own_scope(node: ast.AST):
+        """`node`'s children, never descending into a nested def/lambda/class."""
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda, ast.ClassDef)):
+                continue
+            yield child
+            yield from own_scope(child)
+
+    calls = [node for node in own_scope(main)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "require_door_entered"]
+    assert len(calls) == 1, (
+        f"`main` must call require_door_entered(...) exactly once in its own scope, "
+        f"called {len(calls)} time(s) — the witness exists but nothing arms it, so a "
+        "bypassed capture is written as a measured one (#10983 review P2)")
+    call = calls[0]
+
+    # (b) the argument is the run list, not a literal (``[]`` / ``None``).
+    positionals = call.args
+    assert positionals or call.keywords, (
+        "require_door_entered() is called with NO argument — the guard cannot see "
+        "the runs it is supposed to refuse (#10983)")
+    runs_arg = positionals[0] if positionals else next(
+        kw.value for kw in call.keywords)
+    assert isinstance(runs_arg, ast.Name), (
+        f"require_door_entered(...) is handed "
+        f"{type(runs_arg).__name__} ({ast.dump(runs_arg)[:80]}), not the run LIST — "
+        "`require_door_entered([])` returns entered=0/bypassed=[] and refuses "
+        "nothing, so this call site would be green and inert (#10983)")
+    bound = {n.id for n in own_scope(main)
+             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)}
+    assert runs_arg.id in bound or any(
+        isinstance(n, ast.arg) and n.arg == runs_arg.id for n in own_scope(main)), (
+        f"require_door_entered({runs_arg.id}) is handed a name `main` never binds — "
+        "a module-level empty list refuses nothing either (#10983)")
+
+    # (c) the refusal precedes the artifact. ``render_log`` both BUILDS the text
+    # and (at the next statement) its caller writes it, so a guard placed after
+    # either one refuses nothing that has not already been produced.
+    render_calls = [node for node in own_scope(main)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "render_log"]
+    assert len(render_calls) == 1, (
+        f"`main` must call render_log(...) exactly once: {len(render_calls)}")
+    assert call.lineno < render_calls[0].lineno, (
+        f"require_door_entered(...) is at line {call.lineno} but render_log(...) is "
+        f"at {render_calls[0].lineno} — the door is checked AFTER the log is built, "
+        "so a bypassed capture still produces the artifact and the run exits 0 "
+        "(#10983 review P2)")
