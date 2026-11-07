@@ -4117,8 +4117,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
     `test_the_census_doc_states_the_same_probe_bound_the_report_does` on EVERY
     tree, outside the `if declared is None` branch — measured, deleting §3's
     residual clause reds both that test and this one. This test still earns its
-    keep: the doc pin's ability to FAIL is what the mutations at the end of this
-    file pin, and a row set that names the measured defeats is what keeps the
+    keep: the doc pin's ability to FAIL is what the mutations at the end of THIS
+    TEST pin (not at the end of the file — seven unrelated tests follow it), and
+    a row set that names the measured defeats is what keeps the
     helper's declared surface honest.
 
     Each `must_red` row is asserted to differ from the original sentence, so a row
