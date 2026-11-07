@@ -5829,6 +5829,80 @@ def test_an_ITEM_whose_own_content_is_a_NESTED_LIST_leaves_NO_paragraph():
         assert ipl.claims(control)["closing"] == [100], control
 
 
+def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
+    """Round-57/58 review, P1 + P2 — the round-55 gate's TYPE-7 neighbour, PINNED AS DECLARED.
+
+    The round-55 test above pins `* - x` + `   2. -` + the marker. It constructs NOTHING with a line
+    BETWEEN the bare-marker line and the wide-gap marker, and that neighbour is where this gate
+    moves BOTH columns the wrong way against `193bbfd9a2` — the #11186 squash that is now `main`:
+
+        F1  `* - x` + `<br />` + `   2. -` + `  2.     Closes #100`
+                renderer `<pre><code>` -> CODE
+                `193bbfd9a2` / `origin/main`: `[]` in all four arms, `claims()` `[]`
+                THIS HEAD: `[100]` in all four arms, `claims()` `[100]` — a CLASS-A false PASS in
+                arm 1 (`strict`) of `issue_process_lint`, i.e. the gate this module feeds.
+                `<span>` in place of `<br />` measures identically.
+        F2  `Notes` + `2. -` + `<br />` + `     - x` + `  2.     Closes #100`
+                renderer ONE `<p>` -> PROSE
+                `origin/main`: `[100]` in the two LENIENT arms, `[]` in both `strict` arms
+                THIS HEAD: `[]` in all four arms — a LOST close.
+
+    ⛔ THE EXPECTATIONS BELOW ARE THE MEASURED HEAD ANSWER, AND THREE OF THEM ARE THE WRONG ONE.
+    This is a DECLARATION, not a correctness assertion: the module's own convention
+    (`⚠️ DECLARED RESIDUAL`, and `⚠️ DECLARED REGRESSION` at `_leaves_no_paragraph`) is that a known
+    gap is PINNED so it cannot move silently. Both rows are filed, not fixed — #11369 owns the
+    state fact ("which item held the open paragraph"), #11349 the prose-path half, and three
+    candidate terms were built and measured and each trades a family.
+
+    The assertions ride on the fixture and not only on the pin, which is what makes them
+    non-vacuous: `keyword_types` proves each body really is the rendered shape being claimed (a
+    fixture that drifts reddens here rather than pinning a mutation), and the CONTROLS at the end
+    are this PR's own two fixes, which must NOT move when this family is fixed. Deleting the
+    interposed `<br />` line reproduces the neighbouring test's body and answers `[]` in every arm,
+    so the intervening line is demonstrably the discriminator — the family the suite never built.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    def answers(body: str) -> list[bool]:
+        """All four arms: lenient, lenient+`indented_code`, `strict`, `strict`+`indented_code`."""
+        return [100 in cl.parse_closing_refs(cl.strip_code(body, **kw))
+                for kw in ({}, {"indented_code": True},
+                           {"strict": True}, {"strict": True, "indented_code": True})]
+
+    sys.path.insert(0, str(ROOT))
+    from tools import issue_process_lint as ipl
+
+    # F1 — DECLARED-WRONG. The renderer puts the keyword in `<pre><code>` and `main` blanks it.
+    for body in ("* - x\n<br />\n   2. -\n  2.     Closes #100\n",
+                 "* - x\n<span>\n   2. -\n  2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert answers(body) == [True, True, True, True], body   # DECLARED: should be [] x 4
+        assert ipl.claims(body)["closing"] == [100], body        # DECLARED: the arm-1 false PASS
+
+    # …and the intervening line IS the discriminator: without it this is the test above, and blank.
+    without = "* - x\n   2. -\n  2.     Closes #100\n"
+    assert keyword_types(without) == {"code_block"}, without
+    assert answers(without) == [False, False, False, False], without
+
+    # F2 — DECLARED-WRONG. ONE `<p>` in the renderer; `origin/main` credits the lenient arms.
+    f2 = "Notes\n2. -\n<br />\n     - x\n  2.     Closes #100\n"
+    assert keyword_types(f2) == {"inline"}, f2
+    assert answers(f2) == [False, False, False, False], f2       # DECLARED: lenient should be True
+
+    # CONTROLS — this PR's own two fixes. A fix for F1/F2 that moves either is not a fix.
+    credit = "Notes\n2. -\n  2.     Closes #100\n"
+    assert keyword_types(credit) == {"inline"}, credit
+    assert answers(credit) == [True, True, True, True], credit
+
+    blank = "x\n- 1.\n  2.     Closes #100\n"
+    assert keyword_types(blank) == {"code_block"}, blank
+    assert answers(blank) == [False, False, False, False], blank
+
+
 def test_the_leaf_veto_reads_the_PARAGRAPHS_depth_not_the_last_lines():
     """Round-54, P1 — pinned, because the suite did NOT ride on this term (round-55 review, P2).
 

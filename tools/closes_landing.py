@@ -1376,9 +1376,42 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # should be measured against the item that actually HOLDS the open paragraph (the nested content
     # column), and then `lazy_marker` can decide un-overridden — filed rather than attempted here,
     # because every guard in `_is_lazy_marker` is measured and pinned.
+    # ⚠️ DECLARED REGRESSION — F1/F2, and deliberately NOT "at parity with `origin/main`" (round-57
+    # and round-58 reviews, P1 + P2; re-measured at `e870d7437` for this declaration). The grids the
+    # sentence below names do not compose a TYPE-7 LINE (`<br />`, `<span>`) BETWEEN a bare-marker
+    # line and the wide-gap marker, and one such line moves BOTH columns the wrong way against
+    # `193bbfd9a2` — the #11186 squash that is now `main`, which gets both RIGHT because it runs the
+    # content ladder at the TOP of this function, exactly where the early return below pre-empts it:
+    #     `* - x` + `<br />` + `   2. -` + `  2.     Closes #100`
+    #         renderer `<pre><code>Closes #100` -> CODE
+    #         `193bbfd9a2` and `origin/main` `[]` in all four arms, `claims()` `[]`
+    #         THIS HEAD `[100]` in all four arms, `claims()` `[100]` — CLASS A: a false PASS in arm 1
+    #         (`strict`) of `issue_process_lint`, the gate this module feeds. `<span>` in place of
+    #         `<br />` measures identically. The gate answers `container is None` -> False before the
+    #         ladder runs: the `<br />` line dedented the item in the MODEL while the renderer kept
+    #         the paragraph inside it.
+    #     `Notes` + `2. -` + `<br />` + `     - x` + `  2.     Closes #100`
+    #         renderer ONE `<p>` -> PROSE
+    #         `origin/main` `[100]` in the two LENIENT arms, `[]` in both `strict` arms
+    #         THIS HEAD `[]` in all four arms — a LOST close (P2). At parity with the BRANCH POINT
+    #         `80c912244`: a `main` fix this branch does not carry, not a blank invented here.
+    # (The round-58 record's F2 row read `n n Y Y` at this head; re-measured it is `n n n n` in all
+    # four arms. The DIRECTION — a lenient-arm close `main` credits and this head drops — is what
+    # the declaration records, and it reproduces.)
+    # ⛔ WHY THIS IS DECLARED AND NOT FIXED HERE: three candidate terms were built and measured and
+    # EVERY ONE trades a family (#11369) — the `deep_col` column fix buys F1 with 1 lenient + 2
+    # strict lost closes and still cannot separate `   2. -` at col 3 from `  1.` at col 2; gating
+    # the pop record on `dropped_paragraph_item` buys F1 with a close lost in ALL FOUR arms
+    # (`- x` + `Notes` + `   2. -` + `   2. -` + the marker, which `head` AND `origin/main` both
+    # credit); and the tip commit `e870d7437` is the REVERT of a third. The discriminator is the
+    # missing state fact "which item held the open paragraph", not a column — that is #11369's root,
+    # and #11349 owns the prose-path half. `tests/test_closes_landing.py::
+    # test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION` pins both rows, so a
+    # fix reddens a named test instead of silently moving the family.
     # On the two composed grids this gate is clean (0 new fail-opens, 0 new lost closes vs
-    # `origin/main`, all four arms) — those grids do not compose a leaf-shaped lazy marker's content,
-    # which is why the claim must name its grid and not be stated bare.
+    # `origin/main`, all four arms) — those grids compose NEITHER a leaf-shaped lazy marker's content
+    # NOR a type-7 line between a bare-marker line and the wide-gap marker, which is why the claim
+    # must name its grid and must never be stated bare.
     if lazy_marker and (container is None or not body.strip()):
         return False
     # ⛔ §4.4 COMES BEFORE THE LEAF TESTS, NOT AFTER THEM (round 50 — the ordering half of the
