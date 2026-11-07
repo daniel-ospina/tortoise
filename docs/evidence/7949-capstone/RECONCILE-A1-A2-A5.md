@@ -395,15 +395,24 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
 gh pr view 11213 --json state,mergeCommit,mergedAt
 gh pr view 11211 --json state,mergeCommit,mergedAt,closingIssuesReferences
 gh pr view 11212 --json state,mergeCommit,mergedAt        # MERGED 21:33:54Z, mergeCommit 80c912244
-# How an issue was actually CLOSED — the discriminator an empty closingIssuesReferences cannot give:
-gh api "repos/daniel-ospina/tortoise/issues/10999/timeline?per_page=100" \
+gh pr view 11205 --json state,mergeCommit,mergedAt,closingIssuesReferences   # MERGED 22:40:32Z, 316a572ce2
+gh issue view 11237 --json state,closedAt                # OPEN — the Object→Object WRITE path
+# How an issue was actually CLOSED — THREE arms, and the PRIMARY field is closedByPullRequestsReferences,
+# NOT commit_id alone. Read it first: `gh issue view <n> --json state,closedByPullRequestsReferences`.
+#   1. NON-EMPTY => closed by that PR's body/title keyword (#11001 -> [11213], #10997 -> [11212]);
+#      ⛔ the closed event's commit_id is NULL in this arm — this is the trap
+#   2. empty + commit_id = SHA => the keyword rode the COMMIT message (#10999 -> 316a572ce2, whose
+#      message carries `Closes #10999`)
+#   3. empty + commit_id = null => a MANUAL close (#11021: [] and null)
+# ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 prints null too. And an empty
+#   closingIssuesReferences is not evidence either: that PR-body field stays empty in arms 2 and 3.
+gh api "repos/daniel-ospina/tortoise/issues/10999/timeline?per_page=100" --paginate \
   --jq '.[] | select(.event=="closed") | {created_at, commit_id}'
-                                                          # a SHA => a commit's closing keyword closed it
-                                                          #   (#10999 -> 316a572ce2, message `Closes #10999`)
-                                                          # null => a MANUAL close (#11021 reads null)
-                                                          # ⛔ An empty closingIssuesReferences does NOT mean
-                                                          # "manual": the keyword can ride the squash COMMIT,
-                                                          # which never populates that PR-body-derived field
+                                                          # ⛔ --paginate is MANDATORY: `per_page=100`
+                                                          # alone prints NOTHING once a timeline passes
+                                                          # 100 events (#11021 is at 91 today) and
+                                                          # "nothing" reads as "no closed event" — a
+                                                          # truncated check is worse than none
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
