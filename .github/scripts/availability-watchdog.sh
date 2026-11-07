@@ -216,12 +216,18 @@
 #     (its body carries the cooldown/cap ledger), and never close one. Without
 #     that separate identity a typo'd drill host files a MISLABELLED production
 #     incident (and the next production run would then "recover" it).
-#   * A PRODUCTION URL with no Fly machine behind it (the Pages auth surface) is
-#     ALWAYS restart-disarmed (`disarmed:no_machine` on a DOWN verdict,
+#   * A PRODUCTION URL that is NOT in `RESTARTABLE_PROBE_URLS` is ALWAYS
+#     restart-disarmed (`disarmed:no_machine` on a DOWN verdict,
 #     `disarmed:unexpected` on a DEGRADED one — the DEGRADED disarm is set
-#     first): a 503 there means a missing binding, and restarting the API app
-#     would restart an unrelated service. This is a property of the URL SET,
-#     not of the failure class, so no per-run misconfiguration can arm it.
+#     first): for the Pages auth surface a 503 means a missing binding, and
+#     restarting the API app would restart an unrelated service. This is a
+#     property of the URL SET, not of the failure class, so no per-run
+#     misconfiguration can arm it. ⛔ Membership is the ONLY criterion, and
+#     `disarmed:no_machine` is the ARM's verdict — NOT a claim about machine
+#     presence: the liveness target IS that machine (#10892) and reaches this
+#     same arm, hard-disarmed so one wedged machine cannot spend
+#     MAX_RESTARTS_PER_HOUR twice. Ask `is_machine_backed_url` before
+#     DESCRIBING this disarm (see the header).
 #   * A failed issue SEARCH refuses to file (never duplicate) and fails the
 #     run; a non-numeric issue id is refused the same way. The monitor cannot
 #     go silently deaf in the alerting direction.
@@ -882,10 +888,15 @@ is_production_url() { # <url>
   return 1
 }
 
-# Which production targets may arm the restart leg. A target that is production
-# for alerting but has no Fly machine (the Pages auth surface) must NEVER
-# restart; membership again keeps a new production URL non-restartable until it
-# is explicitly listed here.
+# Which production targets may arm the restart leg. MEMBERSHIP IS THE ONLY
+# CRITERION, and it cuts both ways: the Pages auth surface (no Fly machine) is
+# absent, and so is the liveness target — which IS the machine, held
+# non-restartable so one wedged machine cannot spend MAX_RESTARTS_PER_HOUR
+# twice (#10892). ⛔ Absence here is NOT "has no Fly machine": that premise is
+# refuted by this file's own sets (`FLY_MACHINE_PROBE_URLS` holds the liveness
+# URL, `RESTARTABLE_PROBE_URLS` does not), and the header forbids describing the
+# disarm without asking `is_machine_backed_url`. Membership also keeps a new
+# production URL non-restartable until it is explicitly listed here.
 is_restartable_url() { # <url>
   local u p
   u="${1%/}"

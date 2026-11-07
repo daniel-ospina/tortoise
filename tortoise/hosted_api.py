@@ -6808,8 +6808,10 @@ def _record_health() -> dict:
 # using `loop_stale_ms` to decide the loop is fine is the exact circularity
 # #10892 is about.
 #
-# BLIND SPOT, stated rather than implied (the `docs/ops/fleet-liveness.md`
-# discipline): this proves a request was SERVED just now. It does NOT measure a
+# BLIND SPOT, stated rather than implied (the discipline #10892's own scope
+# comment asks for — `issues/10892#issuecomment-6698714004`; there is no
+# `docs/ops/fleet-liveness.md` in this tree, so this names the source it has):
+# this proves a request was SERVED just now. It does NOT measure a
 # loop that serves SLOWLY — a 4 s answer passes a 5 s prober, and the outage's
 # mean refusal was ~45 s only because the transport wait bound eventually fired.
 # It also says nothing about a deploy that never happened (that is

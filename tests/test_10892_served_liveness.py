@@ -45,8 +45,9 @@ one alone is a false PASS:
    harness already owns "the step, its label and the script's production-set
    membership must move together".
 
-**Blind spots, stated rather than implied** (the `docs/ops/fleet-liveness.md`
-discipline, per the issue's own scope note): this detects a loop that cannot
+**Blind spots, stated rather than implied** (the discipline #10892's own scope
+comment asks for — `issues/10892#issuecomment-6698714004`): this detects a loop
+that cannot
 serve, and — the prober's `--max-time` converts an answer later than the bound
 into `000` → `DOWN` (`classify_code`, harness case 93) — a loop that serves
 SLOWER than the bound too. What it does NOT detect is a loop that serves slowly
@@ -366,16 +367,30 @@ def test_the_served_endpoint_is_not_transport_bound_exempt():
     """
     import tortoise.hosted_api as ha
 
+    # The route under test, READ FROM THE APP rather than restated here: an
+    # assertion over a literal ("/liveness") cannot see the endpoint MOVE, so
+    # moving it under the exempt prefix would leave a literal-based assertion
+    # green while the endpoint became exempt (fresh-context review, #11340).
+    routes = [
+        route for route in ha.app.routes
+        if getattr(route, "path", "").rstrip("/").endswith("/liveness")
+    ]
+    assert routes, (
+        "no route ending in /liveness is registered on the app — this test's "
+        "subject is gone, so it cannot certify anything (#10892)")
+
     exempt = set(ha._TRANSPORT_WAIT_BOUND_EXEMPT)
-    assert ("GET", "/liveness") not in exempt, (
-        "/liveness is transport-bound exempt — a stalled request would then hang "
-        "with no refusal at all, and the 504 that made the 2026-11-04 outage "
-        "legible would never be produced (see the exemption's own OVERRIDES "
-        "block in hosted_api.py)")
-    assert not "/liveness".startswith(ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX), (
-        "/liveness sits under the "
-        f"{ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX!r} prefix exemption — that "
-        "prefix is for internal-only routes (the operators that already hold "
-        "the bound themselves), and a probe that must RETURN cannot live under "
-        "it: exempting /liveness there would re-create the silent hang the "
-        "504 exists to make legible (#10892)")
+    for route in routes:
+        path = route.path
+        assert ("GET", path) not in exempt, (
+            f"{path} is transport-bound exempt — a stalled request would then hang "
+            "with no refusal at all, and the 504 that made the 2026-11-04 outage "
+            "legible would never be produced (see the exemption's own OVERRIDES "
+            "block in hosted_api.py)")
+        assert not path.startswith(ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX), (
+            f"{path} sits under the "
+            f"{ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX!r} prefix exemption — that "
+            "prefix is for internal-only routes (the operators that already hold "
+            "the bound themselves), and a probe that must RETURN cannot live under "
+            "it: exempting the liveness route there would re-create the silent hang "
+            "the 504 exists to make legible (#10892)")
