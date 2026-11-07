@@ -617,6 +617,12 @@ def test_a_registered_non_bar_must_name_its_owner_decision_and_cannot_borrow_the
         # comparator THE FLOOR OWNS, so a bar stated afterwards is still seen.
         ("UNMEASURED(owner-gated — `#10988` decides) above the floor of `>= 30` typed statements "
          "and the bar it will be scored against is `>= 0.5` typed_share", "outside its floor"),
+        # ⛔ …and a bar stated BEFORE the marker, which the arm could not see until round 7: the
+        # scan started at `UNMEASURED(`, so a comparator in the PREFIX was never examined and this
+        # cell exited OK with an empty finding list (#10982 review round 7). A4 is the one row
+        # registered as having NO bar, and its threshold cell is what the run child reads.
+        ("`>= 0.006` typed_share — UNMEASURED(the bar is owner-gated — `#10988` decides)",
+         "outside its floor"),
     ):
         failures = with_threshold(bad)
         assert any(needle in f for f in failures), (bad, failures)

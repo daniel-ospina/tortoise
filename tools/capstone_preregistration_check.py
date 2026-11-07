@@ -3824,8 +3824,15 @@ def check_completeness(rows: list[dict[str, str]]) -> list[str]:
             # INDEPENDENT of the arm above, never `elif`: a cell can name its owner decision and
             # STILL smuggle a comparator out of the floor clause, and that is the mutation this
             # half exists to catch.
-            if any(c in REGISTERED_NO_BAR.split(FLOOR_CLAUSE.sub("", plain), 1)[-1]
-                   for c in COMPARATORS):
+            # ⛔ THE WHOLE CELL, minus the floor clause — never the substring AFTER the marker.
+            # `REGISTERED_NO_BAR.split(text, 1)[-1]` is everything to the right of `UNMEASURED(`,
+            # so a bar written FIRST (`>= 0.006` typed_share — UNMEASURED(…)) was in the PREFIX
+            # and never scanned: measured at #11331 review round 7, that cell exited OK with an
+            # empty finding list while the same bar placed after the marker was refused. A4 is
+            # the one row whose registration is that it has NO bar, and its threshold cell is
+            # what the run/scoring child reads, so a bar surviving here is the owner-decision
+            # bypass this arm exists to close (§7 item 1, §3.7, §10.9).
+            if any(c in FLOOR_CLAUSE.sub("", plain) for c in COMPARATORS):
                 failures.append(
                     f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
                     "declares UNMEASURED(...) and still carries a comparator outside its floor "
