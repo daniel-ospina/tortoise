@@ -359,6 +359,16 @@ def test_each_pick_is_judged_CUMULATIVELY_not_in_isolation():
     assert picks == ["c1"], picks
     assert [(r["id"], r["reason"]) for r in trace["rejected"]] == [
         ("d1", "evicts:sB")], trace["rejected"]
+    # ⚠️ `accepted` is part of the trace's documented contract and this is the
+    # ONE shape where it disagrees with `rejected`: the guard ADMITTED `c1` and
+    # refused `d1`. Unpinned until review cycle 8 (finding 2): rewriting the
+    # guard path's write to `"accepted": []` kept every suite green, and that
+    # row would then read `applied: True, accepted: []` — a guard that admitted
+    # one pick while claiming it admitted none. Asserted on the PARTIAL-
+    # acceptance row precisely because a full-refusal row (`accepted == []`) and
+    # a full-acceptance row are both satisfied by the wrong value.
+    assert trace["accepted"] == ["c1"], trace["accepted"]
+    assert trace["applied"] is True and trace["targeting"] == "window"
     # the window WIDENS (2 -> 3 sessions) and sB survives: both halves of the
     # ruling at once, on the shape a per-pick guard gets wrong.
     got = tl.window_arm_retention(pool, order, picks=picks, window=10,
@@ -546,15 +556,33 @@ def test_the_receipt_carries_the_guard_and_its_refusals():
 
     assert any(_binds(node) for node in stats), (
         "non_eviction_targeting must come from guard_trace.get('targeting')")
-    # and it must NOT be the applied-predicate's slot (the swap above)
+    # ...and the APPLIED slot must carry the applied PREDICATE — the mirror of
+    # `_binds`. ⚠️ The first version of this assertion named a symbol that does
+    # not exist (`_non_eviction_targeting`), so its conjunction was permanently
+    # False and the assertion could never fire: the documented swap
+    # (`"non_eviction_applied": trace.get("targeting") or "none"`) passed every
+    # gate in the tree (review cycle 8, finding 1). `"none"` is TRUTHY, so that
+    # swap would report a guard-enforced `True`-shaped value on a row the guard
+    # never ran — the false PASS cycle 3 removed from this exact field. So this
+    # asserts the POSITIVE (a call to `non_eviction_applied`), which cannot be
+    # satisfied by any other expression.
+    def _is_applied_predicate(value: ast.AST) -> bool:
+        return any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "non_eviction_applied"
+            for node in ast.walk(value))
+
+    applied_slots = 0
     for node in stats:
         for key, value in zip(node.keys, node.values, strict=True):
             if (isinstance(key, ast.Constant)
                     and key.value == "non_eviction_applied"):
-                assert not (isinstance(value, ast.Call)
-                            and isinstance(value.func, ast.Name)
-                            and value.func.id == "_non_eviction_targeting"), (
-                    "non_eviction_applied must not carry the targeting value")
+                applied_slots += 1
+                assert _is_applied_predicate(value), (
+                    "non_eviction_applied must be non_eviction_applied(trace), "
+                    f"not {ast.dump(value)}")
+    assert applied_slots == 1, applied_slots
 
 
 def test_the_leg_trace_passes_the_refusal_count_to_the_empty_reason():

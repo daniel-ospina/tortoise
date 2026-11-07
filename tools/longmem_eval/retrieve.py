@@ -2310,7 +2310,7 @@ def retrieve_for_question(
             # stamping the inert value (``temporal_leg_order`` now always
             # stamps it — review cycle 4).
             "non_eviction_targeting": (_tl_guard_trace.get("targeting")
-                                       or "none"),
+                                        or "none"),
             "non_eviction_rejected": list(
                 _tl_guard_trace.get("rejected") or []),
         }
