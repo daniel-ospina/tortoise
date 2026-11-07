@@ -85,10 +85,10 @@ class _Record:
 @pytest.fixture()
 def lane():
     """A dedicated graph on the live lane container, dropped afterwards."""
-    import uuid
-
     import redis
     from falkordb import FalkorDB
+
+    from tests._embedded import _journal_append
 
     host = _live_utils.service_host()
     port = _live_utils.docker_port()
@@ -98,7 +98,23 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    graph_name = f"evict_{uuid.uuid4().hex[:12]}"
+    # ⛔ Epic #1647 cycle-6 P1-3 / cycle-8 P2-2: a raw client bypasses
+    # `_assert_test_graph` AND the per-test wipe scope, so this handle needs all
+    # three halves of the contract — a per-test-UNIQUE name (`os.urandom`), a
+    # name the sweep's OWNERSHIP VOCABULARY recognises, and the `finally` drop
+    # below. The `test_` prefix is not cosmetic: `_journal_append` is an
+    # ownership RECORD only for a name `owns_by_ownership_record` accepts
+    # (`tests/_embedded.py::_SWEEP_OWNED_PREFIXES`), and journaling an outside
+    # name makes the append INERT — `_sweep_drop` classifies it `preserved`,
+    # drops nothing, then consumes the journal, so the graph can never be
+    # reclaimed while the ownership census still reads GREEN.
+    # Pinned by
+    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
+    # (name + call in the same block) and by
+    # `test_lane_graph_name_is_owned_by_the_sweep_s_ownership_record` below (the
+    # prefix is inside the vocabulary the journal is read against).
+    graph_name = f"test_evict_{os.urandom(6).hex()}"
+    _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
     try:
@@ -109,6 +125,36 @@ def lane():
             client.delete(graph_name)
         except Exception:  # pragma: no cover - best-effort teardown
             pass
+
+
+def test_lane_graph_name_is_owned_by_the_sweep_s_ownership_record(lane):
+    """A journal entry is an ownership RECORD only for a name the sweep's own
+    vocabulary accepts.
+
+    `_journal_append` is the third half of the raw-client contract BECAUSE the
+    session-end sweep reads the journal through `owns_by_ownership_record`
+    (`tests/_embedded.py::_SWEEP_OWNED_PREFIXES` = `test_`, `tortoise_test`,
+    `team_`, `org_`). A journaled name outside that vocabulary makes the append
+    INERT: `_sweep_drop` classifies it `preserved`, drops nothing, and then
+    removes the journal anyway — so the graph this fixture minted can never be
+    reclaimed, and `_owned_survivors` will not report it as a leak either. That
+    is the #1647 cycle-8 P2-2 leak still open, with the census GREEN: the one
+    thing this guard pair must not be able to produce.
+
+    The fixture's name was `evict_<12hex>`; it reds on that name (`evict_` is
+    outside every owned prefix) and greens on the `test_evict_<12hex>` it pins.
+    """
+    _client, _graph, graph_name = lane
+
+    from tests._embedded import _owned_names, owns_by_ownership_record
+
+    assert owns_by_ownership_record(graph_name), (
+        f"{graph_name!r} is journaled but NOT owned — the sweep PRESERVES it and "
+        f"consumes the journal, so the graph leaks for ever")
+    # `_owned_names` is the sweep's DELETE set — the same predicate, applied to
+    # this fixture's single recorded name, so the record and the drop set cannot
+    # drift apart.
+    assert _owned_names([graph_name], None) == {graph_name}
 
 
 def _seed(graph, count: int, *, prefix: str = "n") -> list[str]:
