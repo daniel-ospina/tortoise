@@ -996,6 +996,15 @@ def _default_connect(dsn: str) -> Any:
 #: slower (it connects) instead of failing.
 RECORD_POOL_MAX_CONNECTIONS = 2
 
+#: How many DSN BUCKETS may hold idle handles at once. `RECORD_POOL_MAX_CONNECTIONS`
+#: is per bucket, so without this a process that re-arms the DSN (a rotating
+#: credential, a per-tenant DSN — `record_dsn()` re-reads the environment on
+#: every call) would leave up to two live sockets behind for EVERY value it ever
+#: saw. Past this many buckets the least-recently-created one is drained and its
+#: handles closed, which is the same eviction `_SCHEMA_CACHE_LIMIT` performs for
+#: the schema cache and for the same reason: the process is long-lived.
+RECORD_POOL_MAX_IDLE_KEYS = 4
+
 #: Idle connections, keyed by the SHA-256 of their DSN (never the DSN itself: the
 #: pool is not a new place for a credential to sit in memory).
 _IDLE_CONNECTIONS: dict[str, list[Any]] = {}
@@ -1052,14 +1061,23 @@ def _take_idle_connection(dsn: str) -> Any | None:
 
     A handle the server no longer backs is DISCARDED here rather than returned,
     so one record pays for a server restart and the next acquire connects fresh.
+    The discard happens OUTSIDE the lock: `close()` is a socket write (a
+    Terminate packet) that can block on a full send buffer, and holding the pool
+    lock across it would stall every other borrower and every release for that
+    DSN behind one dead handle.
     """
     key = _pool_key(dsn)
-    with _IDLE_CONNECTIONS_LOCK:
-        idle = _IDLE_CONNECTIONS.get(key)
-        while idle:
-            candidate = idle.pop()
-            if _connection_is_reusable(candidate):
-                return candidate
+    dead: list[Any] = []
+    try:
+        with _IDLE_CONNECTIONS_LOCK:
+            idle = _IDLE_CONNECTIONS.get(key)
+            while idle:
+                candidate = idle.pop()
+                if _connection_is_reusable(candidate):
+                    return candidate
+                dead.append(candidate)
+    finally:
+        for candidate in dead:
             with contextlib.suppress(Exception):
                 candidate.close()
     return None
@@ -1104,14 +1122,35 @@ class _PooledConnection:
         object.__setattr__(self, "_returned", False)
 
     # — the DB-API surface the record path uses —
-    def cursor(self) -> Any:
-        return self._raw.cursor()
+    def _live(self) -> Any:
+        """The raw handle, REFUSING use once returned.
+
+        `close()` must be a fence, not merely a release: before this change a
+        statement on a closed connection raised the driver's own
+        ``InterfaceError``. Now the handle is still open and may be borrowed by
+        ANOTHER thread, so a late ``commit()`` on a returned wrapper would commit
+        that thread's transaction and a late ``cursor()`` would issue statements
+        on a connection this caller no longer owns — silent cross-talk replacing
+        a loud error. The driver's own exception type is raised (lazily imported:
+        it is optional at module scope, exactly like `_default_connect`'s).
+        """
+        if self._returned:
+            try:
+                from psycopg2 import InterfaceError  # type: ignore[import-not-found]
+            except Exception:  # pragma: no cover - driver absent
+                raise RuntimeError(
+                    "connection already returned to the pool") from None
+            raise InterfaceError("connection already returned to the pool")
+        return self._raw
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        return self._live().cursor(*args, **kwargs)
 
     def commit(self) -> None:
-        self._raw.commit()
+        self._live().commit()
 
     def rollback(self) -> None:
-        self._raw.rollback()
+        self._live().rollback()
 
     def close(self) -> None:
         """Return the handle to the pool. Idempotent, and never raises."""
@@ -1155,9 +1194,24 @@ def _park_connection(key: str, conn: Any) -> None:
       `TRANSACTION_STATUS_UNKNOWN`), so a restart cannot poison the pool;
     * it ROLLS BACK an unfinished or aborted transaction before parking the
       handle. A failed projection leaves the transaction aborted, and handing
-      that to the next record would fail it for the previous record's reason. On
-      the happy path ``commit()`` already left the connection IDLE, so this is a
-      status check and **no round trip** — reuse costs nothing extra.
+      that to the next record would fail it for the previous record's reason.
+
+    ⚠️ WHAT IT COSTS, stated per door rather than in general. On the WRITE door's
+    happy path ``commit()`` already left the connection IDLE, so release is a
+    status check and **no round trip**. A READ borrow (`record_serve.open_record`)
+    ends INTRANS — it issues a statement and never commits — so every read
+    release takes the `rollback()` branch, i.e. ONE round trip the previous
+    ``close()`` did not wait for. That is still an order of magnitude cheaper
+    than the connect+auth it replaces (~19 ms measured), but it is not free and
+    is named here rather than averaged away.
+
+    ⚠️ It also NORMALISES `autocommit` back to False. The wrapper forwards session
+    state on purpose (`__setattr__`), so a caller may legitimately set it — but a
+    handle parked in autocommit mode is poisonous in two ways nobody would
+    attribute to the pool: `_apply_tenant_scope`'s transaction-local `set_config`
+    sets NOTHING on an autocommit connection, so every later record fails with a
+    tenant-GUC error that names the DSN; and `open_record`'s transaction-local
+    `statement_timeout` stops applying, so reads lose their bound silently.
 
     ⚠️ It does NOT poke the server. A health ``SELECT 1`` per acquire would cost a
     round trip on every record, and the failure it would prevent is already
@@ -1179,12 +1233,29 @@ def _park_connection(key: str, conn: Any) -> None:
             # Aborted (a failed plan) or still open (a caller that did not
             # commit): either way the next writer must not inherit it.
             conn.rollback()
+        if getattr(conn, "autocommit", False):
+            # Set through the wrapper by a caller; the next borrower must not
+            # inherit it (see the docstring: a transaction-local `set_config`
+            # sets nothing in autocommit mode).
+            conn.autocommit = False
+        evicted: list[Any] = []
         with _IDLE_CONNECTIONS_LOCK:
-            idle = _IDLE_CONNECTIONS.setdefault(key, [])
+            idle = _IDLE_CONNECTIONS.get(key)
+            if idle is None:
+                # A NEW bucket: make room by draining the oldest ones, so a
+                # re-armed DSN cannot leave two sockets per value alive forever.
+                over = len(_IDLE_CONNECTIONS) - RECORD_POOL_MAX_IDLE_KEYS + 1
+                for other in list(_IDLE_CONNECTIONS)[:max(0, over)]:
+                    evicted.extend(_IDLE_CONNECTIONS.pop(other))
+                idle = _IDLE_CONNECTIONS.setdefault(key, [])
             if len(idle) < RECORD_POOL_MAX_CONNECTIONS:
                 idle.append(conn)
-                return
-        conn.close()
+                conn = None
+        for old in evicted:
+            with contextlib.suppress(Exception):
+                old.close()
+        if conn is not None:
+            conn.close()
     except Exception:
         with contextlib.suppress(Exception):
             conn.close()
@@ -1193,10 +1264,15 @@ def _park_connection(key: str, conn: Any) -> None:
 def _release_pooled_connections() -> None:
     """Close every idle connection. Never raises.
 
-    The shutdown verb and the test suite's isolation seam: an idle handle
-    outlives the record it wrote, exactly like any pool's, so a process that
-    wants the sockets gone (or a test that must not inherit one) says so here
-    rather than assuming garbage collection will.
+    The TEST suite's isolation seam today: an idle handle outlives the record it
+    wrote, exactly like any pool's, so a test that must not inherit one says so
+    here rather than assuming garbage collection will. ⚠️ It is NOT registered
+    as a shutdown hook — nothing in production calls it, and the sockets are
+    reclaimed by process exit, which is what a pool holding at most
+    `RECORD_POOL_MAX_IDLE_KEYS` x `RECORD_POOL_MAX_CONNECTIONS` handles can
+    afford. Called from the `test_9558_record_write_cost` fixture (and named in
+    that file as the seam it is) rather than claimed as a lifecycle verb this
+    module does not have.
     """
     with _IDLE_CONNECTIONS_LOCK:
         idle_lists = list(_IDLE_CONNECTIONS.values())

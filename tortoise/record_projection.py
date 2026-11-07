@@ -1563,10 +1563,10 @@ def _release_schema_cache() -> None:
 def _migrations_fingerprint(base: Path) -> tuple:
     """A cheap identity for the migration FILES a schema parse would consume.
 
-    `(name, mtime_ns, size, inode)` per record migration, in `RECORD_MIGRATIONS`
-    order. This is what makes the cache below safe to keep: the parse is reused
-    only while every file it was built from is, as far as the filesystem can
-    cheaply say, the file that is there now.
+    `(name, mtime_ns, size, inode, ctime_ns)` per record migration, in
+    `RECORD_MIGRATIONS` order. This is what makes the cache below safe to keep:
+    the parse is reused only while every file it was built from is, as far as the
+    filesystem can cheaply say, the file that is there now.
 
     WHY IT IS SUFFICIENT — and exactly how far it reaches. The surface this
     reader can be invalidated BY is the CONTENT of the files it parses: the
@@ -1577,12 +1577,36 @@ def _migrations_fingerprint(base: Path) -> tuple:
     file moves `mtime_ns`/`size`, a file replaced by `git checkout`/`cp`/`mv`/an
     editor's write-and-rename changes `mtime_ns`, `size` or `inode`, and a
     DISAPPEARED file is recorded as absent — so the map can never be rebuilt from
-    a file that is no longer the schema. The one shape it cannot see is an
-    in-place rewrite that preserves size AND restores `mtime_ns` to the
-    nanosecond, a deliberate act nothing in this tree performs; and even then the
-    parse served is a parse of that SAME file's previous content, never of a
-    different file. `tests/test_9558_record_write_cost.py` reds it if the
-    fingerprint stops changing on an edit, an edit-of-an-edit, or a removal.
+    a file that is no longer the schema.
+
+    ⚠️ **`ctime_ns` is in the key because `mtime_ns` alone is not enough, and the
+    tool that breaks it is ordinary.** `cp -p`, `rsync -a`/`-t`, `install -p`,
+    `tar -xp` and Docker's `COPY` all PRESERVE the source's mtime as a matter of
+    course, so a same-length content change delivered that way moves neither
+    `size` nor `mtime_ns` — and a key on those two alone serves the pre-change
+    map indefinitely (measured on a copy of this tree: five migrations rewritten
+    `content`→`contenu`, stat unchanged, stale map served). `ctime` is the field
+    those tools CANNOT restore — the kernel bumps it on every content or metadata
+    change, and setting it back needs privilege a migration burn does not have —
+    so the key now covers the whole reachable surface rather than the
+    append-mostly one.
+
+    ⚠️ **The residual, measured rather than dismissed.** A stat-preserving rewrite
+    is still invisible where the FILESYSTEM gives `ctime` coarse granularity: on
+    this box's `/tmp` (an ext3-style mount) a write plus `utime` inside one tick
+    leaves `ctime_ns` identical (delta 0 ns, measured), so a `cp -p` delivered
+    within that tick can be served from the pre-edit map until any other stat
+    field of any registered file moves. Closing it completely needs a content
+    digest, and that was MEASURED and rejected: blake2b over the fifteen files
+    (129 KB) costs 0.554 ms per pass against the stat pass's 0.135 ms — an order
+    of magnitude more than the ~0.5 ms the cache saves relative to a re-parse,
+    so the "fix" would cost most of the win. The trade is therefore explicit: on
+    a fine-grained-ctime filesystem the surface is fully covered; on a coarse one
+    it is covered for every writer except an archive extraction landing inside a
+    single tick. `tests/test_9558_record_write_cost.py` reds it if the
+    fingerprint stops changing on an edit, an edit-of-an-edit, a same-size
+    rewrite, a same-size rewrite with the mtime RESTORED (skipped — with the
+    reason — where the box's ctime cannot move), or a removal.
     """
     entries: list[tuple] = []
     for name in RECORD_MIGRATIONS:
@@ -1594,7 +1618,8 @@ def _migrations_fingerprint(base: Path) -> tuple:
             # cached "complete" map after a file disappears.
             entries.append((name, None))
             continue
-        entries.append((name, info.st_mtime_ns, info.st_size, info.st_ino))
+        entries.append((name, info.st_mtime_ns, info.st_size, info.st_ino,
+                        info.st_ctime_ns))
     return tuple(entries)
 
 
@@ -1606,6 +1631,17 @@ def _schema_entry(migrations_dir: Path | None) -> dict[str, Any]:
     a warm page cache, which the live record door paid ONCE PER JOURNAL RECORD
     (`replay_plan` calls :func:`table_columns` and :func:`refused_props_names`
     for every record).
+
+    ⚠️ The lock guards the DICT, not the entries. `entry["sql"]` and
+    `entry["parsed"][…]` are filled OUTSIDE it — deliberately, and only because
+    every write is IDEMPOTENT: two threads racing on one entry compute the same
+    bytes and the same map, each assignment is atomic under the GIL, and the
+    cost of losing the race is a duplicated parse, never a wrong answer. The
+    same argument covers `_SCHEMA_CACHE.clear()` detaching an entry another
+    thread is still filling (it fills its own copy; the next call re-parses).
+    ⛔ A future field that is NOT idempotent needs the lock around its write;
+    this comment is the reason the omission is safe today, not a licence to
+    copy it.
     """
     base = migrations_dir or _migrations_dir()
     key = (str(base), _migrations_fingerprint(base))
@@ -2033,11 +2069,12 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     once per journal record, so every record re-read and re-regex-parsed all
     fifteen migration files (`record_writer` priced it at "~4 ms of plan
     materialization"). The cache keeps the correctness property and drops the
-    price by keying on each migration file's `(mtime_ns, size, inode)`
+    price by keying on each migration file's `(mtime_ns, size, inode, ctime_ns)`
     (:func:`_migrations_fingerprint`), so an edit, an addition or a removal is a
     cache MISS — the S6 surface's requirement that a cached column map cannot
-    diverge from the live schema silently. Refreshing costs one stat pass (tens
-    of microseconds) instead of a read+parse (~1.6 ms).
+    diverge from the live schema silently. Refreshing costs one stat pass
+    (≈0.5 ms for the fifteen files on the box this was measured on, versus the
+    read+parse+regex ~1.6 ms it replaces) instead of a re-parse.
 
     ⚠️ The returned dict is a fresh copy on every call, exactly as before: a
     caller that edits the map it was handed mutates its own copy, never the

@@ -388,8 +388,10 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
     build performs, so it cannot flake on a loaded box. The answer is memoised in
     `_JSONB_CACHE` for `_JSONB_CACHE_TTL_SECONDS`, so a COLD build is three
     reads — `table_columns()`, `refused_props_names()`, and the jsonb map — and a
-    warm one is two. The cache is cleared first so the count means "once per
-    plan build" rather than "whatever was left warm by an earlier test".
+    warm one is two. ⚠️ BOTH caches are cleared first (#9558): the column map now
+    has its own process-global cache, and clearing only the jsonb one left this
+    count reading 0 in a warm process — an assert that passed vacuously while
+    measuring nothing.
     A per-parameter re-parse shows up here as one read per string parameter
     (measured on the regressed shape: ~180 for this plan).
     """
@@ -404,6 +406,7 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
 
     monkeypatch.setattr(rp, "_read_migrations", _counting)
     rp._jsonb_cache_clear()
+    rp._release_schema_cache()
     tenant = _tenant()
     record = _record(tenant, search_keys=GRAPH_KEYS)
     rp.replay_plan([record] * 20, org_id=tenant[0], graph_id=tenant[1])

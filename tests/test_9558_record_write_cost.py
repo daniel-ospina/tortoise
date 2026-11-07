@@ -46,7 +46,12 @@ from typing import Any
 
 import pytest
 
-from tests.test_record_writer_seam import GRAPH, ORG, FakeConnection
+from tests.test_record_writer_seam import (
+    GRAPH,
+    ORG,
+    FakeConnection,
+    FakeCursor,
+)
 from tortoise import record_projection as rp
 from tortoise import record_writer as rw
 
@@ -58,6 +63,10 @@ REPO_MIGRATIONS = (Path(__file__).resolve().parent.parent
 #: `record_writer._transaction_statuses` so neither the seam's release path nor
 #: this file needs the driver installed.
 IDLE, UNKNOWN = 0, 4
+
+#: One armed DSN for the pool pins, and its bucket key.
+_DSN = "postgresql://record@127.0.0.1/db"
+_DSN_KEY = rw._pool_key(_DSN)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -88,6 +97,27 @@ class FakeStatusConnection(FakeConnection):
     def __init__(self, status: int = IDLE) -> None:
         super().__init__()
         self.info = _Info(status)
+
+
+class ScriptedConnection(FakeStatusConnection):
+    """A fake whose cursor also accepts DB-API arguments and can be closed.
+
+    The shared `FakeConnection.cursor()` takes no parameters and its cursor has no
+    `close()`, which is fine for `replay` and wrong for the two surfaces the
+    POOLED handle is handed to: `open_record` closes its cursor, and
+    `cache_projection._rows` asks for a `RealDictCursor`. Narrowing the wrapper to
+    the fake's shape would let a real `TypeError` ship, so the pins drive this.
+    """
+
+    def __init__(self, status: int = IDLE) -> None:
+        super().__init__(status)
+        self.cursor_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        self.cursor_calls.append((args, kwargs))
+        cur = FakeCursor(self)
+        cur.close = lambda: None       # type: ignore[method-assign]
+        return cur
 
 
 @pytest.fixture(autouse=True)
@@ -236,6 +266,37 @@ def test_an_edited_migration_is_seen_immediately(tmp_path):
         "distinguishing `mtime_ns`, so a `(name, size, inode)` key would pass "
         "this file while serving a stale column map (#9558, surface S6)")
     assert "eeee_probe_column" not in columns
+    # …and a same-size rewrite that ALSO restores the mtime: what `cp -p`,
+    # `rsync -a`/`-t`, `install -p`, `tar -xp` and Docker's COPY do as a matter
+    # of course. mtime and size are both unchanged, so only `ctime_ns` (which
+    # none of those tools can restore) can see it — without it the cache serves
+    # the pre-edit map indefinitely (#9558 review cycle 1, P2, reproduced: five
+    # migrations rewritten content->contenu, stat unchanged, stale map served).
+    before = target.stat()
+    target.write_text(rewritten.replace("ffff_probe_column",
+                                        "gggg_probe_column"), encoding="utf-8")
+    os.utime(target, ns=(before.st_mtime_ns, before.st_mtime_ns))
+    after = target.stat()
+    assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns,
+                                                  before.st_size), (
+        "the step must preserve size AND mtime, or it does not test ctime")
+    if after.st_ctime_ns == before.st_ctime_ns:
+        # ctime is the arm this step exists to test, and some filesystems tick it
+        # so coarsely that a write + `utime` inside one tick leaves it identical
+        # (measured on this box's /tmp: an ext3-style mount, delta 0 ns). The
+        # step cannot be exercised HERE, and pretending otherwise would flake —
+        # so it says so. The residual it cannot cover is declared at
+        # `_migrations_fingerprint`; skipping is not a claim that it is closed.
+        pytest.skip(
+            f"this filesystem's ctime did not move on a write+utime within one "
+            f"tick ({before.st_ctime_ns}) — the ctime arm of the fingerprint "
+            f"cannot be exercised here")
+    columns = rp.table_columns(tree)["point"]
+    assert "gggg_probe_column" in columns, (
+        "a same-size rewrite with the mtime RESTORED was not seen — the "
+        "fingerprint is keyed on stat fields an archive extraction can "
+        "preserve, so a `cp -p` burn would serve a stale column map forever")
+    assert "ffff_probe_column" not in columns
 
 
 def test_the_refused_props_map_also_reacts_to_an_edit(tmp_path):
@@ -539,3 +600,134 @@ def test_an_unarmed_door_acquires_nothing(monkeypatch):
     made = _fake_driver(monkeypatch)
     assert rw.write_live_record(_point(0), seq=1, tenant=(ORG, GRAPH)) is None
     assert made["dsns"] == [], "an UNARMED live write opened a connection"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# The release contract: what a returned handle must NOT still be able to do
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_a_returned_handle_refuses_further_use():
+    """`close()` must be a FENCE, not only a release.
+
+    Once the wrapper is returned, its raw handle is idle in the pool and can be
+    borrowed by ANOTHER thread. A late `commit()` would then commit that thread's
+    transaction, and a late `cursor()` would run statements on a connection this
+    caller no longer owns — silent cross-talk where a closed psycopg2 connection
+    used to raise `InterfaceError`. The pool must not turn a loud error into a
+    silent one.
+
+    FALSIFIER: forward `cursor`/`commit`/`rollback` straight to `self._raw` (drop
+    `_live`) and this reds on all three — the calls succeed instead of raising.
+    """
+    driver = pytest.importorskip("psycopg2", reason="the fence raises the "
+                                                 "driver's own InterfaceError")
+    raw = ScriptedConnection()
+    handle = rw._pooled_connection(raw, _DSN)
+    handle.close()
+    for call in (lambda: handle.commit(),
+                 lambda: handle.rollback(),
+                 lambda: handle.cursor()):
+        with pytest.raises(driver.InterfaceError):
+            call()
+    assert raw.commits == 0 and raw.rollbacks == 0, (
+        f"a post-close call reached the raw handle (commits={raw.commits}, "
+        f"rollbacks={raw.rollbacks})")
+    assert raw.closed == 0 and rw._take_idle_connection(_DSN) is raw, (
+        "the handle was not still parked after the refused calls")
+
+
+def test_a_returned_handle_forwards_cursor_arguments():
+    """The wrapper must not NARROW the DB-API surface the doors were given.
+
+    `record_serve`/`sdk` receive this object, and `cache_projection._rows` is
+    written for a `RealDictCursor`. A `cursor(self)` with no parameter forwarding
+    turns `conn.cursor(cursor_factory=...)` into a `TypeError` at a call site that
+    was correct before the pool existed.
+
+    FALSIFIER: `def cursor(self)` with no `*args`/`**kwargs` — this reds with
+    TypeError instead of recording the call.
+    """
+    raw = ScriptedConnection()
+    handle = rw._pooled_connection(raw, _DSN)
+    marker = object()
+    handle.cursor(cursor_factory=marker, name="a_named_cursor")
+    args, kwargs = raw.cursor_calls[-1]
+    assert kwargs == {"cursor_factory": marker, "name": "a_named_cursor"}, (
+        f"the wrapper dropped the cursor arguments: {kwargs!r}")
+    assert args == ()
+
+
+def test_an_autocommit_handle_is_normalised_before_it_is_parked():
+    """A parked handle must never be handed on in autocommit mode.
+
+    The wrapper forwards session state on purpose, so a caller CAN set it. The
+    next borrower would then get a connection where `_apply_tenant_scope`'s
+    transaction-local `set_config` sets nothing (every record failing with a
+    tenant-GUC error that blames the DSN) and `open_record`'s transaction-local
+    `statement_timeout` stops applying (reads lose their bound in silence).
+
+    FALSIFIER: drop the `autocommit` normalisation in `_park_connection` — the
+    parked handle keeps `True` and this reds.
+    """
+    conn = FakeStatusConnection()
+    conn.autocommit = True
+    rw._park_connection(_DSN_KEY, conn)
+    assert conn.autocommit is False, (
+        "an autocommit handle was parked as-is — the next borrower inherits a "
+        "session in which every transaction-local setting is a no-op")
+    assert rw._take_idle_connection(_DSN) is conn
+
+
+def test_the_pool_is_bounded_across_dsns():
+    """A re-armed DSN must not leave sockets behind for every value it ever saw.
+
+    The per-bucket cap alone is not a bound: `record_dsn()` re-reads the
+    environment on every call, so a rotating credential or a per-tenant DSN makes
+    a new bucket each time. Past `RECORD_POOL_MAX_IDLE_KEYS`, the oldest buckets
+    are drained and closed.
+
+    FALSIFIER: bound only per key — `len(_IDLE_CONNECTIONS)` grows past the cap
+    and this reds.
+    """
+    conns = []
+    for index in range(rw.RECORD_POOL_MAX_IDLE_KEYS + 2):
+        conn = FakeStatusConnection()
+        conns.append(conn)
+        rw._park_connection(rw._pool_key(f"postgresql://record/db{index}"), conn)
+    assert len(rw._IDLE_CONNECTIONS) <= rw.RECORD_POOL_MAX_IDLE_KEYS, (
+        f"{len(rw._IDLE_CONNECTIONS)} buckets are idle; the cross-DSN cap is "
+        f"{rw.RECORD_POOL_MAX_IDLE_KEYS}")
+    assert any(c.closed for c in conns), (
+        "nothing was evicted or closed — every bucket ever seen is still parked")
+
+
+def test_the_read_door_bounds_its_read_transaction_locally(monkeypatch):
+    """`open_record` must set its bound TRANSACTION-locally, not per session.
+
+    `_default_connect` is pooled, so a session-level `SET statement_timeout` set
+    by a read would outlive the read and bound the next BORROWER — a write door's
+    record, or another tenant's read. `set_config(..., true)` scopes it to the
+    read's own transaction, and the release rollback then clears the transaction
+    with it.
+
+    FALSIFIER: restore `SET statement_timeout = %s` and this reds on the
+    statement text — nothing else in the tree asserts it, which is exactly why
+    the line needed a pin (#9558 review cycle 1, P2).
+    """
+    from tortoise import record_serve as rs
+
+    monkeypatch.setenv(rw.RECORD_DSN_ENV, _DSN)
+    conn = ScriptedConnection()
+    monkeypatch.setattr(rw, "_default_connect", lambda dsn: conn)
+    assert rs.open_record() is conn
+    executed = [sql for sql, _params in conn.executed]
+    assert executed, "the read door opened a connection and set nothing"
+    assert "set_config" in executed[0], (
+        f"the read bound is not transaction-local: {executed[0]!r} — a "
+        f"session-level SET would leak onto the next borrower of a POOLED "
+        f"connection")
+    assert executed[0].rstrip().endswith("true)"), (
+        f"`set_config` was called without the transaction-local flag: "
+        f"{executed[0]!r}")
+    assert conn.commits == 0, "the read door committed; a read must not"

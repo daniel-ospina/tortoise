@@ -77,7 +77,12 @@ same spread. AFTER 2–4 are all the shipped design.)
 claim.** `_default_connect` returns an idle handle when it has one, so the live
 door's per-record "open, commit, close" became "borrow, commit, return". The
 remaining 3.8–4.1 ms/record is one transaction boundary (prologue + plan + COMMIT)
-plus plan materialisation — i.e. the work the record is *for*.
+plus plan materialisation — **plus, and this was under-stated in the first
+revision, ≈0.9–1.0 ms of pure stat overhead**: `replay_plan` drives BOTH cached
+readers, and each recomputes the fifteen-file fingerprint, so the cache is
+consulted twice per record. That is a quantified residual with a known fix
+(compute the fingerprint once per plan build) and it is filed, not hidden in
+"the work the record is for".
 
 **(b) The column-map half is real but smaller than the issue's "~4 ms" note
 suggests.** At this head `table_columns()` costs ~1.7 ms uncached and ~0.47 ms
@@ -101,6 +106,56 @@ local loopback Postgres. It is not a capture-throughput claim (the door is one o
 several things a capture does), and it is not a concurrency claim — the pool's
 idle set is bounded at `RECORD_POOL_MAX_CONNECTIONS = 2`, and a burst opens new
 connections rather than queueing.
+
+## Review cycle 2 — four corrections that changed the artifact
+
+**The key needed `ctime_ns`.** A first key on `(mtime_ns, size, inode)` cannot see
+a *same-length* rewrite whose mtime was restored — and restoring it is what
+`cp -p`, `rsync -a`/`-t`, `install -p`, `tar -xp` and Docker's `COPY` do by
+default. The reviewer reproduced it: five migrations rewritten `content`→
+`contenu`, every stat field unchanged, the pre-edit map served indefinitely.
+`ctime` is the one field those tools cannot restore on a fine-grained filesystem
+(the kernel bumps it on every content or metadata change), so it is in the key
+now, and the pin performs a same-size rewrite with `os.utime` restoring the
+mtime — dropping `ctime_ns` reds it (measured).
+
+⚠️ **Re-measured, and the residual is narrower than the claim, not zero.** On
+this box's `/tmp` (an ext3-style mount) a write plus `utime` inside one tick
+leaves `ctime_ns` **identical** (delta 0 ns), so on a coarse-ctime filesystem a
+`cp -p` landing inside a single tick is still invisible. A content digest would
+close it and was measured and rejected: blake2b over the fifteen files (129 KB)
+costs **0.554 ms** per pass against the stat pass's **0.135 ms**, i.e. it would
+consume most of the ~0.5 ms the cache saves over a re-parse. The pin skips — with
+that reason printed — where the box's ctime cannot move, rather than flaking or
+claiming coverage it does not have.
+
+**The pool needed a cross-DSN bound.** `RECORD_POOL_MAX_CONNECTIONS` is per
+bucket, and `record_dsn()` re-reads the environment on every call, so a rotating
+credential or a per-tenant DSN would have left two live sockets behind for every
+value the process ever saw. `RECORD_POOL_MAX_IDLE_KEYS = 4` drains the oldest
+buckets, the same eviction the schema cache does, and the pin parks
+`MAX_IDLE_KEYS + 2` distinct keys to prove it.
+
+**The read door pays one rollback per borrow, and that is now stated.** The
+release comment claimed "no round trip" — true of the write door's happy path
+(`commit()` leaves the connection IDLE), false of a read, which ends INTRANS and
+therefore takes a `rollback()` on 100% of borrows. One round trip against the
+~19 ms connect+auth it replaces; named here rather than averaged away.
+
+**Two silent-failure shapes are closed on the wrapper.** `close()` is now a fence
+(`cursor`/`commit`/`rollback` raise the driver's `InterfaceError` once returned,
+instead of committing whatever transaction the next borrower holds), `cursor()`
+forwards its arguments (`cursor_factory=` would have been a `TypeError` on a call
+site that was correct before), and a handle parked in `autocommit` mode is
+normalised first — a transaction-local `set_config` sets NOTHING there, so the
+tenant GUC would have failed every later record with an error naming the DSN.
+
+**Re-measured after these fixes** (4 runs, same instrument, a box now carrying
+other work — so this is a *load-sensitivity* datum, not a better number):
+`records/s` 178.78 / 277.76 / 246.30 / 200.17; mean 4.99 / 3.60 / 4.06 / 5.59 ms;
+`connect` per record **0 in every run**. The mechanism claim — no handshake, no
+re-parse — is what the change is; the wall-clock headline above is the quiet-box
+measurement and stays labelled as such.
 
 ## Reproducing
 

@@ -586,8 +586,19 @@ def open_record(record_dsn: str | None = None) -> Any:
     it is rather than an unreadable record. The connection is opened with the
     CONNECT bound the ARMING module owns
     (:data:`tortoise.record_writer.CONNECT_TIMEOUT_SECONDS`, applied inside
-    ``_default_connect``) plus a session ``statement_timeout`` set here: a served
-    read must not be able to hang a request on a wedged database.
+    ``_default_connect``) plus a ``statement_timeout`` set here: a served read
+    must not be able to hang a request on a wedged database.
+
+    ⚠️ The timeout is set **transaction-locally** (``set_config(..., true)``), not
+    with a session-level ``SET``, because ``_default_connect`` is POOLED (#9558)
+    and may hand back a connection an earlier caller returned: a session-level
+    ``SET`` would outlive this read and impose a READ-sized bound on the next
+    BORROWER — a write door's record, or a tenant's read under a different
+    timeout. Transaction-local scope is exactly the read (psycopg2's first
+    statement opens the transaction), and `_park_connection`'s release rollback
+    then cannot leave it behind. Pinned by
+    ``tests/test_9558_record_write_cost.py::test_the_read_door_bounds_its_read_transaction_locally``:
+    reverting this line reds it.
     """
     # ⚠️ The resolver is imported under a DISTINCT name: the parameter above is
     # also called `record_dsn`, and a same-named import rebinds the name so the
