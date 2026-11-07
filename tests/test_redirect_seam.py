@@ -530,10 +530,14 @@ def test_worker_thread_non_exempt_redirects(monkeypatch):
 def _thread_start_stamp_violations() -> list[str]:
     """The install contract for the Thread.start stamp, as a VERDICT.
 
-    Extracted so a fixture can make it fire in a chosen process state: inline in
-    the test it only ever ran in the one state the session happened to be in, so
-    the identity form below could not be shown to be the WRONG question — and it
-    was measured wrong in CI (PR #11354, `test (b)`, run 42362934147):
+    Extracted so a TEST can make it fire in a CHOSEN process state — the states
+    are driven by `monkeypatch` in
+    `test_a_third_party_wrapper_on_thread_start_is_not_a_double_wrap` (there is
+    no fixture; this helper takes no arguments and reads whatever
+    `threading.Thread.start` currently is): inline in the assertion it only ever
+    ran in the one state the session happened to be in, so the identity form
+    below could not be shown to be the WRONG question — and it was measured
+    wrong in CI (PR #11354, `test (b)`, run 42362934147):
 
         AssertionError: Thread.start was double-wrapped (installer re-ran
         without the marker guard)
