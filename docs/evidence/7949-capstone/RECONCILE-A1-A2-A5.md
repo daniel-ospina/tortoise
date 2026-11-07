@@ -451,8 +451,11 @@ done
 #      body/title, which is what the four rows below are — `userLinkedOnly,includeClosedPrs` printed `[]`
 #      for all four when measured — or a MANUAL closing link, which that read rules out). ⛔ "MERGED" is
 #      load-bearing here for the SAME reason as in arms 2 and 3, one layer down: the default set carries
-#      OPEN references too, so a `Closes #n` on a PR that never merged reads NON-EMPTY for an issue closed
-#      by something else. ⛔ AND THE STATE HAS TO BE PRINTED TO SEE IT — `gh issue view <n> --json
+#      OPEN references too, so a `Closes #n` on a STILL-OPEN PR reads NON-EMPTY for an issue closed by
+#      something else. ⛔ STILL-OPEN, not "never merged" — a CLOSED-unmerged PR's reference does NOT
+#      appear there (#10850 says `Closes #10812.` and #10812 still reads `[]`); that one is what
+#      `includeClosedPrs:true` reveals. So this arm guards the OPEN pole and that read guards the CLOSED
+#      one, and neither substitutes for the other. ⛔ AND THE STATE HAS TO BE PRINTED TO SEE IT — `gh issue view <n> --json
 #      closedByPullRequestsReferences` returns these nodes with NO `state` key at all, so the read that
 #      classifies is the GraphQL one in the loop below, not that line. ⛔ Its `commit_id` is NOT fixed: it reads
 #      NULL for #11001 ([11213]) and #10997 ([11212]), and that PR's own merge sha for #10684 ([11105])
@@ -464,8 +467,10 @@ done
 #      reads `[]` + a sha (c4a369b011) here while PR **10850** — CLOSED, `mergedAt: null` — opens with
 #      `Closes #10812.`. Read `includeClosedPrs:true` (the block below the loop) before calling a row
 #      arm 2, or the recipe re-creates the very mistake it exists to prevent, one arm over.
-#   3. empty + commit_id = null => no MERGED PR named it, and nothing in the tree attributes the close
-#      (#11021: [] and null). ⛔ "MERGED" is load-bearing HERE TOO, for arm 2's reason: #8447 reads
+#   3. empty + commit_id = null => no MERGED PR named it, and nothing in the DEFAULT set attributes the
+#      close (#11021: [] and null). ⛔ "in the DEFAULT set" is exact, not hedging: #8447 reads `[]` here
+#      AND is named in the tree (next sentence), so "nothing attributes this close" would be false of
+#      arm 3's own row. ⛔ "MERGED" is load-bearing HERE TOO, for arm 2's reason: #8447 reads
 #      `[]` + null + a human actor, yet PR **10562** — CLOSED, `mergedAt: null` — opens with
 #      `Closes #8447`, so a PR DOES name that close and only the default read hides it. Read
 #      `includeClosedPrs:true` here as well before writing the word "manual". ⚠️ "manual" is
