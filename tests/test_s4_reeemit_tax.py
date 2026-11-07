@@ -577,8 +577,15 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
             1 - r["delta_out_tokens"] / r["legacy_out_tokens"] for r in rows)
         assert round(min(reductions), 4) == s["min_session_reduction"]
         assert round(max(reductions), 4) == s["max_session_reduction"]
-        assert round(reductions[len(reductions) // 2], 4) == \
-            s["median_session_reduction"]
+        # ⛔ replicate the PRODUCER's median, including its even-n branch.
+        # `compare` averages the two middle values when n is even; taking the
+        # upper middle value agrees at n=7 and false-blocks the moment a run
+        # covers an even subset (which one `--sessions` flag can produce) — the
+        # exact false block this pin's docstring says it must not cause.
+        mid = len(reductions) // 2
+        expected_median = (round(reductions[mid], 4) if len(reductions) % 2
+                           else round((reductions[mid - 1] + reductions[mid]) / 2, 4))
+        assert expected_median == s["median_session_reduction"]
         # each row's own `reduction` agrees with the two numbers it came from
         for r in rows:
             assert round(1 - r["delta_out_tokens"] / r["legacy_out_tokens"],
@@ -598,3 +605,21 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
                 r = a[arm]
                 if r.get("out_tokens") is not None:
                     assert r.get("basis"), (path.name, a["session"], arm)
+
+
+def test_a_raised_retry_makes_the_arm_unmeasured():
+    """⛔ A FOURTH path to a partial total, and the only one no counter sees: a
+    call that RAISED never reaches `_accumulate_call_cost` at all, so it is in
+    neither `cost["completion_tokens"]` nor any `calls_without_*` counter —
+    `attempts` is its only trace. `stats["attempts"]` is the true running attempt
+    count and `cost["calls"]` counts the attempts that actually contributed, so a
+    gap between them means part of the spend is missing and `cost` is a PARTIAL
+    sum. An earlier revision merely *documented* this gap while still returning
+    the partial sum with a total-looking basis (#11385 review P2)."""
+    stats = {"cost": {"calls": 1, "completion_tokens": 5000}, "attempts": 2}
+    tokens, basis = tool.arm_out_tokens(stats)
+    assert tokens is None, "1 of 2 attempts contributed — not the arm's total"
+    assert "1 of 2 attempt(s)" in basis
+    # …and the healthy case (every attempt contributed) still publishes the total
+    stats = {"cost": {"calls": 2, "completion_tokens": 9000}, "attempts": 2}
+    assert tool.arm_out_tokens(stats) == (9000, "stats.cost.completion_tokens")
