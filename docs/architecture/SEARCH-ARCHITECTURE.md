@@ -58,8 +58,8 @@ So the phases are separate, and each carries its own graph state:
 
 | phase | who is using it | graph state | what is decided there |
 |---|---|---|---|
-| **pre-release** (now → private-beta invite) | nobody external; dogfood + internal | **complete** | build the architecture and the guardrails; measure M1, M4 |
-| **private-beta** (the upcoming release) | invited customers | **complete** | the product is live; cost per tenant is above the 30 % target and accepted as a beta-scale cost (§8). M2, M3, M5 measure here |
+| **pre-release** (now → private-beta invite) | nobody external; dogfood + internal | **complete** | build the architecture and the guardrails; measure §9's M1, M4 |
+| **private-beta** (the upcoming release) | invited customers | **complete** | the product is live; cost per tenant is above the 30 % target and accepted as a beta-scale cost (§8). §9's M2, M3, M5 measure here |
 | **post-measurement** | the same customers | **windowed** | the window is sized, armed and tuned **on real data**, per *"measure and optimise after beta launch"* |
 
 ⛔ **What that sequencing obliges — and it is the part that is easy to get wrong:** the machinery that makes
