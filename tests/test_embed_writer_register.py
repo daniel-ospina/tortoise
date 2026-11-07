@@ -284,20 +284,23 @@ def test_every_writer_the_instrument_finds_outside_the_gate_is_declared():
         "these writers store a vector the gate does not see and carry NO declaration in "
         f"`tortoise/embed_writer_register.py`: {register.undeclared(outside)}"
     )
-    # ⛔ `kind == "duplicate"` is OUTSIDE `NEEDS_A_DECLARATION`, so a name-colliding writer stores
-    # a vector the gate does not see and owes no declaration at all (round-17 review). Zero at this
-    # head, and the cheapest real repair is that it stays zero: an unverifiable class must not sit
-    # in the population at all, or the guard is green over a writer nobody can name.
+    # ⛔ `kind == "duplicate"` is OUTSIDE `NEEDS_A_DECLARATION`, so a name-colliding writer owes no
+    # declaration and its KIND IS UNRESOLVED — it may or may not store a vector the gate sees
+    # (`_put` collapses the key for ANY second def, including two `gated` ones). Zero at this head,
+    # and the cheapest real repair is that it stays zero: an unresolvable identity must not sit in
+    # the population at all, or the guard is green over a writer nobody can name.
     duplicates = sorted(
         key for key, entry in probe.embedding_writers().items()
         if entry.get("kind") == "duplicate"
     )
     assert not duplicates, (
-        "discovery collapsed a name-colliding writer into a `duplicate` row, and `duplicate` is "
-        "outside NEEDS_A_DECLARATION — so this writer stores a vector the gate does not see and "
-        "owes NO declaration, which is the bypass this guard exists to refuse: "
-        f"{duplicates}. Repair the collision (two same-named defs in one module) or declare the "
-        "class; do not delete this arm."
+        "discovery collapsed a name-colliding writer into a `duplicate` row, so its kind is "
+        "UNRESOLVED — it may store a vector the gate does not see, and it owes NO declaration "
+        "either way, which is the gap this guard exists to refuse: "
+        f"{duplicates}. Reconcile the collision (rename or merge the two same-named defs in one "
+        "module) so discovery can classify the writer. It cannot be DECLARED instead: `duplicate` "
+        "is not a declarable class, and declaring a key the instrument does not find outside the "
+        "gate reds the agreement test. Do not delete this arm."
     )
 
 
@@ -512,6 +515,19 @@ def test_every_declaration_cites_a_seam_and_an_owning_issue():
                 f"{key} cites `{module}::{symbol}`, but {path.relative_to(REPO_ROOT)} does not "
                 "define it — the seam moved and the declaration's evidence went with it"
             )
+    # ⛔ The RESOLVER itself is pinned (round-18 review). `.py`-before-package ordering made a
+    # dotted citation of a PACKAGE collide with a same-named deprecated SHIM
+    # (`tortoise/projection.py` re-exports `tortoise/projection/__init__.py`), so
+    # `tortoise.projection::<symbol>` could be "defined" by the shim's re-export line — a citation
+    # that survives deleting the symbol from the package. No citation in the file resolves
+    # differently under the two orders TODAY, which is exactly why the ORDER needs its own arm:
+    # reverting it reds nothing without this.
+    assert _resolve_module("tortoise.projection") == (
+        REPO_ROOT / "tortoise" / "projection" / "__init__.py"
+    ), "a package must win over a same-named module — `tortoise/projection.py` is a shim"
+    assert _resolve_module("tortoise.config") == REPO_ROOT / "tortoise" / "config.py", (
+        "`tortoise/config/` carries no `__init__.py`, so the module is the only candidate"
+    )
 
 
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():

@@ -47,7 +47,10 @@ no wider. Two write shapes are worth naming, because the difference is the diffe
 claim and a slogan:
 
 * **Container keys are SEEN — the LITERAL-ASSIGNMENT form** (`record["embedding"] = …`), for every
-  module discovery walks. This shape was invisible to the
+  module discovery walks AND inside a `def`: the walk visits `def`s only
+  (`probe._embedding_writers`), so a container key at MODULE or CLASS scope is ABSENT no matter which
+  module it sits in — pinned as `INVISIBLE_SHAPES`' `module_scope_container_key` and
+  `class_scope_container_key`. This shape was invisible to the
   instrument's clause regex until `#11274`, so a writer using it added nothing to the population and
   this register's guard stayed green over it; discovery now decides it on the AST, and the four
   live instances it had been missing (`api::add_point`, `consistency::_graph_fingerprint`,
@@ -99,9 +102,8 @@ neither is in `WRITER_CENSUS` or this register at all); by contrast the computed
 (`recognised_producer`/`exempt`/`bypass`) cannot spell `gated` — while
 `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
 `set_embedding_clause`, NOT off its whole-node replace. The authority for SHAPES is
-`tests/test_embed_writer_register.py::INVISIBLE_SHAPES` (and it is only the SHAPES: discovery's
-key-level causes — a skipped module, an unparseable one, a name collision — are the test module
-header's list, not that dict): a count written
+`tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which holds both the shapes neither pass can
+spell AND the two SCOPES the walk never enters (module- and class-body stores): a count written
 here re-stales with every shape added, so this paragraph names forms and instances and does not
 count them.
 ⚠️ `tortoise.sdk::_journal_event_raw_write` is
