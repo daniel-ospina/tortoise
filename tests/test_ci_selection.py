@@ -987,28 +987,29 @@ def _site_assets_the_icon_guard_reads() -> set[str]:
 
 
 def _class_body_assignments(body: list[ast.stmt]):
-    """Every statement in a CLASS BODY, including the ones inside `if`/`try`/`with`.
+    """Every assignment in a CLASS BODY, whatever compound statement encloses it.
 
-    ⛔ NOT `ClassDef.body` only. The regex this replaced (`^\s+NAME = "…"`) matched an
-    assignment at ANY indentation, so a constant bound under `if sys.platform == …:`
-    was collected by the regex and is NOT collected by a bare body scan — a coverage
-    regression dressed as a port. MEASURED: an `if`-guarded `ICON_PNG` yields
-    `{website/favicon.png}` under the regex and `{}` under a body-only scan, i.e. the
-    witness silently becomes unowned, which is the #1349 class this ratchet closes.
+    ⛔ GENERIC WALK, NOT A LIST OF STATEMENT FIELDS. Enumerating `body`/`orelse`/
+    `finalbody`/`handlers` covered `if`/`try`/`with`/`for`/`while` but silently missed
+    `ast.Match` — whose arms live in `cases`, not in any of those fields — so a
+    `match`-guarded fixture constant became an UNOWNED witness, which is the #1349
+    silent-drop class this helper exists to close. A field list can always be one
+    compound statement behind the language; walking every child node cannot.
 
-    Nested FUNCTION and CLASS scopes are still skipped: their bindings are not this
-    class's constant, and `ast.walk` visits a nested class on its own.
+    Pruning is what makes it a CLASS-BODY walk: a nested function, async function or
+    class is a different scope, so its bindings are not this class's constant (and
+    `ast.walk` visits a nested class on its own). Everything else — `if`, `try`,
+    `except` (`ast.ExceptHandler`), `with`, `for`, `while`, `match` arms — is the same
+    scope and is descended into.
     """
-    for stmt in body:
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+    stack: list[ast.AST] = list(body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        yield stmt
-        for field in ("body", "orelse", "finalbody"):
-            inner = getattr(stmt, field, None)
-            if isinstance(inner, list):
-                yield from _class_body_assignments(inner)
-        for handler in getattr(stmt, "handlers", None) or []:
-            yield from _class_body_assignments(handler.body)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            yield node
+        stack.extend(ast.iter_child_nodes(node))
 
 
 def _class_constant_strings(src: str) -> dict[str, set[str]]:
@@ -1142,6 +1143,9 @@ class T(BaseTestCase):
     ANNOTATED: str = "apple-touch-icon.png"
     if sys.platform == "darwin":  # a GUARDED fixture constant
         GUARDED = "favicon.ico"
+    match sys.platform:  # a MATCH-guarded fixture constant (arms are `cases`)
+        case "linux":
+            MATCHED = "assets/investors-og.jpg"
     def icons(self):
         return self._png_size((self.WEB / self.ICON_PNG).read_bytes())
     def text(self):
@@ -1150,6 +1154,8 @@ class T(BaseTestCase):
         return self._head((self.WEB / self.ANNOTATED).read_text())
     def guarded(self):
         return self._ico_entries((self.WEB / self.GUARDED).read_bytes())
+    def matched(self):
+        return self._jpeg_size((self.WEB / self.MATCHED).read_bytes())
     def bound(self):
         shared = self.WEB / "assets" / "og-tortoise.jpg"
         return shared.read_bytes()
@@ -1160,6 +1166,7 @@ class T(BaseTestCase):
         "website/logo.png",
         "website/apple-touch-icon.png",
         "website/assets/og-tortoise.jpg",
+        "website/assets/investors-og.jpg",
     }, (
         "the opened-witness derivation lost a documented shape — a witness read "
         "through it is unowned (the #1349 silent-drop class)"
