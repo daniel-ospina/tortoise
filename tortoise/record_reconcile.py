@@ -178,10 +178,19 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   RESTORES the value — and ``_partition_cache_owned``'s ``keep |=
   set(record_props)`` makes that population COMPARED rather than bucketed, so it
   is not a ``graph_only`` occurrence at all. What has no repair that RESTORES the
-  value is the two ANCHORS, not "no label". ⛔ That is the
-  PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
-  puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
-  forbids the RECORD→CACHE projection from writing it onto either ANCHOR. ⛔ Not
+  value is the two ANCHORS, not "no label". ⛔ The obstacle on those anchors is the
+  PROHIBITION, not a hole in the schema: ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
+  forbids the RECORD→CACHE projection from writing the column there. ⚠️ **Whether a
+  SOURCE actually holds the value is a PER-ROW fact, not a per-class one — key it
+  on what the record HOLDS for this session (``public.{source,event}.story_arc``
+  OR ``public.session_narrative.narrative``), never on how the prose arrived.**
+  Where the record holds it, the graph copy is a stale duplicate and a clear frees
+  it. ⚠️ Where NEITHER holds it — every commit written before ``#9555``'s
+  ``SessionNarrated`` carrier, whose raw-Cypher ``s.story_arc=$arc`` /
+  ``e.story_arc=$arc`` was NEVER journalled, and whose ``session_narrative`` TEXT
+  columns measured NULL on every live capture (``hosted_api``'s 2b,
+  ``#9567``/D7) — the graph copy is the ONLY copy, so NO clear may be applied
+  there: the destructive-clear routes below are for the first population. ⛔ Not
   "no IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
   clear — what is missing on those two ANCHORS is a route that KEEPS the value. ⚠️ No shipped
   instrument performs that removal for THIS class: ``#10017``'s purge
@@ -668,7 +677,9 @@ def reconcile_record_and_cache(
     graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today;
     ⚠️ a ``:Point`` copy is the exception that IS repairable in place —
     ``update_point(<id>, story_arc=None)`` clears the property and keeps the
-    node (measured; see the module docstring's (5)).
+    node (measured; see the module docstring's (5); pinned by
+    `test_the_point_clear_removes_the_prose_and_keeps_the_node` — both the clear
+    and what a replay of the creation record restores).
     ⛔ NOT ``#10017``'s purge: ``tools/purge_legacy_turns.py`` deletes legacy
     episodic turn ``:Point``s — a different population, though a legacy turn
     ``:Point`` that carries the prose is cleared by it, by node deletion — and
