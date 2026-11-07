@@ -1879,8 +1879,11 @@ and under no deny set, which #10389's fifth review round measured (`#10428`):
   — the name above is this entry's historical reference, and a grep for it now finds this line only.
   **So `#10017`'s destructive purge was not durable while door 2 was open** — the next
   restore re-rented the RAM. ⚠️ **CORRECTED (`#11325`)**: `#10017`'s purge is the legacy TURN population and never
-  matched `:Source`/`:Event`; what the next restore re-rented was `#10000`'s write of the prose. Closing it was a PLACEMENT decision (the column's class on `#7879`'s
-  table, plus that test's premise), which is why it was filed rather than absorbed.
+  matched `:Source`/`:Event`; what the next restore re-rented was `#10000`'s write of the prose. Closing it
+  took a decision wider than this entry — a **THIRD** vocabulary
+  (`cache_projection.CACHE_FORBIDDEN_COLUMNS`) beside `#7879`'s placement class, which keeps `story_arc`
+  **PRIMARY** and annotates both rows *not projected*, plus that test's premise — which is why it was
+  filed rather than absorbed (`#10394`'s own entry records that the placement class was the wrong question).
 - **The `:Event` fold — door 1's counterpart one label over, denied here (`#10428`).** `_upsert_event`
   persists extras with `skip = _META_KEYS | _EVENT_HANDLED`, and `story_arc` was in neither while
   `docs/ONTOLOGY.md` declares it on `:Source` only — an UNDECLARED key on the open passthrough, the
