@@ -1085,9 +1085,12 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
     # The shape `test_cache_eviction_evictor.py`'s `lane` fixture builds INLINE (they
     # must agree; the AST coupling at the bottom of this test asserts it).
     name = f"test_evict_{os.urandom(6).hex()}"
-    assert name.startswith("test_"), (
-        f"{name!r} does not start with the `test_` family member: "
-        f"vocabulary is {_SWEEP_OWNED_PREFIXES}")
+    # ⛔ No `name.startswith("test_")` row here: `name` is built with that prefix
+    # two lines up, so it was true by construction and could never red. The
+    # predicate below is the one that discriminates (the sweep's own
+    # `owns_by_ownership_record` against `_SWEEP_OWNED_PREFIXES`), and the
+    # executed COUPLING block at the bottom holds the fixture to the same name at
+    # runtime.
     assert owns_by_ownership_record(name), (
         f"{name!r} is OUTSIDE the ownership vocabulary {_SWEEP_OWNED_PREFIXES} — "
         "journalling it reclaims nothing and leaks the graph on an interrupted run")
