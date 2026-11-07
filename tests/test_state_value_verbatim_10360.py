@@ -1292,7 +1292,8 @@ _UNIT_TOKEN = re.compile(
 #: row — the artifact a lane reads ("read this before improving a number").
 #: ⛔ IT IS A LOCATOR, NOT THE SCAN'S BOUND (#11258 review, round 3): the marker
 #: sits 12,908 chars into a 50,850-char row, so a scan that STARTED here read
-#: 37,914 chars — 74.6% of the row — and reported PASS over a reopening written
+#: 37,942 chars (50,850 − 12,908; MEASURED) — 74.6% of the row — and reported
+#: PASS over a reopening written
 #: into the row's own narrative above it (MEASURED at `(2b) the ADJACENCY half is
 #: open again.` inserted just above the marker: marker bound `[]` → GREEN, row
 #: bound 1 claim → RED). That is #11223's own defect one bound further in
@@ -1791,7 +1792,7 @@ def _residual_region(text: str) -> str:
 
     ⛔ THE BOUND IS THE ROW, NOT THE MARKER, and every earlier bound was defeated
     by writing OUTSIDE it (#11223): `[:1200]` → the `(d)` block (10,019 chars) →
-    the residual marker (37,914 of 50,850 chars = 74.6% of the row). A reopening
+    the residual marker (37,942 of 50,850 chars = 74.6% of the row). A reopening
     is a reopening wherever in the row it is written, so the region is the whole
     row and the marker is only a locator. MEASURED that covering the marker's
     12,908-char prefix costs nothing at this revision: the real row carries 0
@@ -2684,6 +2685,25 @@ def test_every_waiver_withhold_arm_earns_its_place():
             "`I'm` supplies the `m` and `pair's` supplies the `s`, so a sentence "
             f"about a DIFFERENT subject is refused (false block): {opened!r} "
             f"matched {matched}")
+    # 3. THE BARE `m`/`s` ALTERNATIVE ITSELF, at the contract it owns. ⛔ THE
+    #    CONTRACTION ASSERTIONS ABOVE PIN THE LOOKBEHIND, NOT THE ALTERNATIVE:
+    #    they assert a contraction is WAIVED, which stays true when the whole
+    #    bare-token alternative is disarmed (nothing matches, so the waiver is
+    #    granted either way). MEASURED at `83e5613cf`: replacing
+    #    `(?<!['’])\b[ms]\b` with a never-matching group left `103 passed` — so
+    #    the row's own `s`/`m` unit abbreviations could stop withholding the
+    #    waiver with no test noticing, and `the spelling gap is open and s is not
+    #    closed` was then WAIVED (a reopening through the honest path, the
+    #    round-5 `P1` one spelling over). Each token is asserted on its own: one
+    #    sentence carrying `s` leaves `m` unpinned, the same way a single
+    #    contraction left the second lookbehind unpinned (#11258 review round 9).
+    for bare in ("s", "m"):
+        bare_sentence = f"the spelling gap is open and {bare} is not closed"
+        assert not _is_honest_spelling(bare_sentence), (
+            "the waiver was GRANTED on a sentence carrying the row's own bare "
+            f"`{bare}` unit abbreviation — the `[ms]` alternative no longer "
+            "withholds, so a reopening written next to one letter passes the "
+            f"gate: {bare_sentence!r}")
 
 
 def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
