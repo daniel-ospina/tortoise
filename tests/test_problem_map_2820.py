@@ -328,6 +328,36 @@ def test_an_index_entry_with_no_headline_counts_is_drift(tmp_path):
     assert errors and "states no" in errors[0], errors
 
 
+def test_a_wrong_TOTAL_row_is_drift(tmp_path):
+    """Fails when §2's `Total tracked` disagrees with the row count.
+
+    Reachable, and found by the FOURTH review round: the other three counts were
+    guarded and this one was not, so a document could say "Total tracked 30" over
+    a 26-row table and `--check` still answered CLEAN. Every count the document
+    prints is compared, or it is not a count.
+    """
+    copy = _doc_copy(tmp_path)
+    text = copy.read_text().replace(
+        "| **Total tracked** | **26** |", "| **Total tracked** | **30** |", 1
+    )
+    copy.write_text(text, encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("Total tracked says 30" in e for e in errors), errors
+
+
+def test_a_missing_TOTAL_row_is_drift(tmp_path):
+    """Fails when the total row is deleted rather than corrected.
+
+    Reachable: deleting a count is the tempting way to make it stop disagreeing.
+    """
+    copy = _doc_copy(tmp_path)
+    kept = [line for line in copy.read_text().splitlines(keepends=True)
+            if "**Total tracked**" not in line]
+    copy.write_text("".join(kept), encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("missing its `| **Total tracked**" in e for e in errors), errors
+
+
 def test_an_unregistered_document_is_drift(tmp_path):
     """Fails when the page is not listed in `docs/00_index.md`.
 

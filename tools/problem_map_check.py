@@ -82,8 +82,8 @@ from pathlib import Path
 DOC_REL = "docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md"
 INDEX_REL = "docs/00_index.md"
 
-#: The taxonomy #2820 filed: 26 entries across four defect patterns and six
-#: workstreams. This is the map's CLAIM about what it covers, so it is stated in
+#: The taxonomy #2820 filed: 26 entries across four defect patterns and five
+#: workstreams (WS-A…WS-E). This is the map's CLAIM about what it covers, so it is stated in
 #: code rather than parsed out of the document: a row that vanished from the
 #: table must be reported, and a set derived from the table itself could never
 #: report its own shrinking.
@@ -104,6 +104,12 @@ _ROW = re.compile(r"^\|\s*#(\d+)\s*\|")
 _SHA = re.compile(r"`([0-9a-f]{7,40})`")
 _PATH = re.compile(r"`([^`]+)`")
 _SUMMARY = re.compile(r"^\|\s*(VERIFIED-FIXED|OPEN|UNKNOWN)\s*\|\s*(\d+)\s*\|")
+#: The TOTAL row. It is a fourth count and nothing read it, so a document could
+#: state "Total tracked 30" over a 26-row table and this tool still said CLEAN —
+#: found by review on the version that already guarded the other three counts, so
+#: the rule is: EVERY count the document prints is compared, or it is not a count.
+_TOTAL = re.compile(r"^\|\s*\*\*Total tracked\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|",
+                    re.MULTILINE)
 
 #: A test function, INDENTED OR NOT: most of this repo's tests are methods on a
 #: class, so a bare `^def test_` anchor would call 12 of this map's own pins
@@ -335,6 +341,14 @@ def check_summary(text: str, rows: list[Row]) -> list[str]:
             errors.append(
                 f"summary says {declared} {status} row(s); the tables contain {actual}"
             )
+    total = _TOTAL.search(text)
+    if total is None:
+        errors.append("summary is missing its `| **Total tracked** | **n** |` row")
+    elif int(total.group(1)) != len(rows):
+        errors.append(
+            f"summary's Total tracked says {total.group(1)}; the tables contain "
+            f"{len(rows)} row(s)"
+        )
     return errors
 
 
@@ -464,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     else:
-        print(f"{DOC_REL} — {len(report.rows)} row(s) parsed")
+        print(f"{doc} — {len(report.rows)} row(s) parsed")
         for err in report.errors:
             print(f"  DRIFT     {err}")
         for note in report.unverified:

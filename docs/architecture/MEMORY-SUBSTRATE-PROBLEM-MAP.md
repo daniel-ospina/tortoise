@@ -1,5 +1,5 @@
 ---
-title: "The memory-substrate problem map — re-cut, 26 entries, 4 patterns, 20 fixed and 6 open"
+title: "The memory-substrate problem map — re-cut against the tree, 26 entries, 4 patterns"
 type: engineering
 domain: platform
 doc_status: live
@@ -18,7 +18,7 @@ measured_at: 2026-11-06
 > artifact: four defect classes, five workstreams, a dependency order, and 26
 > linked issues. Its body has not changed since, and the tree has moved a very
 > long way underneath it (WS-A/WS-B/WS-C designs landed in
-> `docs/plans/2026-09-10-*.md`; ~40 of the 26 issues' fixes merged). Reading the
+> `docs/plans/2026-09-10-*.md`; 20 of the 26 rows' fixes merged). Reading the
 > issue today therefore tells a lane the opposite of the truth about most of its
 > rows — it reads as 26 problems waiting, when it is **20 fixed and 6 open**.
 >
@@ -165,8 +165,9 @@ ship is the issue's indicator 1: *declaring `mechanism: IMPL`/`NAND` between two
 Object kinds that violate the bucket rule is a validation error naming the rule*.
 The relation validator carries the **shape** check only (`mechanism must be IMPL or
 NAND`); no kind-bucket coherence check exists — `grep -n 'bucket'
-tortoise/pack_registry.py` returns the `storeAs` stream comment and the #2781
-reference buckets, never a relation arm.
+tortoise/pack_registry.py` returns the `storeAs` stream comment, the #2781
+reference buckets, and the `LEGACY_KIND_ALIASES` expansion buckets (`:2943`),
+and never a relation arm.
 
 This row shipped as **VERIFIED-FIXED** on the first landing, on an inference
 ("conservatively … subsumed by the mechanism-inversion table") rather than a
