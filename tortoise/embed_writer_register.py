@@ -60,7 +60,8 @@ claim and a slogan:
   evidence the shape was seen: a writer can be in this population for another reason. 
   `sdk::_journal_event_raw_write` holds the shape (`record["embedding"] = …`) and is ALSO matched by
   `_EMBED_WRITE` on the `embedding=None` in its SIGNATURE, and — because the `encode_for_row` branch
-  assigns `gated` WITHOUT consulting the write predicate OR the shape — every writer that reaches the seam by CALL: `api::_point`, `projection::_revise_point`,
+  assigns `gated` WITHOUT consulting the write predicate OR the shape — the population ALSO takes
+  every writer that reaches the seam by CALL: `api::_point`, `projection::_revise_point`,
   `projection.entities::_upsert_point_props`, `projection.entities::_upsert_subject`,
   `projection.entities::_upsert_object`, `projection.entities::_upsert_document`,
   `projection.entities::_upsert_event`, `sdk::create_point`, `sdk::update_point`. ⛔ That list is
@@ -75,8 +76,9 @@ claim and a slogan:
   shape-blind branch had to admit them and why a census of
   that shape cannot count them — so "every" read as a complete extension of a
   population a `#11086` reader would then have under-counted. Membership and visibility are different
-  questions; the writers whose membership the AST pass actually bought are the four named just
-  above, and nothing else.
+  questions; the writers whose membership the AST pass actually bought are `api::add_point`,
+  `consistency::_graph_fingerprint`, `sdk::_index_gate_read` and `sdk::_write_capture_turns` (the
+  four named at the start of this bullet), and nothing else.
   ⚠️ "Every module discovery walks" is not every module in `tortoise/`: the walk SKIPS `tortoise/embeddings.py` on purpose (the
   seam primitives are not write paths), and two functions there use exactly this form —
   `stamp_journal_embedding` (`payload["embedding"] = vec`) and `_drop_journalled_embedding`
@@ -87,9 +89,12 @@ claim and a slogan:
   statement is not "no writer can bypass silently" but: **every writer discovery finds outside the
   gate is declared, and the shapes discovery cannot decide are named rather than assumed absent** —
   which is why `sdk::_update_entity`, one live map-merge instance, carries the NAMED `#4094`
-  exemption instead of being read as "no write at all" — and `sdk::update_point` is the OTHER: a
-  `SET n += $props` merge that carries a caller-supplied vector verbatim, classed `gated` and
-  declared nowhere (read the closure-claim caveat below for what that does and does not mean).
+  exemption instead of being read as "no write at all" — and `sdk::update_point` is the other
+  KNOWN instance: a `SET n += $props` merge that carries a caller-supplied vector verbatim, classed
+  `gated` and declared nowhere (read the closure-claim caveat below for what that does and does not
+  mean). ⚠️ "Known" is load-bearing: the shape is undecidable by syntax (above), so neither this
+  sentence nor the instrument can say these are the ONLY two — a reader scoping the residual must
+  not read two as the complete population.
 
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,
 whose `__init__` is the head of the `projection → pack_state → sdk → projection` cycle where a

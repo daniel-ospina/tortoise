@@ -429,9 +429,12 @@ def test_the_seam_CALL_population_is_the_one_the_register_names():
     `probe._embedding_writers` classes a writer `gated` the moment it CALLS the seam
     (`probe.SEAM_CALL`) — the write predicate is not consulted — so membership is INDEPENDENT of
     the write shape. The register's paragraph that says exactly that therefore has to name every
-    member: it named four (the ones the AST pass bought) until `#11373`'s review measured five more
-    in `tortoise/projection/entities.py` that hold the same container-key shape AND are in the
-    population by this same branch, which turned "every writer" into a claim wider than its
+    member: it named four of them until
+    `#11373`'s review measured five more in `tortoise/projection/entities.py` that are in the
+    population by this same branch while holding a DIFFERENT write shape (`set_embedding_clause(…)`
+    for subject/object/document, a Cypher `n.embedding=…` property SET fed from the params dict for
+    `_upsert_point_props`, the bare CALL for `_upsert_event`) — none of them is a container-key
+    holder, which turned "every writer" into a claim wider than its
     mechanism — the class this whole line of work exists to remove.
 
     The list is not counted in the register on purpose (a count re-stales with every writer), so it
