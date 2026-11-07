@@ -138,24 +138,31 @@ server's own log across one run, recorded beside the JSON.
 
 ## Reading the numbers honestly
 
-**(a) The connection half is ~83–85 % of the win, and it is now a REUSE, not a
+**(a) The connection half is ~83–87 % of the win, and it is now a REUSE, not a
 claim.** The saving is 18.889–20.102 → 3.819–3.908 ms (means), i.e. 14.98–16.28 ms.
-The column-map half is **~2.4–2.5 ms** of that — **TWO consults, not one**: the
+The column-map half is **~2.1–2.5 ms** of that — **TWO consults, not one**: the
 per-record path drives BOTH cached readers (`table_columns()` AND
 `refused_props_names()`, 1.00 call/record each in the table above, and at the
-BEFORE tree `refused_props_names` called `_read_migrations` — the same full
-read+parse `table_columns` paid), so the figure is twice one consult's delta — and
-on the MEDIAN, because the warm
+BEFORE tree `refused_props_names` called `_read_migrations` — the same full READ
+of the same bytes `table_columns` paid; ⚠️ the READ is shared, the PARSE is not:
+the two readers run different regexes over it, and the second's uncached-minus-warm
+delta measures **0.79×** the first's on this box, so charging it at the first's
+price is an UPPER BOUND on the column half — 2 × 1.193–1.256 = 2.386–2.512 ms —
+and the measured ratio narrows it to ≈2.14–2.25 ms). Both readers are charged on
+the MEDIAN, because the warm
 cost is what the per-record path pays: the probe's 20-sample loop runs before the
 first write, so its single cache-miss sample sits in the mean (AFTER mean
 0.460–0.583 vs median 0.332–0.353; the BEFORE pair is 1.582–1.651 vs 1.546–1.588,
 a **1.5–4.7 % gap** per run — 1.54 / 3.36 / 4.69 / 3.72 % — which shows the miss is
 an AFTER-tree artifact: the AFTER means sit 35–76 % above their medians, the
 BEFORE means a few per cent). 1.546–1.588 →
-0.332–0.353 ms = **1.193–1.256 ms per consult**, ×2 = **2.386–2.512 ms**. The
-connection half is therefore the rest — **12.5–13.9 ms**, pairing the win's lower
-end with the column half's UPPER end and its upper end with the column half's
-lower end — i.e. **83.2–85.3 %**, ~84 % of the win. ⚠️ This lands near the
+0.332–0.353 ms = **1.193–1.256 ms** for the `table_columns` consult, charged twice
+for the two readers (upper bound; see above) = **2.386–2.512 ms**. The connection
+half is therefore the rest — **12.5–13.9 ms** at that upper bound, pairing the
+win's lower end with the column half's UPPER end and its upper end with the column
+half's lower end — i.e. **83.2–85.3 %**; at the measured 0.79× ratio the column
+half is 2.14–2.25 ms, the connection half **12.7–14.1 ms** and its share
+**85.0–86.9 %**. So the honest headline is **~83–87 %**, ~84–85 % of the win. ⚠️ This lands near the
 ORIGINAL "~80-85 % of the ~15 ms saved", and that is a coincidence of BAND, not
 arithmetic: the original did charge the consult twice, but at 0.27–0.33 ms of stat
 (an uncommitted 0.135–0.166 ms band, with `_migrations_dir()`'s resolution never
@@ -171,8 +178,11 @@ plus plan materialisation — **plus, and this was under-stated in the first
 revision, ≈0.68 ms of cache-consult overhead per record, in two halves this
 bullet used to conflate**: `replay_plan` drives BOTH cached readers, and each
 consult costs (i) `_migrations_dir()` → `_complete()`, fifteen `Path.exists()`
-calls resolving the base **before** the key is built (`record_projection.py:1659`
-with `:1497`/`:1502`), and (ii) one `_migrations_fingerprint` pass over the same
+calls resolving the base **before** the key is built (`_schema_entry`'s
+`base = migrations_dir or _migrations_dir()`, with `_complete` at `:1497`/`:1502`;
+cited by SYMBOL, because an added line above it re-stales a bare line number —
+this PR's own `record_projection.py` edit moved it 1659 → 1665), and (ii) one
+`_migrations_fingerprint` pass over the same
 fifteen files (0.160–0.169 ms, `fingerprint-cost.json`). The RESOLUTION half is
 item 6 of the list at the top — taken on one box at `d51c7897d6`, re-takeable by
 the command there: median **0.169 ms**; its siblings are committed (the fingerprint
@@ -200,8 +210,8 @@ bullet. It also said "~92-94 %" (94 % only falls out of the
 superseded ~0.9–1.0 ms column-half estimate the same bullet replaced). It said
 "~91.6–92.7 %" — **the revision immediately before this one**, which charged ONE
 column consult while the per-record path pays TWO (both cached readers, above), so
-the column half is 2.386–2.512 ms and the connection share 83.2–85.3 %, not
-1.193–1.256 ms and 92 %. It said "≈0.9–1.0 ms of pure
+the column half is 2.386–2.512 ms at its upper bound (2.14–2.25 ms at the measured
+ratio) and the connection share 83.2–86.9 %, not 1.193–1.256 ms and 92 %. It said "≈0.9–1.0 ms of pure
 stat" for the residual — which is 2 x the WHOLE cached call (stat + the per-call
 dict copy), not 2 x the stat pass. And the revision that replaced it said
 "0.32–0.34 ms of stat overhead", which is the whole warm call attributed to the

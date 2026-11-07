@@ -116,26 +116,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--column-consult", action="store_true",
                         help="print the three consult medians and write nothing")
     parser.add_argument("--reps", type=int, default=200)
-    parser.add_argument("--tree", type=Path, default=None,
-                        help=("the tree to measure (default: this checkout); NOT "
-                              "valid with --column-consult, which measures the "
-                              "module THIS PROCESS imported"))
     args = parser.parse_args(argv)
-
-    if args.tree is not None and args.column_consult:
-        # ⛔ Refused rather than silently ignored: `--column-consult` measures
-        # `_migrations_dir()`/`table_columns()` of the module already imported, so
-        # a `--tree` here would print THIS tree's medians under the other tree's
-        # name — the exact mislabelling the artifact's print-don't-commit rule
-        # exists to prevent. Run the probe FROM the tree you mean to measure.
-        parser.error("--tree does not apply to --column-consult; "
-                     "run the probe from the tree you want to measure")
 
     if args.column_consult:
         print(json.dumps(column_consult_medians(args.reps), indent=2, sort_keys=True))
         return 0
 
-    base = args.tree or (Path(__file__).resolve().parents[3] / "supabase" / "migrations")
+    # ⛔ NO `--tree`, deliberately (both directions of the same hazard):
+    #   * this path WRITES `fingerprint-cost.json`, the committed source five docs
+    #     cite — a foreign tree's numbers written here would carry no field saying
+    #     so, silently replacing the band every reader trusts; and
+    #   * `--column-consult` measures the module THIS PROCESS imported, so a
+    #     `--tree` there would print one tree's medians under another's name.
+    # The probe therefore measures THIS checkout only: run it FROM the tree you mean
+    # to measure, as the artifact's Reproducing section does.
+    base = Path(__file__).resolve().parents[3] / "supabase" / "migrations"
     out = measure(base, args.reps)
     target = Path(__file__).with_name("fingerprint-cost.json")
     target.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
