@@ -438,7 +438,8 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
             continue
         label = row[0] or "?"
         # A crosswalk row that names NO surface was the third "names nothing" hole:
-        # R1 (`:279`) and R4 (`:306`) both carry the arm, R5 did not, so blanking
+        # R1 (`R1 <capability>: names no surface`) and R4 (`R4 #<issue>: touches no
+        # surface`) both carry the arm, R5 did not, so blanking
         # §6.4's surface cell — the row that carries the approval request — graded
         # CLEAN on the REQUIRED `docs` job (measured). Deleting the row reds R5 as
         # `missing`; emptying its cell must red it as `names no surface`.
@@ -664,8 +665,9 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         "violation",
     ),
     (
-        # The referential half's own "names nothing" hole. R1 (`:279`) and R4
-        # (`:306`) both refuse a row that names no surface; R5 did not, so
+        # The referential half's own "names nothing" hole. R1
+        # (`R1 <capability>: names no surface`) and R4 (`R4 #<issue>: touches no
+        # surface`) both refuse a row that names no surface; R5 did not, so
         # blanking §6.4's surface cell graded CLEAN on the REQUIRED `docs` job
         # (measured). Deleting the row reds R5 as `missing`; emptying its cell must
         # red it as `names no surface`, and this case is what proves the arm runs —
