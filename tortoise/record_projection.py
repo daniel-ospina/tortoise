@@ -1541,12 +1541,12 @@ def _read_migrations(migrations_dir: Path | None = None) -> str:
 #: ⛔ The population is NOT static: the key is `(tree, fingerprint)`, so a
 #: production process holds ONE entry while the migration files are unchanged and
 #: gains one more per distinct FILE STATE it observes — an edit, an addition, a
-#: removal (one entry per observed `(tree, fingerprint)` pair). Stale
-#: states are exactly what the wholesale drop clears (#9558).
+#: removal. Stale states are exactly what the wholesale drop clears (#9558).
 _SCHEMA_CACHE_LIMIT = 8
 
 #: `{(base, fingerprint): {"sql": str | None, "parsed": {name: result}}}` —
-#: at most one entry per DISTINCT migration tree (#9558 / R10).
+#: at most one entry per observed `(tree, fingerprint)` pair, so one migration
+#: TREE can hold several while its files change (#9558 / R10).
 _SCHEMA_CACHE: dict[tuple[str, tuple], dict[str, Any]] = {}
 _SCHEMA_CACHE_LOCK = threading.Lock()
 
