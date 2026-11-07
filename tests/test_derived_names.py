@@ -945,15 +945,37 @@ def _raw_client_call_positions(source: str) -> list[int]:
         return {".".join([node.id, *reversed(parts)])}
 
     def _bindings(wanted):
-        """Targets bound to an expression that REFERENCES one of `wanted`.
+        """Targets bound by an ASSIGNMENT whose value MENTIONS one of `wanted`.
 
-        Every binding FORM, not every spelling of one: plain, annotated,
-        chained (`C = D = …`), tuple/list unpacking, and the walrus. `wanted` is
-        the class name UNIONED with the file's import-resolved names, and grows
-        to the resolved aliases on each pass — the union is what lets a chain
-        ROOTED AT AN IMPORT ALIAS resolve (`from falkordb import FalkorDB as
-        Client`; `D = Client`), and the growth is what lets `C = D` after
+        `wanted` is the class name UNIONED with the file's import-resolved names,
+        and it grows to the resolved aliases on each pass — the union is what lets
+        a chain ROOTED AT AN IMPORT ALIAS resolve (`from falkordb import FalkorDB
+        as Client`; `D = Client`), and the growth is what lets `C = D` after
         `D = falkordb.FalkorDB` resolve.
+
+        ⛔ READ THIS AS AN ENUMERATION, NOT AS A GUARANTEE. It is a list of what
+        is READ, added to as each shape is found; it is not a claim that the list
+        is complete, and three earlier versions of this paragraph were falsified
+        for exactly that reason ("Every binding FORM", then "Every ASSIGNMENT
+        form").
+
+        READ (each pinned by a case in `test_no_IMPORT_SPELLING_can_switch_the_
+        census_gate_off`): plain `C = …`, annotated `C: T = …`, chained
+        `C = D = …`, tuple/list unpacking `C, D = …`, and the walrus.
+
+        NOT READ — each MEASURED to read CLEAN over an unowned, un-journaled bulk
+        DETACH, and each tracked on #11344:
+          • a `for` / `with` / `except` target, a parameter default, or a
+            comprehension target (`for maker in (Client,):` then `maker(...)`);
+          • a SUBSCRIPT target (`reg["c"] = FalkorDB`; `c = reg["c"]`), which
+            `_dotted` drops because `ast.Subscript` is neither Tuple/List nor
+            Attribute;
+          • a parenthesised CALLEE (`c = (FalkorDB)(host="h")`), which the site
+            pattern misses because it requires the name immediately before `(`.
+        This file's OTHER binding model fails CLOSED on the `for`/`with`/`except`
+        forms (`a loop/with/except target: nothing readable`, and the UNDECIDABLE
+        list naming `for`/`with`/STARRED), so the two halves disagree — do not
+        read this paragraph as closing what that one leaves open.
         """
         out = set()
         for node in ast.walk(tree):
