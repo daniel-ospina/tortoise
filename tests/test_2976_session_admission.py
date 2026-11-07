@@ -783,10 +783,11 @@ def test_the_agreement_with_the_pool_authority_is_scoped_to_identified_hits():
     # way the sentinel does: the pool's leg is `is not None`, so `True` keys
     # `idx:True` and OUTRANKS the wire id, while the admission grain excludes
     # bool, skips the index leg, and therefore NAMES the session. Pinned here
-    # (where divergence is allowed) because the identified-hits branch above
-    # legitimately branches on the bool exclusion and no other fixture
-    # reaches it: a loosened predicate (`isinstance(idx, int)` alone) would
-    # answer `('index', True)` in both assertions below.
+    # (where divergence is allowed) because the identified-hits branch AT THE
+    # END of this test legitimately branches on the bool exclusion and no
+    # other fixture reaches it: a loosened predicate (`isinstance(idx, int)`
+    # alone) would answer `('index', True)` in the two admission assertions
+    # below.
     bool_idx = {"id": "B_t0", "sessionId": "sessB",
                 "lme_session_index": True}
     assert session_key_of(bool_idx) == "idx:True"
