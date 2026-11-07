@@ -368,7 +368,7 @@ def test_a_workstream_count_that_disagrees_with_its_rows_is_drift(tmp_path):
     """Fails when §2's "**N of M fixed**" line drifts from that workstream's rows.
 
     Reachable, and reproduced by fresh review at the post-merge head: the guard
-    compared only the four `| STATUS | n |` rows and the total, so a row could move
+    compared only the three `| STATUS | n |` rows and the total, so a row could move
     to OPEN while §2 still printed `**7 of 8 rows fixed**` — and, because the
     status counts were edited to match the moved row, the old guard returned NO
     errors while §2 contradicted its own WS-B table. §2 states a count per

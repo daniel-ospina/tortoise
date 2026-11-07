@@ -325,10 +325,12 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q  # the
 The `TORTOISE_TEST_CARVE_OUT=1` is not decoration: this suite is DB-free, and on
 a box with no database the default conftest refuses the run outright
 (`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — one refusal per
-collected test, 57 errors at the head `measured_at_commit` names), which reads as
-the guard being broken rather than the target being absent. That `57` is a
-narrated count nothing reads (see the residuals below), which is why it is
-anchored to a commit rather than derived from one.
+collected case, **58** at this head), which reads as the guard being broken rather
+than the target being absent. That number is a narrated count nothing reads (see
+the residuals below) AND it is a property of the head, not of
+`measured_at_commit`: this test file does not exist at `23d227c53`
+(`git cat-file -e 23d227c53:tests/test_problem_map_2820.py` exits 128), so the
+count is re-derived with `--collect-only`, never read as a fact about that commit.
 
 The checker re-measures, offline and without network access:
 
@@ -361,10 +363,11 @@ The checker re-measures, offline and without network access:
    row, its five per-workstream `**N of M fixed**` cells (each bound to its
    workstream BY LABEL, so a mislabelled row cannot pass), and the page's opening
    abstract (`**N fixed and N open**`, read from the body above `## 1.` — the
-   frontmatter holds only `measured_at_commit`/`measured_at`) all equal the rows
-   below. A summary that drifts from its own table is the same defect class as
-   the missing `content_hash` this map's Pattern 1 names. Counts narrated inside
-   a sentence are NOT read — see the residuals below.
+   frontmatter carries `measured_at_commit`/`measured_at` and its siblings, not
+   the headline) all equal the rows below. A summary that drifts from its own table is the same defect class as
+   the missing `content_hash` this map's Pattern 1 names. The READ SET is
+   exactly those counts plus the index row's headline (`check_registration`);
+   every other count the page prints is listed in the residuals below.
 6. **Registration** — this page is listed in `docs/00_index.md`, so it is
    reachable rather than merely committed — **and that entry's own
    `**N fixed · N open · N unknown**` headline must equal §2's**, read from the
@@ -407,12 +410,13 @@ rounding:**
   `test_a_corrupt_object_store_reads_as_no_answer_not_as_drift`, so a reword is
   caught by that control rather than by a reader.
 - **The ENUMERATED and prose counts — §1's census sentence, §2's cell text, §8,
-  §10, and §9's own refusal count.** The counts §2
-  states as a table cell ARE compared (the three status rows, the total, the five
-  per-workstream cells, the abstract). What is not compared is every count
-  narrated inside a sentence: §2's `(#2787 OPEN: …)`, `**#2730, #2782 and #2684
-  remain open**` and `**#2696 (epic) remains open**`; §8's "Five rows, and four
-  of them are defects"; §10's census prose. Deciding "which rows does this
+  §10, and §9's own refusal count.** The counts §2 states in its three status
+  rows, its total, its five per-workstream cells and the abstract ARE compared
+  (plus the index row's headline, in `check_registration`). These are not: §1's
+  census sentence; §2's `(#2787 OPEN: …)`, `**#2730, #2782 and #2684 remain
+  open**` and `**#2696 (epic) remains open**`; §8's "Five rows, and four of them
+  are defects"; §10's census prose; and §9's own refusal count above. Deciding
+  "which rows does this
   sentence call open" means reading prose — and §8's second clause additionally
   needs to know which row is an epic, the tracker half this guard refuses to
   read — so a guard that parsed those sentences would be a spelling trap rather

@@ -9923,6 +9923,8 @@ durations:
   # rots the same way. Prose INFLATES a grep, it never deflates one.
   # The 56 -> 58 gap is (three arms − one function) = 2, exactly as the
   # header above says. One count per head, in
+  # The 54 -> 56 gap is (three arms − one function) = 2, exactly as the
+  # header above says.) One count per head, in
   # FUNCTIONS, measured per commit
   # (`git show <sha>:tests/test_problem_map_2820.py | grep -c '^def test_'`):
   # 27 at `a72d38c24` -> 28 at `30b27b240` (the shallow-clone arm's control) ->
@@ -9954,6 +9956,7 @@ durations:
   # probes-of-the-probes landed
   # (`test_a_workstream_count_that_disagrees_with_its_rows_is_drift` and
   # `test_the_ABSTRACT_headline_must_agree_with_the_tables`: §2's five
+  # `test_the_abstract_headline_must_agree_with_the_tables`: §2's five
   # per-workstream "**N of M fixed**" cells and the page's own "**21 fixed and
   # 5 open**" headline were printed counts NOTHING compared — with a row
   # flipped to OPEN and the four status cells edited to match, the pre-fix
