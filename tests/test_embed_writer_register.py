@@ -961,10 +961,15 @@ def test_the_duplicate_criterion_is_put_reached_not_walk_reached(tmp_path):
 
     A `#11086` reader taking the old wording as the criterion would believe every collision lands
     in the undeclarable `duplicate` class and miss exactly the case that IS declarable, so the
-    wording is pinned here rather than left to the next review round to re-measure by hand. The
+    wording is pinned here rather than left to the next review round to re-measure by hand: the
+    arms below measure the MECHANISM, and `_assert_the_register_states_the_put_criterion` measures
+    the SENTENCE, because a criterion pinned only on the instrument side regresses silently when a
+    lane edits the register back to the retracted reading (measured: reverting the parenthetical to
+    "both of them reached by the walk" left this whole file green). The
     both-writers arm is the control: if `duplicate` stops being reachable the two reader arms stop
     discriminating and this test says so instead of passing vacuously.
     """
+    _assert_the_register_states_the_put_criterion()
     for shape, (body, expected) in DUPLICATE_CRITERION.items():
         found = probe._embedding_writers(_scratch_root(tmp_path, shape, body))
         kinds = {name: entry.get("kind") for name, entry in found.items()}
@@ -973,4 +978,40 @@ def test_the_duplicate_criterion_is_put_reached_not_walk_reached(tmp_path):
             f"{{'tortoise.m::w': {expected!r}}} — discovery's collision rule changed. The "
             "register's `duplicate` parenthetical and this file's header both state this "
             "criterion; re-derive both before changing either."
+        )
+
+
+def _assert_the_register_states_the_put_criterion() -> None:
+    """The `duplicate` criterion as the REGISTER states it — pinned in both directions.
+
+    The instrument-side arms above cannot see this: they pass with any wording, so the sentence in
+    `register.__doc__` — the thing a `#11086` reader acts on — could be reverted to the retracted
+    reading with the whole file green (measured). Reads the parenthetical by its own bracket rather
+    than by a paragraph slice, because the same block names `gated` and `producer` for different
+    mechanisms.
+    """
+    doc = register.__doc__ or ""
+    anchor = "`duplicate` ("
+    start = doc.find(anchor)
+    assert start != -1, (
+        f"the register no longer states the `duplicate` criterion: {anchor!r} is absent"
+    )
+    end = doc.find(")", start)
+    criterion = " ".join(doc[start:end + 1].split())
+    # (i) the MECHANISM has to be in the sentence. `_put` is the function whose call site decides
+    # whether a colliding def can displace the discovered one, so a criterion that does not name it
+    # (or the `CLASSIFIES` rule that gates it) is describing something else.
+    assert "`_put`" in criterion and "CLASSIFIES" in criterion, (
+        "the register's `duplicate` parenthetical no longer names the mechanism that decides the "
+        f"criterion (a def must reach `_put`, which happens only for a def discovery CLASSIFIES): "
+        f"{criterion!r}"
+    )
+    # (ii) and the RETRACTED reading must not come back. This is the direction the instrument-side
+    # arms are blind to: "reachable by the walk" is satisfied by a pure reader, which is exactly the
+    # collision that is CAUGHT rather than excused.
+    for retracted in ("reached by the walk", "both of them reached"):
+        assert retracted not in criterion, (
+            f"the register's `duplicate` criterion has been reverted to the retracted reading "
+            f"({retracted!r}) — `ast.walk` reaches a pure reader too, so that wording predicts "
+            f"`duplicate` for the one collision that is actually declared: {criterion!r}"
         )

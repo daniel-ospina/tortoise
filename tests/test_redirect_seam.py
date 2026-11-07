@@ -1129,6 +1129,23 @@ def test_the_installer_guard_clauses_each_decline_by_effect(monkeypatch):
       delete only `Thread.start = …`      -> the marker IS still recorded (separate
                                              statement), so the precondition
                                              PASSES and the red lands at arm (0)
+                                             **within this test** — it is NOT the
+                                             only red in the file: measured, the
+                                             same mutant gives 9 failed / 12
+                                             passed / 6 skipped, and the file
+                                             reds first in
+                                             `test_worker_thread_carve_out_stays_embedded`,
+                                             `test_worker_thread_non_exempt_redirects`
+                                             and
+                                             `test_stem_registry_prod_parity_and_patch_idempotence`
+                                             (`problems == ['expected exactly ONE
+                                             test-stem stamp …']`) before this
+                                             test's arm (0) is reached, because
+                                             the stamp is genuinely absent from
+                                             `Thread.start` for every other arm
+                                             too. Read the middle column as WHERE
+                                             THIS ARM LANDS, not as the mutant's
+                                             only landing point.
 
     That last row is why (0) exists: it is the non-vacuity row that catches an
     installer which runs, records, and installs nothing.
