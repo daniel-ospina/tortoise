@@ -2073,7 +2073,7 @@
   ]
  },
  "caveats": [
-  "Measured per-session S4 output tokens on RECORDED real S2 geometry; the prompt inputs are identical across arms, so the delta is the output contract's effect.",
+  "Measured per-session S4 output tokens on RECORDED real S2 geometry; both arms get the same INPUT CONTENT, but the delta contract's own instruction is longer, so the delta arm's prompt is +242 tokens in every session of these runs \u2014 a small POSITIVE input cost, not a saving. The delta measured here is therefore the whole contract's effect, and the prompt did not get cheaper.",
   "One call per arm per session (no production-run composition): model compliance in the wild is not measured here \u2014 it is OBSERVABLE per row via verbatim_reemissions / added_by_s4 / corrected_by_s4 / s4_delta_reemit_suspect.",
   "The S3 search block is reconstructed from the session's own S2 list and is NOT production geometry: extract_session_v2 runs S3 (search_graph) BEFORE S4 and writes the session's items only afterwards (execute_embed), so production S4 sees bounded PREVIOUS-graph hits (max_queries=15 x limit=3, the capture's own turn echoes dropped). Relabelling the session's own list as already-in-the-graph is the maximally gap-SUPPRESSING input for a delta contract, so the measured saving is a CEILING and the delta arm's added_by_s4 / s4_items read as a floor.",
   "model_id is the model REQUESTED; the served id is not recorded here.",

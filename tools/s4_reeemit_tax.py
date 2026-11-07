@@ -724,8 +724,11 @@ def _model_for(model_id: str):
 # refuted CEILING wording passed every test (#11385 review P3).
 CAVEATS: tuple[str, ...] = (
     "Measured per-session S4 output tokens on RECORDED real S2 geometry "
-    "(the 4 tax-surface sections); the prompt inputs are identical "
-    "across arms, so the delta is the output contract's effect.",
+    "(the 4 tax-surface sections); both arms get the same INPUT CONTENT, but "
+    "the delta contract's own instruction is longer, so the delta arm's "
+    "prompt is +242 tokens in every session of these runs — a small POSITIVE "
+    "input cost, not a saving. The delta measured here is therefore the whole "
+    "contract's effect, and the prompt did not get cheaper.",
     "The replayed S2 embed list is the 4 tax sections — 266 of the 311 "
     "items the receipts record (chain_notes 7 and link_before_create 38 "
     "are not in the prompt; retractions 0). Both arms see the same "

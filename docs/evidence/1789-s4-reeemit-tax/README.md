@@ -25,15 +25,26 @@ written, so S4 sees it" reading, so that one string was replaced — with the
 delta arm's `added_by_s4` / `s4_items` read as a floor." That one-sided wording is itself
 superseded by *What this does not measure* below (it is a caveat, never a measurement, and
 no measured field was touched); the instrument at this head emits a corrected string, pinned by
-`test_the_emitted_caveats_carry_the_corrected_population_and_direction`. ⚠️ The **caveats
+`test_the_emitted_caveats_carry_the_corrected_population_and_direction`. ⚠️ **A second
+artifact field was corrected after the runs, for the same reason**: `caveats[0]` in
+BOTH artifacts said *"the prompt inputs are identical across arms, so the delta is the
+output contract's effect"* — which the artifacts' own `prompt_tokens` rows contradict
+(the delta arm's prompt is **+242 tokens in every session of both runs**, see the
+input-side paragraph under *Verdict*). The string now states the same input CONTENT,
+the small POSITIVE input cost, and that the measured delta is the whole contract's
+effect; the instrument emits the same sentence plus its tax-surface scoping, and the
+pair is pinned by `test_the_emitted_caveats_carry_the_corrected_population_and_direction`.
+⚠️ The **caveats
 list** also postdates the artifacts in a second sense: they carry **5** entries and the
 instrument now emits **6** — ONE ADDED plus TWO EDITED. Added: the replayed-list narrowing
 (266 of the 311 recorded items; `chain_notes` 7 + `link_before_create` 38 dropped). Edited:
-`CAVEATS[0]` (scoped to "the 4 tax-surface sections") and `CAVEATS[3]`, which absorbed the
+`CAVEATS[0]` (scoped to "the 4 tax-surface sections", and the input-side sentence above)
+and `CAVEATS[3]`, which absorbed the
 231-of-266 offered population and the 35 never-offered `operators` while replacing the
 one-sided CEILING wording — the artifacts' replacement of that entry carries neither count. So
 a reader who trusts the artifact's own caveats alone gets neither population statement. **No measured field was touched** — every token count,
-composition channel and reduction is byte-identical to what the runs emitted; re-running
+composition channel and reduction is byte-identical to what the runs emitted (only the
+`caveats` strings above and the `caveats[0]` sentence differ); re-running
 needs a paid key and would move the numbers for reasons unrelated to the correction. The
 filenames are each
 run's START time; `measured_at` inside is its measured end. The model is not
@@ -74,7 +85,9 @@ sessions pays exactly +242 input tokens, in both runs**:
 run and **143 113 → 112 942 = −21.1 %** in the re-run — not −93.8 %. The issue's
 target is the **output** side (*S4 output size per chunk*), which is what the
 verdict row above measures and what the index row routes on; the saving a
-production operator would book is the **total**, and it is **4.6×** smaller.
+production operator would book is the **total**, and it is **4.6×** smaller in the
+primary run (**4.5×** in the re-run — the same spread this document states rather than
+hides for the output pair).
 Stated here because it is the one number this document could have been read
 without: −93.8 % is the figure in the title.
 

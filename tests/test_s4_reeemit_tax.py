@@ -989,7 +989,13 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
     assert (f"{_thousands(_rlg_t)} → {_thousands(_rdl_t)} = "
             f"−{(1 - _rdl_t / _rlg_t) * 100:.1f} %") in flat_all
     assert (f"**{(ps['token_weighted_reduction'] / (1 - _pdl_t / _plg_t)):.1f}×** "
-            "smaller") in flat_all
+            "smaller in the") in flat_all
+    # ⛔ The re-run's OWN multiple, not a spread over a single run's ratio: the
+    # two runs give 4.58 and 4.46, so quoting only the primary is the same
+    # unqualified-figure class the input-side paragraph exists to remove
+    # (#11385 post-rebase review P3).
+    assert (f"**{(prs['token_weighted_reduction'] / (1 - _rdl_t / _rlg_t)):.1f}×** "
+            "in the re-run") in flat_all
     # ⛔ both directions: the output-only reading must not come back as the
     # unqualified number it was ("not −93.8 %" is the sentence that names it).
     assert "not −93.8 %" in flat_all
@@ -1578,7 +1584,8 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
         f"+{_thousands(_pdl_p - _plg_p)})",
         f"{_thousands(_plg_t)} → {_thousands(_pdl_t)} = "
         f"−{(1 - _pdl_t / _plg_t) * 100:.1f} %",
-        "4.6× smaller than the output drop",
+        "4.6× smaller than the output drop in the primary run "
+        "(4.5× on the re-run)",
         "0 content/name rewrites",
         "62 lifecycle (61 `created`→`unchanged` + 1 `changed`→`unchanged`), "
         "1 `slots` (`core:code`→`dev:code`), 1 `supersedes`",
@@ -1659,6 +1666,29 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
         "CAVEATS[0] must carry the tax-surface scoping")
     assert tool.CAVEATS[0].replace(" (the 4 tax-surface sections)", "") == (
         _artifact_caveats[0]), "CAVEATS[0] must be artifact[0] plus the scoping"
+
+    # ⛔ THE INPUT-SIDE CORRECTION (#11385 post-rebase review P1). The equality
+    # above only holds whatever the string SAYS, so a revert of this correction
+    # in BOTH copies stayed green — and the artifact's copy is the one a reader
+    # meets first. Pinned three ways: the artifact sentence must state the input
+    # cost with the DERIVED per-session figure (a regeneration that moves it reds
+    # here), the instrument must carry the same figure, and the refuted
+    # "identical prompt" claim is banned by `_REFUTED_DIRECTION_PHRASES`.
+    _pri_c = json.loads(_PRIMARY.read_text())
+    _per_c = {a["delta"]["prompt_tokens"] - a["legacy"]["prompt_tokens"]
+              for a in _pri_c["arms"]}
+    assert len(_per_c) == 1, f"the per-session input cost is not one value: {_per_c}"
+    _per_c = _per_c.pop()
+    assert [a["delta"]["prompt_tokens"] - a["legacy"]["prompt_tokens"]
+            for a in json.loads(_RERUN.read_text())["arms"]] == [_per_c] * len(_pri_c["arms"])
+    for _copy, _text in (("artifact caveats[0]", _artifact_caveats[0]),
+                        ("tool.CAVEATS[0]", tool.CAVEATS[0])):
+        assert f"+{_per_c} tokens in every session" in _text, (
+            f"{_copy} must state the measured input cost", _text)
+        assert "POSITIVE input cost" in _text, (
+            f"{_copy} must say the input side is a cost, not a saving", _text)
+        assert "same INPUT CONTENT" in _text, (
+            f"{_copy} must scope what IS identical (content, not length)", _text)
     assert tool.CAVEATS[2] == _artifact_caveats[1], "CAVEATS[2] == artifact[1]"
     assert tool.CAVEATS[4:] == tuple(_artifact_caveats[3:]), (
         "the tail must be the artifacts' own entries, unchanged")
@@ -1689,6 +1719,14 @@ _REFUTED_DIRECTION_PHRASES = (
     "no room to add",
     "than it will usually find in production",
     "all 266 items offered",
+    # ⛔ The input-side claim, banned as a CLASS for the same reason the direction
+    # phrases above are: it lived in FOUR copies (instrument `CAVEATS[0]`, both
+    # artifacts' `caveats[0]`, and the sentence the README had to add to refute
+    # it) and the artifact copies are the ones a reader meets FIRST — the
+    # artifact asserted identical prompts while its own `prompt_tokens` rows
+    # recorded +242 per session, and no pin saw it because the README pin reads
+    # the README (#11385 post-rebase review P1).
+    "the prompt inputs are identical",
 )
 
 
