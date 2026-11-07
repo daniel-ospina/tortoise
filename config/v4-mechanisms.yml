@@ -590,7 +590,16 @@ mechanisms:
       docs/architecture/STORAGE-ARCHITECTURE.md): a three-state verdict with the
       residency precedence (§17.3), a bounded `serve`/`escalate-tier` trigger
       that takes no query class, and a write-back plan whose units carry their
-      span, cannot promote a class and dedupe by identity. ⚠️ The state stays
+      span, cannot promote a class and dedupe by identity. ⭐ The write-back's
+      ATTRIBUTION LOOP now closes ACROSS calls (§12.5b):
+      `plan_writeback(already_written=…)` reports what the cheap tier already
+      holds (`already_persisted`) instead of re-minting it, and the STORE's class
+      is part of the class-conflict guard. That is the loop's IDENTITY half only
+      — the plan performs no I/O, so §12.5's persistence seam is still the caller's and this
+      module is still not a writer. ⚠️ The caller owns ONE thing the planner cannot
+      check: `already_written` must be loaded FROM the store — a prior plan's
+      `units` are not evidence of persistence, and passing them reports a closed
+      loop over a unit that was never written. ⚠️ The state stays
       `not-implemented` on purpose: NOTHING ESCALATES YET — no tier walk, no
       Tier-1 store, no read-path caller, and #5009's premise measurement (are
       our queries actually answered badly by a cheap tier?) precedes that
