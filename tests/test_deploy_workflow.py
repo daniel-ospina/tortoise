@@ -4697,7 +4697,23 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         so the two channels cannot disagree about what a doubt frame is.
         """
         for _figure in list(re.finditer(_WORD_FIGURE_IN_POSITION, text)) + list(
-            re.finditer(r"\d{1,5}", text)
+            # ⛔ …AND THE BOUND IS OPEN, NOT NUMERIC (#11191 review r33, P2 — MEASURED at
+            # `9e2ccb589`). `\d{1,5}` re-creates this defect one formatting step out:
+            #   "The note's figure, not 100000 lines, is the census before #9548." -> REFUSED
+            #   "The note's figure, not 12345678 lines, is the census before #9548." -> REFUSED
+            # while `\d+` ACCEPTS both (as `origin/main` does), so the numeric bound buys
+            # nothing and refuses truthful sentences past five digits. On the sha channel the
+            # two agree only up to five digits: `047c91f7a` -> `047`, `91`, `7` EITHER WAY
+            # (three groups; the `6379`/`2` are `ff6379eb2`), but a run of six or more digits
+            # SPLITS under `{1,5}` (`123456789a` -> `12345`,`6789` vs `123456789`), so the
+            # bound does reach that channel too — it just cannot change a sha's verdict,
+            # because the token alternation decides the sha, not this leg. The `not 10 lines` row below
+            # pins the DIGIT->RUN half; a 6+ digit row has to exist or this half is unpinned.
+            # ⚠️ DISCLOSED, NOT CLOSED: a COMMA-GROUPED figure is still split, so
+            #   "The note's figure, not 1,000 lines, is the census before #9548."
+            # is still read as a stated reading. Closing it needs grouping-aware matching
+            # (`\d{1,3}(?:,\d{3})+`), which is a separate measured change.
+            re.finditer(r"\d+", text)
         ):
             _cue_start = max(0, _figure.start() - 16)
             _cue = _DENIED_FIGURE.search(text[_cue_start : _figure.start()])
@@ -4889,6 +4905,54 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: `origin/main` refuses that sentence; the previous head ACCEPTED it. A refutation
     #: of the EQUIVALENCE ends its claim there; one that goes on to qualify WHAT is wrong
     #: is refuting something else, whichever clause it sits in.
+    #: ⛔ A REFUTATION THE SENTENCE *REPORTS* IS NOT ONE IT MAKES (#11191 review b-F2, P1 —
+    #: MEASURED fail-open — still open at `9e2ccb589`, after every review round this branch
+    #: records — and MEASURED
+    #: to be bought back by a LATER arm). Under a NEGATED reporting verb the phrase's clause
+    #: is that verb's COMPLEMENT, so the refutation belongs to the report and the sentence
+    #: asserts the equivalence:
+    #:   "The note never says the tree immediately before #9548 was wrong."
+    #:     -> ACCEPTED at `a74e34c89`, at `4eaeae9134a` and at `9e2ccb589`; `origin/main`
+    #:        REFUSES it, so accepting it is a REGRESSION, not a widening. (Main has TWO
+    #:        exemptions, and the `047c91f7a` substring test comes FIRST — an earlier draft of
+    #:        this comment said "its only exemption", which was false: see r33-R3, P3.)
+    #: The frame must be NEGATED, and the negation must REACH the reporting verb: with a
+    #: positive verb the same words ARE the sentence's own refutation and must stay admitted
+    #: ("The note says the tree before #9548 was wrong" is truthful), and so must a positive
+    #: frame carrying a distractor negator ("No doubt the note says … was wrong"). Bounded to
+    #: the clause, so a negated verb elsewhere in a long cell cannot
+    #: reach it.
+    _REPORTED_NOT_ASSERTED = re.compile(
+        # ⛔ THE NEGATOR MUST REACH THE REPORTING VERB (#11191 review r33-R3, P1 — MEASURED
+        # NEW FALSE RED, 8/8 rows). The first cut put an unanchored `{0,40}?` gap between the
+        # negator and the verb, so ANY negator within 40 characters vetoed a POSITIVE frame:
+        #   "No doubt the note SAYS the tree … was wrong"        -> REFUSED (must accept)
+        #   "Nobody DENIES that the note says … was wrong"        -> REFUSED
+        #   "Not only does the note say … was wrong"             -> REFUSED
+        # i.e. the veto reds exactly the sentences its own `_asserted_refutation` pin says
+        # must pass. The negator now binds the verb DIRECTLY: contractions, or a negator with
+        # at most ONE word between it and the verb, so a negator inside another construction
+        # (`no doubt`, `none of this`, `nothing here`) cannot reach it.
+        #   ⛔ `\b(?:n't)\b` CANNOT MATCH — a word boundary cannot sit between `n` and `'`
+        #   inside "doesn't" (#11191 review r33-R3, P2 — MEASURED inert leg: the whole
+        #   contraction family PASSED at every head). This uses the pattern the file already
+        #   applies in `_DENIED_FIGURE`.
+        r"(?:\b\w+n['\u2019]t\b"
+        r"|\b(?:never|not|no|nothing|none|nobody)\b(?:\s+\w+)?)"
+        r"\s*(?:that\s+)?"
+        r"\b(?:says?|said|states?|stated|records?|recorded|claims?|claimed|notes?|noted|"
+        r"asserts?|asserted|reports?|reported|suggests?|suggested|contends?|contended|"
+        r"indicates?|indicated|concedes?|conceded)\b"
+        # ⛔ THE GAP BETWEEN THE VERB AND THE PHRASE IS THE COMPLEMENT'S SUBJECT, and it may
+        # not cross a clause boundary: `_PHRASE_RE` starts at `before #9548`, so the window
+        # ends *inside* the clause ("… the tree immediately ") rather than at the verb.
+        # Measured on the first cut, which anchored `$` to the verb: the veto never fired and
+        # all four defect shapes stayed ACCEPTED. A comma or a dash in the gap means the
+        # reporting frame has closed and a later refutation is the sentence's own, so the
+        # bound is punctuation, not length.
+        r"[^.,;:()\u2014\u2013]{0,60}$",
+        re.I,
+    )
     _REFUTED_NEXT_CLAUSE = re.compile(
         r"\A\W*(?:(?:and|but)\s+)?(?:that|this|which)\s+(?:is|was)\s+"
         # ⛔ …AND THE OBJECT GUARD APPLIES HERE TOO (#11191 review r4, P1 — measured
@@ -5907,6 +5971,41 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             # the cell it guards. Every other correction arm is clause- or subject-bound for
             # exactly this reason; the cue is the one that was still sentence-wide.
             if _COREF_ASSERTS_FALSE.search(norm) and not _CORRECTION_CUE.search(own):
+                return False
+            # ⛔ A REFUTATION THE SENTENCE *REPORTS* IS NOT ONE IT MAKES — a VETO, beside the
+            # co-reference one above, not another exemption (#11191 review b-F2, P1 —
+            # MEASURED fail-open, still open at `9e2ccb589`). Under a negated reporting verb
+            # the phrase's clause is that verb's COMPLEMENT, so a `was wrong` after the phrase
+            # belongs to the report and the sentence asserts the equivalence stands.
+            # ⛔ IT MUST BE A VETO, NOT A GUARD ON `_REFUTED_AFTER`: measured, the first cut
+            # added `and not _REPORTED_NOT_ASSERTED…` to that arm, the arm then declined — and
+            # the sentence was STILL ACCEPTED, bought back downstream by
+            # `return not _states_a_figure(attribution)` (a sentence that states no figure
+            # dates nothing, so that arm admits it). Tracing the arms rather than trusting the
+            # green suite is what showed the arm was not the decider.
+            # ⛔ THE REFUTATION TERM IS PART OF THE CONDITION, which keeps the truthful denial
+            # out: "The note does not say the tree before #9548 is `ff6379eb2`" reports the
+            # absence of the DEFECT, so the veto fires only when what follows the phrase is a
+            # refutation of the predication — i.e. only on the absence of a REFUTATION.
+            # ⛔ …AND A SENTENCE THAT NAMES THE TRUE TREE IS A CORRECTION (#11191 review
+            # r33-R3, P1 — MEASURED NEW FALSE RED, 6/6 rows, a REGRESSION against
+            # `origin/main`). The veto is OCCURRENCE-scoped and returns before every
+            # correction arm, so a second phrase occurrence that only REPORTS a refutation
+            # vetoed a sentence whose first clause is a textbook correction:
+            #   "The tree immediately before #9548 is `047c91f7a`; the note never says the
+            #    tree immediately before #9548 was wrong."      -> REFUSED (main ACCEPTS)
+            # `_TRUE_TREE`'s presence is this predicate's own established rule for "this
+            # sentence is a correction" (the r30 F1 fix uses exactly it, on `own`), and it is
+            # SENTENCE-level here deliberately, because the correction and the reported clause
+            # sit in different clauses. Cost, MEASURED and DISCLOSED: a defect sentence that
+            # appends the true tree anywhere is admitted — which is also `origin/main`'s
+            # behaviour (its first exemption is a bare `047c91f7a` substring test), so this is
+            # no regression, but it is a real widening and it is not free.
+            if _REFUTED_AFTER.match(
+                norm, phrase.start()
+            ) and _TRUE_TREE not in norm and _REPORTED_NOT_ASSERTED.search(
+                _clause_before_phrase(norm, phrase.start())
+            ):
                 return False
 
             def _third_sha_in_clause(_clause: str) -> bool:
@@ -9584,6 +9683,118 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "`must be` / `would be` were outside the verb alternation, so the same claim was "
         "refused with `is` and accepted with `has to be` (#11191 review r11, P1)"
     )
+    # ⛔⛔ THE r33 FINDINGS — two, both MEASURED by review lane 11191b at `9e2ccb589`.
+    # F1 is a FAIL-OPEN that survived every documented review round on this branch (the r30-r34
+    # commits are in the log): the other arms were each probed in both directions, but this
+    # one was never probed with a REPORTING VERB in front of it.
+    # F2 is a fix whose numeric bound left the false RED it closed open one digit further
+    # out: `\d{1,5}` refuses `not 100000 lines` while `origin/main` accepts it. The row for
+    # `not 10 lines` above pins DIGIT -> RUN; these rows pin RUN -> NO CEILING.
+    _denied_multi_digit_wide = (
+        "The note's figure, not 100000 lines, is the census immediately before #9548.",
+        "The note's figure, not 12345678 lines, is the census immediately before #9548.",
+    )
+    _wide_digit_reds = [s for s in _denied_multi_digit_wide if _refuses_before_9548(s)]
+    assert not _wide_digit_reds, (
+        "a DENIED figure of six or more digits is read as a stated reading — the digit leg "
+        "must match the figure as a TOKEN with NO NUMERIC CEILING, or the verdict keys on "
+        "the number's length and `not 100000 lines` disagrees with `not 10 lines` "
+        "(#11191 review r33, P2):\n  " + "\n  ".join(_wide_digit_reds)
+    )
+    # …and the token leg does not WEAKEN the channel: an ASSERTED figure still refuses.
+    assert _refuses_before_9548(
+        "The census immediately before #9548 returns 100000 lines."
+    ), "an asserted six-digit figure is no longer a stated reading (#11191 review r33)"
+    # F2 — a REFUTATION THE SENTENCE *REPORTS* IS NOT ONE IT MAKES. Under a negated
+    # reporting verb the phrase's clause is the verb's COMPLEMENT, so the `was wrong` after
+    # it belongs to the report: the sentence says the note does NOT refute, i.e. that the
+    # equivalence stands. Every row was ACCEPTED at `a74e34c89`, `4eaeae9134a` and
+    # `9e2ccb589`, and `origin/main` REFUSES rows 1-3 (it has two exemptions — a bare
+    # `047c91f7a` substring test, then a `not` BEFORE the phrase — and rows 1-3 trip neither).
+    # ⛔ ROW 4 GOES ONE STEP FURTHER THAN `origin/main`, deliberately and by measurement:
+    # main ACCEPTS it only because its `\bnot\b[^.]{0,60}?before` window is a crude proxy
+    # for "a denial near the phrase" and `does not say` sits inside it. The sentence reports
+    # the absence of a refutation exactly as `never says` does, so refusing it is the same
+    # CLASS; leaving it admitted keeps a one-word paraphrase of the defect open.
+    _reported_refutation = (
+        "The note never says the tree immediately before #9548 was wrong.",
+        "The row never records that the tree immediately before #9548 was false.",
+        "Nothing indicates the tree immediately before #9548 was wrong.",
+        "The note does not say the tree immediately before #9548 was wrong.",  # past main
+        # ⛔ THE CONTRACTION FAMILY (#11191 review r33-R3, P2 — MEASURED inert leg). The
+        # first cut listed `n't` inside a `\b(?:…|n't)\b` alternation, which CANNOT match:
+        # a word boundary cannot sit between `n` and `'` inside a contraction, so all three
+        # of these PASSED at every head while their `does not say` twin was refused.
+        "The note doesn't say the tree immediately before #9548 was wrong.",
+        "It isn't said anywhere that the tree immediately before #9548 was wrong.",
+    )
+    _reported_passed = [s for s in _reported_refutation if not _refuses_before_9548(s)]
+    assert not _reported_passed, (
+        "a sentence that only REPORTS the absence of a refutation is admitted — the "
+        "`_REFUTED_AFTER` arm buys the equivalence back with a refutation the sentence "
+        "attributes to a note instead of making itself, and no other arm reds it "
+        "(#11191 review b-F2, P1):\n  " + "\n  ".join(_reported_passed)
+    )
+    # …and the veto is not a blanket ban on reporting verbs: a POSITIVE frame makes the
+    # refutation the sentence's own, so the exemption has to survive. Without this row the
+    # veto could be satisfied by refusing every `note says …` sentence — the false-RED
+    # direction, which is the way this file's pins get deleted.
+    _asserted_refutation = (
+        "The note says the tree immediately before #9548 was wrong.",
+        "The note records that the tree immediately before #9548 was false.",
+        "The claim that `ff6379eb2` is the tree before #9548 is false.",
+        # ⛔ A DISTRACTOR NEGATOR MUST NOT VETO A POSITIVE FRAME (#11191 review r33-R3, P1 —
+        # MEASURED NEW FALSE RED, 8/8 rows, all ACCEPTED pre-patch and REFUSED by the first
+        # cut). The permissive gap let ANY negator within 40 characters negate the verb, so
+        # every one of these reddened a truthful sentence — the exact false-RED class this
+        # pin set exists for. Each row carries a DIFFERENT construction, because one spelling
+        # would leave the other seven open (the mistake the first cut made in reverse).
+        "No doubt the note says the tree immediately before #9548 was wrong.",
+        "Nobody denies that the note says the tree immediately before #9548 was wrong.",
+        "None of this changes that the note says the tree immediately before #9548 was wrong.",
+        "Not only does the note say the tree immediately before #9548 was wrong.",
+        "It is not only the note that says the tree immediately before #9548 was wrong.",
+        "There is no question that the note says the tree immediately before #9548 was wrong.",
+        "No one would dispute that the note records the tree immediately before #9548 was false.",
+        # ⛔ …AND A SENTENCE THAT NAMES THE TRUE TREE IS A CORRECTION (#11191 review r33-R3,
+        # P1 — MEASURED NEW FALSE RED, 6/6 rows, a REGRESSION against `origin/main`): the veto
+        # is occurrence-scoped, so a REPORTING clause in the second half vetoed a sentence
+        # whose first half is this file's own textbook correction.
+        "The tree immediately before #9548 is `047c91f7a`; the note never says the tree "
+        "immediately before #9548 was wrong.",
+    )
+    _asserted_reds = [s for s in _asserted_refutation if _refuses_before_9548(s)]
+    assert not _asserted_reds, (
+        "the reported-refutation veto refuses a sentence that MAKES the refutation "
+        "itself — the veto must be keyed on the negation of a REPORTING frame, not on "
+        "reporting verbs or on `not` alone (#11191 review b-F2, P1):\n  "
+        + "\n  ".join(_asserted_reds)
+    )
+    # ⛔ DISCLOSURE, NOT A PIN — a truthful DENIAL OF THE DEFECT that carries a negated
+    # reporting verb is REFUSED, and this change is not why: "The note does not say the tree
+    # immediately before #9548 is `ff6379eb2`." is refused at the PRE-PATCH head
+    # `a74e34c89` (measured; the veto cannot reach it — `_REFUTED_AFTER` needs a refutation
+    # term after the phrase and this sentence has none) while `origin/main` ACCEPTS it. That
+    # is a false RED of the predicate, one class over from this change, and it is NOT closed
+    # here: closing it needs the same arm-by-arm measurement this block demanded, and an
+    # unmeasured regex into a 6,500-line predicate is how the next round gets a truth-RED.
+    # Recorded so the next fixer starts from the reproduction rather than from the guess.
+    #
+    # ⛔ …AND THE VETO'S OWN RESIDUALS ARE DISCLOSED TOO (#11191 review r33-R3, P3 —
+    # MEASURED). These spellings still PASS at the patched head. They are not closed here
+    # because each needs its own control pair, and a wider regex added to satisfy a review
+    # without one is how this predicate got its previous two truth-REDs:
+    #   never mentions that … / There is no statement that … / Nowhere does the note say … /
+    #   fails to say … / never spells out … / does not say anything about … being wrong /
+    #   is silent on whether … / \`ff6379eb2\` — the tree immediately before #9548 — was wrong
+    # (the last is the em-dash aside: `_CLAUSE_DELIM` does not split it, so the gap bound
+    # rejects it rather than the negator failing to bind).
+    # ⛔ THE TRUE-TREE WIDENING IS THE OTHER PRICE, and it is the sharper one: a sentence
+    # that appends `047c91f7a` ANYWHERE is now admitted even when it also reports an absence
+    # of refutation. That is `origin/main`'s behaviour (its first exemption is a bare
+    # substring test), so it is not a regression — but it is a widening, it is not free, and
+    # a future round that wants it closed must close it in BOTH places or the heads disagree.
+    #
     # ⛔⛔ THE r12 FINDINGS — seven, measured on `4e069ee2c` before they were fixed. F1 and
     # F2 are FAIL-OPENS (and F1 left the pin GREEN on the real §A8 cell with the claim
     # restored); F3 and F4 are FALSE REDs `origin/main` accepts; F5 is the alibi class in a
