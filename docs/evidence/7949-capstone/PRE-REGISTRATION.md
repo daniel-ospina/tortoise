@@ -243,7 +243,7 @@ truncation budgets `TORTOISE_EXTRACTOR_MAX_TOKENS` (`_stage_cap`, read at call t
 shipped 1500/16000 stage defaults) and `TORTOISE_EXTRACTOR_ESCALATION_TOKENS` (the
 length-truncation retry budget), `TORTOISE_REFERENTIALITY` (the S2.2 mention arm, reached
 through `referentiality.ENV_FLAG`), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
-`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split) — all pinned **unset**. The set
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`). The last two are the cycle-7 review finding: both sit on the acceptance path and were in no pin, no ledger row and no closure. The set
 is CLOSED over the **measurement modules the path renders with** — and which modules those
 are is DERIVED rather than enumerated here, because a hand-kept list in this paragraph is the one
 that rots: the derivation sentence below is the record — and `tests/test_7949_c2_door.py` derives

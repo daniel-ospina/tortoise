@@ -76,6 +76,16 @@ EXTRACTOR = REPO / "tortoise/extractor_v2.py"
 VALUE_GATE = REPO / "tortoise/value_gate.py"
 SEAM = REPO / "tortoise/s2_decision_seam.py"
 REFERENTIALITY = REPO / "tortoise/referentiality.py"
+#: Round 7 of the #10983 review: the closure was still short of the DOOR. Both of
+#: these are consulted on the capture path and were in no ledger, no pin and no
+#: closure — `context_enrich` via `sdk.capture_session(enrich_fn=_capture_enriched_
+#: texts)` (it REWRITES the text each turn embeds) and `model_adapters` via
+#: `sdk._extract_session_v2` -> `_model_adapter` (it decides the request's
+#: `response_format`). A new read inserted in `context_enrich.enrich_enabled()`
+#: left the closure pin GREEN, which is the same claim-outruns-its-derivation
+#: defect the whole PR exists to close, in its third round.
+CONTEXT_ENRICH = REPO / "tortoise/context_enrich.py"
+MODEL_ADAPTERS = REPO / "tortoise/model_adapters.py"
 PROBE = REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
 REGISTRATION = REPO / "docs/evidence/7949-capstone/preregistration.json"
 
@@ -889,6 +899,24 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     #: pinning them would pin the target rather than the seam.
     acknowledged_inputs = {"TORTOISE_DB_URI", "TORTOISE_API_URL"}
 
+    #: Reads on the derived modules that are NOT measurement switches, each with
+    #: the reason. Adding two modules (cycle 7) made their WHOLE-module reads
+    #: visible, including ones no capture measurement depends on; declaring them
+    #: here is the price of a mechanical closure, and the reason is stated rather
+    #: than assumed.
+    acknowledged_not_a_measurement_seam = {
+        "TORTOISE_EXTRACTOR_PROVIDER": (
+            "DELIBERATELY OBSERVED, not forced: it chooses among routes the box "
+            "already has a key for and the receipt reports the result as "
+            "`extraction_mode` (llm:<route>), which the run records — pinning it "
+            "would pin the route instead of reporting it (probes/capstone_measure.py)"),
+        "TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN": (
+            "operational retry timing between providers; it cannot select or "
+            "rewrite what is extracted"),
+        "TORTOISE_ASK_MODEL": "the ASK feature's model, not the extraction path",
+        "TORTOISE_ASK_PROVIDER": "the ASK feature's provider, not the extraction path",
+    }
+
     #: The MEASUREMENT modules the path renders with. `referentiality.py` is
     #: here because `extractor_v2` reaches it one call down
     #: (`_referentiality.enabled()` on the S2 prompt/mention path), so a
@@ -904,7 +932,21 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     #: input list (#10983 review, cycle 5), and why an unclassified read added to
     #: `value_gate.py` was invisible to the previous two-module form (measured,
     #: cycle 6).
-    path_modules = (EXTRACTOR, REFERENTIALITY, VALUE_GATE, SEAM)
+    #:
+    #: ⛔ `CONTEXT_ENRICH` and `MODEL_ADAPTERS` were added in cycle 7, after the
+    #: SAME defect recurred a third time: `sdk.capture_session` hands the worker
+    #: `enrich_fn=_capture_enriched_texts`, which gates on
+    #: `context_enrich.enrich_enabled()` (ON = "the per-turn rewrite the owner
+    #: approved on #8932", OFF = "byte-identical to pre-#8488") — it changes the
+    #: text that gets embedded — and `sdk._extract_session_v2` builds its model
+    #: through `model_adapters`, whose `TORTOISE_JSON_MODE` is default-ON and read
+    #: PER CALL, flipping the request's `response_format`. MEASURED: a new
+    #: `os.environ.get(...)` inserted in `enrich_enabled()` left this pin green.
+    #: A hand-enumerated module list is not a closure; when a module is
+    #: deliberately out of scope, NAME it here with the switch it reads and the
+    #: reason, rather than leaving its reads invisible.
+    path_modules = (EXTRACTOR, REFERENTIALITY, VALUE_GATE, SEAM,
+                    CONTEXT_ENRICH, MODEL_ADAPTERS)
 
     read: set[str] = set()
     for module in path_modules:
@@ -917,7 +959,8 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     accounted = ({env for env, _w, _d, _s in probe.SEAM_LEDGER}
                  | set(probe.DOOR_PINNED_OFF)
                  | {env for env, _v in probe.DOOR_PINNED_ON}
-                 | acknowledged_inputs)
+                 | acknowledged_inputs
+                 | set(acknowledged_not_a_measurement_seam))
     unaccounted = sorted(read - accounted)
     assert not unaccounted, (
         f"{[m.name for m in path_modules]} read {unaccounted} and the door "
