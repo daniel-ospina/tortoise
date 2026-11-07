@@ -409,6 +409,21 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
         # label-based gate let two shrink edits through, both measured CLEAN —
         # renaming `| §7 |` to `| 7 |` and blanking its cell, and deleting the `§7`
         # row outright. `§7` is now in PLAN_SEAMS so its existence is pinned too.
+        #
+        # The row must be the WIDTH the parser can read, exactly as a §1 row must be
+        # 7 cells: a crosswalk row one cell SHORT keeps `row[2]` pointing at the NOTE,
+        # and a note that names surfaces ("… **SF13 is the row a capstone must not
+        # skip**") then satisfies the arm below. Measured on the live map: deleting
+        # §6.4's surface cell outright — not blanking it, deleting it — graded CLEAN,
+        # exit 0, on the REQUIRED `docs` job, and the same deletion on §7 did too.
+        # Blanking was covered (the case above); deleting was the hole beside it.
+        if len(row) != 4:
+            raise Refusal(
+                f"{label} crosswalk row has {len(row)} column(s); the table needs "
+                f"exactly 4 (plan § · seam / interface · surface(s) · note) — a DELETED "
+                f"cell shifts the note into the surface column, where its own words "
+                f"satisfy the arm below"
+            )
         surface_cell = row[2] if len(row) > 2 else ""
         if not surface_tokens(surface_cell):
             violations.append(f"R5 {label}: names no surface")
@@ -506,6 +521,33 @@ def _rewrite_crosswalk_row(text: str, seam: str, value: str) -> str:
     for line in text.splitlines(keepends=True):
         if line.startswith(f"| {seam}"):
             line = _rewrite_cell(line, 2, value, seam)
+            hit = True
+        out.append(line)
+    if not hit:
+        raise AssertionError(f"self-test mutation target {seam!r} not found")
+    return "".join(out)
+
+
+def _delete_crosswalk_cell(text: str, seam: str, column: int) -> str:
+    """Delete one cell from one crosswalk row — the width primitive.
+
+    Blanking a cell keeps the table's width; DELETING it does not, and the row that
+    loses its `surface(s)` cell is graded by whatever moved into that position. This
+    is the edit the width arm exists for, so the mutation must perform it the way an
+    editor would (`| a | b | c |` → `| a | c |`), not as an empty cell.
+    """
+    out: list[str] = []
+    hit = False
+    for line in text.splitlines(keepends=True):
+        if not hit and line.startswith(f"| {seam}"):
+            row = cells(line)
+            if column >= len(row):
+                raise AssertionError(
+                    f"self-test mutation target {seam!r} has {len(row)} cell(s); "
+                    f"column {column} does not exist"
+                )
+            row.pop(column)
+            line = "| " + " | ".join(row) + " |\n"
             hit = True
         out.append(line)
     if not hit:
@@ -653,14 +695,27 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         "violation",
     ),
     (
+        # The DELETE, not the blank: an editor that removes the `surface(s)` cell
+        # leaves a 3-cell row whose note lands in the surface column, so the arm
+        # below reads §6.4's own "**SF13 is the row a capstone must not skip**" and
+        # scores the row against a surface it never assigned. Measured before the
+        # width arm existed: CLEAN, exit 0, on the REQUIRED `docs` job — the same
+        # false PASS class as an 8-cell §1 row, one edit over from the blank case.
+        "delete the §6.4 surface cell outright (a crosswalk row one column short)",
+        lambda t: _delete_crosswalk_cell(t, "§6.4", 2),
+        "refusal",
+    ),
+    (
         # The width rule must be covered by the arm that is supposed to catch a
         # quietly weakened rule. Without this case, reverting `!= 7` to the old
         # `< 7` floor left --self-test green at 10/10 — the false PASS this rule
         # closes, re-opened with the REQUIRED `docs` job fully green. Since
         # MIN_SELF_TEST_MUTATIONS exists, re-opening it costs TWO edits: at the
-        # shipped floor, deleting this case alone is red ("12 mutation(s)
-        # registered, at least 13 required", exit 1) before the relaxed rule is
-        # ever exercised.
+        # shipped floor, deleting this case alone is red — `self-test: N mutation(s)
+        # registered, at least <floor> required`, exit 1 — before the relaxed rule is
+        # ever exercised. (The counts are deliberately not written out here: they
+        # drifts every time a case is added, and this comment quoted a population
+        # three cases out of date.)
         "splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns)",
         lambda t: _rewrite_row(t, "SF2", 5, "live-docker | unit"),
         "refusal",
@@ -699,7 +754,7 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 #: exit 0 (measured), which is the false PASS this arm exists to prevent. The
 #: map's own residual covers a THREE-place edit (row + pin + case together), so
 #: the shrink that is two places short of that must still be loud.
-MIN_SELF_TEST_MUTATIONS = 15
+MIN_SELF_TEST_MUTATIONS = 16
 
 
 def self_test(text: str) -> int:
