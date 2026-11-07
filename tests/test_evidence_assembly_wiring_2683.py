@@ -274,15 +274,21 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
         seeded_sdk, q, ks=(5,), top_k=10, pool_size=60,
         evidence_assembly=True)
 
-    # the arm marker + the census the run CHECKPOINT records (D2: ON only)
+    # the arm marker + the census (D2: ON only)
     assert on["evidence_assembly"] is True
     stats = on["evidence_assembly_stats"]
-    # THE WHOLE CENSUS, not a sample of it: this dict IS what the run records
-    # about the arm (`run.py:2897` writes it wholesale into the checkpoint), so
-    # a key that grows or disappears is a behaviour change the lane would
-    # otherwise ship unseen. ⛔ It is NOT in the published report: the Layer-1
-    # projection (`run.py:6145`) has no `evidence_assembly_stats`, so the
-    # artifact a lane reads cannot show the arm state either — filed as #11467.
+    # THE WHOLE CENSUS, not a sample of it: this dict IS the arm's record in the
+    # ONLY place the run has one — `retrieve_for_question`'s own return
+    # (`retrieve.py:3324-3326`). ⛔ MEASURED, so the next reader does not assume
+    # it travels: it does NOT reach the run's artifacts. `run.py` contains no
+    # `evidence_assembly` reference at all (`rg -n evidence_assembly
+    # tools/longmem_eval/run.py` → 0 hits), so the outcome whitelist that mirrors
+    # every sibling arm (`run.py:5348` temporal_leg_stats, `:5392`
+    # coverage_loop_stats, `:5403` session_reinjection_stats) omits this one, and
+    # the Layer-1 projection (`run.py:6145`+) omits it too. The arm state is
+    # recorded NOWHERE the eval lane can read it — both gaps are #11467.
+    # Hence this pin is the only guard the census has: a key that grows or
+    # disappears is otherwise shipped unseen.
     assert set(stats) == {
         "on", "applied", "tr_excluded", "pool_items", "package_items",
         "packages", "collapsed_duplicates", "verbatim_refs_kept",
@@ -377,10 +383,12 @@ def test_the_off_switch_leaves_the_old_path_unchanged(seeded_sdk, monkeypatch):
     assert _ids(garbage["context_points"]) == _ids(
         explicit_off["context_points"])
 
-    # …and the AMBIENT env var — the ONLY route the eval lane has today (no
-    # `evidence_assembly=` at `run.py`'s call site, no fingerprint entry, no
-    # report projection: #11467; the scoping doc records the same at
-    # `docs/scoping/2026-09-09-evidence-assembly-wave.md:188`) — DOES arm it.
+    # …and the AMBIENT env var — the ONLY route the eval lane has today: no
+    # `evidence_assembly=` at `run.py`'s call site, no fingerprint entry (the
+    # scoping doc records that one at
+    # `docs/scoping/2026-09-09-evidence-assembly-wave.md:188`), and no run
+    # artifact that records the arm (#11467: neither the checkpoint nor the
+    # Layer-1 report) — DOES arm it.
     monkeypatch.setenv("TORTOISE_LME_EVIDENCE_ASSEMBLY", "1")
     armed = _r.retrieve_for_question(
         seeded_sdk, q, ks=(5,), top_k=10, pool_size=60)
