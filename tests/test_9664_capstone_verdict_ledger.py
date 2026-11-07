@@ -382,8 +382,12 @@ def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
         "cmd:sh tests/*/../../*",
         "cmd:sh docs/[a-z]*/../../*",
         "cmd:sh docs/evidence/*/../../../*",
-        # One NON-runner word plus a real in-tree path: only the `RUNNERS` gate
-        # refuses this, so it is the pin on that gate (without it, exit 0).
+        # ⚠️ NOT a pin on the `RUNNERS` gate, even though it looks like one: this
+        # row cites the `cmd:` entry ALONE, so `validate` refuses it for the
+        # separate reason that a `verified` row needs a held artifact — that refusal
+        # is present whether or not the shape gate runs. The gate's own pin is
+        # `test_a_prose_cmd_is_refused_beside_a_held_artifact` below, which is the
+        # configuration of the false pass this branch exists to close.
         "cmd:see tools/capstone_ledger.py",
     ],
 )
@@ -402,6 +406,25 @@ def test_a_cmd_entry_cannot_alone_satisfy_verified(tmp_path, command):
 
 def test_a_cmd_entry_is_accepted_alongside_a_held_artifact(tmp_path):
     """The record may keep the command it ran; the HELD artifact is what counts."""
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:bash -c 'verified manually by reading pyproject.toml'",
+                    ],
+                )
+            ]
+        ),
+    )
+    # ⛔ The `-c` VALUE is a SCRIPT, not a citation: `bash -c '<body>'` is the only
+    # way to record a script, so grading its body as an artifact path would be a
+    # false block on a real record. It confers nothing either — the held artifact
+    # carries the verdict — so this must be CLEAN, not INVALID.
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
 
 
 @pytest.mark.parametrize(
@@ -893,18 +916,92 @@ def test_committed_ledger_keeps_each_criterion_cell(cid):
     )
 
 
-# --- Ported from #11476 (main) so its B-arm and forgery pins are not lost in
-# the rebase. These are additive: each pins an arm this branch did not have.
+def test_a_prose_cmd_is_refused_beside_a_held_artifact(tmp_path):
+    """⛔ THE PIN ON THE `cmd:` SHAPE GATE — the false pass this PR exists to close.
+
+    This is deliberately NOT a `cmd:`-only row. A `cmd:`-only row is refused by
+    `validate`'s held-artifact rule whether or not the shape gate runs, so it pins
+    nothing here (measured: neutralising the gate in place left such a test green).
+
+    The real configuration is a row that DOES hold a tracked artifact — and
+    `docs/evidence/9664-capstone/README.md` is available to every row, so it is the
+    cheapest way to manufacture a green ledger — plus a `cmd:` whose text says the
+    work was not done. Before the gate this validated at `verified: 22`,
+    `uncovered: 0`, exit 0. Mutation-verified: with the `RUNNERS` check removed this
+    test fails and the row is CLEAN.
+    """
+    for prose in [
+        "cmd:NOT RUN - see tools/capstone_ledger.py for the intended command",
+        "cmd:verified manually by reading pyproject.toml",
+        "cmd:see tools/capstone_ledger.py",
+    ]:
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, prose])]))
+        assert proc.returncode == cl.EXIT_INVALID, (prose, proc.stdout + proc.stderr)
+        assert "must START with a program that runs something" in proc.stderr, proc.stderr
 
 
-def test_a_ledger_without_criteria_expected_is_invalid(tmp_path):
-    """OPTIONAL was no pin: a 9-row ledger omitting the key exits 0 and prints
-    "UNCOVERED LIST: empty" — the denominator computed from the record itself."""
+def test_a_cmd_target_that_is_not_tracked_is_refused(monkeypatch):
+    """The TRACKED rule applies to a `cmd:` target, not only to a bare path entry.
+
+    Both arms make the same claim — "an artifact a reader's clone holds" — so a
+    gitignored `WORKTREE-REPORT.md` must not count as a named artifact through the
+    command arm while the path arm refuses it. Asserted on the wiring: `_is_tracked`
+    is monkeypatched, so this needs no gitignored file on disk.
+    """
+    monkeypatch.setattr(cl, "_is_tracked", lambda resolved, root: False)
+    ok, why = cl._evidence_is_real(f"cmd:uv run python {REAL_EVIDENCE}", REPO_ROOT)
+    assert ok is False, why
+    assert "not TRACKED by git" in why, why
+
+
+def test_commit_state_is_unmeasurable_when_git_cannot_be_asked(monkeypatch):
+    """No `git` on PATH is NOT "this clone is shallow" — they must not be folded.
+
+    Folding them was a measured fail-open: with git unreachable, a forged
+    `measured_at.sha` rendered as provenance with no diagnostic. Mutation-verified:
+    changing this branch's `unmeasurable` back to `unprovable` reddens this test.
+    """
+
+    def no_git(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(cl.subprocess, "run", no_git)
+    assert cl._commit_state("0" * 40) == "unmeasurable"
+
+
+def test_commit_state_is_unmeasurable_when_the_shallow_probe_also_fails(monkeypatch):
+    """A failing shallow PROBE is also "could not be asked", not "shallow".
+
+    Mutation-verified: changing that branch's `unmeasurable` to `unprovable`
+    reddens exactly this test (ported from #11474's mutation-proven pair).
+    """
+
+    class _Failed:
+        returncode = 128
+        stdout = ""
+
+    monkeypatch.setattr(cl.subprocess, "run", lambda *a, **k: _Failed())
+    assert cl._commit_state("0" * 40) == "unmeasurable"
+
+
+def test_an_unmeasurable_sha_is_a_defect(monkeypatch):
+    """`validate` must REFUSE `unmeasurable` — the state is worthless unhandled.
+
+    Mutation-verified: removing the `elif state == "unmeasurable"` branch leaves
+    every other test green and lets a forged sha through as `uncovered: 0`.
+    """
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root=cl.REPO_ROOT: "unmeasurable")
     data = _ledger([_row("A")])
-    del data["criteria_expected"]
-    proc = _run_cli(tmp_path, data)
-    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "criteria_expected" in proc.stderr
+    data["measured_at"]["sha"] = "deadbeef" * 5
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(data)
+    assert "cannot be verified" in str(excinfo.value)
+
+
+# --- Ported from #11476 (main) so its B-arm and forgery pins are not lost in
+# the rebase. Every one below pins an arm this branch did NOT have before the
+# rebase (the tracked-path rule, the merge-key refusal, the reserved report
+# token, the printed-field flattening, NUL/ENAMETOOLONG handling).
 
 
 def test_an_absolute_wildcard_is_refused_not_crashed(tmp_path):
@@ -939,6 +1036,20 @@ def test_a_merge_key_is_refused_by_name(tmp_path):
         "    evidence: [" + REAL_EVIDENCE + "]\n",
         encoding="utf-8",
     )
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "check", "--ledger", str(ledger)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        check=False,
+    )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    # ⛔ The MESSAGE is the assertion, not just the exit code: without the refusal
+    # the same file is still INVALID, but as "not parseable YAML" — a different
+    # defect that happens to share a code. Mutation-verified: neutralising the merge
+    # tag check leaves the exit code at 1 and changes only this text.
+    assert "merge key" in proc.stderr, proc.stderr
+    assert "not parseable YAML" not in proc.stderr, proc.stderr
 
 
 def test_an_untracked_artifact_is_invalid(tmp_path):

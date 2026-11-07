@@ -304,6 +304,10 @@ _LEADING_ASSIGNMENT: Final = re.compile(
     r"""^[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|[^\s'"])+\s+"""
 )
 
+#: A `cd <dir>` WRAPPER segment (no `;`/flags — the compound-separator forms are not
+#: normalised, only the plain `cd X && …` this repo's own recipes use).
+_CD_SEGMENT: Final = re.compile(r"^cd\s+(\S[^;|&]*)$")
+
 #: Flags whose VALUE is a SCRIPT BODY, not an artifact path: `bash -c '<script>'`,
 #: `sh -c '<script>'`, `python -c '<code>'`, `node -e '<code>'`. The value cannot be
 #: graded as a citation — it is not a path — so the entry is a RECORD and the held
@@ -332,9 +336,9 @@ def _glob_names_a_directory(text: str, root: Path) -> bool:
 
     ⛔ A `..` AT OR AFTER THE FIRST WILDCARD is refused, because the resolvable
     prefix stops at that wildcard and the rest cannot be checked statically:
-    `docs/*/../../*` expands to 1085 files and every one is at the repo ROOT — the
-    exact vacuity above, one wildcard deep (measured: exit 0 on a one-row
-    `verified` ledger). `docs/../tests/*.py` stays legal because its `..` sits
+    `docs/*/../../*` resolves every match to the repo ROOT — the exact vacuity
+    above, one wildcard deep (measured: exit 0 on a one-row `verified` ledger).
+    `docs/../tests/*.py` stays legal because its `..` sits
     inside the prefix that IS resolved.
     """
     parts = [part for part in text.split("/") if part not in ("", ".")]
@@ -353,13 +357,22 @@ def _glob_names_a_directory(text: str, root: Path) -> bool:
     return base.is_relative_to(root) and base != root and base.is_dir()
 
 
-def _names_artifact(token: str, root: Path) -> tuple[bool, str]:
-    """Does this ONE token name a file of the tree? A bare path, a pytest node-id,
-    or a glob over a named directory.
+def _names_artifact(token: str, cwd: Path, root: Path) -> tuple[bool, str]:
+    """Does this ONE token name a TRACKED file of the tree? A bare path, a pytest
+    node-id, or a glob over a named directory.
 
     A pytest node-id names the file MORE precisely than a bare path, so
     `tests/x.py::TestY::test_z` counts as naming `tests/x.py`; refusing it would be
     a false block on the most precise citation shape there is.
+
+    `cwd` is the directory the command RAN in (`cd tools && …`): a relative target
+    is resolved there, then required to stay inside `root`. Resolving it at `root`
+    instead refused exactly the paths that make a `cd` worth writing.
+
+    ⛔ The TRACKED rule applies here as well as to a bare path entry — the two are
+    the same claim ("an artifact a reader's clone holds"), and checking only
+    `is_file()` on a `cmd:` target accepted a gitignored `WORKTREE-REPORT.md`
+    through the command arm while refusing it through the path arm.
     """
     text = token.split("::", 1)[0]
     if not text:
@@ -377,14 +390,23 @@ def _names_artifact(token: str, root: Path) -> tuple[bool, str]:
                     "it names everything and therefore no artifact (a bare `*`/`*.yml`/"
                     "`./*` is not a citation)"
                 )
-            for match in root.glob(text):
+            for match in cwd.glob(text):
                 resolved_match = match.resolve()
                 if resolved_match.is_file() and resolved_match.is_relative_to(root):
+                    if not _is_tracked(resolved_match, root):
+                        return False, (
+                            f"the file {text!r} matches is not TRACKED by git, so a "
+                            "reader's clone does not have it"
+                        )
                     return True, ""
             return False, f"no file of this tree matches the glob {text!r}"
         candidate = Path(text)
-        resolved = (candidate if candidate.is_absolute() else root / text).resolve()
+        resolved = (candidate if candidate.is_absolute() else cwd / text).resolve()
         if resolved.is_file() and resolved.is_relative_to(root):
+            if not _is_tracked(resolved, root):
+                return False, (
+                    f"{text!r} is not TRACKED by git, so a reader's clone does not have it"
+                )
             return True, ""
         return False, f"{text!r} is not a file in this tree"
     except (OSError, ValueError, NotImplementedError) as exc:
@@ -498,7 +520,7 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
         raw = entry[len(_CMD_PREFIX) :].strip()
         if not raw:
             return False, "`cmd:` evidence names no command"
-        command = _command_body(raw)
+        command, cmd_cwd = _command_body(raw, root)
         if not command:
             return False, f"`cmd:` evidence names no command: {raw!r}"
         try:
@@ -546,7 +568,7 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
             # that merely NAMES a file. A command's target is its argument, so the
             # first thing in argument position either IS the artifact or the entry
             # is a claim.
-            ok, why = _names_artifact(token, root)
+            ok, why = _names_artifact(token, cmd_cwd, root)
             if ok:
                 return True, ""
             return False, (
@@ -591,8 +613,9 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     return True, ""
 
 
-def _command_body(raw: str) -> str:
-    """The part of a `cmd:` entry that has to be a RUNNABLE command.
+def _command_body(raw: str, root: Path) -> tuple[str, Path]:
+    """The part of a `cmd:` entry that has to be a RUNNABLE command, and the
+    directory it runs in.
 
     A record is written by whoever ran the thing, quoting what they ran, so the
     entry routinely carries the SHELL WRAPPER around the command. Each of these
@@ -608,6 +631,14 @@ def _command_body(raw: str) -> str:
     ⛔ Only the WRAPPER is removed. The shape test still runs on what is left,
     which is what keeps `cmd:NOT RUN - see tools/capstone_ledger.py` refused: no
     normalisation below can turn a sentence into a program.
+
+    ⛔ The SECOND return value is why `cd` is normalisation and not a false block:
+    dropping the `cd` and then resolving the target against the repo root refuses
+    every path that is relative TO THE `cd` TARGET — which is the only reason
+    anyone writes it. Measured: `cd tools && uv run pytest ../tests/x.py -q` was
+    refused while `cd tools && uv run pytest tests/x.py` was accepted, i.e. the
+    accepted form names a path that does not exist at that cwd. The effective
+    directory is returned so the artifact check resolves where the command ran.
     """
     text = raw.strip()
     # A quoted command is written the way it was written down; one matching pair
@@ -622,13 +653,17 @@ def _command_body(raw: str) -> str:
     # `cd tools && uv run …`; scanning for the first RUNNER-shaped segment accepts
     # both and still refuses prose, which never contains one at all.
     segments = [segment.strip() for segment in text.split("&&")]
+    # The directory the graded command runs in: `cd X && …` moves it, and a later
+    # `cd` moves it again. Resolved against `root` only, so a `cd ../../..` cannot
+    # walk the check out of the tree.
+    cwd = root
     for segment in segments:
         if not segment:
             continue
         # Drop any number of leading `NAME=value` assignments ON THE STRING: they
         # set the environment for the command, they are not the command. Done with
         # a regex rather than by popping tokens, because a re-joined token list
-        # loses the quoting shaLL needs (`bash -c 'a b'` came back as `bash -c a b`)
+        # loses the quoting shell needs (`bash -c 'a b'` came back as `bash -c a b`)
         # and then the outer `shlex.split` sees a different command than the one
         # that was recorded.
         body = segment
@@ -638,6 +673,19 @@ def _command_body(raw: str) -> str:
                 break
             body = stripped.lstrip()
         if not body:
+            continue
+        # `cd <dir>` is a WRAPPER, not the command: consumed, and it moves the
+        # directory the following segment is graded in.
+        cd = _CD_SEGMENT.match(body)
+        if cd:
+            target = cd.group(1).strip().strip("'\"")
+            if target and not target.startswith("-"):
+                try:
+                    moved = (root / target).resolve()
+                except (OSError, ValueError):
+                    moved = None
+                if moved is not None and moved.is_relative_to(root):
+                    cwd = moved
             continue
         try:
             tokens = shlex.split(body)
@@ -658,13 +706,13 @@ def _command_body(raw: str) -> str:
             except ValueError:
                 continue
         if tokens and Path(tokens[0]).name in RUNNERS:
-            return body
+            return body, cwd
     # No segment is runner-shaped. Return the first non-empty one so the error
     # message quotes what was actually refused rather than a fragment.
     for segment in segments:
         if segment:
-            return _LEADING_ASSIGNMENT.sub("", segment).lstrip() or segment
-    return ""
+            return _LEADING_ASSIGNMENT.sub("", segment).lstrip() or segment, root
+    return "", root
 
 
 def _short(text: str, limit: int = 120) -> str:
