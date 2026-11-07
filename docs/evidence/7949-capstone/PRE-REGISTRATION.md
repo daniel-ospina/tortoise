@@ -662,7 +662,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:10397, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:11098, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -754,7 +754,7 @@ stops being true is visible as a log that does not carry `UNPREREGISTERED`.
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:10397-10419` (`_collect_classify_items`, the collector's item set), `:11849` and `:11998` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11098-11120` (`_collect_classify_items`, the collector's item set), `:12908` and `:13057` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -1000,8 +1000,8 @@ place a machine reads it.
   be either observed or witnessed **idle** with a basis. The conditional set is read from this record
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
-  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:10397-10419`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:11849`, `:11998`).
+  candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:12908`, `:13057`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -1054,9 +1054,9 @@ place a machine reads it.
 
 - **Original value (as this record was last cut):** `_collect_classify_items` at
   `tortoise/extractor_v2.py:9987`, its extent `:9987-10009`, the two `if items:` gates at `:10530`
-  and `:11724`, and the two fail-open `except` arms at `:10543`/`:10673`.
+  and `:12779`, and the two fail-open `except` arms at `:10543`/`:10673`.
 - **New value:** the same symbols at `:10020`, `:10169-10191`, `:10736`/`:10868` and
-  `:10749`/`:11973`.
+  `:10749`/`:13032`.
 - **Why:** these are HEAD-relative cites, and `#10360`'s two changes together insert **167** lines
   into `extractor_v2.py` above every one of them — `21` in `_UNIT_EQUIV` and `12` in `_UNIT_WORDS`
   from the duration-family widen, then `134` more from the fusion-time composition block
@@ -1069,7 +1069,7 @@ place a machine reads it.
   offset is how this cite block went stale the first time. The numbers themselves were verified by
   CONTENT at the merged head (`_collect_classify_items` at `:10169`, its `return items` at `:10191`,
   the two `if items:` gates at `:10736`/`:10868`, the two fail-open `except` arms at
-  `:10749`/`:11973`), never by adding an offset.
+  `:10749`/`:13032`), never by adding an offset.
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
@@ -1078,9 +1078,9 @@ place a machine reads it.
 
 - **Original value (as §10.7 left it):** `_collect_classify_items` at
   `tortoise/extractor_v2.py:10193`, its extent `:10193-10215`, the two `if items:` gates at
-  `:10736`/`:10868`, and the two fail-open `except` arms at `:10749`/`:11973`.
-- **New value:** the same symbols at `:10397`, `:10397-10419`, `:11849`/`:11998` and
-  `:11862`/`:12009`.
+  `:10736`/`:10868`, and the two fail-open `except` arms at `:10749`/`:13032`.
+- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
+  `:12921`/`:13068`.
 - **Why:** `#10997` inserts **36** lines into `extractor_v2.py` above every one of them — the
   hold/population comment in `execute_embed`, the drain's reclaim sweep before it reads
   `pending()`, and the committed-vs-attempted census on the return. The symbols are unchanged.
@@ -1101,9 +1101,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:10397-10419`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:11849` (the S2 pass) and `:11998` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:12908` (the S2 pass) and `:13057` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -1147,7 +1147,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:11862`, `classify(S2) failed` / `:12009`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:12921`, `classify(S2) failed` / `:13068`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
