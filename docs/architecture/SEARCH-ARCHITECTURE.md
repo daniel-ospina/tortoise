@@ -18,7 +18,7 @@ aboutObjects: tortoise
 2. **The text index stays in FalkorDB for now.** Moving it to a Postgres ranker is a *measured*
    regression (§6.2), so it is deferred behind a measurement, not adopted on a hunch.
 3. **Traversal, writes and EP stay in FalkorDB.** The Cypher surface (~1,900 statements) is untouched.
-4. **The graph becomes a bounded window before launch**, sized by the tier's cost budget — §7.
+4. **The graph stays complete for private-beta and becomes a bounded window only after M2 measures it**, sized by the tier's cost budget — §1.5, §7. The cost during private-beta is **knowingly above** the 30 % target (§8).
 
 **The product goal:** *"a high quality search system with manageable cost, speed matters but is not the
 top criterion"* (owner). Every ordering below follows that sentence.
@@ -42,6 +42,39 @@ different tenants, taken from a total the vendor's own field list shows is incom
 readout is blind to the vector index, which lives in a separate module). A published FalkorDB breakdown
 puts non-index structure at **41 %**. **The range is 17–44 % and it is unmeasured; it is not an input to
 anything here.**
+
+---
+
+## 1.5 The phases, named — because "beta" was doing two jobs
+
+The owner's two constraints are both in force and they sequence differently:
+
+> *"we won't launch until all this is done"* · *"then we'll measure and optimise after beta launch"*
+
+So the phases are separate, and each carries its own graph state:
+
+| phase | who is using it | graph state | what is decided there |
+|---|---|---|---|
+| **pre-release** (now → private-beta invite) | nobody external; dogfood + internal | **complete** | build the architecture and the guardrails; measure M1, M4 |
+| **private-beta** (the upcoming release) | invited customers | **complete** | the product is live; cost per tenant is above the 30 % target and accepted as a beta-scale cost (§8). M2, M3, M5 measure here |
+| **post-measurement** | the same customers | **windowed** | the window is sized, armed and tuned **on real data**, per *"measure and optimise after beta launch"* |
+
+⛔ **What that sequencing obliges — and it is the part that is easy to get wrong:** the machinery that makes
+a windowed graph *safe* must ship **before** private-beta even though demotion is **off**. Otherwise
+"optimise after launch" becomes a risky change made in front of live customers, and they experience it as a
+quality change. **Live before private-beta:**
+
+1. the **residency marker armed** (§7) so any answer computed over an incomplete view is *labelled* — the
+   machinery exists and is currently **off** (`TORTOISE_RESIDENCY`);
+2. the **seed-materialisation path** (§7), so a walk can start from a claim that is not resident;
+3. the **rebuild headroom** measured and reserved (§7) — the #1 production risk;
+4. the **shortfall assertion** on the vector leg (§6.1), without which a beta customer can silently receive
+   fewer results than exist;
+5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — a live defect today, independent of windows.
+
+**Cost during private-beta, plainly:** a complete graph is **$8.75/tenant** against a **$5.70** budget —
+**154 % of target**. A knowing, bounded overspend on a small, known tenant count, taken because the
+alternative (arming a window nobody has measured) risks the quality we rank first.
 
 ---
 
@@ -82,6 +115,14 @@ shows a RAM-resident index returning better answers at this scale.
 | **multi-hop traversal** (2-hop epistemic minimum: claim → operator → claim) | **FalkorDB** (Cypher) | none |
 | **writes, projections, backup/restore** | **FalkorDB** (Cypher) | none |
 | **EP state and computation** | state on graph nodes; **arithmetic in Python** | none — the EP-scalar carve-out stands (§6.3) |
+
+**⚠️ Nothing about the epistemic or entity layer moves — it is already the record, and it stays there.**
+`public.point` (claims **and** operator Points, `is_operator`), `public.relation` (every edge, including
+`IMPL`/`NAND`), `public.object`, `public.subject`, `public.source`, `public.event` and `public.session`
+are all Postgres tables, and Postgres is their authority (§4). What the graph holds is a **derived copy**
+of that structure, and it keeps holding one — because the walk, the operator mediation and EP all run over
+it. **This decision moves the vectors and *nothing else***: the structural copy is retained (complete for
+private-beta, then windowed), which is exactly why the ~1,900-statement Cypher surface is untouched.
 
 **The executing surface of the vector move is small and that is why it is tractable:** two
 `db.idx.vector.queryNodes` calls (both argument orders), the vector-index creation, and the ranking code
@@ -127,7 +168,7 @@ filter** for HNSW post-filtering, where measurement elsewhere shows **0 rows of 
 selectivity**, both at stock settings and with `iterative_scan` tuned; relaxed-order scanning recovers
 0.975 at 100k vectors but **0.847 at 1M**.
 
-**Required before launch:** a **per-tenant-size filter strategy** (exact scan for small tenants using the
+**Required before private-beta (§1.5):** a **per-tenant-size filter strategy** (exact scan for small tenants using the
 record's existing `(org_id, graph_id)` index, partial index for the few large ones, partitioning above),
 and a **shortfall assertion in the read path** — a tenant holding ≥ k rows must never quietly receive
 fewer. A recall-only test passes while the product under-returns.
@@ -174,9 +215,17 @@ the ranker refuses to order on.
 
 ## 7. The window — what the graph holds once it must be bounded
 
-**Why it is on the launch path and not a later optimisation:** a *complete* graph costs **$8.75/tenant**
-against a **$5.70** budget (30 % of $19). Density cannot fix that — density divides the *fixed* lines, and
-this is a per-tenant line. **The window is what makes the pricing work.**
+**Why the window exists at all:** a *complete* graph costs **$8.75/tenant** against a **$5.70** budget
+(30 % of $19). Density cannot fix that — density divides the *fixed* lines, and this is a per-tenant line.
+**The window is what makes the pricing work at scale.**
+
+**⚠️ Why it is nonetheless NOT armed at private-beta (§1.5):** it is unmeasured. The bounded-cache
+literature measures latency and hit rate, not answer quality, and the best trace-aware policy reached ~54 %
+hit rate for 2-hop expansions — so arming it on a guess is exactly the quality risk this document ranks
+first. Private-beta therefore runs **complete** and **above the 30 % target, knowingly** (154 %, bounded by
+a small known tenant count), and the window is armed when M2 says it is safe. **The guardrails that make it
+safe ship before private-beta regardless**, so the eventual switch is a configuration change with measured
+justification, not a redesign in front of customers.
 
 **The unit of retention is a CLOSED component, not a node.** A retained hub whose neighbours were evicted
 pays for the node and still cannot complete the walk. Retaining closed neighbourhoods (1–2 hops) also
@@ -196,7 +245,7 @@ makes EP recomputation exact (§6.3).
 ⚠️ **The honesty item:** the bounded-cache literature measures **latency and hit rate, not answer
 quality**, and the best trace-aware policy reached ~54 % hit rate for 2-hop expansions. **Whether a
 windowed graph harms retrieval quality is unmeasured anywhere** — which is why §9 measures it before the
-window is trusted, and why beta runs the graph **complete**.
+window is trusted, and why **private-beta** runs the graph **complete** (§1.5).
 
 ---
 
@@ -206,7 +255,7 @@ Rates per §17.4.1 (vendor pages, **verified 2026-10-10 — re-check before a pu
 $43.75/GB-month provisioned at the 8 GB tier (**$58.33 per GB of graph data** after the 75 % rule);
 Postgres disk $0.125/GB; plan $25 + compute $60 per project.
 
-| | complete graph (beta) | windowed (launch) |
+| | complete graph (private-beta, §1.5) | windowed (post-measurement, §1.5) |
 |---|---|---|
 | graph per solo tenant | ~150 MB ⇒ **$8.75** | ~77 MB ⇒ **$4.38** |
 | Postgres storage | negligible | **dominant line** (multi-GB, still cents) |
@@ -223,7 +272,7 @@ measured (§17.4.6). The table is the storage lines and says so.
 | # | measurement | decides |
 |---|---|---|
 | **M1** | vector move: recall@10 vs exact ground truth, p95, **and the shortfall rate at 1 % / 10 % / 50 % selectivity** | whether the move ships — a recall-only test is not sufficient (§6.1) |
-| **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the launch gate for §7 — the literature has no answer |
+| **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the gate that ARMS §7 (post-measurement) — the literature has no answer |
 | **M3** | text ranking: a BM25-capable Postgres option vs the current TF-IDF, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
 | **M4** | rebuild peak memory and latency per tenant at the real window size | the 6× headroom (§7), the #1 risk |
 | **M5** | the **miss rate** per tenant | the compute/IOPS/egress tier |
