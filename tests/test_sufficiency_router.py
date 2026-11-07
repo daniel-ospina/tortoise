@@ -1157,7 +1157,7 @@ def test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it() -> 
 # `already_written` raises `TypeError: unexpected keyword argument` there, and the
 # one that reads the new field reddens on the missing `already_persisted`. So the
 # red-first evidence is the whole set, not a sample — measured by loading
-# `origin/main`'s module in place of this one: 14 failed, 212 passed (226 total).
+# `origin/main`'s module in place of this one: 15 failed, 212 passed (227 total).
 # (`settled`'s own SEMANTICS are not proved by that run — none of these tests
 # reaches it pre-fix; they are held by the `settled = not units` revert, which
 # reddens three of them.)
@@ -1399,6 +1399,29 @@ def test_planning_a_write_back_mutates_nothing_it_was_given() -> None:
 def test_an_unaddressable_span_is_refused(kwargs: dict) -> None:
     with pytest.raises(ValueError):
         SourceSpan(**kwargs)
+
+
+def test_a_summary_unit_without_a_claim_class_is_refused_not_built() -> None:
+    """The CLASS is load-bearing since the loop landed, and it was unvalidated.
+
+    ``SummaryUnit.__post_init__`` checked the span, the claim, ``derived`` and the
+    ``unit_key`` — not the class. Two consequences, both measured: a store row
+    with ``claim_class=None`` (or an unhashable one from a JSON row) made the
+    store-contradiction refusal escape as ``TypeError`` from ``sorted`` /
+    ``unhashable type`` instead of the documented ``ValueError``, and
+    ``plan_writeback`` would happily MINT a unit whose class is ``None``. Fail
+    closed at the type, next to the other invariants.
+    """
+    span = _span()
+    with pytest.raises(ValueError, match="claim class"):
+        SummaryUnit(unit_key=unit_key(span, "a claim"), claim="a claim",
+                    claim_class=None, span=span)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="claim class"):
+        SummaryUnit(unit_key=unit_key(span, "a claim"), claim="a claim",
+                    claim_class="  ", span=span)
+    # ... and the planner cannot mint one either.
+    with pytest.raises(ValueError, match="claim class"):
+        plan_writeback([_finding(claim_class=None)])
 
 
 def test_a_summary_unit_cannot_be_constructed_without_its_invariants() -> None:
