@@ -14967,8 +14967,25 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # demo session's read refuses with `record_unavailable` (503), and on an
     # unarmed one it serves `{"turns": 3, "turn_points": []}` — the exact split
     # the counter note above exists to eliminate. Destructive, so it is out of
-    # this change's scope and belongs to the graph-side purge of §9.1's
-    # residual (a), `#10017`. Blast radius: opt-in sample content that
+    # this change's scope and belongs to §9.1's residual (a) — a graph-side
+    # removal no instrument ships today. ⛔ NOT `#10017`'s purge, though these
+    # are `pointKind='event'` `:Point`s wired to the demo session: turn SHAPE
+    # is `is_episodic` + `pointKind='event'` + `is_operator=false` + a single-session
+    # `<sid>_t<digits>` id
+    # (`tools/turn_parity_census.py`), and these fail two of those four —
+    # `t.is_episodic = true` is never set (this seeder never did), and
+    # `epi_turn<N>` carries no `_t<digits>` suffix. ⚠️ The census's graph leg
+    # READS `WHERE t.is_episodic = true` (`turn_parity_census.py`), so a node
+    # without it is never even read and cannot be one of its anomalies: on the
+    # graph THIS seeder produced the purge refuses earlier still —
+    # "the graph holds ZERO is_episodic nodes — an absence is NOT established",
+    # exit 3
+    # (`tools/purge_legacy_turns.py`). If a backfill
+    # (`graph-scripts/backfill_is_episodic.py`) has stamped the flag, the node
+    # IS read and lands in the `non_decimal_suffix` anomaly class instead, so
+    # the census refuses (`outside_population` → `census-not-clean`). Either
+    # way it purges nothing (#11325).
+    # Blast radius: opt-in sample content that
     # `org.point_count` excludes — but the demo `:Session` is still returned by
     # the session reads, so the pre-existing nodes stay reachable there and in
     # search (with their counter, which is why the repair must move both).

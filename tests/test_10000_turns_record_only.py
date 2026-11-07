@@ -3196,7 +3196,9 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
     the `:Session` write exists to eliminate. So
     the note a destructive purge lane reads must name the counter as part of the
     repair instead of presenting the node delete alone as it, and it must name
-    the lane that owns the destructive step (§9.1 residual (a), `#10017`).
+    what owns the destructive step — and say that `#10017`'s purge is NOT it,
+    because that is the lane an operator reaches for first (§9.1 residual (a);
+    `#11325` makes the removal's non-existence explicit).
 
     Fails without the fix: the pre-fix note says "Deleting those three nodes is
     the graph-side repair" and mentions neither `turn_count`, `DETACH DELETE`
@@ -3276,9 +3278,11 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
         "zero rows, which the read refuses (503 on an armed deployment, "
         "`{\"turns\": 3, \"turn_points\": []}` on an unarmed one), so it "
         f"instructs a lane to re-create the defect: {instruction!r}")
-    assert "#10017" in note, (
-        "the note describes a destructive graph-side repair without naming the "
-        f"lane that owns it (§9.1 residual (a), `#10017`): {note}")
+    assert ("no instrument ships" in note
+            and "NOT `#10017`'s purge" in note), (
+        "the note describes a destructive graph-side repair without saying that "
+        "no instrument ships it and that `#10017`'s purge is NOT the lane "
+        f"(§9.1 residual (a); #11325): {note}")
 
 
 # ⛔ KEPT, NOT REMOVED — the resolution of a merge where BOTH sides were right. The

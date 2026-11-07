@@ -1231,7 +1231,33 @@ def parity_difference(cache_props: Mapping[str, Any],
       holding the prose and a record row rightly holding it both render as
       ``explained_missing: [...]``, because the caller supplied the arguments and
       so knows which direction it asked. The two need different repairs
-      (``#10017``'s graph-side purge vs nothing at all), and
+      (on either ANCHOR a destructive clear — a full ``record-restore``'s
+      whole-graph wipe (refused PRE-WIPE on a production server graph name,
+      #2944's L2 guard), or a graph-side ``REMOVE n.story_arc`` no instrument
+      ships today — ⚠️ and the WIPE cannot be row-scoped: ``_wipe_all_nodes`` is
+      ``MATCH (n) DETACH DELETE n``, so a graph holding ANY row whose PROSE neither
+      ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+      carries must NOT be restored at all — copy that prose out first, because the
+      wipe destroys the only copy (§17.2, `#11325`); ⚠️ a ``:Point``
+      copy has a NON-destructive one, **on the same per-row test** — only where the
+      record still HOLDS the text for that session
+      (``public.session_narrative.narrative`` — ⛔ NOT the point's own ``props``
+      tail, which the clear's OWN record write consumes: ``point`` has no
+      ``story_arc`` column, so the projection tails the key and the patch merges
+      RIGHT-HAND, ``props = props || %s::jsonb``, so a null OVERWRITES the prose);
+      where the narrative row does not carry it the
+      node's copy is the only one no SHIPPED route can put back on a production
+      graph (the record's KEYED view does not hold it), and the clear deletes it, because the
+      ``rebuild_all`` that would put it back is refused PRE-WIPE on a production
+      name:
+      ``update_point(<id>, story_arc=None)`` clears the property and keeps the
+      node (measured; ``record_reconcile``'s module docstring states the door);
+      ``#10017``'s purge clears only TURN-SHAPED legacy episodic ``:Point``
+      copies (turn shape = ``is_episodic`` + ``pointKind='event'`` +
+      ``is_operator=false`` + a ``<sid>_t<digits>`` id, per
+      ``tools/turn_parity_census.py``) — any other
+      episodic ``:Point`` refuses its sweep rather than being cleared — vs
+      nothing at all), and
       ``record_reconcile`` is where that distinction is made (``graph_only``
       versus a record-side omission), not here.
 
