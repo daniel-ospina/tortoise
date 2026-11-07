@@ -556,12 +556,23 @@ written after their numbers landed.
 
 **The corpus, and the refusal that guards it.** `A1`–`A5` score on the **same** corpus the `E`-rows pin
 (`tests/eval/write_path`, `fixtures_hash` above), because the record's corpus pin is a single
-`fixtures_hash` and two corpora would make the two row families incomparable on one run. That pin is
-**provisional**: the registered corpus is a fixture, and `A1` needs a pack that declares a part-whole
-hierarchy while `A5` needs statements carrying bindable subject slots — `#10983` (C2) owns the
-reconciliation, and until it lands a row whose population is absent is **REFUSED** with the absent
-population named, never scored on a population of three objects. A run handed a **different** corpus is
-refused by the `G1` rule the record already applies, not scored.
+`fixtures_hash` and two corpora would make the two row families incomparable on one run.
+
+**That pin was written `PROVISIONAL`, and `#10983` (C2) has since LANDED** (`#11298`), so the qualifier
+is retired rather than left standing. C2 did not move any `A`-row value; it settled the question the
+provisional line was waiting on, in §1.6.3: **the registered corpus is a FIXTURE**, and a claim about
+the graph the fleet actually builds belongs to `corpus_rows.fleet-claim`, which pins `fleet-capture`
+and **may not be scored until that corpus is registered**. The `A`-rows inherit that rule verbatim, so
+every one of them is a **fixture-corpus** statement — **none is a fleet measurement**, and in particular
+none of them measures the 2026-11-04 `live-v4` figure its own `threshold_basis` quotes. The machine
+record states this as `a_corpus.not_a_proof_of`.
+
+What C2 did **not** do is discharge the corpus's *content* requirement: `A1` still needs a pack that
+declares a part-whole hierarchy and `A5` still needs statements carrying bindable subject slots. That
+requirement sits on the corpus, not on a pending landing, so it survives C2's close unreduced — a row
+whose population is absent is **REFUSED** with the absent population named, never scored on a
+population of three objects. A run handed a **different** corpus is refused by the `G1` rule the record
+already applies, not scored.
 
 **One instrument, one record.** The census is emitted by the existing
 `probes/capstone_measure.py` — one `run.a_row_census` block per graph (the exact key the machine
@@ -1573,6 +1584,34 @@ decides the row), the `UNMEASURED(...)` exemption is a **closed register** in th
 record-only edit (§7 item 1), and `document_sha256` is re-cut in this same commit (§8). `tools/capstone_verdict_check.py` — a table that
 carries an `A`-row is checked by the same `V1`–`V12` rules as an `E`-row, including `V12`'s refusal of
 a row whose `blocked_by` has **CLOSED**.
+
+### 10.11 — the `A`-corpus qualifier retired, because `#10983` (C2) landed (`#11331`, 2026-11-07)
+
+**Old value (verbatim).** `preregistration.json`'s `a_corpus.status` read
+`"PROVISIONAL — #10983 (C2) owns the reconciliation"`, `a_corpus.requires` ended *"Until `#10983`
+lands a session exercising both, a row whose population is absent is REFUSED…"*, and §3.7's corpus
+paragraph said *"That pin is **provisional** … `#10983` (C2) owns the reconciliation, and until it
+lands a row whose population is absent is **REFUSED**"*. `a_corpus` carried **no** `not_a_proof_of`.
+
+**New value.** `status` reads **`RECONCILED by #10983 (C2), landed as #11298`**; the `#10983`-pending
+conditional is replaced by the requirement itself, which is a statement about the **corpus's content**
+and survives C2's close unreduced; `a_corpus` gains a **`not_a_proof_of`** naming the 2026-11-04
+`live-v4` figures each `A`-row's `threshold_basis` quotes. §3.7's paragraph is rewritten to match.
+
+**Why (the reason this is not a cosmetic edit).** `#11298` landed C2 while this record was being
+amended, so the two halves of the merged record each carried a claim about the other: the `A`-rows said
+C2 owned an **open** reconciliation, and C2's **§1.6.3** said *"**`fleet-capture`** — a real capture
+through the door … this registration pins no fleet-capture corpus, and one must be registered
+**before** such a number is scored"*. A record still pointing at C2 would be **false on its face**,
+and worse it left the `A`-rows silently exempt from the boundary C2 had just drawn: every `A`-row's bar
+is justified by a **fleet** reading (`object→object edges []` against 5,314 Objects; 9,910 of 15,534
+statements; 0.6 % typed; 26 Subjects against 19,300 points) while the corpus that will score them is
+the **fixture**. That is exactly the shape §1.6.3 exists to make unreadable — a green `A`-row cited as
+if it were a measurement of the fleet graph it was written to reverse.
+
+⛔ **No value moves.** No metric, denominator, threshold, relation family, floor or `UNMEASURED(...)`
+register changes; `required_criteria_rows` stays `[E1, E2, E3, E4, E5]`; no committed verdict is
+re-scored. `document_sha256` is re-cut from the resolved document (§8), never picked from a side.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
