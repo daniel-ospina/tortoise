@@ -1150,7 +1150,8 @@ def test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it() -> 
 # question re-minted every unit and reported `ok`, and a caller that persisted
 # honestly wrote a duplicate of a finding it had already paid for. That is
 # §12.7's published "no attribution loop" one level below the module, and it is
-# what makes §12.5's "escalation is a permanent tax" true.
+# what makes §12.8 item 4's "escalation is a permanent tax rather than an
+# investment" true.
 #
 # Each test below is RED on the pre-fix module: every one that passes
 # `already_written` raises `TypeError: unexpected keyword argument` there, and the
