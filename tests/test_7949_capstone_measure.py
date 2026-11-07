@@ -4647,6 +4647,23 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("5286", "if not _carries_value(content, quote):"),
             ("5287", "return None"),
         )),
+        # ⛔ THE S5 CONNECT CALL, IN BOTH DOCUMENTS (#11368 rebase review, P2). The
+        # `+74` re-derivation matched `execute_embed` by SYMBOL and landed on its
+        # `def` 3,849 lines ABOVE the caller, while the table's own column header is
+        # "call site" and every sibling row in it cites a call inside
+        # `extract_session_v2`. Nothing red-ed: the cite is BARE, so `_BUNDLE_CITE`
+        # cannot see it, and no row scoped to it — which is exactly the invisibility
+        # this pin exists for. Both rows hold the CALL, not the definition.
+        ("README.md", "gap filler", (
+            ("13237", "result = execute_embed(complete_list, search, "
+                      "session_id=session_id,"),
+        )),
+        # ...and the probe's own copy of the same number, which sits in prose a
+        # reader is sent to rather than in a table.
+        ("probes/capstone_run.py", "ONE cite per symbol", (
+            ("13237", "result = execute_embed(complete_list, search, "
+                      "session_id=session_id,"),
+        )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
     # line number — a quoted rule cannot drift by an insertion above it, which is why

@@ -1228,8 +1228,8 @@ place a machine reads it.
 - **Original value (as §10.7 left it):** `_collect_classify_items` at
   `tortoise/extractor_v2.py:10193`, its extent `:10193-10215`, the two `if items:` gates at
   `:10736`/`:10868`, and the two fail-open `except` arms at `:10749`/`:11973`.
-- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12982`/`:13131` and
-  `:12995`/`:13142`.
+- **New value:** the same symbols at `:10397`, `:10397-10419`, `:11849`/`:11998` and
+  `:11862`/`:12009`.
 - **Why:** `#10997` inserts **36** lines into `extractor_v2.py` above every one of them — the
   hold/population comment in `execute_embed`, the drain's reclaim sweep before it reads
   `pending()`, and the committed-vs-attempted census on the return. The symbols are unchanged.
@@ -1296,6 +1296,13 @@ place a machine reads it.
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
+⚠️ §10.8's own **New value** is deliberately left at `:10397`/`:11849`/`:11862` — the state
+`#10997` left — because it is the ANCHOR §10.9 re-derives from ("must anchor on the measured
+`:10398`, never on the recorded value plus 700"). Rewriting it to a later head's numbers would
+falsify §10.8's own arithmetic (*`#10997` inserts **36** lines*) and leave §10.9 citing an
+Original value its predecessor never stated. Each §10.N entry freezes ONE move; the moves after it
+are §10.N+1's to record.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
