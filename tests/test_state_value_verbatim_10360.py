@@ -2398,11 +2398,19 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the SPELLING gap is open because `mi` is no longer fused",
     "the SPELLING gap is open because `mos` is no longer fused",
     # ⛔ AND THE FLOOR'S `no longer <participle>` ARM HAS ITS OWN FALSIFIER
-    # (#11258 review round 9 `P2`, MEASURED): replacing that pattern with `(?!)`
-    # left the WHOLE FILE `102 passed`, so the arm was unpinned. These three are
-    # FLOOR-EXCLUSIVE — the waived sentence carries `spelling`, names no class
-    # anchor, and the unanchored openness arm requires a unit SUBJECT — so each
-    # is RED only because of the floor (verified by disarming it at runtime).
+    # (#11258 review round 9 `P2`, MEASURED): at `7b3bdd231d` replacing that
+    # pattern with `(?!)` left the WHOLE FILE `102 passed`. ⚠️ AT `ff1ff27c74` IT
+    # WAS ALREADY PINNED by the peer's `the SPELLING gap is no longer being
+    # fused.`; these three cover the PARTICIPLE ENDINGS that entry does not
+    # (`fused`/`judged`/`retained` without a filler), and each is FLOOR-EXCLUSIVE
+    # for a different reason than an openness gap: `judged` and `retained` ARE in
+    # the unanchored openness arm — the floor decides them because
+    # `_residual_reopening_claims` runs ONLY `_SPELLING_FLOOR` when every clause
+    # is an honest `spelling` disclosure and then `continue`s. (An earlier version
+    # of this comment claimed "the unanchored openness arm requires a unit "
+    # "SUBJECT"; measured, that arm matches both of these sentences — the
+    # short-circuit, not the openness vocabulary, is what makes them floor-only.)
+    # Verified by disarming the floor at runtime, one arm at a time.
     "the SPELLING gap is no longer fused.",
     "the SPELLING gap is no longer judged.",
     "the SPELLING gap is no longer retained.",
@@ -2610,18 +2618,22 @@ def _reds(text: str) -> bool:
 def test_every_waiver_withhold_arm_earns_its_place():
     r"""Each guard the WAIVER carries is pinned by an assertion only IT can satisfy.
 
-    ⛔ WHY THIS TEST EXISTS (#11258 review round 9 `P2`, MEASURED): SIX guards in
-    this family could be DELETED at the previous head with the whole file still
-    `102 passed` — the two subsumed unit spellings (`unit\s+word` and
+    ⛔ WHY THIS TEST EXISTS (#11258 review round 9 `P2`, MEASURED): at
+    `7b3bdd231d` SIX guards in this family could be DELETED with the whole file
+    still `102 passed` — the two subsumed unit spellings (`unit\s+word` and
     `millisec`), the withhold set's contraction lookbehind, `_RESIDUAL_OPENNESS`'s
     `m` lookbehind, its `s` lookbehind, and `_SPELLING_FLOOR`'s `no longer …` arm.
-    An END-TO-END verdict cannot pin them, because the verdict is an OR over
-    several arms: a deleted branch is covered by a sibling and the mutation that
-    should have red became GREEN-through-OR. So each guard is pinned at the
+    ⚠️ Five of them still held at `ff1ff27c74`, and the FLOOR's no longer did
+    (the peer's `the SPELLING gap is no longer being fused.` mutation already
+    reds it there) — so the floor is listed for the head the finding was measured
+    at, not as a claim about every head since.
+    For the five, an END-TO-END verdict cannot pin them: the verdict is an OR over
+    several arms, so a deleted branch is covered by a sibling and the mutation
+    that should have red became GREEN-through-OR. So each is pinned at the
     CONTRACT IT OWNS — `_is_honest_spelling` for the waiver (does it withhold?),
     `_RESIDUAL_OPENNESS` for each bare-token guard (does it match?) — where the
     disarmed guard is the only thing deciding the assertion. The floor's arm is
-    pinned the other way, by the three floor-exclusive entries in
+    pinned end-to-end instead, by the floor-exclusive entries in
     `_RESIDUAL_REOPENING_MUTATIONS`.
     """
     # 1. THE UNIT SPELLINGS. The waiver must WITHHOLD on every spelling the unit
@@ -2633,6 +2645,19 @@ def test_every_waiver_withhold_arm_earns_its_place():
     #    actually armed reds here (#11258 review round 9 `P2`, MEASURED: adding
     #    `fortnights?` to a hand-written sample list left `103 passed`).
     assert _RESIDUAL_UNIT_WAIVER_ARMS, "the withhold set carries no unit spelling"
+    # ⛔ AND THE REQUIRED VOCABULARY IS PINNED BY MEMBERSHIP, not just read: it is
+    # the list that makes deleting an arm visible, so deleting its `kg` entry in
+    # the same edit restores the original fail-open. MEASURED (#11258 review round
+    # 13 `P2`): `kg` removed from BOTH the arms and this list leaves `103 passed`,
+    # and the waiver then swallows `the spelling gap is open because `kg` is not
+    # closed` — the round-5 `P1` this list exists to close. Same idiom as the
+    # proof-list membership loop below: a deleted entry fails to match a literal.
+    assert set(_RESIDUAL_WAIVER_REQUIRED_SPELLINGS) >= {
+        "units", "unit", "kg", "mi", "mos", "millisec", "millisecs"}, (
+        "the required unit-spelling vocabulary SHRANK — every entry here is a "
+        "spelling the unit arm reads and the class anchor does not name, so "
+        "dropping one (with its arm) re-opens the fail-open that let a lane "
+        "defeat the gate with a single word")
     samples = (*_RESIDUAL_WAIVER_REQUIRED_SPELLINGS,
                *[a.replace("?", "") for a in _RESIDUAL_UNIT_WAIVER_ARMS])
     waived = [s for s in samples
