@@ -937,7 +937,7 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # that hoists one AND constructs a client anywhere — a helper, an owned
     # fixture, a second test — resolved a site from the import and returned
     # before the alias was ever resolved. Measured on a fixture with one owned
-    # `FalkorDB(` block and one aliased leaking `C(` block: `sites=[227]`, and
+    # `FalkorDB(` block and one aliased leaking `C(` block: `sites=[223]`, and
     # the leak read CLEAN. So the gate is the THREE FILE-LEVEL conditions below
     # and nothing about `found`, and the alias sites are UNIONED into it.
     #
@@ -2562,7 +2562,7 @@ def test_an_alias_leak_REDS_even_when_the_SAME_file_resolves_a_site(tmp_path):
     falkordb.FalkorDB` — and ALSO constructs a client anywhere (a helper, an
     owned fixture, a second test) resolves a site from the import and returned
     before the alias was ever resolved. Measured on this fixture before the fix:
-    `sites=[227]` only, and the second test's unowned, un-journaled bulk DETACH
+    `sites=[223]` only, and the second test's unowned, un-journaled bulk DETACH
     read CLEAN.
 
     ⛔ It was also invisible to every other pin here: each spelling fixture's
