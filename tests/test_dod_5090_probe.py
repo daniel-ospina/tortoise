@@ -3193,8 +3193,11 @@ def test_a_bypass_on_a_GATED_writer_also_holds_row_one_at_PARTIAL(
     Measured with both narrowed for the `bypass` class only (the surgical form — a
     broader ``stale = declared & outside_gate`` also reds
     `test_a_STALE_declaration_holds_row_one_at_PARTIAL`, so it does not isolate this
-    gap): without this arm the whole file is green (**148 passed, 2 skipped**) while
-    this population reads `MET`; with it, exactly ONE test reds — this one
+    gap): WITHOUT this arm — on the pre-arm tree, i.e. with this file's §6 figure
+    re-cut to the 150 it then collected — the whole file is green (**148 passed,
+    2 skipped** on the `TORTOISE_TEST_CARVE_OUT=1` lane; the second skip is the
+    URI-less live check, where §6's docker-lane figure has one) while this population
+    reads `MET`; with it, exactly ONE test reds — this one
     (**1 failed, 148 passed, 2 skipped**).
     """
     _row_one_fixture(tmp_path, monkeypatch)
