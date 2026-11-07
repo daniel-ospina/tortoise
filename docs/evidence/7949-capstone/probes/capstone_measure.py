@@ -2455,7 +2455,8 @@ def _a4_pointkind(projection) -> dict:
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
     `projection/entities.py:2578`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
-    not claims — turn rows are written with `pointKind='event'` (`tortoise/sdk.py:2988`) and 159 of
+    not claims — turn rows are written with `pointKind='event'` (`tortoise/sdk.py`, the
+    `create_point` call in the turn writer) and 159 of
     the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
     them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
     and reported, never silently dropped.

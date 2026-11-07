@@ -556,6 +556,34 @@ def test_a_registered_non_bar_must_name_its_owner_decision_and_cannot_borrow_the
         assert any(needle in f for f in failures), (bad, failures)
 
 
+def test_a_REQUIRED_row_cannot_declare_itself_a_non_bar():
+    """FAILS IF the `UNMEASURED(...)` exemption is reachable from a required row.
+
+    ⛔ The exemption `continue`s past BOTH numeric arms, so an UNSCOPED branch let `E1`–`E5` declare
+    themselves bar-less and the gate still printed OK — a false PASS introduced by the arm meant to
+    close one, and a direct contradiction of §3.7's "every criteria row names a metric, a denominator
+    and a numeric threshold" (#10982 review round 5). Two directions are pinned: a required row that
+    claims the exemption is REFUSED, and the exemption set can never intersect `REQUIRED_CRITERIA`.
+    """
+    assert not (check.REGISTERED_NON_BAR_ROWS & set(check.REQUIRED_CRITERIA)), (
+        "a required row must never be registered as a non-bar")
+    rows = check.parse_criteria_rows(PREREG.read_text())
+    assert check.check_completeness(rows) == []
+    e1 = next(r for r in rows if r["id"] == "E1")
+    for cell in (
+        "UNMEASURED(the bar is owner-gated — `#10988` decides)",
+        "UNMEASURED(owner-gated — `#10988` decides) above the floor of `>= 30` typed statements",
+    ):
+        failures = check.check_completeness(
+            [dict(r, threshold=cell) if r is e1 else r for r in rows])
+        assert any("is not registered as a non-bar" in f for f in failures), (cell, failures)
+    # …and the reverse direction: a row the code exempts must still BE bar-less in the record.
+    a4 = next(r for r in rows if r["id"] == "A4")
+    failures = check.check_completeness(
+        [dict(r, threshold="`>= 0.5` typed_share") if r is a4 else r for r in rows])
+    assert any("registered as a non-bar" in f for f in failures), failures
+
+
 def _full_census(probe) -> dict:
     return {
         "criteria": list(probe.A_CRITERIA),

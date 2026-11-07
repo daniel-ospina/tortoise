@@ -507,12 +507,18 @@ one (`#7949` §2 R7).
   number **26**, so it cannot be satisfied by writing one Subject per run. `#10987` (C6) owns the
   scoring and the `#4889` verdict.
 
-**Floors, in one place.** `pins.denominator_floors` carries `a1_objects`, `a2_candidates`,
-`a2_decided_candidates`, `a3_statements`, `a4_typed_statements`, `a5_points` and `a5_actors`, all
-**30** — the `E1` object floor, applied uniformly, because a per-row floor chosen after seeing a
+**Floors, in one place.** `pins.denominator_floors` carries **nine** keys, and they are not all the
+same kind of thing. Seven are count floors — `a1_objects`, `a2_candidates`, `a2_decided_candidates`,
+`a3_statements`, `a4_typed_statements`, `a5_points` and `a5_actors`, all **30** — the `E1` object
+floor, applied uniformly, because a per-row floor chosen after seeing a
 population is a floor fitted to its own result. ⚠️ Two of them (`a2_decided_candidates`, `a5_actors`)
 are floors under the **rate's** own denominator, not merely under the population it is drawn from: a
-floor that guards a population the bar does not divide by is a floor a one-of-one decision clears. Below a floor a row is **REFUSED**, which §3 defines as neither a pass nor a fail.
+floor that guards a population the bar does not divide by is a floor a one-of-one decision clears. The
+other two are **not counts** and are therefore not `30`: `a1_rollup_queries: 1` and
+`a3_event_root_coverage: 0.5` are refusal boundaries `#10984`/`#10986` must clear before their bars are
+meaningful (§10.9). They live in the same block on purpose — they were prose-only until `#10982`
+round 2, and a child reading the pins missed them. Below a floor a row is **REFUSED**, which §3 defines
+as neither a pass nor a fail.
 
 **A zero denominator is REFUSED, and it is never `0/0`.** Two bars divide by a population the floor
 does not itself guarantee: `A2`'s is **decided** candidates (a run that holds all 30 candidates clears

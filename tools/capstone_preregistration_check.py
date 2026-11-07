@@ -368,6 +368,13 @@ CROSS_CHECKED_CORPUS_KEYS = (
 #: in for a deleted ``E1`` — the epic's central criterion gone while its guard kept the check green
 #: (#9075 review r3 P2).
 REQUIRED_CRITERIA = ("E1", "E2", "E3", "E4", "E5")
+#: The ONLY rows the record registers as bar-less (`UNMEASURED(...)`, §3.1's A4). Pinned here so the
+#: completeness gate can tell a registered non-bar from a required row that declares itself one —
+#: the branch also skips both numeric arms, so an unscoped version was a false PASS (#10982).
+#: Asserted disjoint from `REQUIRED_CRITERIA` at import: the two sets can never overlap.
+REGISTERED_NON_BAR_ROWS = frozenset({"A4"})
+assert not (REGISTERED_NON_BAR_ROWS & set(REQUIRED_CRITERIA)), (
+    "a required row can never be a registered non-bar")
 
 #: The one required id that may be carried by sub-rows.
 SUB_ROW_CRITERIA = ("E2",)
@@ -3780,6 +3787,21 @@ def check_completeness(rows: list[dict[str, str]]) -> list[str]:
             continue  # already reported above
         plain = _plain(row["threshold"])
         if REGISTERED_NO_BAR.search(plain):
+            # ⛔ SCOPED TO THE ROWS THE RECORD REGISTERS AS NON-BARS — never "any row that says
+            # UNMEASURED". The branch below `continue`s past BOTH numeric arms, so an unscoped
+            # branch let a REQUIRED row (`E1`–`E5`) declare itself bar-less and still leave the gate
+            # at OK, contradicting §3.7's "every criteria row names a numeric threshold" — a
+            # false PASS added by the very arm meant to close one (#10982 review round 5). The
+            # allowed set is pinned and asserted DISJOINT from REQUIRED_CRITERIA, so a required row
+            # cannot enter it by editing the record alone.
+            if row["id"] not in REGISTERED_NON_BAR_ROWS:
+                failures.append(
+                    f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
+                    f"declares UNMEASURED(...) but this row is not registered as a non-bar "
+                    f"(registered: {sorted(REGISTERED_NON_BAR_ROWS)}) — a required row must "
+                    "carry a numeric threshold"
+                )
+                continue
             # ⛔ A REGISTERED non-bar is not a bar, and its FLOOR clause may never stand in for one.
             # Before this arm, a threshold cell declaring `UNMEASURED(...)` passed the numeric test
             # on the `>= 30` its own floor clause happened to contain — so a row the record says has
@@ -3803,6 +3825,16 @@ def check_completeness(rows: list[dict[str, str]]) -> list[str]:
                     "declares UNMEASURED(...) and still carries a comparator outside its floor "
                     "clause — a registered non-bar cannot also be a bar"
                 )
+            continue
+        if row["id"] in REGISTERED_NON_BAR_ROWS:
+            # …and the REVERSE direction: a row the code lets declare itself bar-less must still BE
+            # bar-less in the record. Without this, deleting `UNMEASURED(...)` from A4's cell while
+            # leaving the pin alone would silently turn the exemption into a numeric bar.
+            failures.append(
+                f"row {row['id']!r} (line {row['line']}): this row is registered as a non-bar but "
+                f"its threshold {row['threshold']!r} carries a real bar — drop it from "
+                "REGISTERED_NON_BAR_ROWS or restore UNMEASURED(...)"
+            )
             continue
         if not re.search(r"\d", plain):
             failures.append(
