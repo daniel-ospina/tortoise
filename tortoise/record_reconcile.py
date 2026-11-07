@@ -183,8 +183,7 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   rebuild can REACH: it asks the same L2 name guard as the restore
   (``_assert_test_graph``, refused PRE-WIPE on every production name), so a
   production server graph refuses the replay and the clear is durable there. The
-  RECORD→CACHE
-  lane does the opposite (the ``PointRevised`` patch stores
+  RECORD→CACHE lane does the opposite (the ``PointRevised`` patch stores
   ``props.story_arc = null``, ``_props_from_row`` returns it, and
   ``node_statement`` renders ``SET n += $props``, where a null REMOVES the key),
   so a record-sourced rebuild keeps it clear. ⚠️ So where a ``:Point``'s record
@@ -880,7 +879,8 @@ def log_result(result: RecordReconcileResult,
         # null and keeps it clear. ⚠️ That is the bound's REACH, not an absolute:
         # `rebuild_all` asks the SAME L2 name guard as the restore
         # (`_assert_test_graph`, "REFUSING to run bulk DETACH DELETE on non-test
-        # graph", unconditional per #2944), so on a production server graph the
+        # graph", applying to every SERVER graph name per #2944 — an embedded
+        # `path=` DB is exempt from that name check), so on a production server graph the
         # replay is refused PRE-WIPE and the clear IS durable there); #10017's
         # purge is a DIFFERENT population — legacy episodic turn
         # :Points — and names no story_arc. Calling them all "owned" sends the

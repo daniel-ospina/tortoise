@@ -2112,9 +2112,8 @@ the column, so no in-place route can exist); the declined pair has one, shipped 
 repairs it in place. The classes differ in both why and which lane.
 
 ⚠️ **CORRECTED (`#11325`, review of the `#10394` follow-up)**: this entry named `#10017`'s purge as the targeted repair
-for THIS class. Measured at the tool, `tools/purge_legacy_turns.py`'s single destructive statement deletes legacy
-episodic turn `:Point`s (`MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) WHERE t.is_episodic = true AND t.id IN $ids
-DETACH DELETE t`), never matches `:Source`/`:Event`, and contains no `story_arc` token — so a copy on either anchor
+for THIS class. Measured at the tool, `tools/purge_legacy_turns.py` deletes legacy episodic turn `:Point`s — its
+single destructive statement is `MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) WHERE t.is_episodic = true AND t.id IN $ids DETACH DELETE t` — never matches `:Source`/`:Event`, and contains no `story_arc` token — so a copy on either anchor
 survives it, and an operator following the sentence reads the sweep's unchanged `graph_only` as "the repair did not
 work". ⚠️ This stamp scopes itself to the REPAIR claim: the entry above is left as RECORDED, because a changelog is a
 historical record — the corrected instruction is this stamp's own, and no instrument ships a targeted
