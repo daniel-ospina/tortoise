@@ -6587,7 +6587,41 @@ def test_reap_reports_the_pids_it_declined_but_not_the_ones_it_killed_or_saw_dea
     )
 
 
+def test_build_end_sweep_report_does_not_claim_a_pid_a_LATER_iteration_killed():
+    """#11427: a decline superseded by a kill must not be claimed twice.
 
+    The loop re-runs until an iteration acts on nothing, so a server declined in
+    iteration 1 can be KILLED in iteration 2 once whatever blocked it goes away.
+    Its disappearance is then counted by `reaped`; leaving it in the accumulated
+    declined set would let the term claim the same event a second time — an
+    inflated `exited` is exactly what masks a genuine shortfall (fail-open).
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    first = _scan_aware([{"pid": 5}])
+    first.discovered_pids = {5, 7}
+    first.declined_pids = {7}
+    second = _scan_aware([{"pid": 7}])
+    second.discovered_pids = {7}
+    second.declined_pids = set()
+    third = _scan_aware([])
+    third.discovered_pids = set()
+    third.declined_pids = set()
+
+    report = build_end_sweep_report(
+        iter([first, second, third]).__next__, deadline=1030.0,
+        probe=iter([[5, 7], []]).__next__, clock=lambda: 1000.0)
+
+    assert report["reaped"] == 2, (
+        "both iterations acted, so the loop runs until the empty third one"
+    )
+    assert report["exited"] == 0, (
+        "pid 7 was declined and then KILLED — `reaped` already accounts for "
+        "it, so the declined term must not claim it again"
+    )
+
+
+def test_build_end_sweep_report_leaves_exited_alone_when_the_term_is_unmeasured():
     """An un-instrumented sweep reports UNMEASURED, not zero-vanished.
 
     A `run_one` that carries no `discovered_pids` (a monkeypatched seam) used

@@ -4229,6 +4229,14 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
             declined = None
         elif declined is not None:
             declined |= set(decline_pids)
+            # #11427: a LATER iteration can kill a server an earlier one
+            # declined (the client that blocked it went away). The swept pid is
+            # then counted by `reaped`, so keeping it in the declined set would
+            # let the term claim the SAME disappearance twice — an inflated
+            # `exited` masks a genuine shortfall, the fail-open direction. The
+            # union is therefore kept to pids no iteration acted on.
+            declined -= {r.get("pid") for r in result
+                         if isinstance(r, dict) and r.get("pid")}
         return result
 
     reaped, cleared, exited = sweep_until_cleared(_watched, deadline, clock)
