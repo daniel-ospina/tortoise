@@ -27,12 +27,15 @@ what makes the DISCOVERED MAP unable to NAME OR CLASSIFY a writer; it is not a l
 reason a writer can escape a declaration — `gated` and `producer` escape it too, by design, and are
 stated in the register instead.
 
-⚠️ A NAME-COLLIDING writer is the one case here that is NEITHER absent NOR declarable: two
-same-named `def`s in one module leave the KEY IN the map with its KIND replaced by `"duplicate"`
-(`probe._embedding_writers`'s `_put`), which is outside `NEEDS_A_DECLARATION` — so it owes no
-declaration while its class is UNRESOLVED (it may or may not store a vector the gate sees). The
-guard PINS that the population holds none rather than reading the class as acceptable; a writer
-being IN the map is not the same thing as being classifiable.
+⚠️ A NAME-COLLIDING writer is the one case here that can be NEITHER absent NOR declarable — but
+only when discovery reaches BOTH defs: two same-named `def`s that are EACH discovered leave the KEY
+IN the map with its KIND replaced by `"duplicate"` (`probe._embedding_writers`'s `_put`), which is
+outside `NEEDS_A_DECLARATION`, so such a writer owes no declaration while its class is UNRESOLVED
+(it may or may not store a vector the gate sees). When the colliding def is NOT discovered, `_put`
+is never reached for it and the key keeps the DISCOVERED def's kind — `unresolved_write`, which IS
+in `NEEDS_A_DECLARATION`, so that writer is caught rather than escaped (measured in both
+directions). The guard PINS that the population holds no `duplicate` row at all rather than reading
+the class as acceptable: a writer being IN the map is not the same thing as being classifiable.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (read `WRITER_CENSUS`
 for the class counts rather than a number restated here — the #11274 widening moved them) but left
@@ -301,10 +304,13 @@ def test_every_writer_the_instrument_finds_outside_the_gate_is_declared():
         f"`tortoise/embed_writer_register.py`: {register.undeclared(outside)}"
     )
     # ⛔ `kind == "duplicate"` is OUTSIDE `NEEDS_A_DECLARATION`, so a name-colliding writer owes no
-    # declaration and its KIND IS UNRESOLVED — it may or may not store a vector the gate sees
-    # (`_put` collapses the key for ANY second def, including two `gated` ones). Zero at this head,
-    # and the cheapest real repair is that it stays zero: an unresolvable identity must not sit in
-    # the population at all, or the guard is green over a writer nobody can name.
+    # declaration and its KIND IS UNRESOLVED — it may or may not store a vector the gate sees. The
+    # collapse needs BOTH defs discovered: `_put` is only reached for a def the walk classifies, and
+    # a def it does not reach `continue`s before `_put`, leaving the discovered def's own kind in
+    # place (measured: a same-named pure reader second leaves `unresolved_write`, which IS
+    # declarable). Zero at this head, and the cheapest real repair is that it stays zero: an
+    # unresolvable class must not sit in the population at all, or the guard is green over a writer
+    # nothing can classify.
     duplicates = sorted(
         key for key, entry in probe.embedding_writers().items()
         if entry.get("kind") == "duplicate"
