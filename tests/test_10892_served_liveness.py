@@ -47,12 +47,14 @@ one alone is a false PASS:
 
 **Blind spots, stated rather than implied** (the discipline #10892's own scope
 comment asks for — `issues/10892#issuecomment-6698714004`): this detects a loop
-that cannot
-serve, and — the prober's `--max-time` converts an answer later than the bound
-into `000` → `DOWN` (`classify_code`, harness case 93) — a loop that serves
-SLOWER than the bound too. What it does NOT detect is a loop that serves slowly
-WITHIN the bound: a 4 s answer passes a 5 s prober. It says nothing about a
-deploy that never happened (`check-deploy-staleness.sh`), and it is not a
+that cannot serve, and — by two mechanisms, because an answer can stall in two
+places — a loop that serves SLOWER than the bound too: no status line inside the
+bound yields `000` → `DOWN` (`classify_code`, harness case 93), and headers
+inside the bound with a body that never arrives yields a healthy-looking `200`
+plus a non-zero curl exit, which `probe()` grades DOWN because the transfer did
+not complete (harness case 100b). What it does NOT detect is a loop that serves
+slowly WITHIN the bound: a 4 s answer passes a 5 s prober. It says nothing about
+a deploy that never happened (`check-deploy-staleness.sh`), and it is not a
 substitute for the TCP check that catches a dead process.
 """
 

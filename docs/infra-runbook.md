@@ -1712,19 +1712,31 @@ Two halves close that, and neither is a health *reading*:
    membership and its 5 s bound), 88b (`000` → `PROD DOWN` + the machine-backed
    prose) and 100 (`200` → UP, exit 0, no incident) of
    `.github/scripts/availability-watchdog.test.sh`; case 101 covers the
-   `404` → `PROD DEGRADED` arm.
+   `404` → `PROD DEGRADED` arm, and case 100b the `200`-with-an-INCOMPLETE-body
+   arm (a status line is not an answer).
 
 **Blind spots, stated rather than implied.** It detects a loop that cannot
-serve — and, because `curl --max-time 5` turns any answer later than the bound
-into `000` → `DOWN`, it also detects a loop that serves slower than the bound
-(the `000` → `DOWN` mapping is pinned by harness case 93; the conversion of a
-late answer into `000` is curl's own documented `--max-time` behaviour, measured
-here but not a repo pin). What it does NOT detect is a
-loop that serves slowly *within* the bound: a 4 s answer passes a 5 s prober.
-It says nothing about a deploy that never happened (`check-deploy-staleness.sh`),
-and it is not a substitute for the TCP check that catches a dead process. Do
-**not** replace it with `loop_stale_ms`: reading the loop's own tick to decide
-the loop is fine is the exact circularity that let this outage run unattended.
+serve — and it also detects a loop that serves slower than the bound, by TWO
+mechanisms, because curl's behaviour differs by where the answer stalls:
+
+* an answer that never starts (no status line inside the bound) comes back as
+  `000` with a non-zero curl exit → `DOWN` (harness case 93);
+* an answer whose **headers** arrive inside the bound but whose **body** never
+  does comes back as a healthy `200` with a non-zero curl exit (28 timeout, 18
+  partial transfer, 56 recv error — measured: `"200 3.002614"`, `curl: (28) …
+  10 out of 40 bytes received`). `probe()` therefore grades an `UP` from the
+  status code **only when curl completed the transfer**; an incomplete transfer
+  falls through to the same `DOWN`/retry class as `000` (harness case 100b pins
+  it for both the liveness arm and the restartable API arm). Without that rule
+  a process that flushed headers and wedged mid-body would have read UP — a
+  false PASS on exactly the property this arm exists to prove.
+
+What it does NOT detect is a loop that serves slowly *within* the bound: a 4 s
+answer passes a 5 s prober. It says nothing about a deploy that never happened
+(`check-deploy-staleness.sh`), and it is not a substitute for the TCP check that
+catches a dead process. Do **not** replace it with `loop_stale_ms`: reading the
+loop's own tick to decide the loop is fine is the exact circularity that let this
+outage run unattended.
 
 ⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
 `control_ok()` runs only on the restartable path — the restart decision's own
@@ -1746,7 +1758,9 @@ curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
 # a redeploy/machine restart, and that reset is itself the evidence of a restart
 # (`tortoise/hosted_api.py`: "a restart starting again at 1 is itself the
 # evidence of a restart"). A SMALLER N right after a deploy is healthy, not a
-# replayed/cached body. `<ms|null>` is null until the process has served two.
+# replayed/cached body. `<ms|null>` is `null` on the FIRST answer this process
+# gives and a number from the SECOND on (the age is the pre-increment value, so
+# one served request has no previous tick to measure against).
 ```
 
 ### 6.5 Cost reference (what "one machine warm" actually costs)

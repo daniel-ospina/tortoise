@@ -999,6 +999,23 @@ probe() {
     PROBE_EVIDENCE="${PROBE_EVIDENCE}"$'\n'
 
     v="$(classify_code "$code")"
+    # ⛔ (#10892 review round 6, P1) A STATUS LINE IS NOT AN ANSWER. curl prints
+    # `-w '%{http_code}'` as soon as the RESPONSE HEADERS arrive, so a response
+    # that stalls MID-BODY yields a healthy-looking code with a NON-ZERO exit
+    # and a truncated body. Measured on this box against a server that writes
+    # `200 OK` + `{"served":` then sleeps:
+    #     curl -sS -o body -w '%{http_code} %{time_total}' --max-time 3 <url>
+    #     → "200 3.002614", exit 28, "10 out of 40 bytes received"
+    # Grading that UP is a false PASS on the ONE property these probes exist to
+    # prove — that the request RETURNED — and it is precisely the shape a
+    # wedged-but-flushing process takes. An UP from the status code is therefore
+    # CONDITIONAL on curl completing the transfer; no completion falls through
+    # to the same DOWN/retry class as `000` (and keeps the failure LAYER that
+    # `classify_failure` already recorded, so restart eligibility is unchanged).
+    if [ "$v" = "UP" ] && [ "$rc" -ne 0 ]; then
+      PROBE_EVIDENCE="${PROBE_EVIDENCE}transfer did NOT complete (curl_exit=${rc}, layer=${PROBE_FAILURE_CLASS}) although the status line was ${code} — the BODY never arrived, so this is not an answer (#10892 review round 6, P1)"$'\n'
+      v="DOWN"
+    fi
     # An EXPLICIT header requirement turns an otherwise-UP answer into an
     # ANSWERED-BUT-WRONG verdict: the status looked healthy but the flow did
     # not initialise. Deterministic (a missing header will not appear on a
