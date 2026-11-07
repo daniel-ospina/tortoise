@@ -730,7 +730,7 @@ def door_header(observed: dict[str, str | None]) -> str:
 
 def _door_measured(observed: dict[str, str | None]) -> bool:
     """Does this read-back carry EVERY pinned key? A partial one is not a pin."""
-    return bool(observed) and DOOR_KEYS <= set(observed)
+    return bool(observed) and set(observed) >= DOOR_KEYS
 
 
 def door_record(observed: dict[str, str | None]) -> dict:

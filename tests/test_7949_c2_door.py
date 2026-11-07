@@ -218,7 +218,7 @@ def test_the_lane_selector_defaults_to_v2_and_m2_is_the_opt_in():
         f"(#10983): {ast.unparse(expr.test)!r}")
 
     probe = _load_probe()
-    assert probe.DOOR_LANE == expr.orelse.value, (
+    assert expr.orelse.value == probe.DOOR_LANE, (
         f"the probe pins DOOR_LANE={probe.DOOR_LANE!r} but the selector's "
         f"fall-through is {expr.orelse.value!r} — every acceptance log would "
         f"declare a lane the code does not run (#10983)")
@@ -297,8 +297,8 @@ def test_the_v2_arm_calls_the_sdk_extractor_entry():
     classes = {node.name for node in ast.walk(_tree(m2_module))
                if isinstance(node, ast.ClassDef)}
     assert "LLMExtractor" in classes, (
-        f"tortoise/extractor.py no longer defines LLMExtractor — §1.6.1 and "
-        f"door.not_the_door cite it as the m2 lane's extractor (#10983)")
+        "tortoise/extractor.py no longer defines LLMExtractor — §1.6.1 and "
+        "door.not_the_door cite it as the m2 lane's extractor (#10983)")
     # …resolved as a CALL for the same reason: a comment naming the builder
     # satisfied the substring form (MEASURED, #10983 review cycle 7).
     built = [node for node in ast.walk(_funcs(SDK)["_extract_session_llm"])
@@ -1062,7 +1062,7 @@ class _Unpoppable(dict):
         return self.get(key, default)
 
 
-def _scrubbed_env(pin) -> "_Unpoppable":
+def _scrubbed_env(pin) -> _Unpoppable:
     """A copy of the real environment with every PINNED key removed first.
 
     ⛔ The two leak tests build their fake environ from ``os.environ``, so on a box
