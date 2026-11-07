@@ -718,8 +718,12 @@ def session_key_of(hit: dict) -> str:
       and ``seeded_sessions`` dropped it, so no turn hit could seed its own
       session, and ``reinjection_merge_order`` could not find a turn-seeded
       session's own base ranks (the injected group fell to the defensive
-      tail). The arm #8713 measured was therefore inert on the grain it
-      expands, and the identity the READER
+      tail). What this fixes is the SEED's blindness at the turn grain, NOT
+      the arm's measured effect: #8713's own receipt records the arm firing
+      on the EVAL grain (``seeded_sessions: 354``, ``injected_total_merged:
+      617/617 at cap10``, ``recall_all@5 0.6761 → 0.8592``), so the arm was
+      never globally inert — on a product TURN pool it could not seed at
+      all. The identity the READER
       already renders (``hit_session_id``) was dropped one layer below it;
     * else the hit's OWN ``id`` ⇒ ``idx:point:{id}``: two identity-less hits
       are two DISTINCT entities and must not share a bucket. Before #3591
@@ -743,20 +747,32 @@ def session_key_of(hit: dict) -> str:
     hit used to get IS the defect, not the bucket it names.
 
     Precedence — why ``sessionId`` sits AFTER the index bucket (#10540):
-    every key that already exists stays BYTE-IDENTICAL. The eval's pool
-    hits carry the snake ``session_id`` (``tools/longmem_eval/retrieve.py``),
-    and a hit carrying ``lme_session_index`` keeps its index bucket, so a
-    census measured before this change — #8713's, which this arm must not
-    disturb — cannot move because of it. The only branch that changes is
-    the PHANTOM one, which is exactly the branch a product turn hit falls
-    into.
+    every key an identified hit already had stays BYTE-IDENTICAL — a hit
+    carrying ``session_id`` keeps that id, and a hit carrying
+    ``lme_session_index`` keeps its index bucket (the eval's pool hits carry
+    BOTH, ``tools/longmem_eval/retrieve.py``, so a census measured before
+    this change — #8713's, which this arm must not disturb — cannot move).
+    The keys that DO change are exactly the PHANTOM ones
+    (``idx:point:{id}``), which is the defect: a hit that reaches that
+    branch today falls back only because it carries no identity in a
+    spelling this function reads.
 
-    ⛔ Not sanitized, deliberately: the key is a DICT KEY and a comparison
-    operand against graph ids, never interpolated into Cypher and never
-    rendered into the reader — :func:`hit_session_id` is the surface that
-    refuses to STATE an unrenderable identity, and it applies
-    ``_safe_session_tag``. Filtering here as well would silently turn a hit
-    the reader can name into a bucket nothing can seed.
+    ⛔ Not sanitized, deliberately, and the reason is NOT that filtering
+    would make a hit unseedable — the opposite: ``hit_session_id`` applies
+    ``_safe_session_tag`` (which also STRIPS surrounding whitespace), so a
+    hand-built hit whose camel id is ``" sessA "`` is named ``sessA`` by the
+    reader while this function returns the padded string, which can never
+    equal the fetch's own group key ``coalesce(p.session_id, s.id)`` and so
+    lands the injected group in the merge's defensive tail. Sanitizing here
+    would FIX that case. It is left out because it is a separate, measured
+    change to key semantics: this key is a DICT KEY and a comparison
+    operand, never interpolated into Cypher and never rendered (the render
+    and the wire go through ``hit_session_id``), so there is no injection
+    surface to close, the real fetch already sanitizes before the hit is
+    built (``sdk.tortoise_fts_query``), and folding the render sanitizer
+    into the pool identity would silently move the key of every padded or
+    odd-shaped id on every lane at once — a backlog item, not a rider on
+    this fix.
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all

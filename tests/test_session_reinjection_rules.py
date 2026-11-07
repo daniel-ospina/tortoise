@@ -997,8 +997,10 @@ def test_wire_session_identity_keys_the_pool_and_seeds_the_session():
 
 def test_wire_identity_never_moves_an_existing_key():
     """#10540's inertness claim, and the reason the camel source sits AFTER
-    the ``lme_session_index`` bucket: **every key that already existed stays
-    byte-identical**, so the census #8713 measured cannot move.
+    the ``lme_session_index`` bucket: **every key an IDENTIFIED hit already
+    had stays byte-identical** (a snake ``session_id``; an
+    ``lme_session_index`` bucket), so the census #8713 measured cannot move.
+    Only the PHANTOM keys change — those are the defect being fixed.
 
     The eval's pool hits carry the snake ``session_id``
     (``tools/longmem_eval/retrieve.py``: ``{"session_id": p.get("session_id",
