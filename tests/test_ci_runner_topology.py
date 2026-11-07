@@ -175,7 +175,16 @@ def test_applying_the_plan_satisfies_the_invariant():
     post = _post_pool(desired)
     assert topo.violations(post) == []
     assert topo.check(post, strip_non_x64=True)["ok"] is True
-    assert topo.check(post, strip_non_x64=True)["census"]["by_host"]["X64"]["serving_fallback"] == 16
+    # ⛔ THE ARM IS CAPPED, SO "THE POOL SERVES" MEANS THE ARM, NOT ALL 16. `FALLBACK_ARM_MAX=3`
+    # (OWNER RULING 2026-11-02, #9878) bounds an engaging pass; this tool now reads that cap
+    # instead of arming the whole pool. The widened arm is expressible, and it is a DECISION —
+    # `arm_cap=16` here is the explicit form, not a default.
+    assert topo.check(post, strip_non_x64=True)["census"]["by_host"]["X64"]["serving_fallback"] == topo.ARM_CAP_DEFAULT
+    # 15, not 16: `pi-runner-cell3-x64-9` (id 13) is OFFLINE in the measured fixture, and an
+    # offline runner is not an arm slot.
+    wide = topo.plan(measured(), engage=True, strip_non_x64=True, arm_cap=16)
+    assert len(wide.armed) == 15, "an explicit wider cap must be honoured — the bound is read, not hardcoded"
+    assert topo.check(_post_pool(wide), strip_non_x64=True)["census"]["by_host"]["X64"]["serving_fallback"] == 15
 
 
 def test_a_bare_engage_never_strips_a_non_x64_carrier_and_says_so():
@@ -194,7 +203,10 @@ def test_a_bare_engage_never_strips_a_non_x64_carrier_and_says_so():
         assert name in desired.owner_gated, f"the skipped strip for {name} must be REPORTED, never silent"
         assert topo.FALLBACK_LABEL in next(r for r in post if r.name == name).labels
     # The additive half still happens, and the un-healed defect is still a named violation.
-    assert "pi-runner-x64-1" in desired.changes
+    assert desired.armed == ["cmux", "pi-runner-c5-x64-1", "pi-runner-c5-x64-2"], (
+        "the engaging arm is the first FALLBACK_ARM_MAX managed ids — the gate's own order"
+    )
+    assert set(desired.changes) == set(desired.armed), "a bare engage attaches exactly the arm"
     assert {v.kind for v in topo.violations(post)} == {topo.VIOLATION_FALLBACK_ON_NON_X64}
     # …and the explicit flag closes it, so the owner-gated half is reachable, not dropped.
     stripped = topo.plan(measured(), engage=True, strip_non_x64=True)
@@ -305,8 +317,11 @@ def test_cli_apply_dry_run_writes_nothing(tmp_path: Path):
     assert payload["dry_run"] is True
     assert payload["changes"], "the measured pool is not at the desired topology, so a plan must exist"
     assert all(record["applied"] is False for record in payload["changes"]), "a dry run must apply nothing"
-    # 16 x64 attach ONLY: the 3 ARM64 carriers are owner-gated and left byte-identical.
-    assert len(payload["changes"]) == 16
+    # The arm attaches FALLBACK_ARM_MAX x64 runners ONLY: beyond it the runners are `over_cap`
+    # (reported, never written), and the 3 ARM64 carriers are owner-gated and left byte-identical.
+    assert len(payload["changes"]) == topo.ARM_CAP_DEFAULT
+    assert payload["arm"] == [record["runner"] for record in payload["changes"]]
+    assert len(payload["over_cap"]) == 12, "the x64 runners the cap withheld are REPORTED, not silent"
     assert set(payload["owner_gated"]) == {"pi-runner-vm-2", "pi-runner-vm-5", "pi-runner-vm-6"}
     # ⛔ THE PRE-FLIGHT MUST SPEAK BEFORE THE WRITE DOES. The projection is judged by the same
     # gates, so the dry run reports the violation the apply would leave behind.
@@ -334,8 +349,9 @@ def test_bare_apply_engages_by_default_and_never_strips_the_only_capacity(tmp_pa
     )
     assert payload["engage"] is True, "the default direction must be the one that ADDS capacity"
     after = {record["runner"]: record["after"] for record in payload["changes"]}
-    assert topo.FALLBACK_LABEL in after["pi-runner-x64-1"], (
-        "a bare apply must attach the fallback to the x64 pool, not merely strip it elsewhere"
+    assert payload["arm"], "a bare apply must ARM the x64 pool — an empty arm adds no capacity"
+    assert all(topo.FALLBACK_LABEL in after[name] for name in payload["arm"]), (
+        "a bare apply must attach the fallback to every runner it arms, not merely strip it elsewhere"
     )
     # ⛔ AND IT MUST NOT STRIP THE ARM64 CARRIERS. Their absence from `changes` is the fix; the
     # `owner_gated` entry is what keeps that skip VISIBLE instead of silent.
@@ -472,7 +488,9 @@ def test_apply_reports_the_post_state_not_the_pre_state(monkeypatch, capsys):
     assert payload["ok_before"] is False, "the pre-state is the measured violation"
     assert payload["post"] is not None, "the run must READ THE POOL BACK after writing"
     assert payload["post"]["verdict"] == "OK", "the reported state must be the POST state"
-    assert payload["post"]["census"]["by_host"]["X64"]["serving_fallback"] == 16
+    assert payload["post"]["census"]["by_host"]["X64"]["serving_fallback"] == topo.ARM_CAP_DEFAULT, (
+        "the POST render counts the CAPPED arm the write produced"
+    )
     assert payload["ok"] is True
 
 
@@ -1003,8 +1021,9 @@ def test_engage_and_strip_non_x64_are_ONE_topology_not_a_conflict(tmp_path: Path
     # The x64-only topology reaches a clean pool — the owner-gated half is reachable BY FLAG.
     assert payload["post"]["ok"] is True, payload["post"]
     assert payload["owner_gated"] == {}
-    # 16 attaches + 3 strips.
-    assert len(payload["changes"]) == 19
+    # 3 attaches (the capped arm) + 3 owner-gated strips = 6.
+    assert len(payload["changes"]) == topo.ARM_CAP_DEFAULT + 3
+    assert payload["arm_cap"] == topo.ARM_CAP_DEFAULT
 
 
 # ------------------------------------------- the queue age is the OLDEST run, and it is proven
@@ -1195,3 +1214,183 @@ def test_a_foreign_marker_is_a_violation_on_any_host():
     # …and a host that owns the marker it carries is still clean (the rule is not blanket).
     fine = topo.parse_runner(_runner(3, "win-x64", ["self-hosted", "Windows", "X64"]))
     assert {v.kind for v in topo.violations([fine])} == set()
+
+
+# ------------------------------- the engaging arm is capped at the gate's own bound (#9878)
+#
+# OWNER RULING 2026-11-02 (daniel-ospina/tortoise#9878), held by
+# `agent-infra/scripts/ci_runner_gate.sh`: "what lands on the pool is bounded by
+# FALLBACK_ARM_MAX, so queue length alone no longer decides how much contention a fallback
+# creates". `tools/ci_runner_labels.py` CITED that cap and did not apply it, so `apply` armed all
+# 16 x64 runners — 13 more than the containment an engaging pass may touch (review round 3 P1).
+def _x64_pool(ids_and_names: list[tuple[int, str]], *, carriers: set[str] | None = None,
+              offline: set[str] | None = None) -> list[topo.Runner]:
+    carriers = carriers or set()
+    offline = offline or set()
+    return topo.parse_runners(
+        {
+            "runners": [
+                _runner(
+                    rid,
+                    name,
+                    X64 + ([topo.FALLBACK_LABEL] if name in carriers else []),
+                    status="offline" if name in offline else "online",
+                )
+                for rid, name in ids_and_names
+            ]
+        }
+    )
+
+
+POOL_5 = [(5, "r5"), (1, "r1"), (3, "r3"), (9, "r9"), (2, "r2")]
+
+
+def _apply_to(pool, pending):
+    """Apply a plan to an ARBITRARY pool (the measured one has its own helper above)."""
+    out = []
+    for runner in pool:
+        planned = pending.changes.get(runner.name)
+        custom = planned[2] if planned else sorted(runner.custom_labels)
+        out.append(
+            topo.parse_runner(
+                _runner(
+                    runner.id,
+                    runner.name,
+                    sorted(runner.read_only | set(custom)),
+                    busy=runner.busy,
+                    status=runner.status,
+                    read_only=runner.read_only,
+                )
+            )
+        )
+    return out
+
+
+def test_engage_arms_at_most_the_cap_lowest_id_first():
+    """The cap is the ARM's size, in the gate's order (`sort -n`), not "the first three names"."""
+    pending = topo.plan(_x64_pool(POOL_5), engage=True, arm_cap=3)
+    assert pending.armed == ["r1", "r2", "r3"], "ids ascending — name order would arm r5, r1, r3"
+    assert set(pending.changes) == {"r1", "r2", "r3"}, (
+        "arming more than the cap is the defect this test exists for: 16 armed vs a cap of 3"
+    )
+    assert set(pending.over_cap) == {"r5", "r9"}, "the runners the cap withheld must be REPORTED"
+
+
+def test_the_cap_is_read_from_the_gates_own_variable_and_default(monkeypatch):
+    """One ruling, two readers — so the variable NAME and DEFAULT are pinned, not just the number.
+
+    A tool with its own copy of "3" agrees with the gate by coincidence and drifts silently the
+    first time either side is tuned.
+    """
+    monkeypatch.delenv(topo.ARM_CAP_ENV, raising=False)
+    assert topo.ARM_CAP_ENV == "CI_GATE_FALLBACK_ARM_MAX"
+    assert topo.fallback_arm_cap() == 3, "the gate's default is `${CI_GATE_FALLBACK_ARM_MAX:-3}`"
+    monkeypatch.setenv(topo.ARM_CAP_ENV, "1")
+    assert topo.fallback_arm_cap() == 1
+    assert topo.plan(_x64_pool(POOL_5), engage=True).armed == ["r1"], (
+        "the environment value must actually bound the arm — reading it and ignoring it is the bug"
+    )
+
+
+@pytest.mark.skipif(
+    not (REPO_ROOT / "scripts" / "ci_runner_gate.sh").is_file(),
+    reason="agent-infra scripts are not materialised here (`tools/link_agent_infra_scripts.py`)",
+)
+def test_the_cap_string_matches_the_gate_it_mirrors():
+    """Cross-repo pin: the gate's own line must still carry this variable with this default.
+
+    Read as TEXT because importing a bash script is not a thing — but a string match on the
+    assignment is exact enough to fail when either side renames the lever.
+    """
+    gate = (REPO_ROOT / "scripts" / "ci_runner_gate.sh").read_text()
+    assert 'FALLBACK_ARM_MAX="${CI_GATE_FALLBACK_ARM_MAX:-3}"' in gate, (
+        "the gate no longer declares the cap this tool mirrors — re-read #9878 before changing "
+        "either side"
+    )
+
+
+def test_an_illegal_cap_is_a_refusal_not_an_unbounded_arm(monkeypatch):
+    """`ci_runner_gate.sh` refuses the pass on a non-numeric cap; so does this (`ARM_CAP_UNREADABLE`).
+
+    The failure mode of guessing is silent and wide: a typo in the variable would arm 16 runners
+    under a cap the operator believed was 3.
+    """
+    monkeypatch.setenv(topo.ARM_CAP_ENV, "three")
+    assert topo.fallback_arm_cap() is None
+    pending = topo.plan(_x64_pool(POOL_5), engage=True)
+    assert pending.armed == [], "an unreadable cap arms NOTHING"
+    assert pending.changes == {}, "nothing may be written under a cap that cannot be read"
+    report = topo.check(_x64_pool(POOL_5), engage=True)
+    assert report["ok"] is False
+    assert topo.VIOLATION_ARM_CAP_UNREADABLE in {v["kind"] for v in report["violations"]}
+    assert len(report["over_cap"]) == 5, "every candidate is named as unarmed"
+
+
+def test_a_carrier_beyond_the_cap_keeps_its_label_and_is_reported():
+    """The cap bounds ARMING; it never STRIPS. Removing the label is `--disengage`'s direction.
+
+    The live pool is already wide (16 carriers from a previous arm). Tearing that down inside a
+    verb named "apply" would re-starve the queue to satisfy a cap on ADDING capacity.
+    """
+    pool = _x64_pool(POOL_5, carriers={"r5", "r9", "r1", "r2", "r3"})
+    pending = topo.plan(pool, engage=True, arm_cap=3)
+    assert pending.changes == {}, "the arm (r1/r2/r3) already carries — a wide pool is idempotent"
+    assert set(pending.over_cap) == {"r5", "r9"}
+    assert "keeps the label it already carries" in pending.over_cap["r5"]
+    post = _apply_to(pool, pending)
+    assert all(topo.FALLBACK_LABEL in next(r for r in post if r.name == n).labels for n in ("r5", "r9")), (
+        "a carrier beyond the cap must keep the label — an `apply` must never strip capacity"
+    )
+
+
+def test_an_offline_x64_runner_is_not_an_arm_slot():
+    """A slot that cannot pick up a job is not capacity; arming it would spend a capped slot on a
+    dead box (the same reading `serving_x64` applies to the post-state)."""
+    pool = _x64_pool(POOL_5, offline={"r5", "r1"})
+    pending = topo.plan(pool, engage=True, arm_cap=3)
+    assert pending.armed == ["r2", "r3", "r9"], "the two offline rids are skipped, not counted"
+
+
+def test_the_human_render_does_not_count_offline_carriers_as_capacity(capsys):
+    """REGRESSION (#11435 lane finding, this session): `census` counts carriers, `_print_human`
+    printed that raw count as `serving_fallback` — measured live, `X64 serving_fallback=16` while
+    two of the sixteen were OFFLINE (`pi-runner-cell3-x64-9`, `pi-runner-x64-1`). The line an
+    operator reads to answer "have we got capacity?" overstated it by exactly the dead slots.
+
+    The offline carriers are still counted, named as such — hiding them would lose the fact that
+    the labels are armed on a dead box (which is what the starvation note renders).
+    """
+    pool = _x64_pool(POOL_5, carriers={"r1", "r2", "r9"}, offline={"r9"})
+    report = topo.check(pool)
+    c = report["census"]
+    assert c["by_host"]["X64"]["serving_fallback"] == 3, "the raw census stays raw"
+    assert c["by_host"]["X64"]["serving_offline"] == 1
+    assert c["serving_fallback_online"] == ["r1", "r2"], "the capacity reading is online-only"
+    topo._print_human(report)
+    out = capsys.readouterr().out
+    assert "serving_fallback=2 (+1 offline, cannot serve)" in out, out
+
+
+def test_a_zero_cap_is_a_disarmed_gate_and_apply_refuses(tmp_path: Path):
+    """`FALLBACK_ARM_MAX=0` is DISARMED, not 'arm nothing quietly'.
+
+    `ci_runner_gate.sh:220-222`: "A value of 0 … means the fallback is DISARMED: the pool is
+    released and the engaging pass REFUSES, rather than reporting a successful engage carrying
+    nothing." A verb named `apply` that printed "0 changes — already at the desired topology" and
+    exited 0 under that value IS the successful-looking engage carrying nothing.
+    """
+    fixture = tmp_path / "runners.json"
+    fixture.write_text(json.dumps(MEASURED_2026_11_07))
+    env = dict(__import__("os").environ, **{topo.ARM_CAP_ENV: "0"})
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "apply", "--dry-run", "--from-fixture", str(fixture)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "DISARMED" in proc.stderr, proc.stderr
+    assert "changed:" not in proc.stdout, "no success line may print when the engage is refused"
+    # …and the cap of 0 still arms nothing, so a caller reading `plan` sees the same answer.
+    pending = topo.plan(_x64_pool(POOL_5), engage=True, arm_cap=0)
+    assert pending.armed == [] and pending.changes == {}

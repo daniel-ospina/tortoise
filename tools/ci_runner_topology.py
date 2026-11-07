@@ -91,7 +91,19 @@ tool names each separately because they have different remedies:
 
 The DESIRED topology this tool produces (`--engage`):
 `ubuntu-latest` ATTACHED to the x64 pool, so queueing `ubuntu-latest` work has a
-runner to reach. The x64-ONLY form — the label stripped from every runner that is
+runner to reach.
+
+⛔ THE ENGAGING ARM IS CAPPED, BECAUSE THE GATE THAT OWNS THE LABEL CAPS ITS OWN.
+`agent-infra/scripts/ci_runner_gate.sh` bounds an engaging pass at
+`FALLBACK_ARM_MAX` (default 3, `arm_ids` takes `sort -n | awk 'NR<=n'` over the managed ids):
+OWNER RULING 2026-11-02, daniel-ospina/tortoise#9878 — "what lands on the pool is bounded by
+FALLBACK_ARM_MAX, so queue length alone no longer decides how much contention a fallback
+creates". This tool READ that cap and did not apply it, so `apply` armed all 16 x64 runners —
+13 more than the containment the ruling records permits an engaging arm to touch (review
+finding, round 3). It now reads the SAME variable with the SAME default and ARMS AT MOST that
+many, ids ascending in the gate's own order. A carrier already beyond the cap is REPORTED as
+`over_cap` and left alone: removing the label is the destructive direction, which `--disengage`
+owns. Widening the arm is a recorded-decision change — the #10912 reopen, never a lane edit. The x64-ONLY form — the label stripped from every runner that is
 not x64 — is `--engage --strip-non-x64`, and it is NOT the default: removing the
 label is the step `#6897/#9878` own (`tools/ci_runner_labels.py` R2), and this
 PR's own body records it as not adoptable without a reopen. Under a bare `apply`
@@ -198,6 +210,30 @@ VIOLATION_UNMEASURED_EMPTY_POOL = "UNMEASURED_EMPTY_POOL"
 #: default-direction fix was supposed to close, one layer down (an empty or fully-offline x64 arm).
 VIOLATION_ENGAGE_NO_X64_SERVER = "ENGAGE_PRODUCED_NO_X64_SERVER"
 
+#: The engaging-arm cap the OWNING gate applies, read from the SAME variable and with the SAME
+#: default (`agent-infra/scripts/ci_runner_gate.sh:222` — `FALLBACK_ARM_MAX="${CI_GATE_FALLBACK_ARM_MAX:-3}"`,
+#: OWNER RULING 2026-11-02, daniel-ospina/tortoise#9878). One value, two readers: if this tool
+#: kept its own number the two would arm different amounts of the same pool and neither would be
+#: wrong by its own reading.
+ARM_CAP_ENV = "CI_GATE_FALLBACK_ARM_MAX"
+ARM_CAP_DEFAULT = 3
+
+#: A cap that cannot be read is a REFUSAL, not an unbounded arm. `ci_runner_gate.sh` refuses the
+#: pass on a non-numeric value (`case "$FALLBACK_ARM_MAX" in ''|*[!0-9]*) return 1`), and the
+#: failure mode of guessing here is silent: arming the whole pool under a typo.
+VIOLATION_ARM_CAP_UNREADABLE = "ARM_CAP_UNREADABLE"
+
+#: `FALLBACK_ARM_MAX=0` is not "arm nothing quietly" — `ci_runner_gate.sh:220-222` reads it as the
+#: fallback being DISARMED, where "the pool is released and the engaging pass REFUSES, rather than
+#: reporting a successful engage carrying nothing". A verb named `apply` that printed
+#: "0 changes — already at the desired topology" under it would be that false PASS.
+ENGAGE_REFUSED_CAP_ZERO = "ENGAGE_REFUSED_CAP_ZERO"
+
+#: "read the cap from the environment" — distinct from an explicit `None` (an ILLEGAL cap). Using
+#: `None` as the default would make "no cap configured" and "bad cap configured" one value, and the
+#: second is a refusal.
+_ARM_CAP_FROM_ENV = object()
+
 #: A runner carrying the OTHER architecture's pool marker. `runs-on: [self-hosted, self-hosted-x64]`
 #: is an AND, so an ARM64 box carrying `self-hosted-x64` is selected for x64 work — the #6897
 #: mis-serve, reached through the marker instead of through `ubuntu-latest`. It is also a FALSE
@@ -257,6 +293,14 @@ class Plan:
     unclassified: dict[str, str] = field(default_factory=dict)
     #: A defect this tool MUST NOT heal by default (owner-gated), keyed by runner name.
     owner_gated: dict[str, str] = field(default_factory=dict)
+    #: Runners the engaging-arm cap keeps this run from arming (or keeps carrying the label from a
+    #: previous, wider arm), keyed by runner name -> why. Reported, never written.
+    over_cap: dict[str, str] = field(default_factory=dict)
+    #: The cap this plan was bounded by; None means the configured value was not a legal cap.
+    arm_cap: int | None = None
+    #: The runners this plan ARMS (the first `arm_cap` candidates, ids ascending). Empty for a
+    #: disarm, and empty when the cap is unreadable — nothing was armed then.
+    armed: list[str] = field(default_factory=list)
 
     def add(self, runner: Runner, desired: Sequence[str]) -> None:
         # Both sides are the CUSTOM set, because that is the only set a write can change.
@@ -304,7 +348,7 @@ def census(runners: Sequence[Runner]) -> dict[str, Any]:
     """Counts by host and by fallback service. Pure; no I/O; no judgement."""
     by_host: dict[str, dict[str, int]] = {}
     for runner in runners:
-        bucket = by_host.setdefault(runner.host or "UNKNOWN", {"total": 0, "idle": 0, "serving_fallback": 0})
+        bucket = by_host.setdefault(runner.host or "UNKNOWN", {"total": 0, "idle": 0, "serving_fallback": 0, "serving_offline": 0})
         bucket["total"] += 1
         # ONLINE and not busy. An offline runner is registered capacity that cannot
         # serve anything; counting it as `idle` contradicts `x64_idle` in the same
@@ -313,12 +357,22 @@ def census(runners: Sequence[Runner]) -> dict[str, Any]:
             bucket["idle"] += 1
         if runner.serves_fallback:
             bucket["serving_fallback"] += 1
+            # A carrier that is OFFLINE serves nothing. Kept as its OWN key so the raw census
+            # stays raw (the starvation note reads it deliberately: "ARMED on N runner(s) but not
+            # one ONLINE can serve it") while a render can print what a human is actually asking
+            # for — "how much capacity have I got?".
+            if not runner.online:
+                bucket["serving_offline"] += 1
     return {
         "runners": len(runners),
         "online": sum(1 for r in runners if r.online),
         "by_host": by_host,
         "fallback_label": FALLBACK_LABEL,
         "serving_fallback": sorted(r.name for r in runners if r.serves_fallback),
+        #: ONLINE carriers only: the capacity reading, beside the raw census above.
+        "serving_fallback_online": sorted(
+            r.name for r in runners if r.serves_fallback and r.online
+        ),
         # ONLINE and idle: an offline runner is registered capacity that cannot serve anything,
         # and counting it is how a census reports capacity the queue cannot reach.
         "x64_idle": sorted(
@@ -450,7 +504,44 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
     return found
 
 
-def desired_label_set(runner: Runner, *, engage: bool, strip_non_x64: bool = False) -> list[str]:
+def fallback_arm_cap() -> int | None:
+    """The gate's engaging-arm cap, or None when the configured value is not a legal cap.
+
+    Read from `ARM_CAP_ENV` with the gate's own default, so the two readers of one ruling cannot
+    drift. An unset (or empty) value is the default; an unreadable one is None, which `plan`
+    treats as zero armable slots and `check` reports as `ARM_CAP_UNREADABLE` — the same
+    fail-closed direction the gate takes on the same input.
+    """
+    raw = os.environ.get(ARM_CAP_ENV)
+    if raw is None or raw == "":
+        return ARM_CAP_DEFAULT
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def arm_order(runners: Sequence[Runner]) -> list[Runner]:
+    """The runners an engaging arm may touch, in the gate's own order: ids ASCENDING.
+
+    Mirrors `arm_ids` (`sort -n | awk -v n="$FALLBACK_ARM_MAX" 'NR<=n'` over the pool's managed
+    ids) — which is why the order is by numeric id and not by name: the two orders disagree on a
+    pool whose names carry no id (github-runner-10 sorts before github-runner-2 lexically).
+
+    An OFFLINE runner is a registered slot that cannot serve a job, so it is not a candidate to
+    arm; `serving_x64` applies the same reading to the post-state.
+    """
+    return sorted(
+        (
+            runner for runner in runners
+            if unmanaged_reason(runner) is None and runner.online and runner.host == HOST_LABEL_X64
+        ),
+        key=lambda runner: runner.id,
+    )
+
+
+def desired_label_set(
+    runner: Runner, *, engage: bool, strip_non_x64: bool = False, arm: bool = True
+) -> list[str]:
     """The CUSTOM label set this runner SHOULD carry, under the x64-only invariant.
 
     Only labels a write may carry: GitHub's read-only ones (`self-hosted`, the platform,
@@ -486,9 +577,15 @@ def desired_label_set(runner: Runner, *, engage: bool, strip_non_x64: bool = Fal
     if not engage:
         # `--disengage`: the explicit disarm, every managed runner (`ci_runner_gate.sh:882`).
         out.discard(FALLBACK_LABEL)
-    elif host == HOST_LABEL_X64:
+    elif host == HOST_LABEL_X64 and arm:
         # The ADDITIVE half — the reason this PR exists. It contradicts nothing.
         out.add(FALLBACK_LABEL)
+    elif host == HOST_LABEL_X64:
+        # ⛔ A CAPPED-OUT x64 RUNNER IS NOT ARMED, AND NOT STRIPPED EITHER. Its fallback state is
+        # left exactly as read: a carrier beyond the cap keeps the label (removing it is the
+        # destructive direction `--disengage` owns), and a non-carrier does not get it (that is
+        # the cap). `plan` reports both cases under `over_cap`.
+        pass
     elif strip_non_x64:
         # ⛔ The x64-ONLY half, and only on request. Stripping the label off a non-x64
         # runner is the step #6897/#9878 reserve (see `tools/ci_runner_labels.py` R2), so it
@@ -539,15 +636,57 @@ def unmanaged_reason(runner: Runner) -> str | None:
     return None
 
 
-def plan(runners: Sequence[Runner], *, engage: bool, strip_non_x64: bool = False) -> Plan:
-    """The reconcile. Idempotent: an already-correct pool yields an empty Plan."""
-    result = Plan()
+def plan(
+    runners: Sequence[Runner],
+    *,
+    engage: bool,
+    strip_non_x64: bool = False,
+    arm_cap: int | object | None = _ARM_CAP_FROM_ENV,
+) -> Plan:
+    """The reconcile. Idempotent: an already-correct pool yields an empty Plan.
+
+    ⛔ THE ENGAGING ARM IS CAPPED AT THE GATE'S OWN BOUND (see the module docstring). `arm_cap`
+    defaults to the value read from `CI_GATE_FALLBACK_ARM_MAX`, which is the same variable
+    `agent-infra/scripts/ci_runner_gate.sh` reads; tests pass it explicitly so a test can never
+    depend on the ambient environment of the box it runs on.
+    """
+    cap = fallback_arm_cap() if arm_cap is _ARM_CAP_FROM_ENV else arm_cap
+    result = Plan(arm_cap=cap)
+    # The arm's candidates, ids ascending — `arm_ids`' order. `engage` only: a disarm is bounded
+    # by nothing in the gate (`labels_for` strips every managed runner when the pass is off).
+    armable = arm_order(runners) if engage else []
+    armed = {runner.name for runner in armable[: cap or 0]}
+    result.armed = sorted(armed)
     for runner in sorted(runners, key=lambda r: r.name):
         why = unmanaged_reason(runner)
         if why is not None:
             result.unclassified[runner.name] = why
             continue
-        result.add(runner, desired_label_set(runner, engage=engage, strip_non_x64=strip_non_x64))
+        in_arm = runner.name in armed
+        result.add(
+            runner,
+            desired_label_set(runner, engage=engage, strip_non_x64=strip_non_x64, arm=in_arm),
+        )
+        if engage and cap is None and not unmanaged_reason(runner):
+            result.over_cap[runner.name] = (
+                f"not armed: {ARM_CAP_ENV}={os.environ.get(ARM_CAP_ENV)!r} is not a legal cap, and "
+                f"an unreadable cap is a refusal, not an unbounded arm (`ci_runner_gate.sh` refuses "
+                f"the pass on the same value)"
+            )
+        elif engage and runner in armable and not in_arm:
+            # ⛔ THE CAP IS REPORTED, NOT SILENTLY APPLIED. A runner left unarmed because lower ids
+            # hold the slots is the ruling working; a runner still carrying the label from an
+            # earlier, wider arm is capacity somebody already committed. Both are named, so the
+            # residual cannot read as a clean pool — and widening it is the #10912 reopen, not
+            # something this verb may decide.
+            result.over_cap[runner.name] = (
+                f"is beyond the engaging-arm cap ({cap}) the gate that owns "
+                f"{FALLBACK_LABEL!r} applies ({ARM_CAP_ENV}, OWNER RULING 2026-11-02 — "
+                f"daniel-ospina/tortoise#9878); it "
+                + ("keeps the label it already carries — removing it is `--disengage`"
+                   if runner.serves_fallback
+                   else "is not armed; widening the arm is the #10912 reopen, never a lane edit")
+            )
         if engage and not strip_non_x64 and runner.host == HOST_LABEL_ARM64 and runner.serves_fallback:
             # ⛔ THE STRIP IS NOT OURS TO PERFORM BY DEFAULT. Removing `ubuntu-latest` from a
             # non-x64 runner is the step #6897/#9878 reserve (`tools/ci_runner_labels.py` R2:
@@ -598,10 +737,25 @@ def check(
             "planned_changes": {},
             "unclassified": {},
             "owner_gated": {},
+            "over_cap": {},
+            "arm_cap": None,
+            "arm": [],
             "engage": engage,
         }
     found = violations(runners)
     pending = plan(runners, engage=engage, strip_non_x64=strip_non_x64)
+    if engage and pending.arm_cap is None:
+        found.append(
+            Violation(
+                kind=VIOLATION_ARM_CAP_UNREADABLE,
+                runner="<pool>",
+                why=(
+                    f"{ARM_CAP_ENV}={os.environ.get(ARM_CAP_ENV)!r} is not a legal engaging-arm "
+                    f"cap, so NOTHING was armed — an unreadable cap is a refusal, not an unbounded "
+                    f"arm (`ci_runner_gate.sh` refuses the pass on the same value)."
+                ),
+            )
+        )
     # ⛔ "ENGAGED" IS NOT "USABLE". Counting an OFFLINE carrier as engagement made the exact state
     # this tool exists to surface — label armed, nothing ONLINE can serve it, queue absorbing —
     # emit zero signal: verdict OK, starvation_suspected False, an absorbing queue and no note.
@@ -624,6 +778,9 @@ def check(
         },
         "unclassified": dict(pending.unclassified),
         "owner_gated": dict(pending.owner_gated),
+        "over_cap": dict(pending.over_cap),
+        "arm_cap": pending.arm_cap,
+        "arm": list(pending.armed),
         "engage": engage,
     }
 
@@ -789,9 +946,18 @@ def _print_human(report: Mapping[str, Any]) -> None:
     c = report["census"]
     print(f"runners={c['runners']} online={c['online']} fallback={c['fallback_label']!r}")
     for host, bucket in sorted(c["by_host"].items()):
+        # ⛔ THE RENDER COUNTS WHAT THE QUEUE CAN REACH. `census`'s `serving_fallback` is deliberately
+        # raw (the starvation note needs "armed", not "usable"), so printing it here reported
+        # capacity that does not exist: measured, `X64 serving_fallback=16` while two of those
+        # sixteen were OFFLINE (`pi-runner-cell3-x64-9`, `pi-runner-x64-1`) — the line an operator
+        # reads to answer "have we got capacity?" overstated it by exactly the dead slots. The
+        # offline carriers are still COUNTED, named as such: hiding them would lose the fact that
+        # the labels are armed on a dead box.
+        offline = bucket.get("serving_offline", 0)
         print(
             f"  {host:<8} total={bucket['total']:<3} idle={bucket['idle']:<3} "
-            f"serving_fallback={bucket['serving_fallback']}"
+            f"serving_fallback={bucket['serving_fallback'] - offline}"
+            + (f" (+{offline} offline, cannot serve)" if offline else "")
         )
     print(f"  x64 idle (unused capacity): {len(c['x64_idle'])} -> {', '.join(c['x64_idle'][:6])}"
           f"{' …' if len(c['x64_idle']) > 6 else ''}")
@@ -825,6 +991,12 @@ def _print_human(report: Mapping[str, Any]) -> None:
     # tool is broken rather than owner-gated.
     for name, why in sorted(report.get("owner_gated", {}).items()):
         print(f"  ⚠️  OWNER-GATED {name}: {why}")
+    # ⛔ THE CAP IS ON THE VERDICT'S OWN RENDER. A residual the plan declined to write must be
+    # readable from `check`, not only from an `apply` run: the reviewer's finding was that this tool
+    # armed 5.3× the containment a recorded ruling permits, and a silent cap would hide the same
+    # class in the other direction.
+    for name, why in sorted(report.get("over_cap", {}).items()):
+        print(f"  ⚠️  OVER-CAP {name}: {why}")
     if not report["violations"]:
         print(f"verdict: {report['verdict']}")
     else:
@@ -891,6 +1063,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             "refusing: `apply --from-fixture` requires `--dry-run` — a fixture carries runner ids "
             "from another census (the measured one carries this repo's real ids), so a write "
             "from it would relabel runners nobody asked it to touch.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # ⛔ A CAP OF ZERO IS A DISARMED GATE, NOT A QUIET NO-OP. `ci_runner_gate.sh:220-222`:
+    # "A value of 0 ... means the fallback is DISARMED: the pool is released and the engaging
+    # pass REFUSES, rather than reporting a successful engage carrying nothing." This tool must
+    # not answer a disarmed gate with "0 changes — already at the desired topology" and exit 0:
+    # that is a report of a successful engage which delivered nothing, and an operator reads it
+    # as "the arm is in place". Refused for `--dry-run` too — the pre-flight is judged by the
+    # gates the write will be.
+    if args.verb == "apply" and engage and fallback_arm_cap() == 0:
+        print(
+            f"refusing: {ARM_CAP_ENV}=0 means the fallback is DISARMED — `ci_runner_gate.sh` "
+            f"releases the pool and REFUSES its engaging pass on that value, rather than "
+            f"reporting a successful engage carrying nothing. Nothing was written.",
             file=sys.stderr,
         )
         return 2
@@ -1020,6 +1208,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "changes": records,
         "unclassified": dict(pending.unclassified),
         "owner_gated": dict(pending.owner_gated),
+        "over_cap": dict(pending.over_cap),
+        "arm_cap": pending.arm_cap,
+        "arm": list(pending.armed),
         "post": post,
     }
     if args.json:
@@ -1045,6 +1236,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"  ⚠️  {name}: strip skipped (owner-gated) — its other owned labels are reconciled: {why}")
             else:
                 print(f"  ⚠️  {name}: left untouched — {why}")
+        # ⛔ WHY THE WRITE STOPPED SHORT, ON THE WRITE'S OWN RENDER. Without this an operator sees
+        # `changed: 3 runner(s)` on a 16-member pool and reads the arm as complete — the cap is a
+        # DECISION, so the runners it withheld are named, with the route that would widen it.
+        for name, why in sorted(pending.over_cap.items()):
+            print(f"  ⚠️  {name}: {why}")
+        if pending.armed:
+            print(
+                f"  arm: {len(pending.armed)} runner(s) at most (cap {pending.arm_cap} — "
+                f"{ARM_CAP_ENV}) -> {', '.join(pending.armed[:6])}"
+                f"{' …' if len(pending.armed) > 6 else ''}"
+            )
         if post is not None:
             # ⛔ THE COUNT MUST USE THE GATE'S DEFINITION. `census`'s `serving_fallback` has no
             # `online` filter (deliberately: it is a raw census), so printing it here produced
