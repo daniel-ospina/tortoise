@@ -3875,18 +3875,40 @@ class TestTheMitigationLedger:
     def test_the_belt_warns_only_about_names_the_ledger_could_record(self):
         """The fallback warning must be ACTIONABLE: one aggregated line, and only
         `gh-secret:` names — a `workflow` name cannot be ledgered (the validator
-        refuses it), so telling the reader to record it would be wrong advice."""
-        proc = _ledger_run(_ledger("# empty\n"))
+        refuses it), so telling the reader to record it would be wrong advice.
+
+        ⛔ `GIT_SHA` is the arm that makes the `gh-secret:` restriction
+        non-vacuous, and it was NOT one until #11332 review observation 1: the
+        fixture's default Fly list carries it, so it was never in
+        `live - fly_names` and deleting the restriction left this row green
+        (measured). It is now driven OFF the Fly app (`fly_names` below), which is
+        the only state in which the restriction is the thing keeping it out of the
+        warning: `GIT_SHA` is `workflow`-declared, unconditionally assigned by the
+        payload, and absent from the app — a member of the candidate set that only
+        `.startswith("gh-secret:")` excludes.
+        """
+        # Premise, re-derived from the fixture manifest rather than restated: the
+        # excluded name is a `workflow` declaration (the kind the ledger refuses).
+        sources = _manifest_sources(LEDGER_MANIFEST)
+        assert sources.get("GIT_SHA") == "workflow", (
+            "GIT_SHA is no longer the fixture's `workflow` declaration — this row's "
+            "non-vacuity arm is stale"
+        )
+        proc = _ledger_run(_ledger("# empty\n"), fly_names=["FASTAPI_INTERNAL_KEY"])
         assert proc.returncode == 0, proc.stdout + proc.stderr
         warning = [
             line for line in proc.stdout.splitlines() if "will CREATE" in line
         ]
         assert len(warning) == 1, "exactly one aggregated warning line, not N annotations"
         assert "SENTRY_DSN" in warning[0]
-        assert "GIT_SHA" not in warning[0], "a `workflow` name is not the ledger's to record"
+        assert "GIT_SHA" not in warning[0], (
+            "a `workflow` name is not the ledger's to record — and it IS in the "
+            "`live - fly_names` candidate set here, so only the `gh-secret:` "
+            "restriction keeps it out of the warning"
+        )
 
         # A ledgered name is not "about to be created" — it is deliberately absent.
-        suppressed = _ledger_run(_ledger(_entry()))
+        suppressed = _ledger_run(_ledger(_entry()), fly_names=["FASTAPI_INTERNAL_KEY"])
         assert "will CREATE" in suppressed.stdout  # OPT_SECRET is still absent
         for line in suppressed.stdout.splitlines():
             if "will CREATE" in line:
