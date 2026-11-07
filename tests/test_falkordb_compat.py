@@ -258,10 +258,12 @@ class TestVersionProbeCacheKeyServerMode:
     i.e. per hosted request on the paid tier, which is the exact cost the
     cache exists to remove.
 
-    These tests use the REAL client object (a ``redis.Redis`` built without
-    connecting), not a fake with ``.host``/``.port`` bolted on: a fake that
-    carried those attributes would pin a client that does not exist and would
-    stay green through this defect.
+    The tests below use the REAL client object (a ``redis.Redis`` built without
+    connecting) wherever the claim is about a real client SHAPE — a fake with
+    ``.host``/``.port`` bolted on would pin a client that does not exist and
+    would stay green through this defect. Where a test deliberately exercises a
+    shape no real client produces (a partially-resolving pool), it builds that
+    shape explicitly and says so.
     """
 
     def _proj(self, db) -> FalkorProjection:

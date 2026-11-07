@@ -18744,15 +18744,23 @@ class FalkorProjection(
         kwargs = _client_pool_kwargs(getattr(self, "db", None)) or {}
         pool_host = kwargs.get("host")
         raw_port = kwargs.get("port")
-        if pool_host is not None and raw_port is not None:
+        pool_port = None
+        if raw_port is not None:
             try:
-                return ("server", str(pool_host), int(raw_port))
+                pool_port = int(raw_port)
             except (TypeError, ValueError, OverflowError):
-                # An unparseable port is no endpoint identity — keep looking
-                # rather than mint a key that would collide across stores.
-                pass
+                # ⛔ An unparseable port is NO PORT, not "a port is present" —
+                # the host-only lane below must still fire, or this shape loses
+                # its stable bucket and takes one address-keyed register entry
+                # per projection object (the never-evicted leak the pair
+                # register's own comment names) for no safety gain: a
+                # `("server", host, None)` bucket can never equal a real
+                # `("server", host, port)` one.
+                pool_port = None
+        if pool_host is not None and pool_port is not None:
+            return ("server", str(pool_host), pool_port)
         own_host = getattr(self, "_host", None)
-        if own_host is not None and raw_port is None:
+        if own_host is not None and pool_port is None:
             # ⛔ A HOST-ONLY bucket is a DEGRADED identity (it cannot separate
             # two servers on one host) but it is all this store can offer, and
             # it is *stable* — which is what keeps a per-request projection in
