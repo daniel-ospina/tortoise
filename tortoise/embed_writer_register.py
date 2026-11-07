@@ -56,11 +56,13 @@ claim and a slogan:
   `encode_for_store`, `compute_session_embedding`) — added nothing to the population and this
   register's guard stayed green over it; discovery now decides the shape on the AST. The four live
   instances it had been missing (`api::add_point`, `consistency::_graph_fingerprint`,
-  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here. ⚠️ Two live writers hold
-  this shape and are in the population ANYWAY, so neither is evidence the shape was seen:
+  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here. ⚠️ Live writers hold
+  this shape and are in the population ANYWAY, so none of them is evidence the shape was seen:
   `sdk::_journal_event_raw_write` (the `embedding=None` in its SIGNATURE matches `_EMBED_WRITE`) and
-  `api::_point` (a recognised `encode_for_row` CALL classes it `gated`) — that branch assigns `gated`
-  WITHOUT consulting the write predicate. Membership and visibility are different questions.
+  — because the `encode_for_row` branch assigns `gated` WITHOUT consulting the write predicate —
+  every writer that reaches the seam by CALL (`api::_point`, `sdk::create_point`, `sdk::update_point`,
+  `projection::_revise_point`). Membership and visibility are different questions; the writers whose
+  membership the AST pass actually bought are the four named just above, and nothing else.
   ⚠️ "Every module discovery walks" is not every module in `tortoise/`: the walk SKIPS `tortoise/embeddings.py` on purpose (the
   seam primitives are not write paths), and two functions there use exactly this form —
   `stamp_journal_embedding` (`payload["embedding"] = vec`) and `_drop_journalled_embedding`
@@ -111,7 +113,7 @@ neither is in `WRITER_CENSUS` or this register at all); by contrast the computed
 `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
 `set_embedding_clause`, NOT off its whole-node replace. The authority for SHAPES is
 `tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which holds both the shapes neither pass can
-spell AND the SCOPES the walk never enters (module- and class-body stores): a count written
+spell AND the SCOPES the walk never enters: a count written
 here re-stales with every shape added, so this paragraph names forms and instances and does not
 count them.
 ⚠️ `tortoise.sdk::_journal_event_raw_write` is
@@ -120,7 +122,8 @@ it is not evidence that a literal subscript is what gets a carrier seen; the wri
 owe their visibility to `#11274`'s AST pass are the ones the container-key bullet above names as
 found — not every container-key declaration in the table. A writer is also
 excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
-*named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module) or when its
+*named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module, BOTH of them
+reached by the walk — the test header's collision note carries the measured cases) or when its
 module will not parse. ⛔ **The `gated` escape is not hypothetical, and it is the widest one:**
 `tortoise.sdk::create_point` and `tortoise.sdk::update_point` reach `encode_for_row` on the normal
 path, so discovery classes them `gated` and owes them no declaration — yet **a caller-supplied

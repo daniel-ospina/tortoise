@@ -27,15 +27,22 @@ what makes the DISCOVERED MAP unable to NAME OR CLASSIFY a writer; it is not a l
 reason a writer can escape a declaration — `gated` and `producer` escape it too, by design, and are
 stated in the register instead.
 
-⚠️ A NAME-COLLIDING writer is the one case here that can be NEITHER absent NOR declarable — but
-only when discovery reaches BOTH defs: two same-named `def`s that are EACH discovered leave the KEY
-IN the map with its KIND replaced by `"duplicate"` (`probe._embedding_writers`'s `_put`), which is
-outside `NEEDS_A_DECLARATION`, so such a writer owes no declaration while its class is UNRESOLVED
-(it may or may not store a vector the gate sees). When the colliding def is NOT discovered, `_put`
-is never reached for it and the key keeps the DISCOVERED def's kind — `unresolved_write`, which IS
-in `NEEDS_A_DECLARATION`, so that writer is caught rather than escaped (measured in both
-directions). The guard PINS that the population holds no `duplicate` row at all rather than reading
-the class as acceptable: a writer being IN the map is not the same thing as being classifiable.
+⚠️ A NAME-COLLIDING writer is the case here that can be NEITHER absent NOR declarable, and the
+mechanism differs by whether the walk reaches the colliding def:
+
+* **BOTH defs discovered** → the KEY stays in the map with its KIND replaced by `"duplicate"`
+  (`probe._embedding_writers`'s `_put`), which is outside `NEEDS_A_DECLARATION`: it owes no
+  declaration while its class is UNRESOLVED (it may or may not store a vector the gate sees).
+* **Colliding def NOT discovered** → `_put` is never reached for it and the key keeps the DISCOVERED
+  def's kind. If that kind is `unresolved_write`/`ungated` (measured in both orders), the writer is
+  **caught** — the kind is in `NEEDS_A_DECLARATION`. If it is `gated` or `producer`, the key stops at
+  a class that owes no declaration and the colliding writer is neither absent nor declarable — the
+  same gap, reached through a sibling this file cannot see into.
+
+So a `duplicate` row is the narrow case, and the guard below PINS the population at zero `duplicate`
+rows rather than reading the class as acceptable: a writer being IN the map is not the same thing as
+being classifiable. What closes the sibling case is the register's closure-claim caveat (§ the
+`gated` escape), not this list.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (read `WRITER_CENSUS`
 for the class counts rather than a number restated here — the #11274 widening moved them) but left
