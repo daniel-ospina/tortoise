@@ -57,9 +57,11 @@ the measured arm — IN PROCESS, with the previous values restored in a ``finall
 and the set values READ BACK from ``os.environ`` before the pass, the way
 ``e1_e2_probe.run_arm`` does it (they default OFF in the deployed config), so
 S2.2/S2.3 are ON-PATH for this pass — the convention #9076's E1/E2 run used ("the
-gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned
-UNSET for the same reason: it also switches S2.2 on, so an ambient value would
-silently change the arm. The ``arm:`` line is that read-back, never a typed
+gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned to an
+EXPLICIT ``"0"`` (``ARM_OFF``, NOT popped) for the same reason: it also switches
+S2.2 on, so an ambient value would silently change the arm — and since ``#10996``
+an ABSENT ``TORTOISE_VALUE_GATE`` IS the ON arm, so popping it would arm the
+predicate this arm declares OFF. The ``arm:`` line is that read-back, never a typed
 literal — a run that cannot read a flag back as set REFUSES rather than printing a
 claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
@@ -326,6 +328,195 @@ ARM_ON = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 #: includes the predicate, at a header claiming it was pinned off.
 ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 
+# ── the DOOR (#10983 / C2) ────────────────────────────────────────────────
+#
+# "Which code path produced this number" is a SEPARATE question from "which arm
+# was it run under", and this probe answered only the second one. The extraction
+# LANE is selected by an ordinary environment variable that ``measured_arm`` did
+# not touch:
+#
+#   * ``tortoise/sdk.py`` — ``TORTOISE_SESSION_EXTRACTOR == "m2"`` routes
+#     ``capture_session`` to ``_extract_session_llm``; everything else routes to
+#     ``_extract_session_v2`` (the v4 door).
+#   * ``tortoise/hosted_api.py::_capture_lane`` — the hosted endpoint's mirror of
+#     the SAME predicate, so the two entry points select ONE lane, not two.
+#
+# An ambient ``TORTOISE_SESSION_EXTRACTOR=m2`` on the operator's box therefore
+# rerouted all seven acceptance captures to the OTHER extractor while the log
+# still printed an ``arm:`` line that said nothing about it — the silent seam
+# #10983 exists to close. The lane, plus every switch on this path that changes
+# what the run MEASURES through it, is pinned here and READ BACK like every other
+# switch (the ``arm:`` rule, applied to the door).
+#
+# ⛔ The set below is CLOSED over the **measurement modules the path renders
+# with**, and what is enforced MECHANICALLY is the CENSUS over that list, not the
+# list's membership: `path_modules` is a HAND-MAINTAINED tuple, and every
+# ``TORTOISE_*`` read inside those modules must be classified, or the suite reds.
+# The module names are NOT restated here on purpose — a count in this comment is a
+# transcription that rots: it said "``extractor_v2.py`` plus the three modules it
+# reaches one call down" for three review rounds while the list had already grown
+# past it (cycle 9 measured the comment at four modules against eight in
+# `tests/test_7949_c2_door.py::path_modules`). The authority is `path_modules` in
+# that test. ⚠️ Membership is hand-kept, so a read added to a module OUTSIDE that
+# tuple is NOT caught by it — the ``sdk``/``hosted_api`` helpers the two hops call
+# are the measured gap, tracked as #11410. Every ``TORTOISE_*`` those modules
+# read is accounted for,
+# either as an arm seam in ``SEAM_LEDGER`` (``TORTOISE_VET``,
+# ``TORTOISE_CLASSIFY_LATER``, ``TORTOISE_S4_DELTA``), or as a pin below, or as
+# an INPUT rather than a setting (``TORTOISE_DB_URI`` the graph it writes,
+# ``TORTOISE_API_URL`` a backend label), or as a declared not-a-measurement-seam
+# read with its reason (`acknowledged_not_a_measurement_seam`).
+#
+# ⚠️ The claim is scoped to what it can enforce. The same call chain also reads
+# INFRASTRUCTURE variables (record DSN, packs dir, embedding gates, store
+# connection). Those are what a run needs in order to happen at all, not settings
+# that move the measured population, and the door neither pins nor partitions
+# them. Adding another derived module is a one-line change to `path_modules` in
+# the test (the arm-seam modules are already there). An earlier revision of this comment called the whole path "closed" over
+# "exactly ten" variables and then partitioned 3 arm seams + 6 pins + 2 inputs =
+# 11; the #10983 review (cycle 5) measured both halves of that false —
+# ``TORTOISE_REFERENTIALITY`` is read on every v2 capture through
+# ``referentiality.ENV_FLAG`` and was accounted for by nothing.
+#
+# ⚠️ The set below is what the #10983 reviews widened, in TWO rounds. The first
+# revision pinned the lane and the two render switches and called that "the seam
+# set"; round 1 found ``TORTOISE_SESSION_LLM_MOCK`` (decisive: it swaps the model
+# for ``_V2SessionMock`` — ``sdk._session_llm_mock_enabled`` — AND short-circuits
+# the provider-key check, so ``backend_ready()`` still passes on a real key and a
+# fully mocked run is byte-indistinguishable in the log from a real one), the
+# prompt render and the model selector; round 2 found the two TRUNCATION BUDGETS
+# (``_stage_cap`` / ``_extractor_escalation_tokens``, both read at call time),
+# which decide how much of each stage's output survives. A pin set that stops at
+# "the pipeline" and leaves "what the pipeline reads" ambient is the same
+# declaration-versus-control defect, one layer down.
+#
+# The provider ROUTE is deliberately NOT pinned: ``TORTOISE_EXTRACTOR_PROVIDER``
+# only chooses among routes the box already has a key for, and the route is
+# OBSERVED rather than forced — the receipt reports it as ``extraction_mode``
+# (``llm:<route>``, ``sdk.py``), which ``run_corpus`` records and ``render_log``
+# prints per session. Named here so the set below is not read as an exhaustive
+# list of every ``TORTOISE_`` variable in the process.
+
+#: The env var that selects the extraction lane.
+DOOR_LANE_ENV = "TORTOISE_SESSION_EXTRACTOR"
+
+#: The lane the acceptance runs when that var is unset — and the one the run is
+#: PINNED to (``_capture_lane()``'s default, ``hosted_api.py``).
+DOOR_LANE = "v2"
+
+#: Unset (not ``"0"``) is the correct pin for each of these: every one selects a
+#: DIFFERENT behaviour when PRESENT, and none is an on/off switch whose absent
+#: state is the risky one.
+#:
+#: * ``TORTOISE_SESSION_EXTRACTOR`` — ``m2`` is the OTHER extractor; only
+#:   ``unset`` is the default the fleet runs, and the log must state which one
+#:   this was.
+#: * ``TORTOISE_EXTRACTOR=v1`` — read by ``sdk.commit_session`` (``sdk.py``), NOT
+#:   by ``capture_session``: the acceptance path dispatches on
+#:   ``TORTOISE_SESSION_EXTRACTOR`` alone, so this pin is DEFENSIVE for any
+#:   commit the probe performs, not a route off the capture door. Said plainly
+#:   because the #10983 review found the earlier "a route off this door"
+#:   rationale claimed a reach this variable does not have on this path.
+#: * ``TORTOISE_LABEL_ORDER=shuffle`` — NOT a behaviour seam (#10983): it is a
+#:   render DIAGNOSTIC that reorders the kind lists per call, i.e. it makes two
+#:   runs of this probe differ for a reason that is not the arm. Pinned off.
+#: * ``TORTOISE_SESSION_LLM_MOCK`` — the offline model seam. It replaces the
+#:   model with ``_V2SessionMock`` AND short-circuits the provider-key check, so
+#:   an ambient ``=1`` makes every capture canned output while
+#:   ``backend_ready()`` still passes and the log still claims a real run. The
+#:   acceptance is scored on a REAL provider; a mock is only ever an explicit
+#:   arm, never an inherited one (#10983 review).
+#: * ``TORTOISE_EXTRACTOR_PROMPT=compact`` — a third render switch beside
+#:   ``TORTOISE_LABEL_ORDER`` (``extractor_v2.py`` renders a different master
+#:   under it, and that render is explicitly NOT byte-identical to the default
+#:   since #9733), so it changes what the run measures without changing the arm.
+#: * ``TORTOISE_EXTRACT_MODEL`` — selects the extractor's MODEL (the producer the
+#:   acceptance's numbers come from). It does NOT by itself move the output bound:
+#:   every stage passes ``max_tokens=_stage_cap(...)`` per call, which beats the
+#:   adapter's constructor default — measured at this head, an explicit model id
+#:   with ``TORTOISE_EXTRACTOR_MAX_TOKENS`` unset still caps S2/S4 at 16000. The
+#:   bound has its own switch, pinned below (#10983 review round 2 corrected this
+#:   bullet, which had credited the model selector with the bound).
+#: * ``TORTOISE_EXTRACTOR_MAX_TOKENS`` — the stage output cap (``_stage_cap``, read
+#:   at CALL time): pinned unset ⇒ the shipped 1500/16000 stage defaults. An
+#:   ambient value (the documented lever an operator raises after a timeout
+#:   spike) shrinks how much of each stage survives truncation, i.e. it changes
+#:   the population being measured, under a header that would still claim the
+#:   door held (#10983 review round 2).
+#: * ``TORTOISE_EXTRACTOR_ESCALATION_TOKENS`` — the length-truncation RETRY budget
+#:   (``_extractor_escalation_tokens``): the same class, pinned unset.
+#: * ``TORTOISE_REFERENTIALITY`` — the S2.2 mention-selection arm
+#:   (``referentiality.enabled()``, reached through ``referentiality.ENV_FLAG``
+#:   from ``extractor_v2``'s prompt/mention path): armed, the prompt contract and
+#:   the entity mentions a run yields change without changing the lane. Found in
+#:   the #10983 review (cycle 5) as the one measurement switch the set missed,
+#:   because it is read one module away from the file the closure test derived
+#:   from.
+#: * ``TORTOISE_LABEL_ORDER_SEED`` — inert while ``TORTOISE_LABEL_ORDER`` is off,
+#:   and pinned anyway so the pair cannot be split: setting the seed without the
+#:   render switch is a no-op today, and a future edit that reads the seed
+#:   independently must not inherit one from the operator's shell.
+DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
+                   "TORTOISE_LABEL_ORDER", "TORTOISE_LABEL_ORDER_SEED",
+                   "TORTOISE_SESSION_LLM_MOCK", "TORTOISE_EXTRACTOR_PROMPT",
+                   "TORTOISE_EXTRACT_MODEL", "TORTOISE_EXTRACTOR_MAX_TOKENS",
+                   "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
+                   "TORTOISE_REFERENTIALITY", "TORTOISE_CONTEXT_ENRICH",
+                   # cycle 8, dropped by the peer head and restored here: an
+                   # ambient =1 ADDS a :GraphEvent to the graph the run writes
+                   # (change_feed.py:182 via sdk._change_feed_enabled) and the
+                   # probe's S6 witness prints that count (measured: 2 vs 3).
+                   "TORTOISE_CHANGE_FEED",
+                   # cycle 10: read through a PARAMETER (`_pick(tau_hi,
+                   # "TORTOISE_SUBJECT_TAU_HI", ...)` -> `os.environ.get(env_name)`)
+                   # from the write path, and it decides whether the
+                   # `:aboutSubject`/`:aboutObject` edge is written at all
+                   # (measured: 0.90 -> bound at the defaults, suspected with
+                   # TORTOISE_SUBJECT_TAU_HI=0.99). Absent is the shipped
+                   # default, so pinning them UNSET matches today's behaviour.
+                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO")
+
+#: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
+#: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
+#: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
+#: which changes the embed list a run measures without changing the arm.
+DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
+                  # cycle 9 (#10983): `sparse.py:226` `env_flag(IDENTIFIER_ENV,
+                  # True)` — default-ON, read through `projection/entities.py:1208`
+                  # on the write path (`create_point` -> `point_identifier_aliases`),
+                  # so it REWRITES `search_keys` on every ``:Point`` the run writes.
+                  # Pinned to the SHIPPED default, not off: an ambient `=0` is the
+                  # non-neutral state here, and the registered corpus yields no
+                  # aliases either way (0 of 27 points, 0 turns across the 7
+                  # fixtures — measured), so the pin makes the population
+                  # insensitive to the shell without moving a number.
+                  ("TORTOISE_IDENTIFIER_TOKENS", "1"))
+
+#: Every key a complete read-back carries — the pinned-off set plus the
+#: pinned-to set. A ``door_header``/``door_record`` handed an INCOMPLETE dict is
+#: treated as NOT MEASURED, because every pinned-off target state is ``<unset>``:
+#: rendering a partial dict would print ``KEY=<unset> … read back from os.environ``
+#: about keys nobody read (#10983 review round 11).
+DOOR_KEYS = frozenset(DOOR_PINNED_OFF) | frozenset(k for k, _ in DOOR_PINNED_ON)
+
+#: The v4 seam ledger AT THE HEAD THIS RUN MEASURED (#10983, C2's Target 3).
+#:
+#: ``(env var, module.resolver, default, is a behaviour seam)``. The DEFAULT
+#: column is the CODE's, not a document's — a ledger copied out of prose is how
+#: this one came to call ``TORTOISE_VALUE_GATE`` default-off after #10996 had
+#: already made it default-ON at ``value_gate.value_gate_enabled`` and, through
+#: ``extractor_v2``'s ``vet_enabled`` OR, armed the S2.2 pass on the fleet's
+#: default write path. ``tests/test_7949_c2_door.py`` resolves every row against
+#: the modules and reds if this table and the tree disagree.
+SEAM_LEDGER = (
+    ("TORTOISE_VET", "extractor_v2._vet_enabled", "off", True),
+    ("TORTOISE_CLASSIFY_LATER", "extractor_v2._classify_later_enabled", "off", True),
+    ("TORTOISE_S2_DECISION_SEAM", "s2_decision_seam.seam_enabled", "off", True),
+    ("TORTOISE_VALUE_GATE", "value_gate.value_gate_enabled", "on", True),
+    ("TORTOISE_S4_DELTA", "extractor_v2._s4_delta_enabled", "on", True),
+    ("TORTOISE_LABEL_ORDER", "extractor_v2._label_order_rng", "off", False),
+)
+
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
 #: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2455`` — turn
@@ -407,7 +598,9 @@ def measured_arm():
     (fail closed) rather than printing a claim nothing supports.
     """
     keys = (*ARM_ON, *ARM_OFF)
-    saved = {key: os.environ.get(key) for key in keys}
+    door_off = tuple(DOOR_PINNED_OFF)
+    door_on = tuple(key for key, _ in DOOR_PINNED_ON)
+    saved = {key: os.environ.get(key) for key in (*keys, *door_off, *door_on)}
     try:
         for key in ARM_ON:
             os.environ[key] = "1"
@@ -415,7 +608,12 @@ def measured_arm():
             # explicit falsy, never absent — `#10996`: an unset default-ON
             # switch is the ON arm, so a pop would be a lie in the header below.
             os.environ[key] = "0"
-        observed = {key: os.environ.get(key) for key in keys}
+        for key in door_off:
+            os.environ.pop(key, None)
+        for key, value in DOOR_PINNED_ON:
+            os.environ[key] = value
+        observed = {key: os.environ.get(key)
+                    for key in (*keys, *door_off, *door_on)}
         for key in ARM_ON:
             if observed[key] != "1":
                 raise SystemExit(
@@ -423,6 +621,37 @@ def measured_arm():
                     f"{key}=1 but os.environ reads back {observed[key]!r}; a log "
                     f"that declares an arm it did not run is a fabricated "
                     f"measurement, so this pass writes no table")
+        leaked_lane = observed.get(DOOR_LANE_ENV)
+        if leaked_lane not in (None, ""):
+            raise SystemExit(
+                f"capstone-measure: REFUSED — the run pins the {DOOR_LANE!r} "
+                f"extraction lane, but {DOOR_LANE_ENV} reads back "
+                f"{leaked_lane!r} after being unset. A capture taken under "
+                f"another lane measures a DIFFERENT door (#10983), so this pass "
+                f"writes no table")
+        # EVERY other pinned-off switch, re-read and refused on a leak. The lane
+        # has its own message above (it changes the door); these change what the
+        # run MEASURES through the same door, and the #10983 review found them
+        # popped, printed in the ``door:`` line, and never checked — so the
+        # header's "read back" claim was one var wider than the code. A pin that
+        # cannot fail is a declaration, not a control.
+        for key in door_off:
+            if key == DOOR_LANE_ENV:
+                continue
+            leaked = observed.get(key)
+            if leaked not in (None, ""):
+                raise SystemExit(
+                    f"capstone-measure: REFUSED — {key} is pinned UNSET, but it "
+                    f"reads back {leaked!r} after being popped. It changes what "
+                    f"this run measures through the same door, so the arm cannot "
+                    f"be declared (#10983) and this pass writes no table")
+        for key, expected in DOOR_PINNED_ON:
+            if observed.get(key) != expected:
+                raise SystemExit(
+                    f"capstone-measure: REFUSED — {key} is pinned to "
+                    f"{expected!r} but reads back {observed.get(key)!r}; that "
+                    f"seam changes what the run measures, so the arm cannot be "
+                    f"declared (#10983)")
         yield observed
     finally:
         for key, value in saved.items():
@@ -450,6 +679,235 @@ def arm_record(observed: dict[str, str | None]) -> dict:
                                      for key in (*ARM_ON, *ARM_OFF)}
     record["source"] = "os.environ read-back after measured_arm() forced it"
     return record
+
+
+def door_header(observed: dict[str, str | None]) -> str:
+    """The ``door:`` line, DERIVED from the run's own read-back (#10983).
+
+    Names the entry point in CODE terms — the function chain and the lane
+    selector, not "the pipeline" — plus the value each pinned switch RESOLVED TO
+    on this run and the six-seam ledger with the DEFAULTS the pin suite resolves
+    against the modules. A log therefore states the seam set it ran rather than
+    the one a reader remembers (`#10983` Target 3).
+
+    ⛔ An EMPTY read-back is NOT a pinned door. For every switch here the target
+    state is ``<unset>``, so a header rendered from nothing used to print
+    byte-identical text to a header rendered from a run whose pins HELD —
+    ``render_log``'s ``door`` defaults to ``None`` and the repo's own fixtures
+    call it that way, so a fixture log asserted "read back from os.environ" about
+    a read-back that never happened (#10983 review). Absence is now said out
+    loud, on the same rule the ``arm:`` line already follows for a flag it did
+    not measure.
+    """
+    if not _door_measured(observed):
+        return ("NOT MEASURED — this render carries NO COMPLETE measured_arm() "
+                "read-back, so no lane and no pinned switch is attested. Render "
+                "the log from a run that entered ``measured_arm()`` (``main`` "
+                "does) before citing the door")
+    lane = observed.get(DOOR_LANE_ENV)
+    # The HEADLINE is the read-back, never the module constant: a read-back that
+    # disagrees with the pin must not be summarised as the pin (#10983 review).
+    # ``main`` never reaches here in that state (measured_arm refuses first), so
+    # this is the path a re-render tool or a fixture would take.
+    lane_pinned = lane in (None, "")
+    lane_word = DOOR_LANE if lane_pinned else lane
+    pins = [f"{key}=<unset>" if observed.get(key) in (None, "")
+            else f"{key}={observed.get(key)}"
+            for key in DOOR_PINNED_OFF]
+    pins += [("<unset>" if observed.get(key) in (None, "")
+              else f"{observed.get(key)}") .join([f"{key}=", ""])
+             for key, _ in DOOR_PINNED_ON]
+    seams = ", ".join(f"{env}={default}" for env, _where, default, _seam
+                      in SEAM_LEDGER)
+    return (f"{lane_word} lane (sdk.capture_session -> sdk._extract_session_v2 "
+            f"-> extractor_v2.extract_session_v2; hosted_api._capture_lane() "
+            f"mirrors the same predicate) | {DOOR_LANE_ENV}="
+            f"{'<unset>' if lane_pinned else lane} "
+            f"{'PINNED' if lane_pinned else 'LEAKED — NOT THE PINNED LANE'} "
+            f"({' '.join(pins)} read back from os.environ) | seam defaults at "
+            f"this head: {seams}")
+
+
+def _door_measured(observed: dict[str, str | None]) -> bool:
+    """Does this read-back carry EVERY pinned key? A partial one is not a pin."""
+    return bool(observed) and set(observed) >= DOOR_KEYS
+
+
+def door_record(observed: dict[str, str | None]) -> dict:
+    """The machine half of the door: lane, pins, and the six-seam ledger.
+
+    An empty (or PARTIAL) read-back records ``measured: false`` and NO pin block,
+    rather than borrowing the measured record's ``source`` sentence — a machine
+    record that says "os.environ read-back after measured_arm() forced the door"
+    about a render that never ran one is the same false claim as the log line
+    (#10983 review). ``measured`` is stated in BOTH directions so a consumer can
+    key on it instead of inferring it from an absent key.
+
+    ``lane`` follows the READ-BACK, not the module constant: a record that
+    printed ``lane: v2`` beside ``lane_read_back: m2`` would let a consumer key
+    on the wrong field (#10983 review round 11). ``lane_pinned`` says whether the
+    read-back matched the pin.
+    """
+    if not _door_measured(observed):
+        return {
+            "measured": False,
+            "lane": DOOR_LANE,
+            "lane_env": DOOR_LANE_ENV,
+            "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
+                            "extractor_v2.extract_session_v2"),
+            "hosted_selector": "hosted_api._capture_lane",
+            "note": ("NOT MEASURED — render_log was called without a door "
+                     "read-back, so no pin is attested for this run"),
+        }
+    return {
+        "measured": True,
+        "lane": observed.get(DOOR_LANE_ENV) or DOOR_LANE,
+        "lane_env": DOOR_LANE_ENV,
+        "lane_read_back": observed.get(DOOR_LANE_ENV),
+        "lane_pinned": observed.get(DOOR_LANE_ENV) in (None, ""),
+        "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
+                        "extractor_v2.extract_session_v2"),
+        "hosted_selector": "hosted_api._capture_lane",
+        "pinned_off": {key: observed.get(key) for key in DOOR_PINNED_OFF},
+        "pinned_on": {key: observed.get(key) for key, _ in DOOR_PINNED_ON},
+        "seams": [{"env": env, "resolver": where, "default": default,
+                   "behaviour_seam": seam}
+                  for env, where, default, seam in SEAM_LEDGER],
+        "source": "os.environ read-back after measured_arm() forced the door",
+    }
+
+
+#: The ``extraction_mode`` values that mean a capture REACHED the door.
+#:
+#: ⛔ The COLON is the discriminator, not the ``llm`` — the two lanes differ by
+#: exactly that character, so do not "tidy" this into a route-agnostic ``llm``
+#: prefix (the #10983 review measured that the whole suite stays green under
+#: ``"llm"``):
+#:
+#: * the v2 lane reports ``llm:<route>`` (``sdk.capture_session`` ->
+#:   ``_extract_session_v2`` -> the adapter's own ``route``, always truthy on a
+#:   success);
+#: * the OTHER lane reports a BARE ``"llm"`` — ``_extract_session_llm`` reports it
+#:   with no route and no colon, pinned by
+#:   ``tests/test_capture_session.py::test_capture_session_zero_extraction_is_warning_not_failure``.
+#:   A prefix of ``"llm"`` would therefore admit an m2 capture as door-entered,
+#:   which is the one bypass this witness exists to refuse. The bare ``"llm"``
+#:   spelling is pinned in
+#:   `tests/test_7949_c2_door.py::test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run`
+#:   so the widening cannot be made by aligning the m2 lane to this contract.
+#:
+#: ``replayed`` and ``no-provider`` mean the capture returned BEFORE the lane
+#: dispatch (#1727 replay, #3892 keyless), and ``extraction-disabled`` is the
+#: hosted endpoint's own pre-dispatch branch (the org's off switch) — it cannot
+#: arise on the probed ``sdk.capture_session`` path at all, so it is listed for
+#: completeness of the vocabulary, not as a shape this probe can meet. ``empty``
+#: has TWO origins and neither is this door: the blank session-id and
+#: blank-conversation gates in ``sdk.capture_session`` return before the dispatch,
+#: AND the other lane emits it after taking that lane. So none of the four is
+#: this door entered. (This sentence used to attach "took a lane that is not the
+#: v2 door" to all four spellings; only ``empty`` has that origin. The earlier
+#: "returned BEFORE" clause was also over-attributed to ``extraction-disabled``,
+#: which no ``sdk`` gate emits — #11298 review, source-verified both ways.)
+#:
+#: ⛔ ``error`` IS NOT ONE OF THOSE, and listing it here was a measured defect
+#: (#11298 review, round 14). ``error`` is a POST-dispatch outcome — the lane ran
+#: and REPORTED a failure (raised, or caught and appended), mode set INSIDE it: by
+#: ``sdk._extract_session_v2`` (the door itself) and by ``sdk._extract_session_llm``
+#: (the other lane), each setting ``meta["mode"]`` to ``"error"`` iff its own
+#: ``errors`` is non-empty. ``sdk.capture_session`` then maps a failed extraction
+#: onto it (``elif not ok: effective_mode = "error"``). Never by the pre-dispatch
+#: guards. Rows are cited by FUNCTION rather than by ``sdk.py:<line>``, because a
+#: line number in prose re-stales on the next insertion — the case this file
+#: already carries three times.
+#: Counting it as a bypass refused a run for a cause that was false, AFTER its
+#: full spend, and — because ``require_door_entered`` raises before the log is
+#: written — threw away the ``errors`` that would have shown what actually
+#: happened. See ``DOOR_ENTERED_THEN_FAILED``.
+DOOR_ENTERED_PREFIX = "llm:"
+
+#: The ``extraction_mode`` a capture reports when it DID enter the door and then
+#: FAILED. Treated as entered, not bypassed, for the reason above. The failure is
+#: not swallowed by that: ``run_corpus`` keeps each receipt's ``errors``,
+#: ``main`` collects the non-``ok`` sessions into ``failed``, and the log — which
+#: a bypass no longer prevents — carries them per session (``errors=[…]`` on the
+#: session's own line and in the machine record) plus a ``sessions failed: […]``
+#: line on stderr after the write.
+#:
+#: ⚠️ REPORTED, NOT SCORED — and that half is stated here rather than left to be
+#: discovered. Nothing about a failed capture stops the pass from being scored:
+#: ``main`` still exits 0 and the record's ``run.status`` is still ``"COMPLETED"``,
+#: which is the field ``tools/capstone_verdict_check.py`` V5 reads to decide the
+#: pass completed — it also reads ``run.steps_observed`` and the step-accounting
+#: keys, and none of those distinguishes a failed capture either, because the
+#: step totals are summed over sessions. So a run with a failed capture is not
+#: distinguishable from a clean one BY THE GATE (a human reading the log is).
+#: Filed as **#11414**; changing the exit or the status is a gate decision, not
+#: a comment fix.
+DOOR_ENTERED_THEN_FAILED = ("error",)
+
+
+def door_witness(runs) -> dict:
+    """How many captures actually ENTERED the door — derived from the receipts.
+
+    ⛔ Found in the #10983 review (round 11). The door was pinned and read back as
+    an ENVIRONMENT fact and nothing checked that the path was TAKEN, so a run
+    that never reached ``_extract_session_v2`` still produced a table whose
+    ``door:`` line asserted the v2 lane and whose record said ``measured: true``,
+    exit 0. Both exits are real and both return ``ok=True``:
+
+    * ``no_provider`` (``sdk.capture_session``) — no provider key resolves, so
+      the turns are stored and NOTHING is extracted (#3892);
+    * the ``#1727`` REPLAY — ``session_existed``, which a re-run against an
+      existing graph (``--graph``) reaches for all seven sessions at zero cost.
+
+    The pinned lane cannot catch either, because neither is a different lane: it
+    is no lane. ``backend_ready()``'s provider-key check narrows the first, but
+    it is a different predicate from ``_build_session_llm_extractor() is None``
+    (five provider keys vs ``DEEPSEEK_API_KEY``), so it is not the contract.
+    """
+    runs = list(runs or [])
+    entered = [run for run in runs
+               if str(run.get("extraction_mode") or "").startswith(
+                   DOOR_ENTERED_PREFIX)
+               # A post-dispatch FAILURE still took the door: ``measured_arm``
+               # pins this probe to the v2 lane and refuses a leak, so an
+               # ``error`` receipt here is a v2 receipt that raised, not another
+               # lane and not a return before the dispatch. The failure is
+               # reported by ``main``'s failed list, which a bypass would have
+               # prevented the log from ever reaching.
+               or str(run.get("extraction_mode") or "") in
+               DOOR_ENTERED_THEN_FAILED]
+    bypassed = [str(run.get("session_id")) for run in runs
+                if run not in entered]
+    return {"entered": len(entered), "sessions": len(runs),
+            "bypassed": bypassed}
+
+
+def require_door_entered(runs) -> dict:
+    """REFUSE a run in which any capture returned before the door.
+
+    A table measured on a graph this run did not write through the door is not a
+    measurement of the door, so the pass writes no table — the same posture
+    ``measured_arm`` takes for a leaked switch.
+    """
+    witness = door_witness(runs)
+    if witness["bypassed"]:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(witness['bypassed'])} of "
+            f"{witness['sessions']} capture(s) did not enter "
+            f"sdk._extract_session_v2 ({witness['bypassed']}), so this pass did "
+            f"not take the door it would declare: a keyless capture extracts "
+            f"nothing (#3892), a re-capture of an existing session REPLAYS "
+            f"(#1727) — both report ok=True — and a capture on the other lane "
+            f"reports a bare ``llm`` with no route. A table measured on a graph "
+            f"they did not write is a measurement of another run (#10983). "
+            f"NOTE: a capture that ENTERED the door and FAILED (mode ``error``) "
+            f"is not refused here — its ``errors`` are carried on its own log "
+            f"line and in the machine record, with a ``sessions failed: […]`` "
+            f"line on stderr after the write, because a refusal here would "
+            f"name a false cause AND discard the errors that say what "
+            f"actually happened")
+    return witness
 
 
 # ── pure helpers (pinned by tests/test_7949_capstone_measure.py) ───────────
@@ -3300,7 +3758,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                required: list[str] | None = None,
                accounts: list[dict] | None = None,
                steps_gap: str = "",
-               arm: dict | None = None) -> str:
+               arm: dict | None = None,
+               door: dict | None = None) -> str:
     """The human log with the machine table at the bottom (one artifact, one read)."""
     lines: list[str] = []
     add = lines.append
@@ -3316,6 +3775,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
     add(f"# graph: {graph} (fresh, disposable; every node in it was written by "
         "this run)")
     add(f"# arm: {arm_header(arm or {})}")
+    add(f"# door: {door_header(door or {})}")
     add("")
     add("## the run — one pass over the pre-registered corpus")
     for run in runs:
@@ -3528,6 +3988,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             "probe": "docs/evidence/7949-capstone/probes/capstone_measure.py",
             "graph": graph,
             "arm": arm_record(arm or {}),
+            "door": {**door_record(door or {}),
+                     "captures": door_witness(runs)},
             # #10215: V5 reads the step split from THESE two fields. A log that
             # omits them is read as the pre-#10215 "all eight required" shape,
             # which is why emitting them is the whole point of the accounting.
@@ -3691,6 +4153,11 @@ def main(argv: list[str] | None = None) -> int:
     with measured_arm() as arm:
         print(f"capstone-measure: arm {arm_header(arm)}", flush=True)
         runs = run_corpus(graph, sessions)
+    # The door is a PATH, not only an environment fact (#10983 review round 11):
+    # a capture that returned before the lane dispatch — keyless (#3892) or a
+    # re-capture of an existing session (#1727 replay) — reports ok=True, so the
+    # failed-list below cannot see it and the table would be written anyway.
+    require_door_entered(runs)
     failed = [run["session_id"] for run in runs if not run["ok"]]
     census_data = census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
     # #10982: the A-row census runs against the SAME graph and the SAME pass. A failure here must
@@ -3835,7 +4302,7 @@ def main(argv: list[str] | None = None) -> int:
                       e5_out=e5_result, rows=rows, out_path=out_path,
                       a_census=a_census,
                       required=required, accounts=accounts, steps_gap=steps_gap,
-                      arm=arm)
+                      arm=arm, door=arm)
 
     destination = ROOT / out_path
     destination.parent.mkdir(parents=True, exist_ok=True)

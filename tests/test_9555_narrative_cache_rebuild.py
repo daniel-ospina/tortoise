@@ -37,8 +37,8 @@ three windows that can actually fail:
 ⛔ WHAT CHANGED AT #10394, and why the pin moved rather than being deleted.
 This leg used to assert the OPPOSITE of window 3 — that a rebuilt node CARRIED
 `story_arc` — which was true, and was the defect: the RECORD → CACHE restore is
-one of the routes that put §9.1's prose back into the graph, so #10017's purge
-was undone by the next restore. §9.1 says the narrative lives in Postgres and
+one of the routes that put §9.1's prose back into the graph, so #10000's write
+deletion was undone by the next restore. §9.1 says the narrative lives in Postgres and
 NOT in the graph, so *"the narrative survives the cache being deleted"* is now
 measured where it is true: through the RECORD READER (`record_text.
 serve_from_record`, window 1 and the post-wipe read at the end), while the
@@ -205,7 +205,7 @@ def test_the_public_capture_path_REBUILDS_THE_CACHE_FROM_THE_RECORD_and_the_narr
                            for _labels, props in after_nodes), (
                 "the rebuilt cache holds §9.1's narrative on a node — the "
                 "restore re-materialised what #10000 stopped writing, so "
-                "#10017's purge is undone by the next routine restore "
+                "the next routine restore undid #10000's write deletion "
                 "(#10394 door 2)")
         finally:
             proj.close()
@@ -494,6 +494,160 @@ def test_the_event_journal_replay_drops_the_prose():
         proj.close()
 
 
+def test_the_point_clear_removes_the_prose_and_keeps_the_node():
+    """#11325 — the ONE shipped repair that clears the prose and keeps the entity.
+
+    After `#11325` the reconciler's repair text says the not-projectable class has
+    no route that RESTORES the value, and that on a `:Point` a targeted CLEAR
+    does ship: `update_point(<id>, story_arc=None)` removes the property and
+    KEEPS the node — ⛔ and ONLY where the record still holds the text for the
+    session (`public.session_narrative.narrative`; NOT the point's own `props`
+    tail — the clear's OWN record write overwrites it with a stored null, pinned
+    by `test_the_point_props_tail_is_not_a_record_home_for_the_prose` below);
+    where the narrative row does not carry it the node's copy is the only one no
+    shipped route can put back on a production graph, so
+    that clear
+    deletes the prose. That is load-bearing operator guidance — it is the difference
+    between "clear the stale copy" and "wipe the graph" — and it was asserted as
+    measured at six prose sites while nothing in the suite exercised the door.
+    `tests/test_10000_narrative_record_home.py` pins the REFUSAL of a non-empty
+    narrative on the same call, which is a different claim.
+
+    The seed goes through the JOURNAL REPLAY fold (`_upsert_point_props`), not
+    through `create_point`: since `#10389` both the create and the update door
+    refuse a NON-EMPTY narrative, so a legacy copy on a `:Point` is exactly what
+    a replayed `PointAdded` (or a pre-guard write) leaves behind.
+
+    Two arms so neither can pass vacuously:
+      (1) the property is GONE while the node and its OTHER props are still there
+          — a clear that deleted the node is `tortoise_delete`, not this door;
+      (2) re-running the SAME creation fold puts the prose BACK: the clear is
+          JOURNAL-bound (`#10429`'s replay half), so a journal replay — which
+          routes its `PointAdded` through `_upsert_point_props` — re-materialises
+          it, while a RECORD → CACHE rebuild replays the stored
+          `props.story_arc = null` and keeps it clear. ⚠️ SCOPE: this arm runs the
+          FOLD, not `rebuild_all`, so it pins that the creation fold still
+          persists the key (a point deny-set lever would red it) and does NOT pin
+          `rebuild_all`'s routing of that fold — that half is `#10429`'s, and §17.2
+          says so at the citation.
+    """
+    if not os.environ.get("TORTOISE_DB_URI"):
+        pytest.skip("TORTOISE_DB_URI not set — the clear needs a graph to write")
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(graph_name=f"test_9555_pointclear_{uuid.uuid4().hex[:8]}")
+    try:
+        proj = sdk._get_proj()
+        pid = f"pt-clear-{uuid.uuid4().hex[:8]}"
+        content = "a legacy turn that carried the prose"
+        creation = {"id": pid, "content": content, "is_episodic": True,
+                    "story_arc": NARRATIVE}
+        proj._upsert_point_props(creation)
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.story_arc, n.content",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] == NARRATIVE, (
+            "the seed did not land the prose on the `:Point` — the clear below "
+            f"would prove nothing. Got {rows!r}")
+
+        sdk.update_point(pid, story_arc=None)
+
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.story_arc, n.content",
+            params={"id": pid}).result_set
+        assert rows, (
+            "`update_point(<id>, story_arc=None)` DELETED the node — the shipping "
+            "repair is a CLEAR that keeps the entity (#11325); a node delete is "
+            "`tortoise_delete` and journals the delete that removes its record row")
+        arc, kept = rows[0]
+        assert arc is None, (
+            "the clear left the prose on the node — `SET n += $props` with a "
+            f"`None` value is supposed to REMOVE the key. Got {arc!r}")
+        assert kept == content, (
+            "the clear took the node's OTHER properties with it; it must remove ONE "
+            f"key. Got {kept!r}")
+
+        # (2) JOURNAL-BOUND: the CREATION record still carries the prose, and its
+        # fold is the journal replay fold — so replaying it re-materialises what
+        # the clear removed. (A RECORD → CACHE rebuild replays the stored null
+        # instead, and keeps it clear — `_props_from_row` + `node_statement`.)
+        proj._upsert_point_props(creation)
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.story_arc",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] == NARRATIVE, (
+            "the creation FOLD no longer re-materialises the prose from a record "
+            "that carries it — section 17.2's JOURNAL-bound statement rests on this "
+            "fold, so it and the `update_point` clear's scope must be re-stated "
+            "(note this arm does NOT cover `rebuild_all`'s routing of the fold, "
+            "which is `#10429`'s)")
+    finally:
+        sdk.close()
+
+
+def test_the_point_props_tail_is_not_a_record_home_for_the_prose():
+    """#11325 review cycle 3 — the clear CONSUMES the tail it is licensed by.
+
+    The per-row test licensed a `:Point` clear "where the record still HOLDS the
+    text" and counted the point's OWN `props` tail as one of the two homes. That
+    second home is consumed by the very clear it licenses, so on a row whose only
+    record home is the tail the "safe" clear destroys the last copy the record's
+    KEYED VIEW holds:
+
+      (1) `update_point(<id>, story_arc=None)` journals `PointRevised` carrying
+          `story_arc: None` — the `None` is what makes the clear work at all;
+      (2) `_split_properties("point", …)` finds no `story_arc` column on
+          `public.point` and the name is not refused for `point`, so it lands in
+          the tail — with NO null filter;
+      (3) `_patch_statement` writes the tail as a RIGHT-HAND merge
+          (`props = props || %s::jsonb`), so `{"story_arc": null}` OVERWRITES the
+          prose that tail held.
+
+    So the operator guidance names `public.session_narrative.narrative` and
+    nothing else (§17.2, §9.1(a), `record_reconcile`, `record_serve`, the epic's
+    cache-projection section and the changelog's cycle-3 stamp). ⛔ This is the
+    pin that keeps those docs honest rather than restating them: a null filter
+    added for `point` (making the tail survive) or a left-hand merge would make
+    the tail a home again, and this test reds until the guidance says so.
+    """
+    import tortoise.record_projection as rp
+
+    columns = rp.table_columns()
+    refused = rp.refused_props_names()
+    assert "story_arc" not in columns["point"], (
+        "`public.point` now HAS a `story_arc` column — the tail argument below no "
+        "longer holds, so re-derive the §17.2 guidance before removing this pin"
+    )
+    col_values, tail = rp._split_properties(
+        "point", {"id": "pt-tail-home", "story_arc": None},
+        columns=columns, refused=refused,
+    )
+    assert "story_arc" not in col_values, col_values
+    assert "story_arc" in tail and tail["story_arc"] is None, (
+        "a cleared `story_arc` no longer reaches the point's props tail — this "
+        "pin's premise moved (a null filter was added?), so the §17.2 per-row "
+        f"test may need the tail back as a home. Got tail={tail!r}"
+    )
+
+    stmt = rp._patch_statement(
+        "org", "graph", rp.Node("point", "Point", "id"), "pt-tail-home",
+        col_values, tail,
+    )
+    assert "props = props ||" in stmt.sql, (
+        "the point patch is no longer a RIGHT-HAND props merge, so a stored prose "
+        "tail would SURVIVE the clear and the tail would be a legitimate home "
+        f"again — re-derive the §17.2 guidance. SQL: {stmt.sql!r}"
+    )
+    # …AND the null actually REACHES that merge: the right-handed form alone is not
+    # enough, because a null-stripping serializer would emit `props || '{}'` and
+    # leave the stored prose standing while the SQL above still reads right-handed.
+    assert json.loads(stmt.params[1]) == {"story_arc": None}, (
+        "the cleared `story_arc` no longer reaches the right-hand merge's parameter "
+        "(a null-stripping serializer?), so the stored prose would SURVIVE the "
+        f"clear and the tail would be a home again. Got {stmt.params!r}"
+    )
+
+
 # ── door 2: the RECORD → CACHE restore (#10394) ─────────────────────────────
 #
 # `#10389` closed one write door; this is the exit door it left open, and it is
@@ -514,7 +668,7 @@ def test_the_event_journal_replay_drops_the_prose():
 #
 # ⛔ The fix is at that seam — STOP THE WRITE — not a purge pass after it: a
 # post-restore sweep would still rent the RAM for the duration and would have to
-# be re-run on every restore, which is #10017's purge being undone in a loop.
+# be re-run on every restore, i.e. #10000's write deletion undone in a loop.
 
 _NARRATIVE_DOOR_ROW = {
     # The RECORD row, not a graph node: every column a `:Source` row carries
@@ -544,7 +698,7 @@ def test_the_record_restore_writes_no_story_arc_on_any_node():
         non-vacuous: it is one key dropped, not an empty row.
     (3) a REAL restore into a graph that already holds a legacy node carrying
         the prose leaves `sum(size(n.story_arc))` at 0 over every node — this is
-        #10017's "purge → restore → 0" acceptance, and it is the arm that would
+        the "restore → 0" acceptance, and it is the arm that would
         red if the deny were implemented in the reader only.
     (scope) `public.session_narrative` is untouched by this change: the record
         READER is not on this path at all (`record_text.serve_from_record` reads
@@ -665,16 +819,19 @@ def test_the_record_restore_writes_no_story_arc_on_any_node():
     proj = FalkorProjection.from_uri(os.environ["TORTOISE_DB_URI"],
                                     graph_name=graph)
     try:
-        # The UN-PURGED state: a node that still carries the prose, exactly what
-        # #10017's graph-side purge is meant to remove. The restore runs over it
+        # A LEGACY state: a node that still carries the prose. No purge removes
+        # it (`#10017`'s purge never matches a `:Source` — #11325); the restore runs
+        # over it
         # (it wipes first), so a restore that re-materialises the key puts it
         # back and this leg reads non-zero.
         proj.g.query(
             "MERGE (s:Source {url:$u}) SET s.story_arc = $arc",
             params={"u": "legacy/pre-purge.md", "arc": NARRATIVE})
-        # The state #10017's purge leaves behind is what the restore must not
-        # undo; the pre-restore count is informational (the wipe removes the
-        # legacy node either way, so it can never be the assertion).
+        # A legacy copy of the prose is what the restore must not re-create;
+        # the pre-restore count is informational (the wipe removes the legacy
+        # node either way, so it can never be the assertion). ⛔ NOT "#10017's
+        # purge's state": that purge deletes legacy episodic turn `:Point`s and
+        # never matches a `:Source` (#11325).
 
         out = restore_from_record_view(
             view, org_id="org-door-2", graph_id="g-door-2", cache_graph=graph,
@@ -689,9 +846,10 @@ def test_the_record_restore_writes_no_story_arc_on_any_node():
         assert not bytes_of_prose, (
             "the RESTORE re-materialised §9.1's narrative as a node property — "
             "`sum(size(n.story_arc))` = "
-            f"{bytes_of_prose} B after a record→cache restore, so #10017's "
-            "purge is undone by the next routine recovery operation (#10394 "
-            "door 2)")
+            f"{bytes_of_prose} B after a record→cache restore, so the next "
+            "routine recovery re-rents the prose §9.1 removed (#10394 door 2; "
+            "`#10017`'s purge is the legacy turn population and never matched "
+            "a `:Source` — #11325)")
 
         held = proj.g.query(
             "MATCH (s:Source {url:$u}) RETURN s.summary",

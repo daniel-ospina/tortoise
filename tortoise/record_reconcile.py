@@ -102,16 +102,22 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   too), which the record does not carry — §17.1's chokepoint signature,
   DECLARED BY NOTHING and reported rather than detected
   here (its repair is *find the writer*; measured at `#11184`'s review, filed
-  `#11221`); and the two declared classes below, which the record's TABLE holds
-  and the record SIDE (this comparison's own projector-built map) omits — which
-  is why they are bucketed here rather than compared. The distinction is
+  `#11221`); and the two declared classes below, which the record's TABLE can
+  hold and the record SIDE (this comparison's own projector-built map) omits —
+  which is why they are bucketed here rather than compared. The distinction is
   load-bearing, not pedantry: a name is withheld from the comparison because
   ``record_props`` does not carry it, and for these classes that is because the
   projector declines them, not because the record has nothing to say. ⚠️ It is
   also PER ROW, not per class: the decline for ``_searchText`` is relaxed on a
   post-#10000 row (#10965), so the record side then HOLDS that one name, it is
   compared, and a cache that lost it is a ``field_mismatches`` entry — the
-  residue `#11233` owns on the other instrument.
+  residue `#11233` owns on the other instrument. ⛔ The row decides the
+  ``story_arc`` CLASS too, and there it decides whether a clear is
+  DESTRUCTIVE: the record holds it on a row whose ``public.{source,event}.story_arc``
+  or ``public.session_narrative.narrative`` carries the prose, and holds NOTHING
+  on every commit written before `#9555`'s ``SessionNarrated`` carrier — where the
+  graph copy is the ONLY copy, so a per-class reading of this paragraph licenses
+  the one clear that destroys it (see (5)).
   They are neither a mismatch nor invisible:
   :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
   count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
@@ -138,13 +144,95 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   carries the pair keeps it across an incremental projection
   (``cache_projection``'s own stated bound, #10852 review); and the
   NOT-PROJECTABLE columns (``cache_projection.CACHE_FORBIDDEN_COLUMNS``, #10394)
-  — which the record's TABLE ALSO holds and which no projection may ever write,
-  because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE CLEAR —
-  ``record-restore`` / ``rebuild_from_record`` wipe the graph first
+  — which the record's TABLE can hold and which no projection may ever write,
+  because the graph is where they must not live. ⛔ Its repair is a DESTRUCTIVE
+  CLEAR: the graph-side removal of the column itself (``REMOVE n.story_arc``) or
+  ``record-restore`` / ``rebuild_from_record``, which wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
-  legacy copy, and ``#10017`` is the targeted graph-side purge for an operator
-  who does not want the wipe — and it has NO non-destructive route: nothing
-  writes the column any more, so no in-place repair can exist. That is WHERE IT
+  legacy copy too — ⚠️ and that wipe **cannot** be restricted to the rows where the
+  record holds the text (``MATCH (n) DETACH DELETE n``, no label/``WHERE``/
+  ``LIMIT``): a graph holding ANY row whose PROSE neither
+  ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+  carries must NOT be restored at all — copy that prose out first, because on the
+  pre-``#9555`` population (raw-Cypher write, never journalled;
+  ``session_narrative`` TEXT columns measured NULL) the graph copy is the ONLY
+  copy and the graph-wide wipe DESTROYS it (see (5)'s unit-is-the-GRAPH rule below, `#11325`) — and on a
+  SERVER graph that restore is refused PRE-WIPE unless
+  the graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
+  → the projection's ``_assert_test_graph``, #2944), and no production name does
+  (``org_<org_id>``, its ``org_<org_id>_<gid>`` child and a legacy
+  ``team_<org_id>`` alike; an embedded ``path=`` DB is exempt from that name
+  check, not from supervision), so on a production cache no shipped route clears
+  the PROPERTY on either ANCHOR while keeping the entity (``tortoise_delete``
+  reaches the node only by REMOVING it, and journals the delete that removes its
+  record row; ``update_entity(…, story_arc=None)`` is REFUSED as server-managed
+  on BOTH anchors (``_SOURCE_SERVER_MANAGED_PROPS`` /
+  ``_EVENT_SERVER_MANAGED_PROPS`` — each raises and the stored value is
+  untouched, measured)) — ⚠️ **but the ``:Point`` half DOES have one, and it is
+  non-destructive**: ``update_point(<id>, story_arc=None)`` clears the property
+  and KEEPS the node (measured — the ``None`` passes
+  ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
+  and ``update_point``'s ``SET n += $props`` REMOVES a property set to ``None``;
+  the journal records the ``None``, and the same live door is bound by the MCP
+  tool ``tortoise_update_point``) — ⚠️ **and ONLY on the rows where the record still
+  HOLDS the text** (``public.session_narrative.narrative`` for the session — ⛔ NOT
+  the point's own ``props`` tail): where the narrative row does not carry it the
+  point's copy is the only one NO SHIPPED route can put back on a production graph
+  (the record's KEYED view does not hold it), and NO clear may be applied to it — on a production
+  name the ``rebuild_all`` that would put it back is REFUSED PRE-WIPE, so the clear
+  there deletes the prose rather than repairing the cache. ⛔ **The tail is excluded
+  because the clear's OWN record write consumes it**: ``story_arc`` is no
+  ``public.point`` column, so ``record_projection._split_properties`` sends the key
+  to the tail (it has no null filter) and the record patch is a RIGHT-HAND merge
+  (``props = props || %s::jsonb``) — so ``{"story_arc": null}`` OVERWRITES the prose
+  that tail held, and a row whose only record home is the tail loses the last copy
+  the record's KEYED VIEW holds to the very clear that counting it licensed (the
+  append-only ``journal_event`` payload still carries the pre-clear prose — see the
+  rebuild bound below, whose reach is what decides whether it can be put back). ⚠️ **Its durability is FOLD-DEPENDENT, and the
+  bound is the JOURNAL one**: ``_revise_point``'s SET list is a closed set that
+  names no ``story_arc`` clause, and the creation fold's open-set passthrough
+  (``_persist_extra_props``, which ``_revise_point`` never calls) skips a ``None``
+  by design — so a ``rebuild_all`` over a journal whose CREATION record carried
+  the prose RESTORES it, and that is ``#10429``'s replay half. ⚠️ On a graph the
+  rebuild can REACH: it asks the same L2 name guard as the restore
+  (``_assert_test_graph``, refused PRE-WIPE on every production name), so a
+  production server graph refuses the replay and the clear is durable there. The
+  RECORD→CACHE lane does the opposite (the ``PointRevised`` patch stores
+  ``props.story_arc = null``, ``_props_from_row`` returns it, and
+  ``node_statement`` renders ``SET n += $props``, where a null REMOVES the key),
+  so a record-sourced rebuild keeps it clear. ⚠️ So where a ``:Point``'s record
+  ``props`` tail still CARRIES the prose, ``record-restore`` IS a repair that
+  RESTORES the value — and ``_partition_cache_owned``'s
+  ``keep |= set(record_props)`` makes that population COMPARED rather than
+  bucketed, so it is not a ``graph_only`` occurrence at all. What has no repair
+  that RESTORES the value is the two ANCHORS, not "no label". ⛔ The obstacle on those anchors is the
+  PROHIBITION, not a hole in the schema: ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
+  forbids the RECORD→CACHE projection from writing the column there. ⚠️ **Whether a
+  SOURCE actually holds the value is a PER-ROW fact, not a per-class one — key it
+  on what the record HOLDS for this session (``public.{source,event}.story_arc``
+  OR ``public.session_narrative.narrative``), never on how the prose arrived.**
+  Where the record holds it, the graph copy is a stale duplicate and a clear frees
+  it. ⚠️ Where NEITHER holds it — every commit written before ``#9555``'s
+  ``SessionNarrated`` carrier, whose raw-Cypher ``s.story_arc=$arc`` /
+  ``e.story_arc=$arc`` was NEVER journalled, and whose ``session_narrative`` TEXT
+  columns measured NULL on every live capture (``hosted_api``'s 2b,
+  ``#9567``/D7) — the graph copy is the ONLY copy, so NO clear may be applied
+  THERE. ⛔ And the unit is the GRAPH, not the row: the destructive routes above
+  wipe whole-graph (``MATCH (n) DETACH DELETE n``) and cannot be narrowed to the
+  rows where the record holds the text, so a graph holding ANY row whose PROSE
+  the record does not carry must NOT be restored at all — copy that prose out
+  first. ⛔ Not
+  "no IN-PLACE repair": a targeted ``REMOVE`` IS in place — and destructive, and
+  issued by no instrument — and every targeted CLEAR on those two ANCHORS is
+  REFUSED (``update_entity(…, story_arc=None)`` raises on BOTH); what is missing
+  there is a route that KEEPS the value. ⚠️ No shipped
+  instrument performs that removal for THIS class: ``#10017``'s purge
+  (``tools/purge_legacy_turns.py``) is the precedent on a DIFFERENT population
+  (legacy episodic turn ``:Point``s — a ``DETACH DELETE``) and names no
+  ``story_arc`` at all, so citing it as the purger *for this class* sends an
+  operator to a tool that leaves the divergence in place on either ANCHOR —
+  it DOES clear a turn-shaped legacy ``:Point`` copy carrying the prose, by
+  deleting the node. That is WHERE IT
   DIFFERS from the declined pair, which does have one, shipped:
   ``session_source_prose_migration.reconcile_session_source_prose`` (#11070, via
   ``#11152``) repairs or clears the pair IN PLACE from the record, no wipe, the
@@ -601,7 +689,7 @@ def reconcile_record_and_cache(
     a record-sourced clear IN PLACE for the declined pair —
     ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
     ⛔ NOT a re-projection, which is additive and leaves an existing pair on the
-    node, the graph-side purge for a not-projectable column (below), or *find
+    node, the graph-side ``REMOVE`` for a not-projectable column (below), or *find
     the writer* for the undeclared second-writer population the partition also
     counts.
 
@@ -612,12 +700,36 @@ def reconcile_record_and_cache(
     there and §9.1/D1 forbids it only in the graph — so a legacy cache node
     that still carries the prose reads as a ``graph_only`` occurrence (one
     property the projection declines to write), NOT as a ``field_mismatches``
-    against a record that is correct. The repair for that occurrence is a
-    DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full
-    ``record-restore`` (whose wipe is whole-graph, so it clears the copy too;
-    measured by `test_the_record_restore_writes_no_story_arc_on_any_node` arm
-    (3)) — never a non-destructive one, which is the only sense in which this
-    class differs from the declined pair. Nothing here performs it. ⚠️ **What the exclusion CAN and
+    against a record that is correct. The repair for that occurrence on either
+    ANCHOR is a DESTRUCTIVE CLEAR, and its only RECORD-SOURCED route is a full
+    ``record-restore`` — whose wipe is whole-graph and **cannot** be narrowed to
+    those rows, so a graph holding ANY row whose prose neither
+    ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+    carries must not be restored at all: copy that prose out first, because the
+    wipe destroys it and the record has nothing to restore it from (the module
+    docstring's (5) states the rule) — measured by
+    `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3), ⚠️ and
+    refused PRE-WIPE on a production server graph name, #2944's L2 guard; or a
+    graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today;
+    ⚠️ a ``:Point`` copy is repairable in place ON THE ROWS WHERE THE RECORD STILL
+    HOLDS THE TEXT (the module docstring's (5) states the per-row bound and its
+    only-copy edge) —
+    ``update_point(<id>, story_arc=None)`` clears the property and keeps the
+    node (measured; pinned by
+    `test_the_point_clear_removes_the_prose_and_keeps_the_node` — the clear, and
+    the creation FOLD a journal replay routes through; ``rebuild_all``'s routing
+    of that fold is unpinned).
+    ⛔ NOT ``#10017``'s purge: ``tools/purge_legacy_turns.py`` deletes legacy
+    episodic turn ``:Point``s — a different population, though a legacy turn
+    ``:Point`` that carries the prose is cleared by it, by node deletion — and
+    it never matches ``:Source``/``:Event``; what it contributes is durability
+    for those ``:Point`` copies (its journaled turn removals stop a replay
+    resurrecting them), not the clearing of this class. Never a destructive one
+    for the ``:Point`` half — it has the non-destructive route named above, on the
+    rows where the record still holds the text (where it does not, that clear
+    leaves no copy a shipped route can put back on a production graph, and is not a
+    repair at all).
+    Nothing here performs either. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
     divergence in a caller-supplied ``props``-tail property. ⚠️ For `summary`,
@@ -777,9 +889,24 @@ def log_result(result: RecordReconcileResult,
         # record-owned: the §9.1/D1 pair the narrowing DECLINES (the record
         # holds it, its repair is the IN-PLACE reconciler #11070 — ⛔ not a
         # re-projection, whose write is additive —) and the not-projectable
-        # column (the record holds it and the graph must NOT — its repair is
-        # #10017's purge). Calling them all "owned" sends the operator to the
-        # wrong repair.
+        # column (the record holds the text on the rows where it survives and the
+        # graph must NOT — its repair there is a destructive clear: a full
+        # restore's wipe — refused pre-wipe on a
+        # production SERVER graph name, #2944 L2 — or a graph-side
+        # REMOVE n.story_arc that no instrument ships today; ⚠️ on a `:Point` the
+        # clear is `update_point(<id>, story_arc=None)`, which keeps the node and
+        # needs no wipe — though its durability is the JOURNAL's only: a
+        # `rebuild_all` over a journal whose creation record carried the prose
+        # restores it (#10429), while the RECORD→CACHE rebuild replays the stored
+        # null and keeps it clear. ⚠️ That is the bound's REACH, not an absolute:
+        # `rebuild_all` asks the SAME L2 name guard as the restore
+        # (`_assert_test_graph`, "REFUSING to run bulk DETACH DELETE on non-test
+        # graph", applying to every SERVER graph name per #2944 — an embedded
+        # `path=` DB does not face that name check), so on a production server graph the
+        # replay is refused PRE-WIPE and the clear IS durable there); #10017's
+        # purge is a DIFFERENT population — legacy episodic turn
+        # :Points — and names no story_arc. Calling them all "owned" sends the
+        # operator to the wrong repair.
         line += (f" [graph_only={result.graph_only_total} cache-held "
                  f"property occurrence(s) not compared ({names}{more})]")
     verdict = result.verdict()

@@ -42,8 +42,11 @@
 # `Availability watchdog state machine (#2850)` of the `ops-harnesses` CI job;
 # stubs curl/gh/flyctl, no network).
 #
-# TWO PRODUCTION TARGETS (#3628): the Fly API probe above, plus a SECOND,
-# DEDICATED step for the Cloudflare Pages auth surface (`GET /auth/start`).
+# THREE PRODUCTION TARGETS (#3628, #10892): the Fly API probe above, plus a
+# SECOND, DEDICATED step for the Cloudflare Pages auth surface (`GET
+# /auth/start`), plus a THIRD for the served-request liveness surface
+# (`GET /liveness`) further down — that one is machine-backed but
+# hard-disarmed from the restart leg too.
 # During the #3616 sign-in outage only /auth/start revealed it — /welcome
 # answered 302 and /api/session answered 401 the whole time, so a bare liveness
 # probe of either was GREEN while nobody could sign in for ~35 minutes. The
@@ -286,7 +289,7 @@ jobs:
       # means a missing/renamed binding — a restart of the API app cannot fix
       # it and would restart an unrelated service.
       # The host label is REQUIRED: the incident TITLE is the dedupe key, so
-      # without its own label the two production targets would share ONE issue.
+      # without its own label two production targets would share ONE issue.
       - name: Probe the Pages auth surface (PKCE flow; never restartable)
         if: ${{ !cancelled() }}
         env:
@@ -303,8 +306,8 @@ jobs:
           ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
           # #3887 (round 5): the operator KILL SWITCH, in the SAME repository
           # variable as the API step above (unset → EMPTY → paging ENABLED, the
-          # script default). Both probe steps must carry it: they fail
-          # INDEPENDENTLY, so wiring only one would leave the auth surface
+          # script default). Every probe step must carry it: they fail
+          # INDEPENDENTLY, so wiring only one would leave another surface
           # unkillable. STEP-level, never job-level (same discipline as
           # ESCALATION_CHAT_ID).
           ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
@@ -323,4 +326,88 @@ jobs:
           # UNEXPECTED).
           PROBE_EXPECT_STATUS: '302'
           PROBE_REQUIRE_HEADER: 'code_challenge_method=s256'
+        run: bash .github/scripts/availability-watchdog.sh
+      # THIRD TARGET (#10892): the SERVED-REQUEST liveness surface. This is the
+      # arm that closes "we have no probe that fails when a request cannot be
+      # served". On 2026-11-04 `api.premiselabs.co` was unusable for ~2 h, and
+      # again for ~6 h the same day, while BOTH Fly checks read `passing`:
+      # `servicecheck-00-tcp-8000` is a kernel handshake (a hung app passes it) and
+      # `loop_liveness` reads the loop's own last tick from a listener on another
+      # thread. Neither can
+      # distinguish "answering" from "not answering at all".
+      #
+      # WHY A SEPARATE STEP rather than re-pointing the API probe: the BOUND is
+      # the instrument, and it is not the same bound. The primary API probe keeps
+      # its generous 25 s (it must not page on one slow origin fetch); this
+      # endpoint's handler does no I/O of its own (one loop yield and one counter
+      # increment — no DB, no network, no disk), so 5 s is the latency arm the
+      # incident measured missing — measured at the same moment the checks were
+      # green:
+      # `loop_lag_p99_ms: 14871`, `loop_lag_max_ms: 483685`, `/health` answering
+      # `000` at 9-12 s from outside. A probe with a 5 s timeout alarms within one
+      # cycle; the 25 s one did not exist for this shape at all.
+      #
+      # `if: !cancelled()` like the auth step: the surfaces fail INDEPENDENTLY, so
+      # an API outage must not suppress this alert (and a red here must not be
+      # hidden by a green API probe — the job fails if EITHER step fails).
+      - name: Probe the served-request liveness endpoint (5s bound; never restartable)
+        if: ${{ !cancelled() }}
+        env:
+          # Same step-level credential containment as the two steps above.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
+          ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
+          # #4573: THIRD probe step of the same job — it must NOT write the rolling
+          # heartbeat either. Exactly one step per job emits (the primary API
+          # step), so this one opts out for the same reason the auth step does:
+          # two writes seconds apart could race GitHub's search index into a
+          # DUPLICATE rolling issue.
+          HEARTBEAT_EMIT: '0'
+          PROBE_URL: https://api.premiselabs.co/liveness
+          # Its OWN label: the incident TITLE is the dedupe key, so sharing the
+          # primary probe's label would make the two surfaces fight over one
+          # issue (and a green primary probe would then close a red liveness one).
+          PROBE_HOST_LABEL: api.premiselabs.co (served request)
+          # Healthy = 200 and nothing else. 000/5xx are DOWN (checked before the
+          # list, so a malformed list cannot disarm an outage arm); any other
+          # answered code — 404 after a deploy that lacks the route, a 3xx —
+          # is UNEXPECTED, i.e. a DEGRADED incident, which is the honest
+          # reading: the route this probe depends on is not there.
+          PROBE_EXPECT_STATUS: '200'
+          # THE LATENCY BOUND — the reason this step exists (see the header).
+          # 5 s bounds a handler that does no I/O of its own (one loop yield and
+          # one counter increment: no DB, no network, no disk), so it cannot fire
+          # on a healthy origin; it fires on the outage shape, where the app
+          # genuinely could not answer (measured 9-12 s to `000`, 45 s to the
+          # eventual 504). curl's `--max-time` is what makes ABSENCE a verdict.
+          PROBE_TIMEOUT_S: '5'
+          PROBE_CONNECT_TIMEOUT_S: '3'
+          # Keep the attempt budget of the primary probe: three attempts ~10 s
+          # apart before DOWN, so a single lossy runner network blip cannot page.
+          # ⚠️ STATED RESIDUAL (review round 2): this arm's total tolerance is
+          # 3x5 s + 2x10 s = 35 s, which is SHORTER than one machine restart
+          # (`fly.toml` `kill_timeout = 30` plus a cold boot). The API step above
+          # runs FIRST and owns the restart leg, so when it restarts the machine
+          # this step probes that same machine seconds later and files its OWN
+          # DOWN issue for the same restart window. That page is TRUE (nothing is
+          # serving) but DUPLICATE, and it is left in on purpose: the alternative
+          # — a longer bound here — is exactly the "status-only probe with a
+          # generous timeout" this step exists to replace, so silencing it would
+          # trade a duplicate page for the false green of #10892. The two arms own
+          # separate issues (their titles differ by label), so the operator sees
+          # "one machine restarting" rather than a merged, unattributable alert.
+          # ⚠️ The same applies to a DEPLOY, and that is not the restart leg's
+          # doing (#10892 review round 3): a rollout that replaces the machine
+          # leaves nothing serving for ~85 s (runbook §6, cold boot), which is
+          # longer than this arm's 35 s tolerance while the primary probe's 95 s
+          # budget absorbs it. So a deploy window can page here where the primary
+          # probe stays quiet. Accepted for the same reason: the bound IS the
+          # instrument, and #10892 is a machine that stayed wrongly green for two
+          # hours — a page during a known rollout is the cheap side of that trade.
+          # If it becomes noisy the fix is to teach this step the rollout window,
+          # NEVER to widen the bound.
+          PROBE_ATTEMPTS: '3'
+          PROBE_RETRY_SLEEP_S: '10'
         run: bash .github/scripts/availability-watchdog.sh

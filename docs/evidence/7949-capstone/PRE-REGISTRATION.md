@@ -188,6 +188,153 @@ The other pins survived re-derivation unchanged at this commit: 90 planted units
 14 value-bearing units, 29 marker sentences of 343, and the 25/15/9/6 salience measurement. Only the
 hash had moved.
 
+### 1.6 Amendment — the DOOR, and which corpus carries which row (`#10983` / C2)
+
+Added by `#10983`. Nothing above changes: no metric, no denominator, no threshold. What this section
+adds is the two facts a reader needs to know **what a number in §3 is a number ABOUT**, and it is
+written here — into the registration — because a measurement contract that lives in prose is one
+a reader can re-decide.
+
+#### 1.6.1 The door
+
+**The acceptance runs the fleet's v2 extraction lane:**
+
+```text
+tortoise/hosted_api.py::_capture_lane()            → "v2" (default), "m2" iff TORTOISE_SESSION_EXTRACTOR == "m2"
+  sdk.capture_session → sdk._extract_session_v2    → tortoise/extractor_v2.py::extract_session_v2
+```
+
+The hosted endpoint and the SDK path **select the lane from the same variable with the same
+comparison**, so the "hosted endpoint or SDK path" question is not a choice between two doors — it is
+one door with an optional HTTP boundary in front of it. The probe drives `sdk.capture_session`, i.e.
+the SDK side of that one door. The `m2` lane (`_extract_session_llm` → `tortoise/extractor.py`) is the
+**opt-in, non-default** extractor and is *not* the door.
+
+Every citation above is resolved from the tree by `tests/test_7949_c2_door.py`, not typed — a renamed
+or relocated function reds that suite.
+
+#### 1.6.2 The seam set, as the CODE resolves it at this head
+
+| seam | resolver | default at this head | behaviour seam? |
+|---|---|---|---|
+| `TORTOISE_VET` | `extractor_v2._vet_enabled` | **off** | yes |
+| `TORTOISE_CLASSIFY_LATER` | `extractor_v2._classify_later_enabled` | **off** | yes |
+| `TORTOISE_S2_DECISION_SEAM` | `s2_decision_seam.seam_enabled` | **off** | yes |
+| `TORTOISE_VALUE_GATE` | `value_gate.value_gate_enabled` | **ON** ⚠️ | yes |
+| `TORTOISE_S4_DELTA` | `extractor_v2._s4_delta_enabled` | **ON** | yes |
+| `TORTOISE_LABEL_ORDER` | `extractor_v2._label_order_rng` | off (render diagnostic) | **no** |
+
+⚠️ **`TORTOISE_VALUE_GATE` is default-ON at this head** — `#10996` made the mechanical predicate run
+unless the flag says otherwise (`is_truthy(os.environ.get(ENV_FLAG, "1"))`), and `extractor_v2` ORs it
+into `vet_enabled`. **The S2.2 VET pass is therefore armed on the fleet's default write path even
+with `TORTOISE_VET` unset**, so "VET is off by default" is true of the flag and false of the pass.
+`#10983`'s own ledger and the epic's "the fleet's write path performs zero selection" both predate
+that change; this table is the record at this head, and the pin suite resolves every row against the
+modules so it cannot rot quietly.
+
+**What the acceptance run arms:** `TORTOISE_VET=1`, `TORTOISE_CLASSIFY_LATER=1`,
+`TORTOISE_VALUE_GATE=0`, `TORTOISE_S2_DECISION_SEAM=0`; the lane pinned to (unset ⇒) `v2`;
+`TORTOISE_S4_DELTA` pinned to `1`; `TORTOISE_LABEL_ORDER` pinned unset; `TORTOISE_EXTRACTOR` pinned
+unset; and the three measurement switches an inherited shell must not supply —
+`TORTOISE_SESSION_LLM_MOCK` (the offline model seam, which swaps the model for `_V2SessionMock`
+**and** short-circuits the provider-key check, so an ambient `=1` would score canned output under a
+real key), `TORTOISE_EXTRACTOR_PROMPT` (a third render switch, not byte-identical to the default
+since `#9733`), `TORTOISE_EXTRACT_MODEL` (selects the model — NOT the output bound: every stage
+passes its own `max_tokens=_stage_cap(…)` per call, which beats the adapter default), and the
+truncation budgets `TORTOISE_EXTRACTOR_MAX_TOKENS` (`_stage_cap`, read at call time: unset ⇒ the
+shipped 1500/16000 stage defaults) and `TORTOISE_EXTRACTOR_ESCALATION_TOKENS` (the
+length-truncation retry budget), `TORTOISE_REFERENTIALITY` (the S2.2 mention arm, reached
+through `referentiality.ENV_FLAG`), `TORTOISE_CHANGE_FEED` (an ambient `=1` adds a `:GraphEvent`
+to the graph the run writes), and the two confidence gates `TORTOISE_SUBJECT_TAU_HI` /
+`TORTOISE_SUBJECT_TAU_LO` (read through a parameter by `subject_binding`, and they decide whether
+the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last five are the cycle-7 to
+cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
+then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
+path and was in no pin, no ledger row and no closure. The authoritative list is
+`capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
+against the tree — this sentence is the reader's map, not the control. The set
+is CLOSED over the **measurement modules the path renders with**, and what
+`tests/test_7949_c2_door.py` enforces **mechanically is the CENSUS over that
+list, not the list's membership**: `path_modules` is a hand-maintained tuple, and every
+`TORTOISE_*` read inside those modules must be classified (an arm seam, a pin, a declared input, or
+an acknowledged non-seam with a stated reason) or the suite reds. Membership is hand-kept, so a read
+added to a module *outside* that tuple is **not** caught by it — stated plainly rather than left to
+be discovered, and tracked as **#11410** (the `sdk`/`hosted_api` helpers those two hops call are the
+measured gap). The same call chain also reads *infrastructure* variables (record DSN,
+packs dir, embedding gates, store connection): those are inputs a run needs in order to happen, not
+settings that move the measured population, and they are deliberately outside the door's partition —
+stated because an earlier revision of this section called the whole path "closed", which the review
+measured false (`TORTOISE_REFERENTIALITY` was read on every v2 capture and accounted for by
+nothing). The closure is derived over the modules the test names in `path_modules` — a POINTER rather than a
+count, because a count in this paragraph went stale three rounds running (six, then seven, then eight) while
+the derivation grew, which is itself the defect this section is about. Cycle 10 also made the derivation
+read the `TORTOISE_*` **literals** in those modules, not only the two read shapes its resolver understands:
+`subject_binding.py` holds both of its spellings and passes one to a helper as an argument, so it resolved
+to the EMPTY SET while sitting on the write path (`bind_point_subjects`, inside
+`_extract_session_v2`) and gating whether the `:aboutSubject`/`:aboutObject` edge is written at all
+(measured: `decide_binding(0.90)` is `bound` at the defaults and `suspected` with
+`TORTOISE_SUBJECT_TAU_HI=0.99`) — so the arm seams, the mention arm, the per-turn embed
+rewrite, the request's `response_format`, the change-feed writer, the identifier-token writer and the
+confidence-gated subject binder are inside the derived
+surface, not hand-listed beside it. That list grew one review round at a time (the last four are
+`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
+`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, each found by a
+measured mutation that left the previous derivation green), which is the honest reason to state
+it as a CLOSURE over the reads INSIDE those modules rather than as a list somebody curated — not
+a closure over everything the path reaches, which is the gap #11410 records. Every one is written in-process, **read back**, and a run whose read-back
+disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
+unpinned until the `#10983` reviews (rounds 1 and 2), which is the same declaration-versus-control gap one layer below
+the lane. The arm pins `TORTOISE_VALUE_GATE=0` on purpose: with the
+default-ON predicate the arm would otherwise measure the predicate's population while declaring an
+arm that does not include it.
+
+#### 1.6.3 Which corpus carries which row
+
+**The registered corpus (`tests/eval/write_path`) is a FIXTURE**, pinned by `fixtures_hash`, and one
+of its arms (`E1b`) is defined as a run on the **`m2`** lane. So the registered E1/E2 rows are
+statements about *this fixture on this lane* — they are **not** a proof about the graph the fleet
+builds. Writing that down does not weaken any row; it stops a green row from being read as a claim it
+never made.
+
+| row | corpus that carries it | the claim it supports | it is NOT a proof of |
+|---|---|---|---|
+| **E1** | `tests/eval/write_path` (fixture, this hash) | `^the <X>` share falls ≥50% **on this corpus**, both arms, same commit | that the fleet's graph volume falls |
+| **E1b** | `tests/eval/write_path` **on the `m2` lane** (`baselines/m2.json`, posture `m2`: `salient_unit_survival_strict` 1.0 = 90/90 at this `fixtures_hash`). ⚠️ The figure the probe **publishes** is read from `docs/evidence/9889/e1-e2-scores.json` → `e1b.real_facts` ← `on-arm.log`, which is a no-loss **CONTROL on the scored (v2) arm** and says so itself ("no committed artifact carries `grading.strict_survival_counts` over the m2 lane"), and the `m2` baseline's own history records its metrics as **carried forward** from `943a99ec6`, not re-measured at this hash | the anti-gaming control: planted units survive the deterministic lane (90/90) | anything about the v2 door: the `m2` lane is a *different extractor*, so unit survival there says nothing about what the v2 lane writes — **and the published 90/90 was not measured on it either** |
+| **E2a / E2b** | `tests/eval/write_path` (fixture) | value-bearing units survive; claims are not fused | the fleet's correctness, which needs a capture through the door |
+| **E3** | the run's **own door-written graph** (shape, not content) | every derived node carries a version anchor | a content claim: it is a structural property of the writer; nor a fleet-population claim, since the graph it counts is whichever graph the run wrote |
+| **E4** | `tests/eval/write_path`, graded **through the v2 door** (the receipt the probe selects by `corpus_hash`) | 5 of 15 planted operator edges are wired and persisted against the registered bar (15) | the fleet's graph: this is the fixture corpus. ⚠️ It is **not** an `m2` row — the selected receipt (`w2b-operator-2026-10-24-8503-b.json`) records `extract_session_v2` |
+| **E5** | `tests/eval/write_path` (fixture, §10) | the raw-vs-narrative premise, measured on this corpus | a fleet-corpus premise: a different corpus is a different measurement |
+| **any fleet-graph claim** | **`fleet-capture`** — a real capture through the door | what the fleet's write path actually produces | nothing yet: this registration pins no fleet-capture corpus, and one must be registered **before** such a number is scored |
+
+⚠️ **E4's figure, reconciled.** §10.3 and the record's `criteria.E4` `post_registration_measurement`
+state **2 of 15**, measured on receipt `w2b-operator-2026-10-19.json` — whose `corpus_hash`
+(`943a99ec…`) is **not** the frozen `fixtures_hash` (`dd7e8520…`), so that figure measures a different
+corpus revision. The probe now SELECTS E4's receipt by `corpus_hash` against the frozen pin, and the
+receipt that matches (`w2b-operator-2026-10-24-8503-b.json`) reads **5 of 15** on
+`extract_session_v2`. **5 of 15 is this row's figure at this head**; 2 of 15 is kept above as the
+historical disclosure it is, not as the row's current number. The denominator (**15**) and the
+threshold (`= 15 of 15`) are untouched by either figure, so the row is RED either way.
+
+#### 1.6.4 The negative control, MEASURED
+
+Same corpus session (`wp01_quarry_debug`), same offline model seam, both lanes, one embedded
+graph each:
+
+| lane | `:Object` | `:Point` | `:Event` | `:Session` | `:Operator` | `:Object` names |
+|---|---|---|---|---|---|---|
+| **v2 — the door** | **1** | **27** | **2** | 1 | 0 | `['the strategy']` |
+| **m2 — the other lane** | **0** | **149** | **1** | 1 | 0 | `[]` |
+
+The difference is measured, and it is **structural IN KIND, not a matter of degree**: the `m2` lane mints
+**no `:Object` at all** on this session, and it also writes **5.5×** the `:Point`s — the ratio is the
+*size* of a difference whose nature (a different extractor, not a different seam of the same one) is
+what makes a number measured on one lane not a number about the other.
+
+⇒ **A number measured on one lane is not a number about the other.** That is exactly why the `m2` column in §1.6.3 (E1b) must not be read as a fleet fact, and why the door is pinned structurally (§1.6.1)
+as well as measured here — a control measures the two lanes *as they are today*, while the pin is
+what stops the selector moving tomorrow.
+
 ---
 
 ## 2. The split
@@ -964,6 +1111,8 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | **6,533 / 2,614 / 402** on **7,870** Objects and **27,324** reference edges (A2 basis) | `tortoise/definite_description_backfill.py:15-23` — re-derivable |
 | **64** Objects / **19** Subjects / **21** `aboutSubject` (the A-row figures §10.10 discloses) | `capstone-measured-9152448d.log:271` (`"Object": 64`), `:275`, `:299-309` — re-derivable |
 | the **nine** A-row floors (§3.7) | `pins.denominator_floors` in this file, cross-checked against `preregistration.json` **both ways** by `tools/capstone_preregistration_check.py` |
+| §1.6.4's censuses — v2 `Object 1 / Point 27 / Event 2 / Session 1 / Operator 0`, m2 `0 / 149 / 1 / 1 / 0` — and the `5.5×` ratio | `tests/test_7949_c2_door.py` (`test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE`), measured on `wp01_quarry_debug` under `TORTOISE_SESSION_LLM_MOCK=1`, one embedded graph per arm |
+| 5 of 15 operator edges (§1.6.3, E4) | `tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json` — the receipt `select_e4_receipt()` selects at the frozen `fixtures_hash` `dd7e8520…` (`operator_audit.edge_correct = 5`, extractor `tortoise.extractor_v2::extract_session_v2`) |
 
 ---
 

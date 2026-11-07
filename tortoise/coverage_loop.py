@@ -438,11 +438,22 @@ def facet_census(proj: Any, query: str, *,
 def _session_of(hit: dict, session_key: Callable[[dict], str] | None = None) -> str:
     """A hit's session identity — delegates to the pool's AUTHORITY
     (``retrieval.session_key_of``: ``session_id`` when present, else the
-    ``idx:{lme_session_index}`` bucket) so the loop's window census and the
-    pool's dedup never disagree on what a session is. The import is
-    FUNCTION-LOCAL: ``coverage_loop`` stays a stdlib-only leaf at import
-    time and the ``retrieval → coverage_loop`` dependency stays one-way
-    (no cycle under either import order).
+    ``idx:{lme_session_index}`` bucket, else the wire ``sessionId``) so the
+    loop's window census and the pool's dedup never disagree on what a
+    session is. The import is FUNCTION-LOCAL: ``coverage_loop`` stays a
+    stdlib-only leaf at import time and the ``retrieval → coverage_loop``
+    dependency stays one-way (no cycle under either import order).
+
+    The camel ``sessionId`` leg is #10540: without it a product pool hit —
+    whose only identity is that camel key (the fetch pops the snake prop
+    from every point hit) — censused as a phantom, so for a
+    captured-session pool of TURN hits this census counted zero real
+    sessions. #10632's own instrument INHERITED that blindness rather than
+    covering it (``reader_window_displacement`` keys through the same
+    AUTHORITY, ``retrieval.session_key_of`` — which this function delegates
+    to — and filters the ``idx:*`` namespace, so it reported
+    ``sessions_before = 0`` for such a pool); a hit whose session was
+    present in a spelling the authority read was never affected.
     """
     if session_key is not None:
         return session_key(hit)
