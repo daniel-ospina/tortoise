@@ -59,12 +59,47 @@ ARMED_LEG_FILES = frozenset({
 #: junit from the job's own armed legs plus the capstone run `-k "not D8"`
 #: (tests=133, skipped=0, no D8 case) was CERTIFIED, exit 0.
 #:
-#: Each entry is `case name` -> the wrong outcome its absence produces.
+#: ⛔ AND THE RULE MUST MATCH THE CATEGORY IT STATES (#11429 review cycle 4).
+#: Enumerating ONE entry fixed D8 and left the other eleven DoD legs — `test_D1_…`
+#: .. `test_D12_…` — visible to the same `-k`: measured `-k "not D10"` (the drill
+#: that `DROP POLICY`s on the live record, i.e. the leg most likely to be
+#: quarantined) still CERTIFIED at exit 0. An enumeration is the defect whether it
+#: holds one name or twelve, so the required set is DERIVED from the capstone's
+#: own source (`test_D*`) and a new DoD leg is protected the day it is named.
+#: Fails CLOSED: if the file cannot be read, nothing is certified.
+#:
+#: Each entry here is `case name` -> the wrong outcome its absence produces; it
+#: carries the rationale for legs whose absence is a specific, named loss and is
+#: UNIONED with the derived set (it is a subset today).
 REQUIRED_CASES = {
     "test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires":
         "the record's restore drill (#9567 D8) never ran — the durable artifact "
         "is not proven restorable on this leg, and a `-k` filter hides it",
 }
+
+#: The capstone file whose `test_D*` legs are required by construction.
+CAPSTONE_TEST_FILE = (Path(__file__).resolve().parents[2]
+                      / "tests" / "test_9567_record_capstone.py")
+
+
+def _capstone_leg_names() -> list[str]:
+    """Every DoD leg the capstone FILE defines, read from its source with `ast`.
+
+    Source, not a list: a hand-maintained enumeration is how eleven of the twelve
+    legs stayed invisible (#11429 review cycle 4), and a leg added later must not
+    need a second edit here to be protected. `ast` rather than a regex so a name
+    mentioned in a docstring or a comment is not mistaken for a definition.
+
+    ⛔ Raises rather than returning `[]`: an unreadable or unparseable capstone is
+    NOT "no required legs", it is "this gate cannot answer" — the same fail-closed
+    rule as a missing junit XML (`main`).
+    """
+    import ast
+
+    tree = ast.parse(CAPSTONE_TEST_FILE.read_text(encoding="utf-8"))
+    return [node.name for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_D")]
 
 
 def _leg_module(case) -> str:
@@ -162,10 +197,26 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
     # one line away. No `REQUIRED_CASES` entry has a legitimate xfail.
     present = {case.get("name", "") for case in root.iter("testcase")
                if case.find("skipped") is None}
-    for required, why in sorted(REQUIRED_CASES.items()):
-        if required not in present:
+    # UNIONED: the explicit rationales plus every DoD leg the capstone DEFINES.
+    # A `-k "not D<k>"` deselects exactly one name and records no skip, so only a
+    # per-name requirement can see it — and it has to be the whole set, not one
+    # entry (#11429 review cycles 3 and 4).
+    try:
+        required = dict(REQUIRED_CASES)
+        for leg in _capstone_leg_names():
+            required.setdefault(
+                leg,
+                f"the capstone's DoD leg {leg} never ran — a `-k`/`--deselect` "
+                "filter hid it, and no other CI leg proves this item")
+    except (OSError, SyntaxError, ValueError) as exc:
+        problems.append(
+            f"cannot read the capstone's DoD legs from {CAPSTONE_TEST_FILE} "
+            f"({exc}) — nothing was certified (#11429)")
+        required = dict(REQUIRED_CASES)
+    for required_leg, why in sorted(required.items()):
+        if required_leg not in present:
             problems.append(
-                f"required leg {required} did not run — {why} (#11429)")
+                f"required leg {required_leg} did not run — {why} (#11429)")
     return stats, problems
 
 

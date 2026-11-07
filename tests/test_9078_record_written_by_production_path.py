@@ -4044,6 +4044,79 @@ _JUNIT_FAILED = """<testsuites><testsuite name="pytest" tests="3" failures="1" \
 _JUNIT_EMPTY = """<testsuites><testsuite name="pytest" tests="0" failures="0" \
  errors="0" skipped="0"/></testsuites>"""
 
+_D8_NAME = "test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires"
+_D10_NAME = "test_D10_a_record_table_without_its_policy_fails_closed"
+
+
+def _capstone_d_leg_names() -> list[str]:
+    """Every DoD leg the capstone FILE defines, read from its source.
+
+    Read rather than restated, for the same reason the gate reads it (#11429
+    review cycle 4): a hand-maintained list is how eleven of twelve legs stayed
+    invisible, and a fixture that drifted from the file would red for a reason
+    that has nothing to do with the rule it is testing.
+    """
+    tree = ast.parse((REPO_ROOT / CAPSTONE_FILE).read_text(encoding="utf-8"))
+    return [node.name for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_D")]
+
+
+def _fill_d_legs(xml: str, *, omit: tuple[str, ...] = ()) -> str:
+    """Add a GREEN `<testcase>` for every DoD leg the fixture does not already name.
+
+    ⛔ THE FIXTURES MUST CARRY THE WHOLE SET. The gate requires every `test_D*`
+    leg by name, so a fixture that names only D8 now reds for the eleven legs it
+    omits — which would make each falsifier below pass for the wrong reason and
+    stop discriminating. `omit` is how a fixture says "this one leg is the
+    subject": the rest stay green so the only possible problem is the rule under
+    test.
+    """
+    extra = [name for name in _capstone_d_leg_names()
+             if name not in omit and f'name="{name}"' not in xml]
+    if not extra:
+        return xml
+    cases = "\n".join(
+        '  <testcase classname="tests.test_9567_record_capstone"\n'
+        f'            name="{name}"/>' for name in extra)
+    filled = xml.replace("</testsuite></testsuites>",
+                         cases + "\n</testsuite></testsuites>")
+    match = re.search(r'tests="(\d+)"', filled)
+    assert match is not None, (
+        "the fixture lost its `tests=` attribute — re-anchor this helper instead "
+        "of deleting it (the gate reads that attribute)")
+    total = int(match.group(1)) + len(extra)
+    return filled[:match.start()] + f'tests="{total}"' + filled[match.end():]
+
+
+#: ⛔ FILL EVERY OTHERWISE-GREEN FIXTURE WITH THE WHOLE DoD SET (#11429 review
+#: cycle 4). Each of these asserts a verdict that must be attributable to ONE
+#: rule; without the other eleven legs present, "exit 1" would also mean "eleven
+#: legs were missing", and the falsifier would no longer prove anything about the
+#: rule it names.
+_JUNIT_GREEN = _fill_d_legs(_JUNIT_GREEN)
+_JUNIT_REAL_SKIP = _fill_d_legs(_JUNIT_REAL_SKIP)
+_JUNIT_ONE_FILE = _fill_d_legs(_JUNIT_ONE_FILE)
+_JUNIT_WRONG_FILES = _fill_d_legs(_JUNIT_WRONG_FILES)
+_JUNIT_XFAIL = _fill_d_legs(_JUNIT_XFAIL)
+_JUNIT_D8_XFAILED = _fill_d_legs(_JUNIT_D8_XFAILED)
+_JUNIT_D8_QUARANTINED = _fill_d_legs(_JUNIT_D8_QUARANTINED, omit=(_D8_NAME,))
+
+#: One DoD leg deselected, D8 green — the `-k "not D10"` shape (#11429 review
+#: cycle 4). D10 `DROP POLICY`s on the live record, so it is the leg most likely
+#: to be quarantined; before the derived rule it CERTIFIED (exit 0).
+_JUNIT_D10_DESELECTED = _fill_d_legs(
+    """<testsuites><testsuite name="pytest" tests="3" failures="0" \
+ errors="0" skipped="0">
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
+            name="test_the_public_capture_path_writes_the_record"/>
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
+            name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+  <testcase classname="tests.test_9555_narrative_carrier" \
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+</testsuite></testsuites>""",
+    omit=(_D10_NAME,))
+
 
 def _run_leg_gate(tmp_path, xml: str, script: Path | None = None):
     """Run the arm gate as a PROCESS over one fixture XML."""
@@ -4128,6 +4201,30 @@ def test_the_arm_gate_reds_when_the_D8_drill_is_QUARANTINED(tmp_path):
         f"filter hides it:\n{result.stdout}")
     errors = _gate_errors(result)
     assert any("required leg test_D8_" in line for line in errors), errors
+
+
+def test_the_arm_gate_reds_on_any_deselected_dod_leg_not_just_d8(tmp_path):
+    """⛔ One enumerated entry was the SAME defect one `-k` away (#11429 cycle 4).
+
+    `REQUIRED_CASES` held only D8, so `-k "not D10"` — which deselects the drill
+    that `DROP POLICY`s on the live record and re-applies the tenancy migration to
+    repair it, i.e. the leg most likely to be quarantined — recorded no skip and
+    passed every other rule. Measured before the derived rule: exit 0, CERTIFIED.
+    The required set is now read from the capstone's own source, so every DoD leg
+    is protected and a leg added later needs no second edit here.
+
+    Mutation: restrict the derived set back to D8 -> RED on this test, green on the
+    previous one — which is exactly the asymmetry that made this a finding.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_D10_DESELECTED)
+
+    assert result.returncode == 1, (
+        "the gate certified a run in which D10 was deselected — only an "
+        f"enumerated D8 was protected:\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any("test_D10_" in line for line in errors), errors
+    assert not any("test_D8_" in line for line in errors), (
+        f"D8 was present in this fixture, so it must not be named as missing: {errors}")
 
 
 def test_the_arm_gate_passes_a_green_armed_run(tmp_path):
@@ -4238,6 +4335,20 @@ def test_deleting_the_skip_clause_reds_the_arm_gate(tmp_path):
         "the skip clause moved — re-point this mutation test at it instead of "
         "deleting the proof that the pin discriminates")
     mutated = tmp_path / "record-postgres-leg-gate.py"
+    mutated.write_text(source[:start] + source[end:], encoding="utf-8")
+
+    # ⛔ THE COPY MUST KEEP THE SCRIPT'S OWN LAYOUT. The gate resolves the
+    # capstone by `Path(__file__).resolve().parents[2] / "tests" / …`, and fails
+    # CLOSED when it cannot read it — correct, but it means a bare copy in
+    # /tmp reds for "cannot read the capstone" instead of for the deleted clause,
+    # and this proof would silently stop proving anything. Mirror `repo/` so the
+    # mutation is the ONLY difference between the two runs.
+    mirror = tmp_path / "repo"
+    (mirror / ".github" / "scripts").mkdir(parents=True)
+    (mirror / "tests").mkdir()
+    (mirror / "tests" / CAPSTONE_FILE.split("/")[-1]).write_text(
+        (REPO_ROOT / CAPSTONE_FILE).read_text(encoding="utf-8"), encoding="utf-8")
+    mutated = mirror / ".github" / "scripts" / "record-postgres-leg-gate.py"
     mutated.write_text(source[:start] + source[end:], encoding="utf-8")
 
     result = _run_leg_gate(tmp_path, _JUNIT_REAL_SKIP, script=mutated)
