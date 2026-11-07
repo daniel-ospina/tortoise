@@ -112,8 +112,13 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner). The producer is
    a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999`.
 2. **`extractor_v2.py` calls none of the three edge-creating verbs**, so it cannot be the producer of any
-   Object→Object edge, including the declared `hasPart` pairs: `grep -c -E
-   'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py` → **0**. This is `#10984`'s
+   Object→Object edge, including the declared `hasPart` pairs: the **4** textual hits for `git grep -n -E
+   'create_edge|create_about_edge|create_operator' -- tortoise/extractor_v2.py` are **every one prose,
+   not a call** — `#` comments at `:8892` and `:9231`, docstring text at `:8910` and `:8917` (all four at
+   `d69faaf38`) — so the **call** count is **0**.
+   ⚠️ *Recipe drift, corrected 2026-11-07:* this read `grep -c … → 0` when the record was measured at
+   `80c912244`, and the same command prints **4** at `d69faaf38` — read the hits, never the bare count; a
+   lane that reads `4` as calls goes hunting for a producer that is not there. This is `#10984`'s
    own third bullet, still true after the merge.
    ⚠️ **Scoped on purpose.** The narrower claim is the one the command proves. "The extraction lane emits
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
@@ -227,8 +232,10 @@ four-suite run below is 254).
 ⛔ **But the HOLD that landed is not the gate A2 needs, and an earlier revision of this record read it as
 if it were.** The HOLD has exactly **one** kind (`identity_hold.py:125` `HOLD_ENDPOINT =
 "operator_endpoint"`, and `KINDS = (HOLD_ENDPOINT,)`) and exactly **one** call site —
-(`extractor_v2.py:9617`), inside `_mint_endpoint`, which fabricates a `statement` **Point** from an
-operator ref. A2's population is the **Object** mint: every emitted entity is appended unfiltered at `extractor_v2.py:8880`
+(`extractor_v2.py:9617` at `80c912244`; **`:10172` at `d69faaf38`**, the sole `_hold_endpoint(...)` call,
+def `:10052`), inside `_mint_endpoint`, which fabricates a `statement` **Point** from an
+operator ref. A2's population is the **Object** mint: every emitted entity is appended unfiltered at the
+`payload_entities.append({` site (`extractor_v2.py:8880` at `80c912244`; **`:9433` at `d69faaf38`**)
 (`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16414-16428`. Nothing
 filters it, and the tree's own registry says so in `#10997`'s own words —
 `config/v4-mechanisms.yml`'s `failure_policy` row is still **`state: not-implemented`**, its note reads
@@ -238,15 +245,22 @@ So `#10985`'s own premise — *"the **MINT** half does not — 'nothing suppress
 true for Objects**, and the 0.0 pp above is explained by the arm that *did* run (Rule 2 re-KEEPs every
 referenced entity), not by a HOLD the probe's arms never reach. Its other premise blocker, `#10996`, is
 CLOSED, and S2.2's
-mechanical half now defaults ON — the composition is `extractor_v2.py:11731-11732`
-(`vet_enabled = (vet_arbiter is not None or _vet_enabled() or _value_gate_enabled())`), and the
-default-ON itself lives at `tortoise/value_gate.py:81` (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
+mechanical half now defaults ON — the composition is the `vet_enabled = (vet_arbiter is not None or
+_vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-11732` at `80c912244`;
+**`:12302-12303` at `d69faaf38`**), and the default-ON itself lives at `tortoise/value_gate.py:81`
+(`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
 `extractor_v2.py:1154` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
-nothing else. ⚠️ Both cites are line numbers **at `80c912244`**: the forward merge that brought `#11212`
-in inserted ~381 lines above them, and the two cites moved by **different** amounts —
-`:11351-11352` → `:11731-11732` (**+380**) and `:1153` → `:1154` (**+1**) — so a bare "re-anchor on merge"
-is not one arithmetic. That is the class of defect §0 exists to catch: a number true at one base and false
-at the base the record claims. Which is why the 0.0 pp above is the **armed** result, not an unarmed one.
+nothing else. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
+named by the sha it is true at, so every delta has a reproducible operand: `:11351-11352` / `:1153` at
+**`aa414b4d5`** (the `#11211` landing — ⚠️ the immediate parent of the next point, `80c912244^`, holds
+`:11358`, i.e. **+373**, so the delta depends on which pre-merge base you pick) → `:11731-11732` / `:1154`
+at **`80c912244`** (**+380** / **+1**) → `:12302-12303` / `:1154` at **`d69faaf38`** (**+571** / **+0**).
+So a bare "re-anchor on merge" is not
+one arithmetic, and an arithmetic that is right for one base is already wrong for the next: **cite the
+symbol and let the line number be a convenience printed beside it** (`git grep -n 'vet_enabled = '`,
+`git grep -n 'payload_entities.append'`). That is the class of defect §0 exists to catch: a number true at
+one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
+not an unarmed one.
 
 **Exact remaining gap for `#10985`:** (a) the attach rate must be a reported census number, per candidate,
 with HOLD as a third bucket; (b) E1/E1b must be scored against the registered arithmetic rather than
@@ -380,7 +394,10 @@ gh issue view 11021 --json state,closedAt                 # CLOSED, one second a
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
 git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
 git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
-grep -c -E 'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py   # 0
+grep -c -E 'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py   # ⛔ NOT 0 — see below
+# 4 hits at d69faaf38, and EVERY one is prose rather than a call ('#' comments at :8892 and :9231,
+# docstring text at :8910 and :8917): the CALL count is 0. The command is `grep -c`, so prose that
+# mentions a verb counts exactly like a call. Read the hits.
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
 tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer (2 holders on a
                                                           # clean checkout); exit 2 = a surface could not
@@ -400,8 +417,9 @@ git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-caps
     > /tmp/e1e2.log 2>&1                                   # exits 3 = UNPREREGISTERED, by design
 grep -E '^e1 |metric=objects|vet-downgrades|metric=real_facts' /tmp/e1e2.log
 grep -n -E 'after_share <= 0.50|>= 90 of 90' docs/evidence/7949-capstone/PRE-REGISTRATION.md
-sed -n '11731,11732p' tortoise/extractor_v2.py; sed -n '81p' tortoise/value_gate.py   # the default-ON composition
-sed -n '1154p' tortoise/extractor_v2.py                      # the `TORTOISE_VET` toggle (OFF by default)
+git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py   # the default-ON composition (symbol, not a line)
+git grep -n 'ENV_FLAG, "1"' -- tortoise/value_gate.py      # the default-ON itself (value_gate.py:81)
+git grep -n 'os.environ.get("TORTOISE_VET")' -- tortoise/extractor_v2.py   # the toggle (OFF by default)
 # the 62.3 % share is QUOTED from a research record, re-read (not re-derived):
 sed -n '192p;314p' docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md
 sed -n '45p' docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md   # "#4894 is the mechanism audit"
