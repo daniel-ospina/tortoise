@@ -795,13 +795,20 @@ _RE_WH_LOOKUP = re.compile(r"\b(?:what|which|who|whom|whose|where|when)\b",
 
 
 #: The recency-selecting `latest` at the START of an interval anchor's own
-#: noun phrase ("my latest exam", "the latest concert", bare "latest"). That
-#: is a REFERENT the arms must resolve, not narrative text — #8775 leaves
-#: main's reject in place for it (see ``_latest_selects_an_interval_anchor``).
-_RE_LATEST_ANCHOR_HEAD = re.compile(
-    r"^\W*(?:(?:the|a|an|my|our|your|their|his|her|its|this|that|these|those)"
-    r"\W+)?latest\b",
-    re.IGNORECASE)
+#: noun phrase ("my latest exam", "the latest concert", "Sarah's latest exam",
+#: "the very latest exam", bare "latest"). That is a REFERENT the arms must
+#: resolve, not narrative text — #8775 leaves main's reject in place for it (see
+#: ``_latest_selects_an_interval_anchor``).
+#:
+#: Expressed as a bounded PREFIX of at most TWO tokens: that is what separates
+#: the selecting forms (determiner + optional intensifier: `the very latest`,
+#: `my own latest`, a possessive noun `Sarah's latest`) from the narrative ones
+#: the issue is about — `the day I saw the latest Marvel film` (4 tokens before
+#: `latest`), `I read the latest novel …` (3), and the census row's anchor
+#: (~30). A fixed determiner list was the round-1 shape of this pattern and it
+#: leaked every possessive/intensified spelling; the token bound is what the
+#: distinction actually is, so it needs no vocabulary to stay complete.
+_RE_LATEST_ANCHOR_HEAD = re.compile(r"^\W*(?:\S+\W+){0,2}latest\b", re.IGNORECASE)
 
 
 def recency_narrative_latest_enabled() -> bool:
@@ -1089,9 +1096,10 @@ def classify_question(question: str) -> AssemblyShape | None:
             return None
     # #8056 — class-plural temporal ENUMERATION (a class of events over a
     # relative window, no named subjects). Checked BEFORE the blanket R13
-    # guard block below, because that block's RECENCY arm (`_RE_RECENCY`,
-    # "bare `latest` is an ORDERING INSTRUCTION, not a time") rejects the
-    # `from earliest to latest` spelling of THIS shape's own ordering
+    # guard block below, because that block's RECENCY arm (``_recency_vetoes``
+    # — whose ORDERING-BOUND spelling `from earliest to latest` is an ORDERING
+    # INSTRUCTION, not a time; #8775 split the bare `latest` out of it) rejects
+    # the `from earliest to latest` spelling of THIS shape's own ordering
     # request while admitting the `starting from the earliest` spelling of
     # the same question — the feature would serve one arbitrary spelling of
     # its own census class.

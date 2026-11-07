@@ -932,12 +932,25 @@ def test_recency_latest_heading_an_interval_anchor_still_rejects():
         "How many days had passed since my latest review when I moved house?",
         # the same select-then-resolve form on the since arm
         "How many weeks had passed since the latest book launch when I moved?",
+        # #8775 review round 2: a POSSESSIVE noun and an INTENSIFIED determiner
+        # are the same selecting form — round 1's fixed determiner list leaked
+        # every one of these (they fired INTERVAL on the unresolvable referent)
+        "How many days passed between Sarah's latest exam and my graduation?",
+        "How many days passed between the team's latest exam and my graduation?",
+        "How many days passed between my sister's latest exam and my graduation?",
+        "How many days passed between the very latest exam and my graduation?",
+        "How many days passed between my own latest exam and my graduation?",
+        "How many days had passed since Maria's latest review when I moved house?",
     ]:
         assert classify_question(q) is None, q
-    # …and the narrative form still fires, so the rule is not "any anchor"
+    # …and the narrative form still fires, so the rule is not "any anchor":
+    # its `latest` sits 5 tokens into the anchor, and the census row's ~30.
     assert classify_question(
         "How many days passed between the day I saw the latest Marvel film "
         "and my birthday?") is AssemblyShape.INTERVAL
+    assert classify_question(
+        "How many weeks had passed since I bought my car when I read the "
+        "latest novel by my favourite author?") is AssemblyShape.INTERVAL
 
 
 def test_recency_residual_guard_site_takes_ownership_from_the_question():
