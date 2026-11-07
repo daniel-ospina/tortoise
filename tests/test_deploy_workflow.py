@@ -4920,7 +4920,15 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         + _PHRASE_RE
         + r"\s*(?:is|was|means|denotes)\b[^.;\u2014\u2013]{0,40}?"
         + re.escape(_FALSE_TREE)
-        + r"\s*(?:is|was)\s+(?:false|wrong|mistaken|incorrect|untrue|not\s+true)\b",
+        # ⛔ THE REFUTATION SET IS THE SAME ONE THE OTHER ARMS CARRY (#11191 review r21, P2
+        # — MEASURED). `_REFUTED_AFTER` admits `not true|not correct|not right`; this arm
+        # admitted `not true` ONLY, so the two word orders of the SAME refutation graded
+        # differently — the `not correct` spelling was REFUSED while its `is false` twin in
+        # the same order was accepted, and `origin/main` accepts both:
+        #   "The claim that the tree before #9548 is `ff6379eb2` is not correct; the true
+        #    tree is `047c91f7a`."
+        + r"\s*(?:is|was)\s+(?:false|wrong|mistaken|incorrect|untrue"
+        r"|not\s+(?:true|correct|right))\b",
         re.I,
     )
     #: The COMPLEMENT names the false sha as NOT the tree — "the tree before #9548 is
@@ -5333,7 +5341,19 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         # (#11191 review r19, P2 — MEASURED: "The statement that the tree before #9548 was
         # `ff6379eb2` was wrong" stayed REFUSED after the arm was added). One set, both
         # tenses, so the two arms cannot disagree about what a refutation is.
-        r"\b|\bno\s+longer\b|\b(?:is|was)\s+(?:false|wrong|mistaken|incorrect|untrue)\b",
+        r"\b|\bno\s+longer\b"
+        r"|\b(?:is|was)\s+(?:false|wrong|mistaken|incorrect|untrue)\b"
+        # ⛔ …AND `NOT TRUE` IS THE SAME REFUTATION, SPELLED IN THE NEGATIVE (#11191 review
+        # r21, P2 — MEASURED false RED, a regression against `origin/main` that no earlier
+        # round measured). The refutation arms above admit `not true|not correct|not
+        # right`; this cue admitted `is false|wrong|…` and not the negated copula, so the
+        # co-reference veto fired FIRST and the arm was never reached:
+        #   "The claim that the tree before #9548 is `ff6379eb2` is not true; the true
+        #    tree is `047c91f7a`."                                -> REFUSED (main accepts)
+        # The defect is the one this cue's own comment already records — one set of
+        # refutation spellings, written twice — fixed for TENSE and left open for NEGATION,
+        # so the same sentence graded two ways according to how the writer denied it.
+        r"|\b(?:is|was)\s+not\s+(?:true|correct|right)\b",
         re.I,
     )
     #: A correction that RETIRES the attribution — "§A8 no longer calls `ff6379eb2` the
@@ -5630,6 +5650,106 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             # end: a correction belongs to the predication it sits beside.
             return norm[previous_end:next_start]
 
+        #: ⛔ A NAMED TREE IS AN ADJACENT NOUN PHRASE, not `#<n>` anywhere near a copula
+        #: (#11191 review r22, P1 — MEASURED fail-open). `_OTHER_SUBJECT_LEFT` admits 80
+        #: characters between the number and ANY copula, so an ASIDE (`the tree (see
+        #: #9601) is …`), a meta-reference (`the tree per issue #11187 is …`) and a
+        #: comparison (`the tree, as #9601 says, is …`) each bought the re-assertion
+        #: exemption for a sentence that still published `ff6379eb2` as the pre-#9548 tree
+        #: — all four REFUSED by `origin/main`. The two spellings that DO name a different
+        #: tree in the subject are the ones this file's own two-tree comparison uses
+        #: (`the commit for #9601 is `ff6379eb2``, `the #9601 merge is `ff6379eb2``), so the
+        #: test is adjacency to a tree NOUN and nothing else.
+        _NAMED_TREE = re.compile(
+            r"\b(?:tree|commit|merge|sha|revision|tip|branch|parent|child)"
+            r"\s+(?:for|of|in)?\s*#(\d+)\b"
+            r"|\b#(\d+)\b\s+(?:merge|commit|tree|sha|revision|tip|branch)\b",
+            re.I,
+        )
+
+        def _tail_reasserts_equivalence(tail: str) -> bool:
+            """True when `tail` ASSERTS the false equivalence AGAIN, after a refutation.
+
+            ⛔ A CO-REFERENTIAL SUBJECT IS NOT THE WHOLE TEST (#11191 review r21, P2 —
+            MEASURED). Handing the tail to `_COREF_ASSERTS_FALSE` alone read three TRUTHS
+            as re-assertions: that arm's subject set is closed, but its SENTENCE is not, so
+            it cannot tell a co-referential subject from a clause that PREDICATES the sha
+            of a DIFFERENT, NAMED tree, and it has no refutation reader at all — a tail
+            that quotes the same claim in order to deny it AGAIN was read as an assertion
+            of it. All of these regressed against `origin/main`:
+              "…is false; the tree is `047c91f7a`, and the commit for #9601 is
+               `ff6379eb2`."
+              "The claim … is false; the true tree is `047c91f7a`, and the claim that the
+               tree before #9548 is `ff6379eb2` is false."
+            The three exemptions are the ones this file ALREADY implements one arm over —
+            `_admits`' propositional test and `_NOT_FALSE_SHA`'s relation guard — so this is
+            the same discriminator applied here, not a fourth spelling list:
+              (a) a `#<n>` other than the phrase's own `#9548`, joined to a TREE NOUN —
+                  `the commit for #9601`, `#9601 merge` — so the sha is predicated of a
+                  DIFFERENT, NAMED tree, which is the two-tree comparison this file requires
+                  to stay green. Read with `_NAMED_TREE`, which is ADJACENT on purpose: an
+                  aside or a meta-reference (`the tree (see #9601) is …`, `the tree per
+                  issue #11187 is …`) is not a subject, and buying the exemption with one
+                  is the class `_INCISE`/`_PAREN` close everywhere else. A control below
+                  pins that boundary.
+              (b) the co-reference sits INSIDE a refutation of the same equivalence — a
+                  claim quoted in order to be denied again refutes, it does not assert. Both
+                  kinds are read with `finditer` (#11191 review r22, P2 — MEASURED: keeping
+                  only the FIRST match of each kind refused a tail carrying TWO quoted
+                  re-denials — "…is false; the tree is `047c91f7a`, and the claim that the
+                  tree before #9548 is `ff6379eb2` is false, and the claim that … is false"
+                  — which `origin/main` accepts). The span test is what keeps this from
+                  becoming a blank cheque: a later bare re-assertion is outside every span
+                  and still blocks.
+              (c) a POSSESSIVE tail after the sha (`… is `ff6379eb2`'s descendant`)
+                  predicates a RELATION of the false tree, which is not the equivalence.
+                  Genitive-ONLY: a bare relation noun (`… is `ff6379eb2` merge commit`) is a
+                  LABEL for the false tree, i.e. the equivalence, and admitting it made the
+                  verdict turn on a comma (`… is `ff6379eb2`, the #9601 merge` was refused).
+            Everything else still blocks: F2 ("…is false; the tree is `ff6379eb2`") is
+            refused exactly as before, which is the property the guard exists for.
+            """
+            _refutations = [
+                _m
+                for _pat in (_REFUTED_INVERTED, _REFUTED_AFTER)
+                for _m in _pat.finditer(tail)
+            ]
+            for _hit in _COREF_ASSERTS_FALSE.finditer(tail):
+                if any(_r.start() <= _hit.start() < _r.end() for _r in _refutations):
+                    continue  # (b) quoted in order to be denied again
+                # ⛔ A MENTION IS NOT A NAMED SUBJECT (#11191 review r22, P1 — MEASURED
+                # fail-open in the first cut). Searching `_OTHER_SUBJECT_LEFT` over the
+                # co-reference's span accepts ANY `#<n>` within 80 characters of ANY
+                # copula, so an ASIDE or a meta-reference bought the exemption and the
+                # equivalence was asserted anyway — every row below REFUSED by
+                # `origin/main` and ACCEPTED by that first cut:
+                #   "…is false; the tree (see #9601) is `ff6379eb2`."
+                #   "…is false; the tree per issue #11187 is `ff6379eb2`."
+                #   "…is false; the tree, as #9601 says, is `ff6379eb2`."
+                # An aside buying an exemption is the rule `_INCISE`/`_PAREN` exist for
+                # everywhere else in this predicate, and an ISSUE NUMBER is not a tree at
+                # all. The test is therefore ADJACENT: the `#<n>` must sit in the noun
+                # phrase the copula predicates the sha of — a tree noun joined to it
+                # (`the commit for #9601`, `#9601 merge`) — which is exactly the two-tree
+                # comparison that has to stay green.
+                _named = _NAMED_TREE.search(_hit.group(0))
+                if _named and next(_g for _g in _named.groups() if _g) != "9548":
+                    continue  # (a) a different, named tree
+                # ⛔ …AND THE RELATION GUARD IS GENITIVE-ONLY (#11191 review r22, P2 —
+                # MEASURED fail-open in the first cut). Admitting a bare relation NOUN
+                # after the sha made the verdict depend on a COMMA — the appositive label
+                # asserts the equivalence, and only the comma spelling was refused:
+                #   "…is false; the tree is `ff6379eb2` merge commit of #9601."  ACCEPTED
+                #   "…is false; the tree is `ff6379eb2` tree of record."        ACCEPTED
+                #   "…is false; the tree is `ff6379eb2`, the #9601 merge."       refused
+                # `origin/main` refuses all three. A possessive is the only spelling that
+                # PREDICATES a relation (`ff6379eb2`'s descendant); a bare noun after the
+                # sha is a label, i.e. the equivalence.
+                if re.match(r"['\u2019]s\b", tail[_hit.end() :]):
+                    continue  # (c) a relation OF the false tree, not the false tree
+                return True
+            return False
+
         def _is_corrected(norm: str, phrase: re.Match[str]) -> bool:
             """True when THIS phrase occurrence's claim is corrected, denied or refuted."""
             # 0. A CO-REFERENTIAL CLAUSE THAT ASSERTS THE FALSE TREE IS THE DEFECT, even when
@@ -5749,9 +5869,9 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             #   "The claim that `ff6379eb2` is the tree before #9548 is false; the tree is
             #    `ff6379eb2`."                                    -> ACCEPTED (must refuse)
             # A refutation stands only when nothing after it re-asserts the claim.
-            if _REFUTED_AFTER.match(norm, phrase.start()) and not _COREF_ASSERTS_FALSE.search(
-                norm[clause_end:]
-            ):
+            if _REFUTED_AFTER.match(
+                norm, phrase.start()
+            ) and not _tail_reasserts_equivalence(norm[clause_end:]):
                 return True
             if _REFUTED_NEXT_CLAUSE.match(norm[clause_end:]):
                 return True
@@ -5777,8 +5897,9 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             # _FALSE_SHA_ADJACENT.search(clause)`), applied one clause further out: the
             # refutation stands only when nothing AFTER it re-asserts the same
             # equivalence. Both word orders are pinned by `_refuted_alibi` below.
-            if _REFUTED_INVERTED.search(own) and not _COREF_ASSERTS_FALSE.search(
-                norm[norm.find(own) + len(own) :]
+            _own_at = norm.find(own, clause_end - len(clause))
+            if _REFUTED_INVERTED.search(own) and not _tail_reasserts_equivalence(
+                norm[_own_at + len(own) :]
             ):
                 return True
             # ⛔ …AND THE SAME REFUTATION WHEN IT IS SPELLED `IS NOT TRUE` (#11191 review
@@ -7039,6 +7160,179 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "arm is reading the sentence instead of the occurrence, which is the A2/F5 "
         "alibi class this file closes everywhere else (#11191 review r20, P2):\n  "
         + "\n  ".join(_refuted_alibi_passed)
+    )
+    # ⛔ …AND THE GUARD MAY NOT READ A TRUTHFUL TAIL AS A RE-ASSERTION (#11191 review r21,
+    # P2 — MEASURED: three regressions against `origin/main` that the r20 guard
+    # INTRODUCED). `_COREF_ASSERTS_FALSE`'s subject set is closed, but its SENTENCE is
+    # not: it cannot tell a co-referential subject from a clause that PREDICATES the sha
+    # of a DIFFERENT, NAMED tree, it has no refutation reader at all, and it carries no
+    # relation guard, so a truthful tail is read as a re-assertion:
+    #   "…is false; the tree is `047c91f7a`, and the commit for #9601 is `ff6379eb2`."
+    #   "…is false; the true tree is `047c91f7a`, and the claim that the tree before
+    #    #9548 is `ff6379eb2` is false."
+    # `_tail_reasserts_equivalence` adds exactly the three discriminators this file
+    # ALREADY implements one arm over — `_admits`' propositional test (`_OTHER_SUBJECT_LEFT`)
+    # and `_NOT_FALSE_SHA`'s relation guard — so it is the same discriminator, not a fourth
+    # spelling list. Each shape below names the exemption that decides it; the attribution
+    # is by MUTATION (deleting that one exemption reds that row and no other).
+    _refutation_truthful_tail = (
+        # (a) the sha is predicated of a different, NAMED tree
+        "The claim that `ff6379eb2` is the tree before #9548 is false; the tree is "
+        "`047c91f7a`, and the commit for #9601 is `ff6379eb2`.",
+        "The claim that `ff6379eb2` is the tree before #9548 is false; the commit for "
+        "#9601 is `ff6379eb2`.",
+        # (b) the tail quotes the same claim in order to deny it AGAIN
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the true tree is "
+        "`047c91f7a`, and the claim that the tree before #9548 is `ff6379eb2` is false.",
+        # …and TWO re-denials in one tail, which the first cut's one-match-per-kind
+        # exemption refused while `origin/main` accepts it (#11191 review r22, P2)
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is "
+        "`047c91f7a`, and the claim that the tree before #9548 is `ff6379eb2` is false, "
+        "and the claim that the tree before #9548 is `ff6379eb2` is false.",
+        # (c) a POSSESSIVE tail predicating a relation — main REFUSES (pre-existing)
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree before "
+        "it is `ff6379eb2`'s descendant.",
+    )
+    _refutation_truthful_reds = [
+        s for s in _refutation_truthful_tail if _refuses_before_9548(s)
+    ]
+    assert not _refutation_truthful_reds, (
+        "a TRUTHFUL tail after a refutation is refused — the re-assertion guard is "
+        "reading the sentence with one test (`_COREF_ASSERTS_FALSE`) where the file "
+        "already implements three (a NAMED tree in the subject, a refuted-occurrence "
+        "span, a possessive tail). (a)'s first row and (b) are regressions against "
+        "`origin/main`; (a)'s minimal row and (c) are pre-existing false REDs that "
+        "`origin/main` also produces, closed here as well (#11191 review r21, P2):\n  "
+        + "\n  ".join(_refutation_truthful_reds)
+    )
+    # ⛔ …AND EACH EXEMPTION IS BOUNDED, so it cannot be BORROWED by the defect it sits
+    # beside. Three separators, one per exemption: an appositive names the other tree
+    # AFTER the sha (the sentence still asserts the equivalence); a refutation exemption is
+    # bounded to the occurrence it quotes; and a relation tail does not cover a later,
+    # bare co-reference. Measured — every row is REFUSED by `origin/main`.
+    # ⛔ …AND EACH EXEMPTION IS BOUNDED IN ITS OWN TERMS (#11191 review r22, P1/P2 — the
+    # first cut's bounds were bought with an ASIDE, a META-REFERENCE and a COMMA, all three
+    # MEASURED fail-opens here and REFUSED by `origin/main`). One separator per exemption:
+    # (a) is ADJACENT to a tree noun, so an aside or an issue number cannot supply it;
+    # (b) is bounded to the occurrence it quotes; and (c) is GENITIVE-ONLY, so a bare
+    # relation noun is read as the label it is.
+    _refutation_tail_alibi = (
+        # (a) an ASIDE naming the other tree is not the subject
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree (see "
+        "#9601) is `ff6379eb2`.",
+        # …nor is a META-REFERENCE, nor a comparison that names the number in passing —
+        # an ISSUE number is not a tree at all
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree per "
+        "issue #11187 is `ff6379eb2`.",
+        # ⚠️ The `, as #9601 says,` spelling of the same shape is NOT in this tuple: it is
+        # still ACCEPTED, and MEASURED at `921238a52` (r19, before this round's guard
+        # existed) as well — so it is a PRE-EXISTING residual decided by another arm, not a
+        # regression this round introduces and not a boundary of exemption (a). It is pinned
+        # as an open characterisation below and recorded on #11304; presenting it here as a
+        # closed boundary would be the over-claim r22 P3 names.
+        # (c) a bare relation NOUN is a label for the false tree, not a relation of it —
+        # the comma spelling is REFUSED above, so this row pins that the verdict is not
+        # keyed on the comma
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is "
+        "`ff6379eb2` merge commit of #9601.",
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is "
+        "`ff6379eb2` tree of record.",
+        # (b) is bounded to the quoted occurrence: a LATER bare re-assertion is not covered
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the claim that "
+        "the tree before #9548 is `ff6379eb2` is false, but it is `ff6379eb2`.",
+        # …and a possessive tail does not shelter a later bare equivalence
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is "
+        "`ff6379eb2`'s descendant, and that tree is `ff6379eb2`.",
+        # …and naming the other tree does not license a re-assertion in the SAME clause
+        "The claim that `ff6379eb2` is the tree before #9548 is false; the tree for "
+        "#9601 is `ff6379eb2`, so the tree before #9548 is `ff6379eb2`.",
+        # the comma spelling of the appositive (refused, and it must STAY refused)
+        "The claim that `ff6379eb2` is the tree before #9548 is false; the tree is "
+        "`ff6379eb2`, the #9601 merge.",
+    )
+    _refutation_tail_alibi_passed = [
+        s for s in _refutation_tail_alibi if not _refuses_before_9548(s)
+    ]
+    assert not _refutation_tail_alibi_passed, (
+        "an exemption meant for a TRUTHFUL tail is being borrowed by the defect: the "
+        "named-subject test must read the subject BEFORE the copula, a refutation "
+        "exemption must be bounded to the occurrence it quotes, and a relation tail must "
+        "not shelter a later bare equivalence (#11191 review r21, P2):\n  "
+        + "\n  ".join(_refutation_tail_alibi_passed)
+    )
+    # ⚠️ CHARACTERISATION OF AN OPEN RESIDUAL (#11191 review r22, P1 — MEASURED, and the
+    # measurement is why it is NOT claimed as fixed). The `…, as #9601 says, is
+    # `ff6379eb2`` spelling of the aside-alibi is ACCEPTED at this head AND at `921238a52`,
+    # where this round's guard did not exist — so the accepting arm is another one, and
+    # `origin/main` refuses the sentence. Pinned so a future fix notices, and recorded on
+    # #11304 with the two-column measurement; if it starts being REFUSED, that residual was
+    # closed and this assertion should be inverted.
+    _aside_meta_alibi_known_open = (
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree, as "
+        "#9601 says, is `ff6379eb2`.",
+    )
+    _aside_meta_now_refused = [
+        s for s in _aside_meta_alibi_known_open if _refuses_before_9548(s)
+    ]
+    assert not _aside_meta_now_refused, (
+        "the `as #<n> says` aside-alibi is now REFUSED — if that refusal is correct, this "
+        "residual on #11304 has been CLOSED and this characterisation should be inverted; "
+        "if it is not, the aside is being read as prose by an arm that must not read it "
+        "(#11191 review r22, P1):\n  "
+        + "\n  ".join(_aside_meta_now_refused)
+    )
+    # ⛔ …AND THE ARM READS THE OCCURRENCE, NOT THE SENTENCE (#11191 review r21 P3 / r22 P3
+    # — MEASURED). r21 measured that reverting `_REFUTED_INVERTED.search(own)` to
+    # `search(norm)` kept the whole file green and concluded no control existed; that
+    # conclusion was WRONG, and only because the shape it measured carried an `and` the
+    # deciding one does not. The COMMA-ONLY variant below is the discriminating control:
+    # with the scoping in place it is REFUSED, and under the revert it is ACCEPTED (a
+    # fail-open — a refutation of the first occurrence exempting a second, uncorrected one).
+    _occurrence_scope_pair = (
+        "The claim that the tree before #9548 is `ff6379eb2` is false, the tree before "
+        "#9548 is `ff6379eb2`.",
+        "The claim that the tree before #9548 is `ff6379eb2` is false, and the tree "
+        "before #9548 is `ff6379eb2`.",
+    )
+    _occurrence_scope_passed = [
+        s for s in _occurrence_scope_pair if not _refuses_before_9548(s)
+    ]
+    assert not _occurrence_scope_passed, (
+        "a refutation of one phrase occurrence is exempting a SECOND occurrence in the "
+        "same sentence — the arm is reading the sentence instead of the occurrence, "
+        "which is the A2/F5 alibi class. At least one of these two rows is the "
+        "discriminating shape, so this assertion IS the pin for the scoping "
+        "(#11191 review r21, P3 / r22, P3):\n  "
+        + "\n  ".join(_occurrence_scope_passed)
+    )
+    # ⛔ …AND `NOT TRUE` IS THE SAME REFUTATION AS `FALSE` (#11191 review r21, P2 —
+    # MEASURED false RED, a regression against `origin/main` that no earlier round
+    # measured). The refutation arms admit `not true|not correct|not right`; the cue did
+    # not, so the co-reference veto fired FIRST and the arm was never reached — the same
+    # sentence graded two ways according to how the writer denied it.
+    _refutation_negated_copula = (
+        "The claim that the tree before #9548 is `ff6379eb2` is not true; the true tree "
+        "is `047c91f7a`.",
+        "The claim that the tree before #9548 is `ff6379eb2` is not correct; the true "
+        "tree is `047c91f7a`.",
+    )
+    _refutation_negated_reds = [
+        s for s in _refutation_negated_copula if _refuses_before_9548(s)
+    ]
+    assert not _refutation_negated_reds, (
+        "a refutation spelled with a NEGATED COPULA is refused while its `is false` twin "
+        "is accepted — `_CORRECTION_CUE` carries one refutation set and `_REFUTED_AFTER` "
+        "another, so the two disagree about what a refutation is (#11191 review r21, "
+        "P2):\n  "
+        + "\n  ".join(_refutation_negated_reds)
+    )
+    # …and the widened cue is still CUED TO SOMETHING: a `not true` about the CENSUS does
+    # not refute the equivalence it sits beside.
+    assert _refuses_before_9548(
+        "The tree before #9548 is `ff6379eb2`; that census reading is not true."
+    ), (
+        "the `not true` cue is a blank cheque: a denial of the FIGURE switches off the "
+        "co-reference veto for the equivalence beside it (#11191 review r21, P2)"
     )
     # …and the closed SUBJECT still binds to the phrase through `that`, so a refutation of
     # something else in the sentence is not borrowed: without `_REFUTED_INVERTED`'s
@@ -8322,10 +8616,29 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     )
     _anchor_now_refused = [s for s in _anchor_known_open if _refuses_before_9548(s)]
     assert not _anchor_now_refused, (
-        "the anchor set now REFUSES a spelling it did not before — that is the false-RED "
-        "direction and it means the truthful controls above need re-measuring "
-        "(#11191 review r20, P3; the class is #11301):\n  "
+        # ⛔ THE MESSAGE IS PART OF THE CONTROL (#11191 review r21, P3 — the r20 wording
+        # called a CORRECT fix a false RED). Every row above is a FALSE claim that is
+        # ACCEPTED today, so one of them becoming REFUSED means this residual was CLOSED —
+        # the good direction — and the block must be re-derived from measurement rather
+        # than "fixed" by restoring the hole.
+        "a spelling of the pre-#9548 attribution that this pin ACCEPTED is now REFUSED — "
+        "if that refusal is correct, a residual on #11301 has been CLOSED and this "
+        "characterisation control should be INVERTED (move the row to the accepted set "
+        "and re-measure the truthful controls beside it); if it is not correct, the "
+        "anchor widened into the false-RED class. Either way do not restore the hole "
+        "to make this assertion pass (#11191 review r20, P3 / r21, P3; the class is "
+        "#11301):\n  "
         + "\n  ".join(_anchor_now_refused)
+    )
+    # …and the TRUTH anchor that makes "closed" distinguishable from "widened into red":
+    # if this pair ever disagrees with the block above, the predicate is refusing the
+    # truthful attribution too and the residual note is no longer describing it.
+    assert not _refuses_before_9548(
+        f"The tree immediately before #9548 is `{_TRUE_TREE}`."
+    ), (
+        "the truthful attribution is refused while the residual spellings are the "
+        "characterisation target — the two verdicts must move together "
+        "(#11191 review r21, P3)"
     )
     # ⛔ AND THE ANCHOR IS ONE NON-CAPTURING GROUP. `_PHRASE_RE` is CONCATENATED into
     # `_INVERTED_FALSE`, `_INVERTED_TRUE` and `_FALSE_SHA_ADJACENT`, and `|` binds looser
