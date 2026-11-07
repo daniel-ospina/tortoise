@@ -5050,6 +5050,11 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #:   "`ff6379eb2` is not what the note means by the tree before #9548; that tree is
     #:    `047c91f7a`."                                             -> accepted (33 chars)
     #:   "… by the tree IMMEDIATELY before #9548 …"                     -> REFUSED (45 chars)
+    #: ⛔ AND THE WIDENING IS CONTROLLED — the long spelling above is row 5 of
+    #: `_restored_corrections` (#11191 review r29 F1, P2). MEASURED: `{0,90}` accept,
+    #: `{0,40}` REFUSE that row, and the revert reds this test on `assert not _restored_reds`
+    #: (`1 failed, 110 passed`). Before that row existed the revert left the suite GREEN,
+    #: so the window was load-bearing with nothing defending it.
     #: ⛔ …AND THE BOUND IS A COORDINATE, NOT THE COMMA (#11191 review r18, P1 — MEASURED
     #: both ways). Banning EVERY comma refused the incise denial — the spelling a fixer
     #: writes after reading this pin's own failure message, and one `origin/main` accepts:
@@ -5093,14 +5098,19 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #: prefix so the `nor` belongs to THIS occurrence; a coordinating negator must govern
     #: that `nor` (same clause boundary, looking across only the `nor` itself); and the
     #: denied element must CLOSE there
-    #: (nothing after it in the clause). ⚠️ MEASURED AT THIS HEAD: this condition is
+    #: (nothing after it in the clause). ⚠️ MEASURED AT THIS HEAD: this closing condition is
     #: OVER-DETERMINED — another arm refuses the same continuation shapes, so deleting it
-    #: does not red the suite. It is kept as a second line of defence against a re-widening
+    #: does not red the suite. Measured directly (#11191 review r29 F3, P3): replacing
+    #: `_DENIAL_COMPLEMENT_ENDS.match(...)` with `True` leaves **111 passed**. It is kept as
+    #: a second line of defence against a re-widening
     #: (the `which` alternative was removed here precisely because it ACCEPTED three
     #: assertions), and that status is stated rather than claimed as a pinned arm. The closing condition is what keeps
     #: the arm from exempting an ASSERTION — ", nor the tree before #9548 IS `ff6379eb2`"
-    #: continues into a copula, so it is the claim, not a denial element. All three
-    #: conditions are load-bearing and each is separately pinned (#11191 review r13, P1).
+    #: continues into a copula, so it is the claim, not a denial element. ⛔ ALL THREE of
+    #: these conditions were load-bearing when r13 shipped, but the CLOSING one is now
+    #: over-determined — do NOT read a pinning claim into it, and do not delete the arm on
+    #: the strength of "covered" (#11191 review r13, P1; r29 F3 corrected the earlier
+    #: sentence here that said each was "separately pinned").
     _NOR_PREDICATE_DENIAL = re.compile(
         r"\bnor\b\s*(?:the\s+)?(?:tree\s+)?(?:immediately\s+)?$", re.I
     )
@@ -8835,6 +8845,15 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "`ff6379eb2` isn't the tree immediately before #9548.",
         "`ff6379eb2` cannot be the tree immediately before #9548.",
         "`ff6379eb2` is an ancestor rather than the tree before #9548.",
+        # ⛔ THE LONG-GAP REPAIR (#11191 review r29 F1, P2 — MEASURED both ways).
+        # `:5043` records that `_DENIAL_GAP`'s no-comma window was widened {0,40} →
+        # {0,90} BECAUSE this exact sentence (45 gap characters) was REFUSED; the
+        # comment carried the measurement but NO row did, so reverting the window to
+        # {0,40} left the suite green while restoring the r18 P1 false RED. Measured at
+        # this head: head `accept`, `{0,40}` mutant `REFUSE`. It belongs in THIS block
+        # because it is a truthful correction the pin must never reject.
+        "`ff6379eb2` is not what the note means by the tree immediately before #9548; "
+        "that tree is `047c91f7a`.",
         # a correction that RETIRES the attribution
         "§A8 no longer calls `ff6379eb2` the tree before #9548.",
         "§A8 does not call `ff6379eb2` the tree before #9548.",
@@ -9150,13 +9169,23 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "three false shapes below pass again (#11191 review r20):\n  "
         + "\n  ".join(_supersession_open)
     )
-    # …and the arm that decides them is named, not merely "the suite": the verbal frame
-    # `#9548 replaced was <sha>` is reached by `_INVERTED_FALSE`, and the pre-posed frame
-    # `at <sha>, just ahead of #9548` by the referent rule. If either arm is deleted the
-    # matching control above reds, so this pair is a discrimination test rather than two
-    # independent assertions.
-    # ⚠️ ALSO DOCUMENTATION (same finding): deleting the verbal branch reds the
-    # refutation-orders control first, so this one is never the deciding assertion.
+    # …and the arm that decides them is NAMED — and it is NOT the one the first cut of this
+    # comment claimed (#11191 review r29 F2, P3; re-measured at this head). The first cut
+    # said `_INVERTED_FALSE` REACHES the verbal frame `#9548 replaced was <sha>` and that
+    # deleting either arm reds the control above. Both halves are false, measured:
+    #   • `_INVERTED_FALSE` matches the three `_supersession_false` shapes, but NEUTERING
+    #     its decision arm changes no verdict on any of them (all three still REFUSED) —
+    #     so it is a redundant second line of defence here, never the deciding one. r29's
+    #     suite-level mutation agrees: deleting that loop leaves **111 passed**.
+    #   • neutering `_FALSE_SHA_ADJACENT.search(clause)` ALSO changes no verdict on these
+    #     three, so naming that arm would be a second false coverage claim. The shapes are
+    #     refused by the deeper cascade; WHICH single arm is load-bearing is UNDETERMINED
+    #     here and is stated as undetermined rather than guessed.
+    # ⛔ SO THE ASSERTION BELOW IS A PATTERN TEST ONLY: it proves the regex matches the
+    # string, never that the arm is REACHED — which is exactly the failure its own message
+    # names ("the control above proves nothing about which arm reads it"). Do not read it as
+    # coverage, and do not "fix" this block by deleting the assertion. Reducing the
+    # predicate to arm-per-arm controls is #11301's rewrite, not a comment edit here.
     assert _INVERTED_FALSE.search(
         "The tree #9548 replaced was `ff6379eb2`."
     ), (
