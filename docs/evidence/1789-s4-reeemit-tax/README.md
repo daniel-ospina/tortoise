@@ -27,12 +27,12 @@ superseded by *What this does not measure* below (it is a caveat, never a measur
 no measured field was touched); the instrument at this head emits a corrected string, pinned by
 `test_the_emitted_caveats_carry_the_corrected_population_and_direction`. ⚠️ The **caveats
 list** also postdates the artifacts in a second sense: they carry **5** entries and the
-instrument now emits **6**, and the ONE added entry is the replayed-list narrowing (266 of
-the 311 recorded items; `chain_notes` 7 + `link_before_create` 38 dropped) — the 231-of-266
-offered population is not a new entry either: the **instrument** folds it into the corrected
-version of that caveat (`CAVEATS[3]` at this head), while the artifacts' replacement carries
-neither count. So a reader who trusts the artifact's own caveats alone gets neither population
-statement. **No measured field was touched** — every token count,
+instrument now emits **6** — ONE ADDED plus TWO EDITED. Added: the replayed-list narrowing
+(266 of the 311 recorded items; `chain_notes` 7 + `link_before_create` 38 dropped). Edited:
+`CAVEATS[0]` (scoped to "the 4 tax-surface sections") and `CAVEATS[3]`, which absorbed the
+231-of-266 offered population and the 35 never-offered `operators` while replacing the
+one-sided CEILING wording — the artifacts' replacement of that entry carries neither count. So
+a reader who trusts the artifact's own caveats alone gets neither population statement. **No measured field was touched** — every token count,
 composition channel and reduction is byte-identical to what the runs emitted; re-running
 needs a paid key and would move the numbers for reasons unrelated to the correction. The
 filenames are each

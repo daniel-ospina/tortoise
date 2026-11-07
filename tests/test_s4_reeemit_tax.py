@@ -955,8 +955,13 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
     for art in (pri, rer):
         s, comp = art["summary"], art["summary"]["composition"]
         lg, dl = comp["legacy"], comp["delta"]
-        assert _thousands(s["sum_legacy_out_tokens"]) in readme
-        assert _thousands(s["sum_delta_out_tokens"]) in readme
+        # ⛔ ANCHORED to the run's own sentence: a bare "2 038" is also satisfied by
+        # a longer documented figure, and the two runs' sums sit one line apart
+        # (#11385 review P3).
+        sl, sd = (_thousands(s["sum_legacy_out_tokens"]),
+                  _thousands(s["sum_delta_out_tokens"]))
+        assert ((f"{sl} → {sd} output tokens over 7 sessions" if art is pri
+                 else f"{sl} → {sd} tokens") in " ".join(readme.split())), (sl, sd)
         # ⛔ TWO decimals only. The 1-dp fallback matched the title/verdict `93.8`,
         # so a reduction anywhere in [93.80, 93.89] left the 2-dp figure at the
         # summary line free to go stale — a window half the observed run-to-run
@@ -985,7 +990,11 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # each occur several times in the document (#11385 review P2). The
         # TABLE is the PRIMARY run (its caption says so), so the re-run is
         # pinned by its own sentence instead of being matched against it.
-        assert f"{s['max_session_reduction'] * 100:.1f}" in readme
+        # ⛔ anchored, per run: a 1-dp bare match also hides the 2-dp neighbours
+        # (#11385 review P3), and only the primary table cell bolds its figure.
+        best_txt = f"{s['max_session_reduction'] * 100:.1f} %"
+        assert ((f"best **−{best_txt}**" if art is pri else f"best −{best_txt}")
+                in " ".join(readme.split())), s["max_session_reduction"]
         if art is not pri:
             flat_r = " ".join(readme.split())
             assert (f"Re-run: legacy {lg['verbatim_reemissions']} verbatim / "
@@ -1108,8 +1117,31 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # the delta arm's honest limitation, not a hidden one
         assert sum(a["delta"].get("s4_delta_empty") is False
                    for a in art["arms"]) == 7
-    assert f"{pri['summary']['median_session_reduction'] * 100:.1f}" in readme
-    assert f"{rer['summary']['median_session_reduction'] * 100:.2f}" in readme
+    # ⛔ ANCHORED and run-attributed: these were bare (`96.9` / `96.87`), so the
+    # two runs' medians could be swapped and a 1-dp window (0.10 wide against an
+    # observed 0.01 median spread) would hide a moved figure; the spread
+    # sentence itself could also have its two values transposed (#11385 review
+    # P3).
+    flat_med = " ".join(readme.split())
+    assert (f"median **−{pri['summary']['median_session_reduction'] * 100:.1f} %**"
+            in flat_med), pri["summary"]["median_session_reduction"]
+    assert (f"median −{rer['summary']['median_session_reduction'] * 100:.2f} %"
+            in flat_med), rer["summary"]["median_session_reduction"]
+    assert (f"(`−{pri['summary']['token_weighted_reduction'] * 100:.2f} %` / "
+            f"`−{rer['summary']['token_weighted_reduction'] * 100:.2f} %`)"
+            in flat_med), "the spread sentence must name the runs in order"
+    # ⛔ the truncation cell is where the whole "NOT EVIDENCED" argument starts,
+    # and its `14/14` was unpinned: flipping one arm to `truncated=True` with
+    # `attempts=2` (and mirroring it into `summary.rows`) left 36/36 green while
+    # the README asserted a false absence (#11385 review P3).
+    for art in (pri, rer):
+        n_calls = sum(1 for a in art["arms"] for arm in ("legacy", "delta")
+                      if a[arm].get("truncated") is False
+                      and a[arm].get("attempts") == 1)
+        total = 2 * len(art["arms"])
+        assert n_calls == total, (n_calls, total)
+        assert (f"`truncated=False` on **{n_calls}/{total}** arm calls, "
+                "`attempts=1`") in flat_med, (art["measured_at"], n_calls)
 
     # the two checkable PROSE claims: the retired absolute ("no kind changed")
     # is contradicted by the `slots` pair, so its absence (in either wording) is
@@ -1279,6 +1311,13 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     assert "231 of the 266" in caveats, "the offered population is not emitted"
     assert "266 of the 311" in caveats, "the replayed-list narrowing is not emitted"
     assert "is a CEILING" not in caveats, "the refuted one-sided wording is back"
+    # ⛔ the README names the SLOT (`CAVEATS[3]`) that absorbed the population
+    # fact, and a wrong slot index is the exact defect that fix repaired — yet
+    # flipping it to `CAVEATS[2]` left 36/36 green (#11385 review P3).
+    _slot = next(i for i, c in enumerate(tool.CAVEATS) if "231 of the 266" in c)
+    assert "231 of the 266" in tool.CAVEATS[_slot]
+    _readme = " ".join((_EVID / "README.md").read_text().split())
+    assert f"`CAVEATS[{_slot}]`" in _readme, (_slot, "the README names a wrong slot")
     # ⛔ The COUNT was unpinned: appending a seventh entry to `tool.CAVEATS` left
     # the whole suite green, so the README's "the instrument emits **6**" had no
     # guard — and the count is exactly what a reader uses to know the artifact
