@@ -2735,26 +2735,74 @@ GIT_SHA               workflow
 # exists to catch: with a hand-copied filter the suite proves that the COPY
 # filters. Extracting it means a regression in the real block turns these tests
 # red (review F5).
-_LEDGER_BLOCK_START = "# ⛔ #11122 — THE MITIGATION LEDGER"
+_LEDGER_ENV_BLOCK_START = "# ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE ENVIRONMENT"
+_LEDGER_ENV_BLOCK_END = "# ⛔ #11122 — END OF THE ENVIRONMENT BLOCK"
+_LEDGER_TAIL_BLOCK_START = "# ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE PAYLOAD"
 _LEDGER_BLOCK_END = '          flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq'
 
 
-def _real_ledger_filter() -> str:
-    """The ledger block of the SHIPPED sync step, verbatim (anchored, fail-loud)."""
-    run = REAL_WORKFLOW.read_text()
-    assert _LEDGER_BLOCK_START in run, (
-        f"{_LEDGER_BLOCK_START!r} not found in deploy-hosted.yml — the ledger block "
-        "moved or was dropped; the fixture that executes it would otherwise pass "
+def _line_of(lines: list[str], marker: str, after: int = 0) -> int:
+    """Index of the first LINE at or after `after` that contains `marker`."""
+    for i in range(after, len(lines)):
+        if marker in lines[i]:
+            return i
+    raise AssertionError(
+        f"{marker!r} not found in deploy-hosted.yml at or after line {after} — a ledger "
+        "region moved or was dropped; a fixture that executes it would otherwise pass "
         "vacuously against a copy"
     )
-    start = run.index(_LEDGER_BLOCK_START)
-    # Back up to the LINE start: the block's own lines are indented to the YAML
-    # `run: |` body, and a slice beginning mid-indent starts a scalar at column 0,
-    # which does not parse.
-    start = run.rindex("\n", 0, start) + 1
-    end = run.index(_LEDGER_BLOCK_END)
-    assert start < end, "the ledger block moved AFTER the flyctl call"
-    return run[start:end].rstrip() + "\n"
+
+
+def _ledger_regions(text: str | None = None) -> tuple[str, str]:
+    """The TWO shipped ledger regions, verbatim and anchored (fail-loud).
+
+    An ENVIRONMENT block before the payload is composed (it blanks each ledgered name,
+    so derived values like `BACKUP_SWEEP_ENABLED` or the versioned model default are
+    computed from the deliberate absence) and a PAYLOAD block after it (the belt that
+    removes the name from ARGS even when an unconditional default re-adds it). They
+    are not contiguous, so they are sliced separately — a hand-copy of either would
+    drift, and the first draft of this fixture used different variable names and a
+    different default path.
+    """
+    lines = (REAL_WORKFLOW.read_text() if text is None else text).splitlines(keepends=True)
+    env_start = _line_of(lines, _LEDGER_ENV_BLOCK_START)
+    env_end = _line_of(lines, _LEDGER_ENV_BLOCK_END, after=env_start)
+    tail_start = _line_of(lines, _LEDGER_TAIL_BLOCK_START, after=env_end)
+    tail_end = _line_of(lines, _LEDGER_BLOCK_END, after=tail_start)
+    assert env_start < env_end < tail_start < tail_end, (
+        "marker drift: the ledger regions moved, or the environment block now runs "
+        "AFTER the payload composition — which would restore the derived-value "
+        "inconsistency the ordering exists to prevent"
+    )
+    env_block = "".join(lines[env_start : env_end + 1])
+    tail_block = "".join(lines[tail_start:tail_end])
+    return env_block, tail_block
+
+
+def _real_ledger_filter() -> str:
+    """The whole ledger mechanism, in the order the deploy runs it."""
+    env_block, tail_block = _ledger_regions()
+    return env_block + tail_block
+
+
+def _without_ledger_regions(text: str) -> str:
+    """`text` with BOTH ledger regions cut out.
+
+    The regions are not contiguous (the payload composition sits between them), so the
+    composed `_LEDGER_FILTER` never appears verbatim in the workflow and a
+    `str.replace(_LEDGER_FILTER, "")` silently removes nothing — which would leave the
+    "filter removed" arm running the shipped filter and prove nothing. Whole LINES are
+    cut so the `run: |` scalar keeps its indentation; the `flyctl secrets set` call is
+    kept, because removing it would make the payload stage nothing and the arm would
+    pass for the wrong reason.
+    """
+    lines = text.splitlines(keepends=True)
+    env_start = _line_of(lines, _LEDGER_ENV_BLOCK_START)
+    env_end = _line_of(lines, _LEDGER_ENV_BLOCK_END, after=env_start)
+    tail_start = _line_of(lines, _LEDGER_TAIL_BLOCK_START, after=env_end)
+    tail_end = _line_of(lines, _LEDGER_BLOCK_END, after=tail_start)
+    assert env_start < env_end < tail_start < tail_end
+    return "".join(lines[:env_start] + lines[env_end + 1 : tail_start] + lines[tail_end:])
 
 
 _LEDGER_FILTER = _real_ledger_filter()
@@ -3062,6 +3110,75 @@ class TestTheMitigationLedger:
             f"directory case: {proc.stdout}{proc.stderr}"
         )
 
+    def test_a_ledgered_name_is_blanked_IN_THE_ENVIRONMENT_not_only_in_ARGS(self, tmp_path):
+        """The ledger must be applied BEFORE the payload COMPOSES anything (#11332 P1).
+
+        The payload does not just copy env vars into ARGS: it composes derived values
+        from them — `BACKUP_SWEEP_ENABLED=true` only when a conjunction of nine secrets
+        is present. A tail-only filter left those computed from the UNFILTERED values,
+        so a ledger entry for `TORTOISE_BACKUP_KEY` shipped `BACKUP_SWEEP_ENABLED=true`
+        in the same argv that did NOT carry the key. At boot
+        `tortoise/backup_config.py` raises a ConfigError whose text asserts the now
+        FALSE "deploy-hosted.yml sets BACKUP_SWEEP_ENABLED=true only when all are
+        present", `alert_channel.sweep_config_safe` swallows it, and the backup sweep
+        plus the staleness watcher start DISABLED with only a warning — a green gate
+        over a payload that contradicts itself.
+
+        Executed against the SHIPPED environment block and the SHIPPED conjunction (both
+        sliced from `deploy-hosted.yml`, not transcribed), so a regression in either
+        turns this red.
+        """
+        run = REAL_WORKFLOW.read_text().splitlines(keepends=True)
+        start = next(
+            i
+            for i, line in enumerate(run)
+            if 'if [ -n "$TORTOISE_BACKUP_KEY" ] && [ -n "$R2_ACCOUNT_ID" ]' in line
+        )
+        end = next(i for i in range(start + 1, len(run)) if run[i].strip() == "fi")
+        conjunction = "".join(run[start : end + 1])
+        assert "BACKUP_SWEEP_ENABLED=true" in conjunction, (
+            "the shipped conjunction no longer stages BACKUP_SWEEP_ENABLED — the anchor "
+            "drifted, so this fixture would prove nothing"
+        )
+        env_block, _tail = _ledger_regions()
+
+        def staged(ledger_text: str, name: str) -> list[str]:
+            ledger = _fixture(name, ledger_text)
+            script = (
+                # every input the shipped conjunction reads, all PRESENT.
+                'TORTOISE_BACKUP_KEY="bk"\n'
+                'R2_ACCOUNT_ID="a"\nR2_ACCESS_KEY_ID="b"\nR2_SECRET_ACCESS_KEY="c"\n'
+                'R2_BUCKET="d"\nTELEGRAM_BOT_TOKEN="e"\nTELEGRAM_CHAT_ID="f"\n'
+                'DR_ISSUES_PAT="g"\nBACKUP_ALERT_ASSIGNEE="h"\n'
+                "ARGS=()\n" + env_block + conjunction + 'printf "%s\\n" "${ARGS[@]}"\n'
+            )
+            proc = subprocess.run(
+                ["bash", "-e", "-u", "-c", script],
+                capture_output=True,
+                text=True,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "HOME": str(tmp_path),
+                    "FLY_MITIGATION_LEDGER": str(ledger),
+                },
+                timeout=30,
+            )
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            return [line.split("=", 1)[0] for line in proc.stdout.splitlines() if line]
+
+        assert "BACKUP_SWEEP_ENABLED" in staged("# empty\n", "derived-control.txt"), (
+            "the CONTROL case staged nothing — the fixture no longer reproduces the "
+            "conjunction, so the assertion below would prove nothing"
+        )
+        assert "BACKUP_SWEEP_ENABLED" not in staged(
+            _entry("TORTOISE_BACKUP_KEY"), "derived-mitigated.txt"
+        ), (
+            "a ledger entry for TORTOISE_BACKUP_KEY removed the ARG but NOT the "
+            "environment, so BACKUP_SWEEP_ENABLED=true shipped in the same payload that "
+            "omitted the key — the app then boots into a ConfigError asserting an "
+            "invariant this payload just broke (#11332 review, P1)"
+        )
+
     def test_a_ledgered_name_does_not_suppress_a_SHORTER_name_it_extends(self, tmp_path):
         """The `case` DELIMITERS are the discrimination feature (#11332 review, P2).
 
@@ -3113,6 +3230,40 @@ class TestTheMitigationLedger:
         assert "FASTAPI_INTERNAL_KEY" in staged, (
             f"the block staged nothing at all — the harness broke, not the filter: {staged}"
         )
+
+    def test_a_ZERO_guarded_ledgered_name_is_caught_when_the_filter_is_removed(self):
+        """The `unconditional` leg of check (0) is load-bearing, and it was unpinned.
+
+        Check (0) asks whether a ledgered name is still STAGED, over
+        `assigned | unconditional | live`. With the shipped filter working, all three
+        sets exclude the name, so the legs only separate when the filter is GONE —
+        which is precisely the regression the check exists to catch. A `-z`-guarded
+        assignment (`[ -z "$X" ] && ARGS+=(X=…)`) runs only on the runs where the
+        GitHub secret is ABSENT, so the name lands in `unconditional` and NOT in
+        `assigned`: narrowing the check to `mitigated & assigned` leaves the whole
+        suite green while re-arming exactly the names a mitigation removed, and it is
+        the `#4126` shape this gate was built around. This fixture is that case.
+        """
+        zero_guarded = _LEDGER_WORKFLOW_UNFILTERED.replace(
+            '[ -n "${{ secrets.OPT_SECRET }}" ] && ARGS+=(OPT_SECRET="${{ secrets.OPT_SECRET }}")',
+            '[ -z "${{ secrets.OPT_SECRET }}" ] && ARGS+=(OPT_SECRET="${{ secrets.OPT_SECRET }}")',
+        )
+        assert zero_guarded != _LEDGER_WORKFLOW_UNFILTERED, (
+            "the OPT_SECRET assignment moved — this fixture no longer produces the "
+            "`-z` shape it exists to exercise"
+        )
+        proc = _ledger_run(
+            _ledger(_entry("OPT_SECRET")),
+            workflow=_fixture("ledger-workflow-zero-unfiltered.yml", zero_guarded),
+            # OPT_SECRET ABSENT from GitHub, which is what turns the `-z` guard ON.
+            present={"FASTAPI_INTERNAL_KEY", "SENTRY_DSN"},
+        )
+        assert proc.returncode == 2, (
+            "a `-z`-guarded ledgered name is staged on exactly the runs where the "
+            f"GitHub secret is absent, and the gate did not refuse it: {proc.stdout}"
+        )
+        assert "LEDGER NOT HONOURED" in proc.stdout
+        assert "OPT_SECRET" in proc.stdout
 
     def test_a_ledgered_name_the_payload_still_stages_fails_the_deploy(self):
         """Dropping the filter from the workflow must not be a silent re-arm.
@@ -3427,7 +3578,7 @@ class TestTheMitigationLedger:
         # no ledger at all.
         unfiltered = _fixture(
             "real-workflow-unfiltered.yml",
-            REAL_WORKFLOW.read_text().replace(_LEDGER_FILTER, ""),
+            _without_ledger_regions(REAL_WORKFLOW.read_text()),
         )
         assert unfiltered.read_text() != REAL_WORKFLOW.read_text(), (
             "the shipped ledger block was not removed from the copy — the anchors in "
