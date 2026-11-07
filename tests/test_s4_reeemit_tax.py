@@ -540,6 +540,27 @@ def test_load_sessions_raises_on_a_receipt_with_no_embed_list(tmp_path):
         tool.load_sessions(tmp_path)
 
 
+
+def test_a_healthy_retried_arm_is_NOT_voided():
+    """⛔ `stats["attempts"]` must not be compared against `cost["calls"]`.
+
+    `_complete` writes `stats.update(attempts=attempt, …)` on its SUCCESS path,
+    where `attempt` is the attempt number of ONE logical call — so a single
+    429-retried call reports `attempts=2` while `_accumulate_call_cost` ran once
+    (`calls=1`), and the whole spend IS in the accumulator. An earlier revision
+    refused exactly that healthy arm as "partial", which would have silently
+    dropped the session from the measurement (and made a fully-measured run exit
+    1 with "0 sessions produced a usable pair"). It also overwrites the same key
+    on the raise path, so the gap is neither sound nor complete in the other
+    direction (#11385 review P2).
+
+    What the instrument owes the reader is the DATA, not a classification: the
+    row records `attempts` and `calls` beside the total.
+    """
+    stats = {"cost": {"calls": 1, "completion_tokens": 5000}, "attempts": 2}
+    assert tool.arm_out_tokens(stats) == (5000, "stats.cost.completion_tokens")
+
+
 _EVIDENCE = _REPO / "docs" / "evidence" / "1789-s4-reeemit-tax"
 
 
@@ -563,18 +584,33 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
         s = d["summary"]
         rows = s["rows"]
         assert rows, path.name
-        assert s["sessions_measured"] == s["sessions_attempted"] == len(rows)
+        # ⛔ An unmeasured arm is a DOCUMENTED shape ("a failed arm is data",
+        # `out_tokens: null`), so the arithmetic below runs over MEASURED rows
+        # only — mirroring `compare`'s `usable`. An earlier revision assumed every
+        # row was measured, so a legitimate regeneration with one failed arm both
+        # redded and then crashed on `None` (#11385 review P3).
+        measured = [r for r in rows
+                    if r["legacy_out_tokens"] is not None
+                    and r["delta_out_tokens"] is not None]
+        assert s["sessions_attempted"] == len(rows), path.name
+        assert s["sessions_measured"] == len(measured), path.name
+        assert measured, path.name
         # the published totals ARE the sums of the rows
         assert s["sum_legacy_out_tokens"] == sum(
-            r["legacy_out_tokens"] for r in rows), path.name
+            r["legacy_out_tokens"] for r in measured), path.name
         assert s["sum_delta_out_tokens"] == sum(
-            r["delta_out_tokens"] for r in rows), path.name
+            r["delta_out_tokens"] for r in measured), path.name
         # …and the headline is that ratio, not a number typed beside it
         assert round(1 - s["sum_delta_out_tokens"] / s["sum_legacy_out_tokens"],
                      4) == s["token_weighted_reduction"], path.name
-        # the per-session statistics ARE the rows' statistics
+        # the per-session statistics ARE the rows' statistics. ⛔ ROUND BEFORE
+        # SORTING: `_reduction` rounds to 4 dp and `compare` sorts those rounded
+        # values, so sorting unrounded ratios and averaging the middle two
+        # diverges whenever the pair rounds in opposite directions (3 of 7
+        # six-session subsets of the primary run; measured).
         reductions = sorted(
-            1 - r["delta_out_tokens"] / r["legacy_out_tokens"] for r in rows)
+            round(1 - r["delta_out_tokens"] / r["legacy_out_tokens"], 4)
+            for r in measured)
         assert round(min(reductions), 4) == s["min_session_reduction"]
         assert round(max(reductions), 4) == s["max_session_reduction"]
         # ⛔ replicate the PRODUCER's median, including its even-n branch.
@@ -605,21 +641,3 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
                 r = a[arm]
                 if r.get("out_tokens") is not None:
                     assert r.get("basis"), (path.name, a["session"], arm)
-
-
-def test_a_raised_retry_makes_the_arm_unmeasured():
-    """⛔ A FOURTH path to a partial total, and the only one no counter sees: a
-    call that RAISED never reaches `_accumulate_call_cost` at all, so it is in
-    neither `cost["completion_tokens"]` nor any `calls_without_*` counter —
-    `attempts` is its only trace. `stats["attempts"]` is the true running attempt
-    count and `cost["calls"]` counts the attempts that actually contributed, so a
-    gap between them means part of the spend is missing and `cost` is a PARTIAL
-    sum. An earlier revision merely *documented* this gap while still returning
-    the partial sum with a total-looking basis (#11385 review P2)."""
-    stats = {"cost": {"calls": 1, "completion_tokens": 5000}, "attempts": 2}
-    tokens, basis = tool.arm_out_tokens(stats)
-    assert tokens is None, "1 of 2 attempts contributed — not the arm's total"
-    assert "1 of 2 attempt(s)" in basis
-    # …and the healthy case (every attempt contributed) still publishes the total
-    stats = {"cost": {"calls": 2, "completion_tokens": 9000}, "attempts": 2}
-    assert tool.arm_out_tokens(stats) == (9000, "stats.cost.completion_tokens")

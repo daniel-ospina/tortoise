@@ -55,8 +55,12 @@ Composition is recorded alongside the tokens (`_s4_merge_stats` /
 WHY the delta arm is smaller: how many items it omitted (the tax), how many
 it added (gaps) and how many it corrected.
 
-    # the measurement (needs DEEPSEEK_API_KEY; ~20 s and ~6k output tokens
-    # per arm per session, so a 7-session A/B is cents, not dollars)
+    # the measurement (needs DEEPSEEK_API_KEY). Cost, from the two recorded runs
+    # rather than guessed: ~145 s of wall clock and ~4.7k output tokens on the
+    # LEGACY arm and ~0.3k on the delta arm per session, so the 7-session A/B is
+    # ~2.4 min and cents. (An earlier revision said "~6k per arm" — wrong for the
+    # delta arm by ~20x, and a cost hint nobody can check is what a reader plans
+    # a re-run against.)
     DEEPSEEK_API_KEY=… uv run python tools/s4_reeemit_tax.py run \
         --receipt tests/eval/write_path/receipts/7947-arms-2026-10-18 \
         --out docs/evidence/1789-s4-reeemit-tax/ab-<utc>.json
@@ -206,9 +210,12 @@ def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
     error-informed re-prompt are separate billed calls, and a final-call read
     under-counts exactly the expensive arms (the ones that truncate or emit a
     malformed list), i.e. it shrinks the legacy arm and flatters the delta.
-    ⛔ A call that RAISED is in no total here: `_accumulate_call_cost` runs on
-    `_complete`'s success return, so a retried-and-failed attempt is billed and
-    counted nowhere. `attempts` is its only trace.
+    ⛔ A call that RAISED is in no total here — `_accumulate_call_cost` runs on
+    `_complete`'s success return, so an attempt that failed before returning a
+    response is counted nowhere. That is NOT detectable from this accumulator
+    (`attempts` counts attempts within one logical call and is overwritten on the
+    raise path), so it is recorded rather than classified: every row carries
+    `attempts` and `calls` beside the total.
 
     `stats["cost"]["completion_tokens"]` is the ONE accumulator with that
     property: it takes one entry per SUCCESSFUL call, so an escalation or
@@ -246,23 +253,16 @@ def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
             f"{dropped} of {cost_acc.get('calls') or '?'} call(s) — rejected, "
             "usage-less or deadline-aborted)")
     if cost > 0:
-        # ⛔ A FOURTH path to a partial total, and one no counter above can see:
-        # a call that RAISED never reaches `_accumulate_call_cost` at all, so it
-        # is in neither `cost` nor any counter. `attempts` is the true running
-        # attempt count (`stats["attempts"]`, re-accumulated across escalation),
-        # and `cost["calls"]` counts the attempts that actually contributed — so
-        # a gap between them means part of the spend is missing. Comparing them
-        # is the only fail-closed check available for this path, and it needs no
-        # new production counter. (An earlier revision claimed a "recovery
-        # cross-check below" covered this; the cross-check sits BELOW the
-        # `cost > 0` early return, so it could never run here.)
-        calls = int(cost_acc.get("calls") or 0)
-        attempts = int(stats.get("attempts") or 0)
-        if attempts and calls < attempts:
-            return None, ("unmeasured (only "
-                          f"{calls} of {attempts} attempt(s) contributed a "
-                          "token count — the rest raised, billed, counted "
-                          "nowhere)")
+        # ⛔ A call that RAISED is in neither `cost` nor any counter above, and
+        # this function does NOT try to detect it. `stats["attempts"]` cannot be
+        # used for that: `_complete` writes it on the SUCCESS path as the attempt
+        # number of ONE logical call (so a single 429-retried call reports
+        # `attempts=2` while `_accumulate_call_cost` ran once — an earlier
+        # revision refused that healthy arm as partial), and it OVERWRITES the
+        # same key on the raise path, so a gap between it and `cost["calls"]` is
+        # neither sound nor complete. The honest statement is the one below: the
+        # row records `attempts` and `calls` beside the total, so a reader can
+        # SEE the discrepancy even though this function cannot classify it.
         return cost, "stats.cost.completion_tokens"
     rec = stats.get("recovery") or {}
     healthy = int(rec.get("s4_out_tokens") or 0)
