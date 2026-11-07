@@ -199,12 +199,30 @@ def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
     A tokenless response yields ``(None, …)`` — an unmeasured arm, never a 0
     that would read as "this arm emitted nothing".
     """
-    cost = int((stats.get("cost") or {}).get("completion_tokens") or 0)
+    cost_acc = stats.get("cost") or {}
+    cost = int(cost_acc.get("completion_tokens") or 0)
+    # ⛔ A MULTI-CALL arm whose provider count was rejected (or a call killed by
+    # the deadline — billed, counted nowhere) has `calls_without_tokens > 0`:
+    # the remaining sum is NOT the arm's total, and presenting it as one
+    # under-counts in the direction that flatters the delta arm. Report the arm
+    # as unmeasured instead of silently reading a partial sum as a total.
+    if int(cost_acc.get("calls_without_tokens") or 0) > 0:
+        return None, (
+            "unmeasured (provider reported no token usage for "
+            f"{cost_acc['calls_without_tokens']} of "
+            f"{cost_acc.get('calls') or '?'} call(s))")
     if cost > 0:
         return cost, "stats.cost.completion_tokens"
     rec = stats.get("recovery") or {}
     healthy = int(rec.get("s4_out_tokens") or 0)
     trunc = int(rec.get("truncation_completion_tokens_s4") or 0)
+    if trunc and int(stats.get("completion_tokens") or 0) not in (0, trunc, healthy):
+        # A truncation was recorded AND the last call's count is a THIRD number,
+        # so the escalated call never reached `s4_out_tokens` (the
+        # partial-accept arm). The recovery sum is therefore the base call
+        # alone — a partial sum must not be presented as the arm's total.
+        return None, ("unmeasured (recovery accumulator incomplete after an "
+                      "escalated retry)")
     if healthy or trunc:
         return healthy + trunc, "recovery.s4_out_tokens+truncation"
     fallback = int(stats.get("completion_tokens") or 0)
@@ -244,6 +262,11 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
         })
         return row
     merged = x.merge_embed_lists(sess["s2"], s4)
+    # production's own "found nothing" predicate: ANY content-bearing schema
+    # section, not just the 4 tax sections (#1789 Task 3 `_s4_section_is_content`)
+    emitted_nothing = not any(
+        x._s4_section_is_content(k, v)
+        for k, v in (s4 or {}).items())
     # the #2408 census instrument, reused verbatim — one implementation
     comp = x._s4_merge_stats(sess["s2"], s4, merged)
     out_tokens, basis = arm_out_tokens(stats)
@@ -259,10 +282,12 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
         # — both are `extract_session_v2`-stage keys, so reading them here would
         # be a STRUCTURALLY DEAD field (None on every row, and `False` on rows
         # whose delta emitted nothing, which contradicts the data). They are
-        # DERIVED from this arm's own composition with production's own
-        # definitions instead: empty = no content-bearing item emitted; suspect
-        # = pure verbatim re-emission at ≥ `_S4_REEMIT_SUSPECT_RATIO` × S2.
-        "s4_delta_empty": (comp["s4_items"] == 0) if arm == "delta" else None,
+        # DERIVED here with PRODUCTION'S OWN predicates: `s4_delta_empty` from
+        # `_s4_section_is_content` over EVERY emitted section (a retraction-only
+        # delta is NOT empty — it carries content the merge keeps), and the
+        # suspect flag from pure verbatim re-emission at ≥
+        # `_S4_REEMIT_SUSPECT_RATIO` × S2.
+        "s4_delta_empty": emitted_nothing if arm == "delta" else None,
         "s4_delta_reemit_suspect": (
             (comp["verbatim_reemissions"]
              >= x._S4_REEMIT_SUSPECT_RATIO * comp["s2_items"])
@@ -276,9 +301,92 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
         "corrected_by_s4": comp["corrected_by_s4"],
         "added_by_s4": comp["added_by_s4"],
         "kept_from_s2": comp["kept_from_s2"],
+        # ⛔ The item TEXT, not only the counts. The plan's Task 10 Step 5
+        # (partition each correction into content-changing / kind-lifecycle-only
+        # / re-emission-noise) needs, per correction, BOTH the S2 item and the
+        # S4 re-emitted copy for the SAME merge key — a counts-only artifact
+        # cannot support the follow-up it points at, and neither can a list of
+        # the additions alone (a correction is by definition the same key, so it
+        # is the one thing an "items not in S2" filter drops).
+        "added_items": _added_items(sess["s2"], s4),
+        "corrected_items": _corrected_items(sess["s2"], s4),
         "elapsed_s": round(time.monotonic() - started, 2),
     })
     return row
+
+
+#: The fields whose change distinguishes a CORRECTION from a verbatim re-emit
+#: (the same mask `_verbatim_reemissions` uses: optional/noise fields —
+#: source_ref / confidence / quote / search_keys / source_turn_id — are
+#: ignored, so a reordered or field-pruned copy is still a re-emission).
+_CORRECTION_FIELDS = ("content", "name", "kind", "pointKind", "eventKind",
+                      "lifecycle", "supersedes", "slots")
+
+
+def _field_snapshot(item: dict) -> dict:
+    return {f: item.get(f) for f in _CORRECTION_FIELDS if f in item}
+
+
+def _added_items(s2: dict, s4: dict, *, max_items: int = 40,
+                 clip: int = 160) -> list[dict]:
+    """Items this arm emitted that the S2 base did not contain — the GAP channel."""
+    s2_keys = {x._merge_key(s, i)
+               for s in _TAX_SECTIONS for i in (s2.get(s) or [])
+               if isinstance(i, dict)}
+    out: list[dict] = []
+    for s in _TAX_SECTIONS:
+        for i in (s4 or {}).get(s) or []:
+            if not isinstance(i, dict) or x._merge_key(s, i) in s2_keys:
+                continue
+            out.append(_item_record(s, i, clip))
+            if len(out) >= max_items:
+                return out
+    return out
+
+
+def _corrected_items(s2: dict, s4: dict, *, max_items: int = 40,
+                     clip: int = 160) -> list[dict]:
+    """The CORRECTION channel: same merge key as an S2 item, with at least one
+    correction-relevant field changed (≠ a verbatim re-emission), recorded as
+    BOTH sides so the Task 10 Step 5 partition can classify it offline."""
+    s2_by_key = {x._merge_key(s, i): (s, i)
+                 for s in _TAX_SECTIONS for i in (s2.get(s) or [])
+                 if isinstance(i, dict)}
+    out: list[dict] = []
+    for s in _TAX_SECTIONS:
+        for i in (s4 or {}).get(s) or []:
+            if not isinstance(i, dict):
+                continue
+            hit = s2_by_key.get(x._merge_key(s, i))
+            if hit is None:
+                continue
+            before = _field_snapshot(hit[1])
+            after = _field_snapshot(i)
+            changed = sorted(f for f in set(before) | set(after)
+                             if before.get(f) != after.get(f))
+            if not changed:
+                continue                      # a verbatim re-emission — the tax
+            out.append({**_item_record(s, i, clip),
+                        "changed_fields": changed,
+                        "s2_before": {f: str(before.get(f))[:clip]
+                                      for f in changed},
+                        "s4_after": {f: str(after.get(f))[:clip]
+                                     for f in changed}})
+            if len(out) >= max_items:
+                return out
+    return out
+
+
+def _item_record(section: str, item: dict, clip: int) -> dict:
+    return {
+        "section": section,
+        "key": str(section[:4]) + ":" + " | ".join(
+            str(part) for part in x._merge_key(section, item))[:clip],
+        "content": str(item.get("content") or item.get("name") or "")[:clip],
+        "kind": item.get("pointKind") or item.get("eventKind") or item.get("kind"),
+        "lifecycle": item.get("lifecycle"),
+        "supersedes": item.get("supersedes"),
+    }
 
 
 # ── the comparison ─────────────────────────────────────────────────────────
@@ -292,14 +400,42 @@ def _reduction(legacy: int, delta: int | None) -> float | None:
     return round(1.0 - (delta / legacy), 4)
 
 
+def _composition_totals(pairs: list[dict]) -> dict:
+    """Sum the census quantities per arm — WHY the delta arm is smaller, and
+    what it costs in the two value channels.
+
+    Summed over the SAME usable pairs the token totals use — a "why it is
+    smaller" table built over a different population than the headline number
+    would silently describe different sessions.
+
+    `verbatim_reemissions` is the tax itself (items re-typed unchanged);
+    `added_by_s4` is the gap channel and `corrected_by_s4` the correction
+    channel — the two the contract exists to keep. Reporting all three per arm
+    is what stops the token delta from being read as a pure win: a delta arm
+    that emits nothing because it stopped LOOKING shows up as BOTH value
+    channels collapsing against the legacy arm, next to the reduction number.
+    """
+    keys = ("s2_items", "s4_items", "merged_items", "added_by_s4",
+            "corrected_by_s4", "verbatim_reemissions")
+    out: dict = {}
+    for arm in _ARM_CHOICES:
+        tot = dict.fromkeys(keys, 0)
+        for p in pairs:
+            row = p.get(arm) or {}
+            for k in keys:
+                tot[k] += int(row.get(k) or 0)
+        out[arm] = tot
+    return out
+
+
 def compare(pairs: list[dict]) -> dict:
     """Aggregate one (legacy, delta) pair set into the measurement.
 
     PRIMARY number is the TOKEN-WEIGHTED reduction (Σdelta/Σlegacy), because
-    the ticket's target is a per-chunk output-size drop and sessions differ
-    in size; the per-session median is reported as the robustness check (a
-    single huge session must not carry the verdict alone), plus the min so a
-    reader can see whether the effect is universal or carried by outliers.
+    the ticket's target is a per-chunk output-size drop and sessions differ in
+    size; the per-session median is reported as the robustness check (a single
+    huge session must not carry the verdict alone), plus the min so a reader can
+    see whether the effect is universal or carried by outliers.
     """
     rows = []
     for p in pairs:
@@ -318,6 +454,7 @@ def compare(pairs: list[dict]) -> dict:
             "delta_verbatim_reemissions": dl.get("verbatim_reemissions"),
             "delta_added_by_s4": dl.get("added_by_s4"),
             "delta_corrected_by_s4": dl.get("corrected_by_s4"),
+            "delta_corrected_items": len(dl.get("corrected_items") or []),
             "legacy_error": lg.get("error"),
             "delta_error": dl.get("error"),
         })
@@ -347,43 +484,13 @@ def compare(pairs: list[dict]) -> dict:
     }
 
 
-def _composition_totals(pairs: list[dict]) -> dict:
-    """Sum the census quantities per arm — WHY the delta arm is smaller, and
-    what it costs in gap-finding.
-
-    `verbatim_reemissions` is the tax itself (items re-typed unchanged);
-    `added_by_s4` is the gap channel (the value the contract exists to keep)
-    and `corrected_by_s4` the correction channel. Reporting all three per arm
-    Summed over the SAME usable pairs the token totals use — a "why it is
-    smaller" table built over a different population than the headline number
-    would silently describe different sessions.
-
-    It is what stops the token delta from being read as a pure win: a delta arm
-    that emits nothing because it stopped LOOKING would show up as `added_by_s4`
-    collapsing against the legacy arm, and the reader sees that instead of
-    having to trust the reduction number.
-    """
-    keys = ("s2_items", "s4_items", "merged_items", "added_by_s4",
-            "corrected_by_s4", "verbatim_reemissions")
-    out: dict = {}
-    for arm in _ARM_CHOICES:
-        tot = dict.fromkeys(keys, 0)
-        for p in pairs:
-            row = p.get(arm) or {}
-            for k in keys:
-                tot[k] += int(row.get(k) or 0)
-        out[arm] = tot
-    return out
-
-
 # ── commands ───────────────────────────────────────────────────────────────
 
 
 def _model_for(model_id: str):
     """The direct DeepSeek adapter — the same route the extractor uses when
-    DEEPSEEK_API_KEY is set (`build_extractor_model`'s deepseek-direct
-    branch), constructed directly so the measurement does not depend on
-    routing config."""
+    DEEPSEEK_API_KEY is set (`build_extractor_model`'s deepseek-direct branch),
+    constructed directly so the measurement does not depend on routing config."""
     from tortoise.model_adapters import DeepSeekDirectModel
     return DeepSeekDirectModel(model_id)
 
@@ -428,7 +535,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         ],
         # every per-arm observation, so the artifact is auditable without
         # re-running (the token totals are only trustworthy if the rows behind
-        # them are inspectable)
+        # them are inspectable), and the ITEMS so the Task 10 Step 5 partition
+        # can be done offline.
         "arms": [
             {"session": p["session"], "legacy": p["legacy"],
              "delta": p["delta"]}
@@ -441,10 +549,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             "output contract's effect.",
             "One call per arm per session (no production-run composition): model "
             "compliance in the wild is not measured here — it is OBSERVABLE per "
-            "row via verbatim_reemissions / added_by_s4 / "
+            "row via verbatim_reemissions / added_by_s4 / corrected_by_s4 / "
             "s4_delta_reemit_suspect.",
             "The S3 search block is reconstructed from the session's own S2 list "
             "(what production S4 sees after S2 is written), not a live graph read.",
+            "model_id is the model REQUESTED; the served id is not recorded here.",
             "Accuracy / chunk@20 are the eval lane's gates and are NOT measured here.",
         ],
     }
@@ -471,8 +580,8 @@ def cmd_dry_run(args: argparse.Namespace) -> int:
 
     This is the input-side half of the tax (the delta template is longer than
     the legacy one) and the CI-runnable proof that the two renders really are
-    different documents — a cheap pin that cannot rot into "both arms render
-    the same prompt", which would make the whole measurement vacuous.
+    different documents — a cheap pin that cannot rot into "both arms render the
+    same prompt", which would make the whole measurement vacuous.
     """
     sessions = load_sessions(Path(args.receipt), embeds_arm=args.embeds_arm,
                              only=args.sessions)

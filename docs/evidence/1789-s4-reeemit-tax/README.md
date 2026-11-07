@@ -1,5 +1,5 @@
 ---
-title: "#1789 — the S4 re-emit tax, measured: −93.8 % output tokens on real geometry"
+title: "#1789 — the S4 re-emit tax, measured: −95.3 % output tokens on real geometry"
 type: evidence
 domain: extraction
 doc_status: final
@@ -12,23 +12,23 @@ aboutObjects: "#1789, PR #8041, #4917, #2408, plan docs/plans/2026-08-27-1789-s4
 # `#1789` — the S4 re-emit tax, measured
 
 **Measured on:** 2026-11-07, `feat/1789-s4-reeemit-tax-measurement` (base
-`origin/main` @ `23d227c53`), model `deepseek-v4-flash` (direct DeepSeek; the
-provider served `deepseek-flash` — a dated pin, per its own substitution
-notice), 7 real recorded sessions, **2 recorded repeats, both produced by the
-committed instrument** (`ab-20261107T012628Z` = primary, `ab-20261107T013359Z`
-= repeat). The headline is the PRIMARY run; the repeat is there so the spread
-is visible (`−93.8 %` / `−95.7 %`), and the model is not deterministic even at
-`temperature=0.0`.
+`origin/main` @ `23d227c53`), model **requested** `deepseek-v4-flash` via the
+direct DeepSeek adapter, 7 real recorded sessions, **2 recorded runs, both
+produced by the committed instrument**: `ab-20261107T020837Z` (primary) and
+`ab-20261107T021100Z` (re-run, same code, same inputs). The filenames are each
+run's START time; `measured_at` inside is its measured end. The model is not
+deterministic even at `temperature=0.0`, which is why two runs are recorded and
+the spread (`−95.3 %` / `−94.2 %`) is stated rather than hidden.
 
 **What was already true:** the delta contract (PR #8041) shipped and is
 default-ON (`_s4_delta_enabled()` = `env_flag("TORTOISE_S4_DELTA", True)`;
 `S4_TMPL_DELTA` derived from the byte-identical legacy constants).
 
-**What was missing — this document:** the issue's own last comment
-(2026-11-01) called the ticket **PARTIAL** and restated the remainder as
-*"run the S4-token measurement against a frozen baseline, then compare to
-≥40 %."* The plan's Task 10 (fresh 50-question E2E) was never run, so the
-delta contract's **magnitude was unmeasured**.
+**What was missing — this document:** the issue's own last comment (2026-11-01)
+called the ticket **PARTIAL** and restated the remainder as *"run the S4-token
+measurement against a frozen baseline, then compare to ≥40 %."* The plan's
+Task 10 (fresh 50-question E2E) was never run, so the delta contract's
+**magnitude was unmeasured**.
 
 ---
 
@@ -36,30 +36,34 @@ delta contract's **magnitude was unmeasured**.
 
 | target (issue) | measured | verdict |
 |---|---|---|
-| **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 351 → 2 006 output tokens over 7 sessions); median **−97.4 %**, worst session **−84.5 %**, best **−98.2 %** | **MET**, 2.3× the threshold; every one of 7 sessions clears 40 % on its own |
-| truncation rate | `truncated=False` on **14/14** arm calls — neither contract truncated on this geometry | unchanged (no regression) |
+| **S4 output size per chunk drops ≥ 40 %** | **−95.3 %** token-weighted (31 775 → 1 497 output tokens over 7 sessions); median **−96.8 %**, worst session **−90.6 %**, best **−98.0 %** | **MET**, 2.4× the threshold; every one of the 7 sessions clears 40 % on its own |
+| truncation rate | `truncated=False` on **14/14** arm calls, `attempts=1` — neither contract truncated on this geometry | unchanged (no regression) |
 | accuracy ≥ 0.826 / chunk@20 ≥ 0.738 | **not measured here** — the eval lane's gates | see *What this does not measure* |
 
-Repeat (`ab-20261107T013359Z`): 32 539 → 1 413 tokens, **−95.66 %**, median
-−96.81 %, min −86.98 %. The two runs disagree by 1.9 points, so the point
+Re-run (`ab-20261107T021100Z`): 33 180 → 1 914 tokens, **−94.23 %**, median
+−97.23 %, worst −84.71 %. The two runs differ by 1.1 points, so the point
 estimate is soft and the DIRECTION is not: the worst session in either run is
-−84.5 %, still above twice the ticket's threshold.
+−84.7 %, still above twice the ticket's threshold.
 
 ## The method — one variable
 
-The tax is a property of the **output contract**, not of the pipeline, so it
-can be isolated instead of inferred. For each session, `run_s4()` is called
-**twice over identical inputs**:
+The tax is a property of the **output contract**, not of the pipeline, so it can
+be isolated instead of inferred. For each session, `run_s4()` is called **twice
+over identical inputs**:
 
 | arm | template | what the contract asks for |
 |---|---|---|
 | `legacy` | `S4_TMPL` (`delta=False` ⇒ today's `TORTOISE_S4_DELTA=0`) | re-emit the COMPLETE embed list |
 | `delta` | `S4_TMPL_DELTA` (`delta=True` ⇒ the shipped default) | gap ADDITIONS + full-item CORRECTIONS only |
 
-Same story, same S2 embed list, same reconstructed S3 search block, same
-model, same cap. **The only variable is the contract.** The number reported is
-the provider's own `usage.completion_tokens` — not a tokenizer estimate, not an
-item-count proxy.
+Same story, same S2 embed list, same reconstructed S3 search block, same model,
+same cap — `run_s4` threads `delta` and nothing else (pinned by
+`test_both_arms_get_identical_inputs`). The number is the provider's own
+`usage.completion_tokens`, read from `stats["cost"]["completion_tokens"]`, the
+**per-call SUM** — so an escalated retry or a parse-retry re-prompt is counted
+rather than overwritten. An arm whose provider reported no usage for any of its
+calls is recorded as **unmeasured** (`null`), never as 0, and so is an arm whose
+recovery accumulator cannot be shown to be complete.
 
 **Inputs are real, not synthetic.** The sessions come from the recorded
 write-path eval receipts (`tests/eval/write_path/receipts/7947-arms-2026-10-18/`):
@@ -67,58 +71,84 @@ real S1 stories and real S2 embed lists (29–49 items per session across
 entities/events/points/operators; the recorded S2 output those sessions cost is
 **3 263–5 453 tokens, median 4 187**, per `inputs[].s2_reference`).
 
-**Nothing is lost by construction.** The delta arm's omissions are preserved
-by the E4 union: `merged_items` is 273 vs an S2 base of 266 — the delta added
-7 gaps and dropped nothing (the legacy arm merged 276).
+**Nothing is lost by construction.** The delta arm's omissions are preserved by
+the E4 union: `merged_items` is 270 vs an S2 base of 266 — the delta added 4
+gaps and dropped none of the 266 S2 items (the legacy arm merged 275).
 
 ## What the delta arm stopped paying for
 
-Summed over the 7 sessions (`composition` in the artifact):
+Summed over the 7 sessions (`composition` in the artifact, primary run):
 
 | channel | legacy | delta | reading |
 |---|---|---|---|
-| `verbatim_reemissions` — items re-typed **unchanged** (the tax) | **201** | **0** | the 201 items are pure typing cost; nothing about them was new |
-| `corrected_by_s4` — S2 items S4 re-emitted at all | 266 | 0 | legacy re-touched every single S2 item; delta touched none |
-| `added_by_s4` — the gap channel (the value the contract exists to keep) | 10 | 7 | **the residual risk — see below** |
-| `s4_items` emitted | 276 | 7 | 269 fewer items per 7 sessions |
+| `verbatim_reemissions` — items re-typed **unchanged** (the tax) | **200** | **0** | 200 items were pure typing cost; nothing about them was new |
+| `corrected_by_s4` — S2 items S4 re-emitted at all | 265 | 0 | legacy re-touched every S2 item it saw; delta touched none |
+| of which a field actually changed (`corrected_items`) | **64** | **0** | see the residual — this is the channel the design exists for |
+| `added_by_s4` — the gap channel (`added_items`) | 9 | 4 | see the residual |
+| `s4_items` emitted | 274 | 4 | 270 fewer items per 7 sessions |
 
-(The repeat gives the same shape: legacy `verbatim_reemissions` 201, `added_by_s4`
-11; delta 0 and 4.)
+(Re-run: legacy 201 verbatim / 266 corrected / 16 added / 64 corrected items;
+delta 0 / 0 / 5.) The census count (265) and the recorded `corrected_items` (64)
+sit one item apart from `265 − 200 = 65`: the census helper compares whole
+parsed dicts, while the item snapshot compares the listed correction-relevant
+fields. Neither number is a claim about value — see the residual.
 
-## ⚠️ The residual this measurement exposes (do not read the −94 % as a free win)
+## ⚠️ The residual this measurement exposes (do not read the −95 % as a free win)
 
-**The gap channel is thinner under delta: 10 additions (legacy) vs 7 (delta)
-in the primary run, 11 vs 4 in the repeat** — across the same 7 sessions. Two
-readings are consistent with the data and this instrument cannot separate them:
+**BOTH value channels thinned, and the corrections channel went to zero.**
 
-1. most of legacy's 10 "additions" are re-worded near-duplicates of S2 items
-   (legacy is re-typing 266 items, so a paraphrase lands as a new identity),
-   i.e. the 3 missing additions are noise; or
-2. the delta contract suppressed genuine gap-finding (the delta arm emitted
-   *nothing at all* in 5 of 7 sessions in both runs), i.e. up to 3 real gaps per
-   7 sessions are now missed.
+- **Corrections.** The legacy arm re-emitted 265 S2 items, of which 200 were pure
+  re-emits, so 65 carried a change by the census mask (`_verbatim_reemissions`
+  ignores `source_ref`/`confidence`/`quote`/`search_keys`/`source_turn_id`, so
+  those are real corrections, not noise fields); the item-level snapshot records
+  **64** of them with a changed field, keeping both sides. The delta arm emitted
+  **0 colliding items in 14 calls**: the corrections channel was never used once.
+  The plan's own research is why that matters — the corrections/retraction
+  channel is the stated reason NOT to ship a pure ADD-only contract, and accuracy
+  is exactly what this document does not measure.
+- **Gaps.** legacy `added_by_s4` 9 (primary) / 16 (re-run) vs delta 4 / 5, and the
+  delta arm emitted **no new tax-surface item** in 5 of 7 sessions in both runs.
+  The narrower statement matters: `s4_delta_empty` — production's predicate over
+  EVERY emitted section, not just the four tax sections — is **False on all 7
+  delta rows in both runs**, because those arms still carried a non-tax section
+  (graph-search bookkeeping). "Emitted no item" and "emitted nothing" are
+  different claims, and only the first is true here.
 
-The two runs disagree on the counts too (delta 7 then 4, legacy 10 then 11),
-so the channel is **noisy at n = 7** and a single run
-cannot carry a fidelity verdict either way. Deciding between (1) and (2) needs the corrections-fidelity sampling the plan
-assigns to Task 10 Step 5 (partition corrections into content-changing vs
-kind/lifecycle-only vs re-emission-noise) — that is a follow-up, and it is the
-one thing this document does not settle. It is recorded here rather than
-smoothed over, because the honest form of "−94 % cost" is "−94 % cost, with the gap channel
-4–7 vs 10–11 and unexplained at this sample size".
+Two readings fit both channels and this instrument cannot separate them:
+
+1. the legacy arm's extra items and its 64 corrections are artefacts of it
+   re-typing 266 items — a paraphrase lands as a new identity, a re-statement as
+   a "correction" — i.e. they are the tax's own noise; or
+2. the delta contract suppressed genuine gap-finding and correction, i.e. up to
+   16 gaps (9 in the primary run, 16 in the re-run) and 64 corrections per 7
+   sessions are now missed.
+
+Deciding between them is **Task 10 Step 5** of the plan (partition each
+correction into content-changing / kind-lifecycle-only / re-emission-noise).
+That partition needs the ITEMS, which is why the artifact carries them: every
+row records `added_items` (the gaps — section, merge key, content, kind,
+lifecycle, `supersedes`) **and `corrected_items`** — the correction PAIRS, each
+with `changed_fields`, `s2_before` and `s4_after`, because a correction reuses
+the S2 merge key and any "items not in S2" filter would drop the entire channel
+the partition is about. The follow-up can therefore be done **from this
+artifact**, without a second paid run.
 
 ## What this does **not** measure
 
-- **Accuracy / `chunk_evidence@20`** — the eval lane's gates (#1789's targets 3).
-  A cheaper S4 that finds fewer gaps could still hold accuracy or could not;
-  only the eval can answer that.
+- **Accuracy / `chunk_evidence@20`** — the eval lane's gates (#1789 target 3).
+  A cheaper S4 that corrects less could hold accuracy or could not; only the eval
+  can answer that, and the corrections channel above is the reason to ask.
 - **Model compliance in the wild** — one call per arm per session, not a
   production run. Non-compliance is *observable* per row
-  (`verbatim_reemissions`, `s4_delta_reemit_suspect`), so a model that ignored
-  the contract would show up in the artifact rather than be assumed away.
+  (`verbatim_reemissions`, `corrected_by_s4`, `s4_delta_reemit_suspect`), so a
+  model that ignored the contract would show up in the artifact rather than being
+  assumed away.
+- **Which model actually served the calls** — the artifact records the model id
+  REQUESTED. (The adapter logs a substitution warning when the provider pins a
+  dated id; that warning is logged, not persisted here.)
 - **The S3 live-graph read** — the search block is reconstructed from the
-  session's own S2 list (what production S4 sees after S2 is written), not a
-  live graph query. Both arms see the same block, so the comparison holds.
+  session's own S2 list (what production S4 sees after S2 is written), not a live
+  graph query. Both arms see the same block, so the comparison holds.
 
 ## Reproduce
 
@@ -126,21 +156,21 @@ smoothed over, because the honest form of "−94 % cost" is "−94 % cost, with 
 # zero-cost, no network — the input-side geometry + the vacuity pin
 uv run python tools/s4_reeemit_tax.py dry-run
 
-# the measurement (needs DEEPSEEK_API_KEY; ~2.5 min and a few cents for 7 sessions)
+# the measurement (needs DEEPSEEK_API_KEY; ~4 min and a few cents for 7 sessions)
 DEEPSEEK_API_KEY=… uv run python tools/s4_reeemit_tax.py run \
     --out docs/evidence/1789-s4-reeemit-tax/ab-$(date -u +%Y%m%dT%H%M%SZ).json
 ```
 
-Artifacts: `ab-20261107T012628Z.json` (primary — per-arm rows, composition
-totals, and the per-arm `s4_delta_empty` / `s4_delta_reemit_suspect` flags
-derived from each arm's own composition) and `ab-20261107T013359Z.json` (the
-repeat). The token totals are the provider's own `usage.completion_tokens`,
-read from `stats["cost"]["completion_tokens"]` — the per-call SUM, so an
-escalated retry or a parse-retry re-prompt is counted rather than overwritten
-(`basis` records which accumulator was used on every row). An arm that reports
-NO usage is recorded as unmeasured (`null`), never as 0 — a 0 delta would read
-as a −100 % saving.
-Instrument tests: `tests/test_s4_reeemit_tax.py` (17 tests, offline, fake model)
-— they pin the three ways a number like this goes wrong silently: a vacuous A/B
-(both arms rendering the same prompt), a mis-attributed escalation cost, and a
-"measured zero" pretending to be a measurement.
+Artifacts: `ab-20261107T020837Z.json` (primary — per-arm rows, the added and
+corrected items, composition totals, and the per-arm `s4_delta_empty` /
+`s4_delta_reemit_suspect` flags derived with production's own predicates) and
+`ab-20261107T021100Z.json` (the re-run).
+
+Instrument tests: `tests/test_s4_reeemit_tax.py` (23 tests, offline, fake
+model) — they pin the ways a number like this goes wrong silently: a vacuous A/B
+(both arms rendering the same prompt), the two arms receiving different inputs, a
+mis-attributed cost (a per-call total rather than the final call, and `null`
+rather than 0 when the provider reports nothing or the accumulator is provably
+incomplete), a "measured zero" pretending to be a measurement, a corrections
+channel that an items-not-in-S2 filter silently drops, and `s4_delta_empty`
+diverging from production's predicate.
