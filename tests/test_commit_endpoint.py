@@ -5149,9 +5149,9 @@ class Test4051ChargeCoversTheLoopShape:
             self, client, monkeypatch):
         """`points: []` — the cheapest iteration of the loop #4051 names.
 
-        Its body is ~1 KB, so the payload term never wins and the declared count
-        is the WHOLE bound. Measured here: the fixed chain is 4 nodes, declared
-        4, charged 4 × 1024 B.
+        Its body is ~840 B (measured), so the payload term never wins and the
+        node floor is the WHOLE bound: the fixed chain is 4 nodes, declared 4,
+        charged 4 × 1024 B.
 
         Mutation this REDs: drop `_COMMIT_FIXED_NODES` below the chain's real
         size (measured: 4 → 3 reds this and both other legs), or add a node to
@@ -5190,21 +5190,80 @@ class Test4051ChargeCoversTheLoopShape:
             f"the node floor {declared * 1024} B — the payload term must never "
             "let a small body under-charge the nodes it mints")
 
+    def test_the_endpoint_SPENDS_the_charge_on_the_shared_window(
+            self, client, monkeypatch):
+        """The charge is not merely computable — the endpoint SPENDS it.
+
+        Every other leg here computes `commit_ingest_charge_bytes(payload)` in
+        the TEST process, so all of them are blind to the spend site: replace
+        `hosted_api`'s `commit_ingest_admit(org, commit_ingest_charge_bytes(
+        payload))` with `commit_ingest_admit(org, 0)` and the rest of this class
+        stays green (MEASURED — that mutation is why this leg exists). Until it
+        existed, the class pinned "declared covers minted" plus "the function
+        returns the node floor" — statements about a pure function, not about
+        the throttle that is supposed to bound the write.
+
+        This leg OBSERVES the number the endpoint actually charged — the
+        window's own `used`, the figure a refusal reports — and then the
+        boundary that figure implies: at an allowance of `2 × charge - 1` the
+        FIRST `points: []` commit is admitted and the SECOND is refused, so the
+        spend is exactly `commit_ingest_charge_bytes(payload)`, not
+        approximately it and not the node floor only.
+
+        Mutations this REDs (each measured): charge the endpoint `0`; charge it
+        `charge - 1` (two then fit in `2 × charge - 1`, so the second is
+        admitted).
+        """
+        import tortoise.quota as quota_mod
+        from tortoise.commit_schema import (
+            CommitPayload,
+            commit_ingest_charge_bytes,
+            declared_commit_write_count,
+        )
+        from tortoise.quota import commit_ingest_admit
+
+        _pin_shipped_ingest_allowance(monkeypatch)
+
+        raw = _raw_payload(0, session_id="s4051SpendA", points=[],
+                           entities=[], provenance_refs=[])
+        payload = CommitPayload(**{**raw, "client_commit_id": "0" * 64})
+        charge = commit_ingest_charge_bytes(payload)
+        assert charge == declared_commit_write_count(payload) * 1024
+
+        # A ONE-BYTE-tight boundary: two charges cannot fit.
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG",
+            2 * charge - 1)
+        quota_mod._reset_commit_ingest_budget_for_tests()
+
+        assert _commit(client, raw).status_code == 200
+        assert commit_ingest_admit(TEST_ORG_ID, 0).used == charge, (
+            "the endpoint admitted a `points: []` commit but the shared ingest "
+            "window recorded no charge — the node floor is not being SPENT, "
+            "so the throttle this class exists to bound does not bind")
+        r = _commit(client, _raw_payload(
+            0, session_id="s4051SpendB", points=[], entities=[],
+            provenance_refs=[]))
+        assert r.status_code == 429, (
+            f"a second `points: []` commit was admitted against an allowance "
+            f"of {2 * charge - 1} B after the first spent {charge} B — the "
+            f"endpoint is charging less than `commit_ingest_charge_bytes` "
+            f"says (got {r.status_code})")
+
     def test_a_flat_collection_lane_is_charged_for_every_node_it_mints(
             self, client, monkeypatch):
         """`entities[]` / `events[]` are charged 1 node per entry — measured.
 
         `declared_commit_write_count` charges `_COMMIT_FLAT_NODE_LANES` one node
-        per entry, an assumption no test had measured against the GRAPH
-        (`TestDeclaredCommitWriteCount::test_each_collection_entry_is_charged_once`
-        pins the flat RATES, against the formula). The existing graph-measured
-        invariant legs cover `points[]` and `operators[]` only, and
-        `supersessions[]` is pinned by nothing at all (see this class's
-        docstring). An entry that minted a node AND a durability `:GraphEvent`
-        would make that rate a 2× fail-open — the same defect review cycles 2
-        and 3 found on the points and operator lanes, one lane over. Measured:
-        declared 7 / minted 7 for three entries on each lane (4 chain nodes +
-        one per entry).
+        per entry — a rate the FORMULA pins
+        (`TestDeclaredCommitWriteCount::test_each_collection_entry_is_charged_once`)
+        but that **no test measured against the graph**: the existing invariant
+        legs measure `points[]` and `operators[]` only, and `supersessions[]` is
+        pinned by nothing at all (see this class's docstring). An entry
+        that minted a node AND a durability `:GraphEvent` would make that rate a
+        2× fail-open — the same defect review cycles 2 and 3 found on the points
+        and operator lanes, one lane over. Measured: declared 7 / minted 7 for
+        three entries on each lane (4 chain nodes + one per entry).
 
         Mutation this REDs: empty `_COMMIT_FLAT_NODE_LANES` (measured: reds this
         leg, and outside this class also
@@ -5239,9 +5298,10 @@ class Test4051ChargeCoversTheLoopShape:
         declared, minted, _charge = self._measure(client, _raw_payload(
             0, session_id="s4051ChargeEvents", points=[], entities=[],
             provenance_refs=[], events=events))
-        assert minted > 4, (
-            f"3 events minted {minted} nodes — the `:Event` lane wrote nothing, "
-            "so this leg pins nothing")
+        assert minted == 4 + 3, (
+            f"3 events minted {minted} nodes, not the 4 chain nodes plus one "
+            "`:Event` per entry — the rate this leg's own docstring quotes "
+            "(declared 7 / minted 7)")
         assert declared >= minted, (
             f"`events[]` declared {declared} nodes for {minted} minted — a "
             "flat lane that mints more than it declares is the fail-open "
