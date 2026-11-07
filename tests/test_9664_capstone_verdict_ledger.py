@@ -25,6 +25,7 @@ stop being reported.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -542,6 +543,30 @@ def test_an_unresolvable_evidence_entry_is_invalid_not_a_traceback(tmp_path):
         assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
         assert "Traceback" not in proc.stderr, proc.stderr
         assert "CAPSTONE-LEDGER: INVALID" in proc.stderr, proc.stderr
+
+
+def test_a_glob_whose_only_match_resolves_outside_the_tree_is_invalid(tmp_path):
+    """T6's last member, and the one declared class member that had NO pin.
+
+    The glob arm's per-match `is_relative_to(root)` reads like belt-and-braces next
+    to the literal-prefix check, but it is the ONLY thing refusing a glob whose
+    PREFIX is a genuine in-tree directory while every match under it is a symlink
+    pointing outside. MEASURED: deleting that one clause left the suite 102/102
+    green and let `cmd:sh pure/*` (a directory holding one symlink to
+    /etc/hostname) validate as `verified` with an EMPTY uncovered list — a false
+    PASS on a citation that names no artifact of this tree.
+    """
+    tree = tmp_path / "tree"
+    (tree / "pure").mkdir(parents=True)
+    os.symlink("/etc/hostname", tree / "pure" / "evil.md")
+
+    with pytest.raises(cl.InvalidLedger) as glob_excinfo:
+        cl.validate(_ledger([_row("A", evidence=["cmd:sh pure/*"])]), repo_root=tree)
+    assert "no file of this tree matches" in str(glob_excinfo.value)
+
+    # The same tree via a bare path: the link names a file that IS not in the tree.
+    with pytest.raises(cl.InvalidLedger):
+        cl.validate(_ledger([_row("B", evidence=["pure/evil.md"])]), repo_root=tree)
 
 
 def test_usage_outcomes_never_borrow_a_verdict_code(tmp_path):
