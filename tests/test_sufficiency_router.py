@@ -1454,6 +1454,13 @@ def test_a_summary_unit_cannot_be_constructed_without_its_invariants() -> None:
         SummaryUnit(**{**good, "claim": "   "})
     with pytest.raises(ValueError):
         SummaryUnit(**{**good, "claim": 7})  # type: ignore[arg-type]
+    # The CLASS (added with the across-call attribution loop): without these two
+    # cases this test's own MUTATION PROOF bullet was false — dropping the class
+    # check left it green, so the guard was pinned only by its dedicated test.
+    with pytest.raises(ValueError):
+        SummaryUnit(**{**good, "claim_class": None})  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        SummaryUnit(**{**good, "claim_class": "  "})
 
 
 def test_a_unit_key_requires_an_address() -> None:

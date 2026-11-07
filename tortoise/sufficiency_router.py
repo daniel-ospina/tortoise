@@ -1327,7 +1327,8 @@ class SummaryUnit:
                 f"without an address is an unattributable belief (§12.5)"
             )
         if not isinstance(self.claim, str) or not self.claim.strip():
-            # ``plan_writeback`` REFUSES `no-claim`; the type must not accept what            # the planner refuses, and a non-str claim would otherwise reach
+            # ``plan_writeback`` REFUSES `no-claim`; the type must not accept what
+            # the planner refuses, and a non-str claim would otherwise reach
             # ``_normalise_claim`` and raise AttributeError instead of a refusal.
             raise ValueError(
                 f"a summary unit needs a non-empty claim, got {self.claim!r}")
@@ -1343,14 +1344,15 @@ class SummaryUnit:
             # The CLASS is load-bearing since the attribution loop landed: the
             # plan compares it against what the cheap tier holds (a store row and
             # a re-verification disagreeing about the class is §12.4's incorrect
-            # promotion as an OVERWRITE), and it builds an error message by
-            # SORTING the pair. An unvalidated class therefore made that refusal
-            # escape as a `TypeError` from `sorted` (a `None` class) or as an
-            # `unhashable type` (a JSON row's list) — neither of which the
-            # documented `except ValueError` recovery catches, and both of which
-            # blame Python instead of the store. The class is also what
-            # `promote_to` exists to bolt shut, so a unit without one is not a
-            # summary unit.
+            # promotion as an OVERWRITE). Unvalidated, an unhashable class made
+            # that refusal escape as `TypeError: unhashable type` FROM THE SET
+            # LITERAL — not the `ValueError` the docstring documents — and a
+            # ``None`` class raised `TypeError: '<' not supported …` from
+            # ``sorted`` before this message sorted by ``repr``. Either way the
+            # caller's documented ``except ValueError`` recovery missed it and
+            # the traceback blamed Python instead of the store. The class is also
+            # what ``promote_to`` exists to bolt shut, so a unit without one is
+            # not a summary unit.
             raise ValueError(
                 f"a summary unit needs the finding's claim class, got "
                 f"{self.claim_class!r}"
