@@ -2754,7 +2754,8 @@ Why it exists, measured: on 2026-11-05/06 `SENTRY_DSN` was unset on
 `tortoise-y4mjjq` as the mitigation for #11092's source-context serialization
 storm (with it absent `/health` answered in 0.25–1.07 s; with it present three
 `py-spy dump`s showed the MainThread parked inside `sentry_sdk`). Deploys
-`42117073101` (23:13) and `42139810077` (01:04) **each put it back**, on builds
+`42117073101` (23:13) and `42135045025` (`deploy-api` completed 01:04) **each put
+it back**, on builds
 (`46ea687dc`, `c3af2d0188`) that provably did not contain the fix — because the
 sync step asserts a desired state and cannot distinguish *unconfigured* from
 *deliberately removed 40 minutes ago*. It is the stale-flag pattern: a record of
@@ -2780,13 +2781,16 @@ undone.
   NOT IN EFFECT` — the entry is a false record *and* it freezes that secret's
   rotation) and an **expired** entry (`MITIGATION LAPSED`).
 - **Exit classes.** Exit 2 (never bypassable): the ledger is missing, malformed,
-  **indented**, duplicates a name, names a name the manifest does not declare,
-  names a non-`gh-secret:` source, names one of the app's **mandatory** secrets
-  (`FASTAPI_INTERNAL_KEY`, `TORTOISE_SECRET_PEPPER`, `FALKORDB_CLOUD_URI`,
-  `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` — removing one of those is an
-  outage, not a mitigation), **or records a name the deploy's payload still stages
-  (`LEDGER NOT HONOURED`)**. Exit 1 (incident-bypassable): expired, or not in
-  effect because the name is on Fly.
+  **indented / carrying a line-break character the sync filter does not split on**,
+  duplicates a name, names a name the manifest does not declare, names a
+  non-`gh-secret:` source, names one of the app's **mandatory** secrets (seven, per
+  `MANDATORY_FLY_SECRETS`: the five below plus `SUPABASE_ACCESS_TOKEN` and
+  `FLY_API_TOKEN`, which the manifest-declaration rule refuses first because they
+  are never Fly secrets — removing any of them is an outage, not a mitigation),
+  names a Fly variable `fly.toml [env]` also assigns (the deploy would apply that
+  value whatever the secret list says), **or records a name the deploy's payload
+  still stages (`LEDGER NOT HONOURED`)**. Exit 1 (incident-bypassable): expired,
+  or not in effect because the name is on Fly.
   ⛔ `LEDGER NOT HONOURED` is exit 2 on purpose, and it is the one distinction in
   this block that matters operationally: exit 1 is the `skip-fly-secret-provenance`
   lane, so putting a broken sync filter there would let an operator arming that

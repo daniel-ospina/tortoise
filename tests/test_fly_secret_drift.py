@@ -2775,6 +2775,20 @@ def _entry(name: str = "SENTRY_DSN", expires: str = _EXPIRES, reason: str = "#11
     return f"{name} owner=daniel expires={expires} reason={reason}\n"
 
 
+def _manifest_fly_names(path: Path) -> list[str]:
+    """The names the real manifest declares as Fly SECRETS (`fly-toml-env` are not)."""
+    names: list[str] = []
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) < 2 or parts[1].startswith("fly-toml-env"):
+            continue
+        names.append(parts[0])
+    return sorted(set(names))
+
+
 class TestTheMitigationLedger:
     """#11122 — a deliberate absence is a RECORDED state, enforced at sync time."""
 
@@ -2937,6 +2951,88 @@ class TestTheMitigationLedger:
                 "the indentation must be reported as the fault it is, not blamed "
                 "on the sync step"
             )
+
+    def test_a_cr_only_ledger_is_refused_not_blamed_on_the_sync_step(self):
+        """The two readers must agree about LINE BOUNDARIES too (round-2 F1).
+
+        `Path.read_text()` opens in universal-newline mode, so a CR-only ledger used
+        to arrive stripped-and-resplit into two entries here while bash's `read` saw
+        ONE line: the gate then reported `LEDGER NOT HONOURED` against
+        `deploy-hosted.yml` — a false accusation, and exit 2 is not even bypassable,
+        so the operator had no way past the wrong message.
+        """
+        two_entries = _entry() + _entry("BACKUP_ALERT_ASSIGNEE")
+        for name, text in (
+            ("cr-only", two_entries.replace("\n", "\r")),
+            ("vertical-tab", two_entries.replace("\n", "\v")),
+        ):
+            proc = _ledger_run(_ledger(text, name=f"ledger-{name}.txt"))
+            assert proc.returncode == 2, (name, proc.stdout + proc.stderr)
+            assert "line contains" in proc.stderr, (name, proc.stderr)
+            assert "LEDGER NOT HONOURED" not in proc.stdout, (
+                f"{name}: the line boundary must be reported as the ledger's fault,"
+                " not the sync step's"
+            )
+
+    def test_a_ledgered_name_that_fly_toml_env_also_assigns_is_refused(self):
+        """`[env]` is a SECOND delivery path (round-2 F4).
+
+        Unsetting the secret does not remove a value `fly.toml` still assigns, so the
+        entry would be a false record with a GREEN gate: the app keeps reading the
+        value while every line of the ledger says the name is deliberately absent.
+        `fly-toml-env` and `fly-only:` are already refused `name in env_keys`; a
+        `gh-secret:` name has to be caught by the ledger's own check.
+        """
+        toml = _fixture(
+            "ledger-env.toml",
+            _FLY_TOML.replace(
+                "[env]\n", '[env]\n  SENTRY_DSN = "https://example.invalid/1"\n', 1
+            ),
+        )
+        assert '"SENTRY_DSN"' in toml.read_text() or "SENTRY_DSN =" in toml.read_text()
+        proc = _run(
+            _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], "ledger-env-secrets.json"),
+            manifest=LEDGER_MANIFEST,
+            workflow=LEDGER_WORKFLOW,
+            toml=toml,
+            present={"SENTRY_DSN", "FASTAPI_INTERNAL_KEY", "OPT_SECRET"},
+            extra_env={
+                "FLY_MITIGATION_LEDGER": str(_ledger(_entry())),
+                "FLY_MITIGATION_TODAY": "2026-11-07",
+            },
+        )
+        assert proc.returncode == 2, proc.stdout + proc.stderr
+        assert "also an assigned key in fly.toml [env]" in proc.stdout, proc.stdout
+
+    def test_the_gate_runs_over_the_REAL_workflow_with_a_non_empty_ledger(self):
+        """The other end-to-end test pins the ledger EMPTY (round-2 F5).
+
+        `test_shipped_manifest_matches_the_real_workflow_and_recorded_debt` seeds every
+        declared name as live on Fly, which is exactly the state a real entry makes
+        illegal — so it has to run with an empty ledger, and that left NO test
+        executing the gate over the real `deploy-hosted.yml` with a non-empty one. A
+        second staging path added to the real step would have passed the whole suite.
+        """
+        declared = _manifest_fly_names(REAL_MANIFEST)
+        target = "SENTRY_DSN"
+        assert target in declared, "the real manifest no longer declares SENTRY_DSN"
+        proc = _run(
+            _secrets_file([n for n in declared if n != target], "real-ledger-secrets.json"),
+            manifest=REAL_MANIFEST,
+            workflow=REAL_WORKFLOW,
+            toml=REAL_FLY_TOML,
+            present=_declared_gh_names(REAL_MANIFEST),
+            extra_env={
+                "FLY_MITIGATION_LEDGER": str(_ledger(_entry(target, expires=_TOMORROW))),
+                "FLY_MITIGATION_TODAY": "2026-11-07",
+            },
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "MITIGATED — 1 secret(s)" in proc.stdout, proc.stdout
+        assert "LEDGER NOT HONOURED" not in proc.stdout, (
+            "the SHIPPED sync step no longer suppresses a ledgered name — a second "
+            "staging path, or a filter that stopped matching"
+        )
 
     def test_the_suppression_is_the_REAL_filter_not_a_copy(self):
         """The fixture executes the block that ships (review F5).
