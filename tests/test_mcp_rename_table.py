@@ -1139,8 +1139,9 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
         "python3 tools/test_design_map_check.py"
     )
     assert _code(str(step.get("run", ""))).strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the four "
-        "`--check` commands — no shell operator, no `echo` decoy, no wrapper, no "
+        "the drift step must invoke EXACTLY the installer, the four "
+        "`--check` commands and the no-flag design-map check — no shell "
+        "operator, no `echo` decoy, no wrapper, no "
         f"trailing anything, or a real failure reports green (#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
     )

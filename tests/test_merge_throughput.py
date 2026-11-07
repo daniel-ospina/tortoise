@@ -4080,8 +4080,9 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         "python3 tools/test_design_map_check.py"
     )
     assert code.strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the four "
-        "`--check` commands — no shell operator, no wrapper, no trailing "
+        "the drift step must invoke EXACTLY the installer, the four "
+        "`--check` commands and the no-flag design-map check — no shell "
+        "operator, no wrapper, no trailing "
         f"anything, or a real failure reports green (#2656); got {code!r}"
     )
     # The step may carry only the keys that cannot silence it. Enumerating the
