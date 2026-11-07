@@ -569,8 +569,9 @@ def _stamp_problems(start) -> list[str]:
        ran; two means one execution of the module stacked its stamp on
        another's.
     2. a stamp's ``_ORIG_THREAD_START`` does not reach ANOTHER stamp — the
-       SELF-revisit a plain ``importlib.reload`` creates is the state fact 2
-       alone can see (a two-stamp stack already trips fact 1). This is
+       SELF-revisit an UNGUARDED module body produced on a plain
+       ``importlib.reload`` is the state fact 2 alone can see (a two-stamp
+       stack already trips fact 1). This is
        the genuine double wrap the class marker exists to prevent: a module
        body that captures ``_ORIG_THREAD_START = Thread.start``
        UNCONDITIONALLY takes the PREVIOUS stamp on a reload — directly or
@@ -959,14 +960,18 @@ def test_the_double_wrap_verdict_reads_the_CHAIN_not_the_identity():
         this shape is synthesised below rather than produced by a real reload.
         The reload alone cannot stack anything: it also resets
         ``_TEST_SESSION_ACTIVE`` and the class marker survives, so the installer
-        is a no-op for two reasons. Clearing the marker AND re-arming the flag
-        (what a test must do to reach it) then installs the reloaded module's
-        stamp ON the old one — ``Thread.start`` is that new function, so
-        identity is TRUE and the check the message promised cannot see it; a
-        chain-length check does. An unguarded PLAIN reload with no re-install
-        is worse still — it rewrote the installed stamp's delegate to ITSELF,
-        so the count stayed 1, only reachability saw it, and ``Thread.start()``
-        recursed.
+        is a no-op for two reasons. With an UNGUARDED body, clearing the marker
+        AND re-arming the flag (what a test had to do to reach it) then
+        installed the reloaded module's stamp ON the old one — ``Thread.start``
+        was that new function, so identity was TRUE and the check the message
+        promised could not see it, while a chain-length check saw two stamps.
+        With the guard in place that path no longer reaches the state at all
+        (measured: after a reload + re-install ``_ORIG_THREAD_START`` is still
+        the REAL ``Thread.start``, so the new stamp is the only layer), which is
+        why this shape is synthesised below instead. An unguarded PLAIN reload
+        with no re-install was worse still: it rewrote the installed stamp's
+        delegate to ITSELF, so the count stayed 1, only reachability saw it, and
+        ``Thread.start()`` recursed.
     """
     links = _stamp_links(threading.Thread.start)
     assert len(links) == 1, links
@@ -986,7 +991,9 @@ def test_the_double_wrap_verdict_reads_the_CHAIN_not_the_identity():
         f"a vendor wrapper over a healthy stamp is not a double wrap: {vendor_problems}"
 
     # (2) the GENUINE double wrap: a stamp whose `_ORIG_THREAD_START` is the
-    # previous stamp — the state a reload + re-install creates.
+    # previous stamp — the state an UNGUARDED reload + re-install created
+    # (before #11217; the guard keeps the real original, so it is synthesised
+    # here rather than reached).
     reloaded = types.FunctionType(
         stamp.__code__,
         {"__name__": "tortoise.projection", "_ORIG_THREAD_START": stamp},
@@ -1006,8 +1013,10 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
     that DOES call our stamp: the one-hop walk saw no stamp and reported "never
     installed", a FALSE RED. It is a legitimate wrapper and must be tolerated.
 
-    ``wrapped_delegate`` — the reload-in-vendor-order state: a stamp whose
-    ``_ORIG_THREAD_START`` is a ``@wraps`` wrapper *over* the previous stamp.
+    ``wrapped_delegate`` — the reload-in-vendor-order state an UNGUARDED module
+    body produced (before #11217; synthesised here, since the guard keeps the
+    captured original): a stamp whose ``_ORIG_THREAD_START`` is a ``@wraps``
+    wrapper *over* the previous stamp.
     The one-hop arm tested only the immediate delegate, found the vendor wrapper
     (not a stamp) and reported nothing while ``Thread.start()`` recursed. The
     stamp must be found by REACHABILITY.
@@ -1034,8 +1043,10 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
         def vendor_start(self, *a, **k):  # pragma: no cover - shape, never called
             return stamp(self, *a, **k)
 
-        # The reloaded module captures `Thread.start` — here the vendor wrapper
-        # over the previous stamp — as its delegate, then installs on top.
+        # An unguarded reloaded module captured `Thread.start` — here the vendor
+        # wrapper over the previous stamp — as its delegate, then installed on
+        # top. #11217's guard keeps the real original across a reload, so this
+        # shape is synthesised rather than reached.
         reloaded = types.FunctionType(
             stamp.__code__,
             {"__name__": "tortoise.projection", "_ORIG_THREAD_START": vendor_start},
