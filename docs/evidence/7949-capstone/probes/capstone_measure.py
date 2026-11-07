@@ -346,9 +346,11 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # what the run MEASURES through it, is pinned here and READ BACK like every other
 # switch (the ``arm:`` rule, applied to the door).
 #
-# ⛔ The set below is CLOSED over the MEASUREMENT modules the path renders with —
-# ``extractor_v2.py`` and ``referentiality.py`` (reached one call down, from the
-# S2 prompt/mention path) — and that claim is checkable rather than rhetorical:
+# ⛔ The set below is CLOSED over the modules the capture path DERIVES from —
+# ``extractor_v2.py`` (the renderer) plus the three modules it reaches one call
+# down (``referentiality`` for the S2.2 mention arm, ``value_gate`` and
+# ``s2_decision_seam`` for the seam decisions) — and that claim is checkable
+# rather than rhetorical:
 # every ``TORTOISE_*`` those two modules read is accounted for, either as an arm
 # seam in ``SEAM_LEDGER`` (``TORTOISE_VET``, ``TORTOISE_CLASSIFY_LATER``,
 # ``TORTOISE_S4_DELTA``), or as a pin below, or as an INPUT rather than a setting
@@ -360,7 +362,8 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # INFRASTRUCTURE variables (record DSN, packs dir, embedding gates, store
 # connection). Those are what a run needs in order to happen at all, not settings
 # that move the measured population, and the door neither pins nor partitions
-# them. An earlier revision of this comment called the whole path "closed" over
+# them. Adding a FOURTH derived module is a one-line change to `path_modules` in
+# the test, and the two arm-seam modules are already there. An earlier revision of this comment called the whole path "closed" over
 # "exactly ten" variables and then partitioned 3 arm seams + 6 pins + 2 inputs =
 # 11; the #10983 review (cycle 5) measured both halves of that false —
 # ``TORTOISE_REFERENTIALITY`` is read on every v2 capture through

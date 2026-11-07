@@ -241,7 +241,8 @@ since `#9733`), `TORTOISE_EXTRACT_MODEL` (selects the model — NOT the output b
 passes its own `max_tokens=_stage_cap(…)` per call, which beats the adapter default), and the
 truncation budgets `TORTOISE_EXTRACTOR_MAX_TOKENS` (`_stage_cap`, read at call time: unset ⇒ the
 shipped 1500/16000 stage defaults) and `TORTOISE_EXTRACTOR_ESCALATION_TOKENS` (the
-length-truncation retry budget), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
+length-truncation retry budget), `TORTOISE_REFERENTIALITY` (the S2.2 mention arm, reached
+through `referentiality.ENV_FLAG`), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
 `TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split) — all pinned **unset**. The set
 is CLOSED over the **measurement modules the path renders with** (`extractor_v2.py` and
 `referentiality.py` — the latter reached one call down from the S2 prompt/mention path), and
@@ -250,8 +251,10 @@ than asserting the prose. The same call chain also reads *infrastructure* variab
 packs dir, embedding gates, store connection): those are inputs a run needs in order to happen, not
 settings that move the measured population, and they are deliberately outside the door's partition —
 stated because an earlier revision of this section called the whole path "closed", which the review
-measured false (`TORTOISE_REFERENTIALITY` is read on every v2 capture and was accounted for by
-nothing). Every one is written in-process, **read back**, and a run whose read-back
+measured false (`TORTOISE_REFERENTIALITY` was read on every v2 capture and accounted for by
+nothing). The closure is derived over `extractor_v2.py` **and** the three modules it reaches one call
+down — `referentiality.py`, `value_gate.py` and `s2_decision_seam.py` — so the two arm seams and the
+mention arm are inside the derived surface, not hand-listed beside it. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
 unpinned until the `#10983` reviews (rounds 1 and 2), which is the same declaration-versus-control gap one layer below
 the lane. The arm pins `TORTOISE_VALUE_GATE=0` on purpose: with the

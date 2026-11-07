@@ -401,6 +401,21 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
     assert not any(isinstance(s, ast.If) for s in fall_through), (
         "the SDK's lane chain grew ANOTHER `elif` — a third arm is a second "
         "door; the acceptance pins exactly two lanes (#10983)")
+    # …and the fall-through IS one call to that function, not an expression that
+    # happens to contain one. An `IfExp` in the else arm
+    # (`_extract_session_v2(...) if os.environ.get("TORTOISE_MUTANT_ARM") != "1"
+    # else _variant(...)`) selects a second lane with the earlier shape checks
+    # green — an `IfExp` is not an `ast.If` and the real call is still present
+    # (MEASURED, #10983 review cycle 6). One statement, one call, named.
+    assert len(fall_through) == 1 and isinstance(fall_through[0], ast.Assign), (
+        f"the fall-through is {[ast.unparse(s) for s in fall_through]} — expected "
+        f"a single assignment to the extractor pair (#10983)")
+    fall_value = fall_through[0].value
+    assert isinstance(fall_value, ast.Call) and \
+        ast.unparse(fall_value.func) == "self._extract_session_v2", (
+        f"the SDK's non-m2 arm calls {ast.unparse(fall_value)[:120]!r} — a "
+        f"conditional expression or any other callee selects a second lane "
+        f"while the door's record still declares v2 (#10983)")
     fall_calls = [c for s in fall_through for c in ast.walk(s)
                   if isinstance(c, ast.Call)]
     assert any(ast.unparse(c.func).endswith("self._extract_session_v2")
@@ -591,13 +606,18 @@ def test_the_connect_stage_has_a_named_call_site_or_no_claim():
         "emitter half of CONNECT is gone, so E4 has no operator data to "
         "persist (#7949 §2 R10)")
 
-    # ⛔ _body, never _resolve: the name also appears in the docstring, so a
-    # substring test over the whole segment stayed GREEN with the real call
-    # deleted (measured in the #10983 review — this file's own _body() helper
-    # exists for exactly this class, and the E4 "wired and persisted" claim is
-    # only a call-site claim if the CALL is what is read).
-    body = _body(SDK, "_extract_session_v2")
-    assert "apply_payload_operators(" in body, (
+    # ⛔ A resolved CALL, never a substring — not `_resolve` (it includes the
+    # DOCSTRING) and not `_body` with a substring either (it strips the docstring
+    # but KEEPS COMMENTS, so `# apply_payload_operators(…) used to be here` was
+    # enough; MEASURED in the #10983 review, cycle 6: real call deleted, comment
+    # left behind, 1 passed). E4's "wired and persisted" claim is a CALL-SITE
+    # claim, so the pin resolves a call.
+    connect_calls = [
+        node for node in ast.walk(_funcs(SDK)["_extract_session_v2"])
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func).endswith("apply_payload_operators")
+    ]
+    assert connect_calls, (
         "sdk._extract_session_v2 no longer CALLS apply_payload_operators — the "
         "v2 lane would emit operator edges that nothing persists, and E4's "
         "'wired and persisted' claim would have no call site to name "
@@ -811,7 +831,16 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     #: derivation over `extractor_v2.py` ALONE cannot see
     #: `TORTOISE_REFERENTIALITY` — which is read on every v2 capture and was in
     #: no ledger, no pin and no input list (#10983 review, cycle 5).
-    path_modules = (EXTRACTOR, REFERENTIALITY)
+    #: The modules the capture path RENDERS WITH and the two it consults for a
+    #: SEAM decision. All four are reached one call down from `extractor_v2`
+    #: (`_referentiality.enabled()`, `value_gate.value_gate_enabled()`,
+    #: `s2_decision_seam.seam_enabled()`), so a derivation over `extractor_v2.py`
+    #: alone cannot see their reads — which is how `TORTOISE_REFERENTIALITY` came
+    #: to be read on every v2 capture while being in no ledger, no pin and no
+    #: input list (#10983 review, cycle 5), and why an unclassified read added to
+    #: `value_gate.py` was invisible to the previous two-module form (measured,
+    #: cycle 6).
+    path_modules = (EXTRACTOR, REFERENTIALITY, VALUE_GATE, SEAM)
 
     read: set[str] = set()
     for module in path_modules:
@@ -827,7 +856,8 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
                  | acknowledged_inputs)
     unaccounted = sorted(read - accounted)
     assert not unaccounted, (
-        f"extractor_v2.py reads {unaccounted} and the door accounts for none of "
+        f"{[m.name for m in path_modules]} read {unaccounted} and the door "
+        f"accounts for none of "
         f"them: either pin it (pop + refuse, like the rest) or declare it an "
         f"INPUT in this test with the reason. An unclassified read is how an "
         f"inherited shell changes the measured population under a door the log "
