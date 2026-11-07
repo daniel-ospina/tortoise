@@ -1074,13 +1074,14 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
     module for the same reason — the skip fires at import — so the coupling is read off
     its SOURCE below.
     """
+    import ast
     import os
     from pathlib import Path
 
     from tests._embedded import _SWEEP_OWNED_PREFIXES, owns_by_ownership_record
 
     # The shape `test_cache_eviction_evictor.py`'s `lane` fixture builds INLINE (they
-    # must agree; that module's own comment cites this pin).
+    # must agree; the AST coupling at the bottom of this test asserts it).
     name = f"test_evict_{os.urandom(6).hex()}"
     assert name.startswith("test_"), (
         f"{name!r} does not start with the `test_` family member: "
@@ -1099,17 +1100,66 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary():
     # constrains a name IT builds. Measured during this fix — reverting the fixture to
     # `f"evict_{…}"` left every assertion above GREEN, i.e. a pin that does not pin.
     # The live module cannot be imported here (its `allow_module_level` skip fires at
-    # import), so the coupling is read off its source: the fixture must BUILD the owned
-    # name, INLINE in the `lane` block.
-    # ⛔ INLINE IS PART OF THE PROPERTY, not style: `tests/test_derived_names.py`'s
-    # `_raw_detach_violations` matches `os.urandom` against the fixture's raw text, so a
-    # name built in a module-level helper moves the only code-side `os.urandom` out of
-    # the block it inspects and leaves that census reading a COMMENT. Do not re-extract
-    # it into `_lane_graph_name()`.
+    # import), so the coupling is resolved STRUCTURALLY off its AST: the owned name must
+    # be BUILT and JOURNALLED inside `lane` itself.
+    # ⛔ STRUCTURAL, not a substring of the whole file. A first draft asserted
+    # `'graph_name = f"test_evict_{…}"' in live_module`; measured here, that is wrong in
+    # BOTH directions (#11373 review): it stays GREEN when the f-string is extracted to a
+    # module-level helper that still contains that exact line — green over the very
+    # extraction it claims to forbid — and it REDs a correct rename of the local inside
+    # `lane`, which the property does not care about. Resolving `lane` and walking its own
+    # AST pins the property without pinning a spelling.
+    # ⛔ What the sibling census does and does not catch — measured, not assumed:
+    # `_raw_detach_violations` matches `os.urandom` on the RAW enclosing block, so
+    # extraction to a helper REDs it (it fails CLOSED) **unless** the block keeps prose
+    # naming `os.urandom`, which satisfies that half by COMMENT — also measured, and the
+    # #11182 tightening masked only the ownership half. So that census is not evidence
+    # about the vocabulary, and this pin is what settles it.
     live_module = (Path(__file__).resolve().parent / "test_cache_eviction_evictor.py").read_text(
         encoding="utf-8")
-    assert 'graph_name = f"test_evict_{os.urandom(6).hex()}"' in live_module, (
-        "the live suite's `lane` fixture no longer builds an owned, per-run graph name "
-        "INLINE — either the prefix left the vocabulary (the journal would be INERT "
-        "for reclamation, #11373 P1) or the f-string moved into a helper (which hides "
-        "`os.urandom` from the raw-client census's enclosing block)")
+    lane = next(
+        (n for n in ast.walk(ast.parse(live_module))
+         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "lane"),
+        None)
+    assert lane is not None, (
+        "`test_cache_eviction_evictor.py` no longer defines a `lane` fixture, so this "
+        "coupling no longer locates the block it pins — re-read #11373 P1 instead of "
+        "deleting it")
+    built = [n for n in ast.walk(lane)
+             if isinstance(n, ast.JoinedStr) and n.values
+             and isinstance(n.values[0], ast.Constant)
+             and isinstance(n.values[0].value, str)
+             and n.values[0].value.startswith("test_evict_")
+             and any(isinstance(v, ast.Call) and isinstance(v.func, ast.Attribute)
+                     and v.func.attr == "urandom" for v in ast.walk(n))]
+    assert len(built) == 1, (
+        f"the `lane` fixture builds {len(built)} `test_evict_…{{os.urandom}}` names; it "
+        "must build exactly one INLINE — a name built in a helper moves the code out of "
+        "the block the raw-client census inspects, and a name outside the `test_` family "
+        "leaves the journal INERT for reclamation (#11373 P1)")
+    holders = {t.id for a in ast.walk(lane) if isinstance(a, ast.Assign)
+               and a.value is built[0]
+               for t in a.targets if isinstance(t, ast.Name)}
+    assert holders, (
+        "the `lane` fixture's owned graph name is not assigned to a name, so the "
+        "journal cannot be checked against the thing it journals")
+    # Follow plain `x = owned` aliases, so RENAMING the local (a correct edit this
+    # property does not care about) stays green — the false red the whole-file
+    # substring produced, which is what motivated resolving the block structurally.
+    grew = True
+    while grew:
+        grew = False
+        for a in ast.walk(lane):
+            if (isinstance(a, ast.Assign) and isinstance(a.value, ast.Name)
+                    and a.value.id in holders):
+                for t in a.targets:
+                    if isinstance(t, ast.Name) and t.id not in holders:
+                        holders.add(t.id)
+                        grew = True
+    assert [c for c in ast.walk(lane)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "_journal_append" and c.args
+            and isinstance(c.args[0], ast.Name) and c.args[0].id in holders], (
+        f"`lane` journals something other than the owned name it builds "
+        f"({sorted(holders)}) — journalling an UNOWNED name buys the peer-protection "
+        "half only, and the graph still leaks (#11373 P1)")
