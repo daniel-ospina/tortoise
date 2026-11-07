@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:a36d4f71c7f00296a3711cc89b6e43587f75c05b23d9c23b78204d1d65098ace",
+  "document_sha256": "sha256:27fe4b7823f7ecc06f484c1484f1a0a9011af4f2ab6dfaffe3bd15d82fdb5a7a",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -89,7 +89,7 @@
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "the measurement RAN at 2026-10-19T01:39:26Z (the receipt's own `date`), BEFORE this record's add-commit a6085af84 (2026-10-21T21:49:11Z) — but its ARTIFACT, tests/eval/write_path/receipts/w2b-operator-2026-10-19.json, was not in the tree: it landed at d50217273 (2026-10-22T05:34Z), AFTER the registration. So this `false` is a claim about VISIBILITY, not about existence: nothing measured by this row was in the tree its author wrote. That distinction is stated in PRE-REGISTRATION.md section 0's row and section 10.3 — leaving it unstated is what let the row be read as 'no measurement existed', a claim the measurement's own date refutes (#10525 review).",
       "threshold_basis": "the 15 edge gold replaced a 4-edge denominator that swung 0-2 of 4 on identical code; no rate may ever be reported against 4",
-      "post_registration_measurement": "capstone-measured-e0fc940b.log (2026-10-23): edge_correct=2 of 15 planted on receipt tests/eval/write_path/receipts/w2b-operator-2026-10-19.json — RED. NOT re-scored here: the receipt's corpus_hash sha256:943a99ec... is not the frozen fixtures_hash, so it measures its own corpus revision; denominator 15 and threshold 15-of-15 are UNCHANGED (#9736/#9738 do not reach this row). Disclosed in PRE-REGISTRATION.md section 10.3."
+      "post_registration_measurement": "capstone-measured-e0fc940b.log (2026-10-23): edge_correct=2 of 15 planted on receipt tests/eval/write_path/receipts/w2b-operator-2026-10-19.json — RED. NOT re-scored here: the receipt's corpus_hash sha256:943a99ec... is not the frozen fixtures_hash, so it measures its own corpus revision; denominator 15 and threshold 15-of-15 are UNCHANGED (#9736/#9738 do not reach this row). Disclosed in PRE-REGISTRATION.md section 10.3. ⚠️ THE ROW'S FIGURE AT THIS HEAD IS 5 OF 15, read from the FROZEN-corpus receipt the probe SELECTS by corpus_hash (w2b-operator-2026-10-24-8503-b.json, extractor extract_session_v2); the 2/15 above is the OTHER, non-frozen receipt's number, kept as a historical disclosure. See §1.6.3 and corpus_rows.E4.reconciles_with."
     },
     {
       "id": "E5",

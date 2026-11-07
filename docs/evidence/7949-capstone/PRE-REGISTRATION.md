@@ -564,7 +564,8 @@ provisional line was waiting on, in §1.6.3: **the registered corpus is a FIXTUR
 the graph the fleet actually builds belongs to `corpus_rows.fleet-claim`, which pins `fleet-capture`
 and **may not be scored until that corpus is registered**. The `A`-rows inherit that rule verbatim, so
 every one of them is a **fixture-corpus** statement — **none is a fleet measurement**, and in particular
-none of them measures the 2026-11-04 `live-v4` figure its own `threshold_basis` quotes. The machine
+none of the four `A`-rows whose `threshold_basis` quotes a 2026-11-04 `live-v4` figure (`A1`, `A3`,
+`A4`, `A5` — `A2`'s basis is tree-derivable) measures that figure. The machine
 record states this as `a_corpus.not_a_proof_of`.
 
 What C2 did **not** do is discharge the corpus's *content* requirement: `A1` still needs a pack that
@@ -1602,7 +1603,8 @@ lands a row whose population is absent is **REFUSED**"*. `a_corpus` carried **no
 **New value.** `status` reads **`RECONCILED by #10983 (C2), landed as #11298`**; the `#10983`-pending
 conditional is replaced by the requirement itself, which is a statement about the **corpus's content**
 and survives C2's close unreduced; `a_corpus` gains a **`not_a_proof_of`** naming the 2026-11-04
-`live-v4` figures each `A`-row's `threshold_basis` quotes. §3.7's paragraph is rewritten to match.
+`live-v4` figures the four `A`-rows' `threshold_basis` quotes (`A1`, `A3`, `A4`, `A5`; `A2`'s basis is
+`tortoise/definite_description_backfill.py:15-23`, tree-derivable). §3.7's paragraph is rewritten to match.
 
 **Why (the reason this is not a cosmetic edit).** `#11298` landed C2 while this record was being
 amended, so the two halves of the merged record each carried a claim about the other: the `A`-rows said
