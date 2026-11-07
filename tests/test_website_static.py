@@ -72,10 +72,12 @@ import re
 import struct
 import sys
 import tempfile
+import zlib
 from html import unescape
 from html.parser import HTMLParser
 from itertools import pairwise
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # `pytest` is deliberately not imported (#8066): this file's only use was the
 # `pytest.skip` that made the tortoise-decide gate green-while-blind.
@@ -3990,11 +3992,17 @@ class TestSiteIconAndSocialPreviewContract:
     ship (PNG IHDR, JPEG SOF, ICO directory) — stdlib only, no imaging library,
     so the guard runs in the fast lane.
 
-    ⛔ WHAT THIS CANNOT SEE, said plainly so a green run is not read as more:
-    it cannot judge the card's CONTENT. A valid 1200x630 JPEG of a solid colour
-    passes every assertion here. It also cannot see the blog, whose head is
-    emitted by `website/functions/blog/_lib.ts` — that surface has its own guard
-    in `tests/test_blog_seo_meta.mjs`, which executes the real renderer.
+    ⛔ WHAT THIS CAN SEE ABOUT CONTENT, AND WHAT IT STILL CANNOT. The PNG icons are
+    DECODED (`_png_palette`) and must hold at least 8 distinct colours with no colour
+    above 95% of the canvas, so a flat rectangle in place of a mark reds. The card is
+    a JPEG, which this file cannot decode without dragging a wheel into the fast
+    lane, so it is bounded by ENCODED SIZE (>= 40 KB) — a proxy, with its
+    measurements written beside it, and it does reject a solid 1200x630 JPEG (22,016
+    bytes measured).
+    What remains unseen is whether the card DEPICTS the right thing: a 60 KB
+    photograph of something unrelated passes. The blog's own head is emitted by
+    `website/functions/blog/_lib.ts` and is guarded by `tests/test_blog_seo_meta.mjs`,
+    which executes the real renderer.
     """
 
     WEB = REPO_ROOT / "website"
@@ -4014,6 +4022,82 @@ class TestSiteIconAndSocialPreviewContract:
     def _png_size(data: bytes) -> tuple[int, int]:
         assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
         return struct.unpack(">II", data[16:24])
+
+    @staticmethod
+    def _png_palette(data: bytes) -> dict[tuple[int, ...], int]:
+        """How many pixels of each colour a PNG really holds — stdlib only.
+
+        ⛔ WHY A DECODER LIVES IN A TEST. `/blog/og-image.png` was a 4.6 KB
+        placeholder: two colours, 99.2% of the canvas flat background, a bare accent
+        rule, no mark and no text. Every dimension assertion in this file passed on
+        it, because a 1200x630 rectangle IS 1200x630. A card (or an icon) that renders
+        as an empty block is the failure these guards exist to prevent, and only the
+        pixels can tell it apart from art. No imaging library is in the dev env, and
+        adding one for a guard would make the fast lane depend on a wheel — so this
+        decodes 8-bit PNGs (the only depth this repo writes) directly.
+        """
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+        pos = 8
+        width = height = 0
+        depth = colour = 0
+        idat = b""
+        palette: list[tuple[int, ...]] = []
+        while pos < len(data):
+            (length,) = struct.unpack(">I", data[pos:pos + 4])
+            kind = data[pos + 4:pos + 8]
+            body = data[pos + 8:pos + 8 + length]
+            pos += 12 + length
+            if kind == b"IHDR":
+                width, height, depth, colour = struct.unpack(">IIBB", body[:10])
+                assert body[12] == 0, "interlaced PNG — not the shape this repo writes"
+            elif kind == b"PLTE":
+                palette = [tuple(body[i:i + 3]) for i in range(0, len(body), 3)]
+            elif kind == b"IDAT":
+                idat += body
+            elif kind == b"IEND":
+                break
+        assert depth == 8, f"bit depth {depth} — this decoder reads 8-bit PNGs"
+        channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[colour]
+
+        def paeth(a: int, b: int, c: int) -> int:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            if pa <= pb and pa <= pc:
+                return a
+            return b if pb <= pc else c
+
+        raw = zlib.decompress(idat)
+        stride = width * channels
+        prev = bytearray(stride)
+        counts: dict[tuple[int, ...], int] = {}
+        off = 0
+        for _ in range(height):
+            ftype = raw[off]
+            off += 1
+            line = bytearray(raw[off:off + stride])
+            off += stride
+            if ftype:
+                for i in range(stride):
+                    a = line[i - channels] if i >= channels else 0
+                    b = prev[i]
+                    c = prev[i - channels] if i >= channels else 0
+                    if ftype == 1:
+                        line[i] = (line[i] + a) & 0xFF
+                    elif ftype == 2:
+                        line[i] = (line[i] + b) & 0xFF
+                    elif ftype == 3:
+                        line[i] = (line[i] + (a + b) // 2) & 0xFF
+                    elif ftype == 4:
+                        line[i] = (line[i] + paeth(a, b, c)) & 0xFF
+                    else:
+                        raise AssertionError(f"bad PNG filter {ftype}")
+            prev = line
+            for x in range(0, stride, channels):
+                px = tuple(line[x:x + channels])
+                if colour == 3:
+                    px = palette[px[0]]
+                counts[px] = counts.get(px, 0) + 1
+        return counts
 
     @staticmethod
     def _jpeg_size(data: bytes) -> tuple[int, int]:
@@ -4094,28 +4178,73 @@ class TestSiteIconAndSocialPreviewContract:
         start = html.index("<head")
         return cls._head_markup(html[start:html.index("</head>", start)])
 
-    @staticmethod
-    def _og(head: str, prop: str) -> str | None:
-        m = re.search(
-            rf'<meta property="og:{re.escape(prop)}" content="([^"]*)"', head)
-        return m.group(1) if m else None
+    # The readers below go through the PARSER, not a regex, and that is not
+    # fastidiousness: `<meta content="…" property="og:image">` is identical to a
+    # browser, to every scraper and to this file's own structural test, but a
+    # source-order regex reports "declares no og:image — a shared link renders no
+    # card" about a page that is correct. A guard that cries wolf on a legitimate
+    # edit teaches the next person to weaken it, which is how a guard dies.
+    @classmethod
+    def _meta_content(cls, head: str, **attrs: str) -> str | None:
+        metas, _ = cls._head_metas(head)
+        for meta in metas:
+            if all(meta.get(k) == v for k, v in attrs.items()):
+                return meta.get("content")
+        return None
 
-    @staticmethod
-    def _twitter(head: str, name: str) -> str | None:
-        m = re.search(
-            rf'<meta name="twitter:{re.escape(name)}" content="([^"]*)"', head)
-        return m.group(1) if m else None
+    @classmethod
+    def _og(cls, head: str, prop: str) -> str | None:
+        return cls._meta_content(head, property=f"og:{prop}")
+
+    @classmethod
+    def _twitter(cls, head: str, name: str) -> str | None:
+        return cls._meta_content(head, name=f"twitter:{name}")
+
+    @classmethod
+    def _links(cls, head: str) -> list[dict[str, str]]:
+        """Every `<link>` element in the head, as its attribute dict."""
+
+        class Collector(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.links: list[dict[str, str]] = []
+                self.in_head = False
+
+            def handle_starttag(self, tag: str, attrs) -> None:
+                if tag == "head":
+                    self.in_head = True
+                elif tag == "link" and self.in_head:
+                    self.links.append({k: (v or "") for k, v in attrs})
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag == "head":
+                    self.in_head = False
+
+        collector = Collector()
+        collector.feed(head)
+        collector.close()
+        return collector.links
 
     # --- 1. the icon resolves ------------------------------------------
 
     def test_every_page_declares_the_icon_trio(self):
-        """Two `rel=icon` rows (ICO + PNG) plus the apple-touch icon, every page."""
+        """Two `rel=icon` rows (ICO + PNG) plus the apple-touch icon, every page.
+
+        The `rel` is asserted, not just the `href`: `<link rel="preload"
+        href="/favicon.ico">` mentions the file and gives the tab no icon at all, and
+        an href-only check cannot tell the two apart.
+        """
         for page in self._pages():
-            head = self._head(page.read_text())
-            for href in (f"/{self.ICON_ICO}", f"/{self.ICON_PNG}", f"/{self.ICON_APPLE}"):
-                assert f'href="{href}"' in head, (
-                    f"{page.name} does not declare {href} — a page with no icon "
-                    "shows a blank tab and, on a share, no avatar")
+            links = self._links(self._head(page.read_text()))
+            for href in (f"/{self.ICON_ICO}", f"/{self.ICON_PNG}"):
+                assert any(ln.get("href") == href and "icon" in ln.get("rel", "").split()
+                           for ln in links), (
+                    f"{page.name} does not declare {href} as a rel=icon — a page with no "
+                    "icon shows a blank tab and, on a share, no avatar")
+            assert any(ln.get("href") == f"/{self.ICON_APPLE}"
+                       and ln.get("rel") == "apple-touch-icon" for ln in links), (
+                f"{page.name} does not declare {self.ICON_APPLE} as rel=apple-touch-icon; "
+                "iOS then renders a screenshot of the page instead of the mark")
 
     def test_the_icon_files_exist_and_are_usable(self):
         """Every icon a page points at exists, and has the shape the tag implies."""
@@ -4147,6 +4276,22 @@ class TestSiteIconAndSocialPreviewContract:
             assert (i["planes"], i["bpp"]) == (1, 32), (
                 f"favicon.ico entry declares planes={i['planes']} bpp={i['bpp']}; "
                 "a PNG payload is 1 plane / 32bpp and anything else is a hand-edited directory")
+
+        # ...and every one of them has something DRAWN on it. A 256x256 flat
+        # rectangle is a valid PNG at a valid size and shows a blank tab: the
+        # measured placeholder this PR deletes from the blog was exactly that shape.
+        # The floor is low on purpose (a two-colour logo would still pass at 8); what
+        # it rejects is the degenerate case, not art the next person might choose.
+        for name in (self.ICON_PNG, self.ICON_APPLE):
+            counts = self._png_palette((self.WEB / name).read_bytes())
+            assert len(counts) >= 8, (
+                f"website/{name} holds {len(counts)} distinct colour(s) over "
+                f"{sum(counts.values())} pixels — that is a flat rectangle, not a mark; "
+                "every size assertion would pass on it")
+            dominant = max(counts.values()) / sum(counts.values())
+            assert dominant < 0.95, (
+                f"website/{name} is {dominant:.1%} a single colour — a mark needs to "
+                "carry something the background does not")
 
     def test_the_wordmark_is_never_used_as_an_icon(self):
         """`/logo.png` is a 400x244 wordmark — a tab renders it as a squashed bar."""
@@ -4332,7 +4477,11 @@ class TestSiteIconAndSocialPreviewContract:
             declared_w = int(self._og(head, "image:width"))
             declared_h = int(self._og(head, "image:height"))
 
-            path = self.WEB / image.split("//", 1)[-1].split("/", 1)[-1]
+            # A cache-busting query is legitimate and does not change which file is
+            # served, so it is stripped before the URL becomes a path — otherwise a
+            # `?v=2` on a correct tag reports "not in the served tree".
+            image_path = urlsplit(image).path
+            path = self.WEB / image_path.lstrip("/")
             assert path.is_file(), (
                 f"{page.name} points og:image at {image}, which is not in the served "
                 f"tree (looked for {path}) — the scraper fetches a 404 and shows no card")
@@ -4342,14 +4491,42 @@ class TestSiteIconAndSocialPreviewContract:
             assert declared_type, (
                 f"{page.name} declares no og:image:type — a scraper that has to sniff "
                 "the format is a scraper that can guess wrong")
-            assert declared_type == "image/jpeg" and raw[:2] == b"\xff\xd8", (
-                f"{page.name} declares og:image:type {declared_type!r} but {path.name} "
-                "is not a JPEG — the declared type and the bytes must agree")
+            # Dispatch on what the page SAYS the file is, and hold the bytes to it.
+            # Pinning JPEG outright would false-red on a page that legitimately ships
+            # a PNG card — this repo already has one under blog/ — with a message
+            # that blames the type for being honest.
+            readers = {"image/jpeg": self._jpeg_size, "image/png": self._png_size}
+            assert declared_type in readers, (
+                f"{page.name} declares og:image:type {declared_type!r}; this guard reads "
+                f"{sorted(readers)} — add a reader rather than dropping the assertion")
+            try:
+                actual = readers[declared_type](raw)
+            except AssertionError as exc:
+                raise AssertionError(
+                    f"{page.name} declares og:image:type {declared_type!r} but "
+                    f"{path.name} is not one: {exc}") from exc
 
-            actual = self._jpeg_size(raw)
             assert (declared_w, declared_h) == actual, (
                 f"{page.name} declares {declared_w}x{declared_h} but {path.name} is "
                 f"{actual[0]}x{actual[1]}")
+
+            # ⛔ A CARD CAN BE A RECTANGLE, and dimensions cannot tell. THE NUMBERS
+            # ARE MEASURED, not guessed, because the first version of this check used
+            # a 20 KB floor and a flat 1200x630 JPEG at maximum quality is 22,016
+            # bytes — it would have passed the assertion written to reject it:
+            #   authored card (gradient + wordmark + text) ....... 94,066 B
+            #   flat #060b14 rectangle, sips -s formatOptions best 22,016 B
+            #   the placeholder this PR deleted (2-colour PNG) ...  4,595 B
+            # 40 KB sits 1.82x above a flat one and 2.35x below the real card.
+            # A JPEG decoder is what would make this exact; shipping one for a guard
+            # would drag a wheel into the fast lane. If a future card is legitimately
+            # simple and lands under this line, LOOK AT IT, then lower the bound and
+            # write down what you saw. PNG icons get a real pixel check below.
+            assert len(raw) >= 40000, (
+                f"{page.name}'s card {path.name} is only {len(raw)} bytes — a "
+                "1200x630 JPEG that small is near-uniform (a flat rectangle of one "
+                "colour measures 22 KB), and a link preview of it is an empty block "
+                "rather than a card")
 
     def test_the_shared_preview_is_the_agreed_size(self):
         """1200x630 is the size the scrapers crop to; the shared image must be it."""
