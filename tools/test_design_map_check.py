@@ -412,42 +412,36 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
         separator = _separator(block)
         return separator is not None and separator > 0 and _is_crosswalk_header(block[separator - 1])
 
-    # Fail CLOSED when §5 no longer holds a crosswalk header: the header itself is the
-    # thing a shrinker deletes, and once it is gone no block can be told apart from
-    # the crosswalk. Grading nothing would be a false PASS on every remaining row
-    # (measured: header deleted + a cell blanked -> CLEAN before this fallback), so
-    # every block in the section is graded instead. A decorative table sharing §5
-    # with a MISSING crosswalk header is therefore a false RED — the direction that
-    # costs a re-run, never a gate that reports green over an ungraded row.
-    headed = [block for block in blocks if _is_crosswalk_block(block)]
-    # The header is a HINT, never the authority. A reworded FIRST header cell made the
-    # real crosswalk unheaded while a DECOY headed block elsewhere in §5 kept `headed`
-    # non-empty, so the fallback never fired and the real rows went UNGRADED: blanking
-    # AND deleting §6.4's surface cell both graded CLEAN, exit 0 on the REQUIRED `docs`
-    # job (measured; the pre-shape tool caught both). The pinned seam tokens are the
-    # crosswalk's ACTUAL signature — its first column is the plan section — so when no
-    # headed block carries one, grade every block instead of trusting the hint.
-    if headed and not any(
-        re.match(r"^\|\s*" + re.escape(seam), line)
-        for block in headed
-        for line in block
-        for seam in PLAN_SEAMS
-    ):
-        headed = []
-    if headed:
-        # A block with NO separator is a continuation of the table above it (a blank
-        # line splits the markdown table in the parser but not on the page). Grading
-        # only the headed blocks left a split table's tail ungraded — measured: a
-        # blank line before §6.4 plus a blanked §6.4 cell graded CLEAN.
-        graded_blocks = [block for block in blocks if _is_crosswalk_block(block) or _separator(block) is None]
-    else:
-        graded_blocks = blocks
-
+    # GRADE PER ROW, NOT PER TABLE. Deciding "which table is the crosswalk" from its
+    # header cannot be made safe, and every attempt to patch it was measurably
+    # defeated by a two-edit document change:
+    #   * header CONTENT hints  -> an ordinary `| area | kind | surface |` table in §5
+    #     was graded as the crosswalk, and its rows refused as "one column short"
+    #     (a false RED, measured);
+    #   * header SHAPE required -> a reworded FIRST cell made the real crosswalk
+    #     unheaded, and a decoy headed table elsewhere kept the fallback switched off,
+    #     so blanking AND deleting §6.4's surface cell both graded CLEAN (a false
+    #     PASS, measured);
+    #   * a pinned-seam ANCHOR  -> a decoy whose first column carries a seam token
+    #     (`| §5 row 1 | … |`) restored the header's authority, and the same two
+    #     edits graded CLEAN again (measured). A crosswalk SPLIT into two headed
+    #     tables did the same without any decoy.
+    # The row is the unit that carries the fact, so the rule is: grade EVERY row of a
+    # crosswalk-headed block (which keeps the `extra row` / split-table cases graded),
+    # AND every row in the section whose own first cell is a seam label — whatever
+    # table it sits in, headed or not. A decorative table's rows are neither, so an
+    # ordinary §5 table stays CLEAN (no false RED); a real crosswalk row is graded in
+    # every one of the shapes above (no false PASS). A row whose label was renamed off
+    # the `§` form is still caught by the PLAN_SEAMS pin, which fails when the seam is
+    # missing.
     rows: list[str] = []
-    for block in graded_blocks:
+    for block in blocks:
+        headed_block = _is_crosswalk_block(block)
         separator = _separator(block)
         start = 0 if separator is None else separator + 1
-        rows.extend(block[start:])
+        for line in block[start:]:
+            if headed_block or _is_crosswalk_row(line):
+                rows.append(line)
 
     for line in rows:
         row = cells(line)
@@ -577,14 +571,34 @@ def _is_crosswalk_header(line: str) -> bool:
     property, so requiring it costs nothing that a reworded `surface(s)` cell
     still gets: renaming THAT cell keeps the block headed.
 
-    A reworded FIRST cell does drop the block into the fail-closed fallback below
-    (every §5 block graded), which is that fallback's documented direction — a
-    re-run, never a gate that reports green over an ungraded row.
+    This test only decides whether a block's rows are ALL graded; it never decides
+    whether a crosswalk ROW is graded, because that is decided per row
+    (`_is_crosswalk_row`). Which cell is load-bearing is worth stating: the THIRD
+    cell tolerates `surface` / `surfaces` / `surface(s)`, and the FIRST must read
+    exactly `plan §` — a reworded first cell makes the block unheaded, which only
+    widens nothing and narrows nothing, since the seam-labelled rows inside it are
+    still graded.
     """
     row = cells(line)
     if len(row) != 4:
         return False
     return row[0].strip() == _HEADER_PLAN_CELL and row[2].strip().lower() in _HEADER_SURFACE_CELLS
+
+
+#: A seam LABEL, i.e. a crosswalk row's first cell: `§5 row 1`, `§6.4`, `§7`. Rows are
+#: graded by this rather than by their table's header, because the header is a single
+#: editable cell and every header-based selection was defeated by a two-edit document
+#: change (see the comment at the grading loop).
+_SEAM_LABEL = re.compile(r"^§")
+
+
+def _is_crosswalk_row(line: str) -> bool:
+    """True when this row carries a crosswalk seam label in its first cell."""
+    row = cells(line)
+    if not row:
+        return False
+    first = row[0].strip()
+    return bool(_SEAM_LABEL.match(first)) or first in PLAN_SEAMS
 
 
 def _insert_before(text: str, prefix: str, inserted: str) -> str:

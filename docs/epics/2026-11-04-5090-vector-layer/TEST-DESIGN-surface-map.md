@@ -208,7 +208,7 @@ self-test: 17/17 mutation(s) behaved as designed — the checker is not a rubber
 The `--self-test` arm exists because a checker that passes on everything is worse than no checker:
 it applies the seventeen mutations an editor actually makes (remove a row, **remove a row and every mention
 of it**, blank a cell, blank a **crosswalk** row's surface cell, **delete a crosswalk row's surface cell** (one column short), **rename a crosswalk row and blank its
-cell**, **add a crosswalk row with no `§` label and a blank cell**, **append an ordinary table whose third column reads `surface` and require it to stay CLEAN**, restate a failure as a mechanism, retype a
+cell**, **add a crosswalk row with no `§` label and a blank cell**, **append an ordinary table whose third column reads `surface` and require the verdict to stay UNCHANGED**, restate a failure as a mechanism, retype a
 layer as a mechanism, retype a crosswalk surface as one that has no row, **splice a raw `|` into a cell**,
 **splice a `\\|` into a cell**, drop a child, drop a capability, forget a seam, destroy the section
 structure) to an in-memory
@@ -254,13 +254,24 @@ an appended `| area | kind | surface |` table, exit 2, `CLEAN` before the per-bl
 landed). Requiring both cells AND the four-column width closes it: appended `surface` /
 `surfaces` / `note` / 4-column tables and a `| plan § | note |` table all stay `CLEAN` again, while a
 second, validly-headed crosswalk table is still graded (its 3-cell row refuses, its blank cell
-violates) and a deleted header still fails CLOSED. ⚠️ **The header is a hint, never the authority.**
-A reworded FIRST header cell left the real crosswalk unheaded while a DECOY headed table elsewhere in
-§5 kept the headed set non-empty, so the fail-closed fallback never fired and blanking AND deleting
-§6.4's surface cell both graded `CLEAN` (measured). The pinned seam tokens are the crosswalk's actual
-signature, so a headed set in which NO block carries one is discarded and every block is graded: with
-the first cell reworded to `seam` / `Plan §` / `plan`, the blanked cell reds (`R5 §6.4: names no
-surface`) and the deleted one REFUSES, while the untouched map stays `CLEAN`.
+violates) and a deleted header still fails CLOSED.
+
+⚠️ **The ROW is graded, not the table — because every header-based selection was defeated, and each
+defeat is measured.** Deciding "which table is the crosswalk" from its header failed three ways at
+this head: header **content** hints graded an ordinary `surface`-column table as the crosswalk (the
+false RED above); requiring the header's **shape** let a reworded first cell leave the real crosswalk
+unheaded while a DECOY headed table kept the fallback switched off, so blanking AND deleting §6.4's
+surface cell both graded `CLEAN`; and anchoring on a **pinned seam token** was beaten by a decoy whose
+first column carries one (`| §5 row 1 | … |`) — and, with no decoy at all, by SPLITTING the crosswalk
+into two headed tables and rewording the first header, both of which also graded `CLEAN` with §6.4's
+cell blanked or deleted. So the unit of grading is the row: **every row of a crosswalk-headed block**
+is graded (which keeps the `extra row` and split-table cases graded) **and every row in §5 whose own
+first cell is a seam label**, whatever table it sits in and whether that table is headed or not. A
+decorative table's rows are neither, so an ordinary §5 table stays `CLEAN`; a real crosswalk row is
+graded in every shape above — verified for all three rewordings with a decoy carrying each of the ten
+seam tokens, for the split-crosswalk shape, and for all ten rows' blank/delete pairs (20/20 correct).
+A row whose label was renamed OFF the `§` form is still caught by the `PLAN_SEAMS` pin, which fails
+when the seam is missing.
 
 The false-RED direction has its own self-test case, `append an ordinary §5 table with a
 surface column (must stay CLEAN)`, and it is a **NEGATIVE control**: the one case whose expected
