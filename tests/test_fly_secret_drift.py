@@ -3267,7 +3267,7 @@ class TestTheMitigationLedger:
         space-delimited accumulator. Drop either delimiter and `FOO_BAR` also matches
         `FOO`, so a ledger entry for `TORTOISE_BACKUP_KEY_PREVIOUS` would suppress
         `TORTOISE_BACKUP_KEY` as well — a REAL pair in this payload
-        (`deploy-hosted.yml:1212` / `:1217`, pinned by
+        (`deploy-hosted.yml:1214` / `:1219`, pinned by
         `tests/test_deploy_workflow.py::test_every_citation_of_the_backup_key_pair_resolves`),
         where the previous backup key is the
         entry an operator is most likely to write after a rotation. The consequence
@@ -3590,40 +3590,71 @@ class TestTheMitigationLedger:
             assert "LEDGER NOT HONOURED" in proc.stdout, proc.stdout
             assert "assigns it a NON-EMPTY value" in proc.stdout, proc.stdout
 
-    def test_a_QUOTED_fly_toml_env_key_is_the_same_key(self):
-        """#11332 round 11 (P2) — TOML quoting must not hide a real `[env]` value.
+    def test_EVERY_legal_TOML_spelling_of_an_env_assignment_is_read_the_same(self):
+        """#11332 rounds 11–12 — the `[env]` reader is `tomllib`, so the CLASS is closed.
 
-        TOML defines `"SENTRY_DSN" = "x"` and `'SENTRY_DSN' = "x"` as the SAME key as
-        the bare form (`tomllib` agrees), and `["env"]` as the same table as `[env]`.
-        The gate's reader matched a BARE IDENTIFIER only, so a quoted key parsed as NO
-        assignment — check (0b-ii) skipped the name and the ledger certified a
-        mitigation while `fly.toml [env]` kept supplying the value. Measured end to
-        end: `rc=2 LEDGER NOT HONOURED` for the bare spelling and `rc=0 MITIGATED` for
-        the quoted one, on identical semantics — a false PASS on this gate's own
-        subject, in the arm round 2 added for exactly this second delivery path.
+        `[env]` is a SECOND delivery path: a ledger entry says a name is deliberately
+        absent, and check (0b-ii) refuses it when `fly.toml [env]` still supplies a
+        value. Every spelling this reader fails to recognise therefore becomes a
+        **false PASS** — `rc=0 MITIGATED` over a mitigation that is not in effect.
 
-        Every row must produce the SAME verdict as the bare spelling, so the
-        parametrization is a statement about the quoting and nothing else.
+        This was a hand-rolled line scanner for four review rounds, and each round
+        closed one spelling: a header with a trailing comment (round 5), a value the
+        scanner could not see (round 6), a quoted key or quoted header (round 11). The
+        last escape was demonstrated end to end — `"\\u0053ENTRY_DSN" = "…"` is the
+        same key as `SENTRY_DSN` (`tomllib` agrees), and the scanner produced
+        `rc=0 MITIGATED` where the bare spelling produced `rc=2 LEDGER NOT HONOURED`.
+        So the fix is not another arm: the reader is now `tomllib`, the reference
+        parser, and every spelling below resolves to the same `[env]` entry Fly reads.
+
+        Every row must produce the SAME verdict, so this is a statement about the
+        SPELLING and nothing else. `bare` is the control.
         """
+        # (label, whole-file rewrite of the shared fixture)
         spellings = {
-            # The control: the spelling the reader always handled.
-            "bare": ("[env]\n", '  SENTRY_DSN = "https://real.invalid/dsn"\n'),
-            "quoted-key": ("[env]\n", '  "SENTRY_DSN" = "https://real.invalid/dsn"\n'),
-            "literal-key": ("[env]\n", "  'SENTRY_DSN' = 'https://real.invalid/dsn'\n"),
-            "quoted-header": ('["env"]\n', '  SENTRY_DSN = "https://real.invalid/dsn"\n'),
+            "bare": lambda toml: toml.replace(
+                "[env]\n", '[env]\n  SENTRY_DSN = "https://real.invalid/dsn"\n', 1
+            ),
+            "quoted-key": lambda toml: toml.replace(
+                "[env]\n", '[env]\n  "SENTRY_DSN" = "https://real.invalid/dsn"\n', 1
+            ),
+            "literal-key": lambda toml: toml.replace(
+                "[env]\n", "[env]\n  'SENTRY_DSN' = 'https://real.invalid/dsn'\n", 1
+            ),
+            "escaped-key": lambda toml: toml.replace(
+                "[env]\n",
+                '[env]\n  "\\u0053ENTRY_DSN" = "https://real.invalid/dsn"\n',
+                1,
+            ),
+            "quoted-header": lambda toml: toml.replace(
+                "[env]\n", '["env"]\n  SENTRY_DSN = "https://real.invalid/dsn"\n', 1
+            ),
+            "spaced-header": lambda toml: toml.replace(
+                "[env]\n", "[ env ]\n  SENTRY_DSN = \"https://real.invalid/dsn\"\n", 1
+            ),
+            # These two carry the table WITHOUT a header, so they replace it outright.
+            "dotted-root": lambda toml: toml.replace(
+                "[env]\n    ENV_ONLY_KEY".replace("    ", "  "),
+                'env.SENTRY_DSN = "https://real.invalid/dsn"\n  ENV_ONLY_KEY',
+                1,
+            ),
+            "inline-table": lambda toml: toml.replace(
+                "[env]\n    ENV_ONLY_KEY".replace("    ", "  "),
+                'env = { SENTRY_DSN = "https://real.invalid/dsn", ENV_ONLY_KEY = "1" }'
+                "\n  #",
+                1,
+            ),
         }
-        for label, (header, assignment) in spellings.items():
-            toml = _fixture(
-                f"ledger-env-{label}.toml",
-                _FLY_TOML.replace("[env]\n", header + assignment, 1),
-            )
-            assert assignment in toml.read_text(), (
+        for label, rewrite in spellings.items():
+            text = rewrite(_FLY_TOML)
+            assert text != _FLY_TOML, (
                 f"the {label} fixture did not take — the assertion below would be "
                 "about the unmodified file"
             )
+            toml = _fixture(f"ledger-env-{label}.toml", text)
             proc = _run(
                 _secrets_file(
-                    ["FASTAPI_INTERNAL_KEY", "GIT_SHA"], f"quoted-env-{label}.json"
+                    ["FASTAPI_INTERNAL_KEY", "GIT_SHA"], f"spelling-{label}.json"
                 ),
                 manifest=LEDGER_MANIFEST,
                 workflow=LEDGER_WORKFLOW,
@@ -3635,24 +3666,34 @@ class TestTheMitigationLedger:
                 },
             )
             assert proc.returncode == 2, (
-                f"the {label} spelling was read as NO [env] assignment — `fly.toml` "
-                "still supplies SENTRY_DSN, so the gate certified a mitigation that "
-                "is not in effect: " + proc.stdout + proc.stderr
+                f"the {label} spelling was not read as an `[env]` assignment — "
+                "`fly.toml` still supplies SENTRY_DSN, so the gate certified a "
+                "mitigation that is not in effect: " + proc.stdout + proc.stderr
             )
             assert "LEDGER NOT HONOURED" in proc.stdout, proc.stdout
             assert "assigns it a NON-EMPTY value" in proc.stdout, proc.stdout
 
-    def test_a_MULTI_LINE_fly_toml_env_value_is_not_read_as_a_placeholder(self):
-        """TOML allows the value on the following line; that is a VALUE, not `""`.
+    def test_an_UNPARSEABLE_fly_toml_fails_closed(self):
+        """A `fly.toml` this gate cannot PARSE must certify nothing — exit 2.
 
-        Taking only the text after `=` on the assignment's own line read
-        `SENTRY_DSN =` / newline / `"https://…"` as EMPTY — i.e. as the `[env] = ""`
-        PLACEHOLDER — so check (0b-ii) was skipped and the ledger certified a
-        mitigation while the app kept reading the `[env]` value. Measured end to end
-        on the shipped fixtures: exit 0 + `MITIGATED` (#11332 review round 6, P1).
+        ⛔ CORRECTION OF A ROUND-6 CLAIM, made when the reader became `tomllib`. The
+        `SENTRY_DSN =` / newline / `"https://…"` shape this test used to build is NOT
+        valid TOML — `tomllib`, the reference parser, rejects it (`Invalid value` at
+        the line after the `=`), and Fly's own parser would reject it too. So the
+        round-6 finding described an input that cannot exist in a real `fly.toml`;
+        the scanner's lenient reading of it could only ever produce a REFUSAL, never
+        a false PASS. The test is kept because the SAFETY PROPERTY it should have
+        pinned is real and now holds for every unparseable file:
+
+        a `[env]` table this guard cannot classify is an unclassifiable DELIVERY PATH,
+        and check (0b-ii) must not certify a deliberate absence against it.
+
+        ⛔ `LEDGER NOT HONOURED` is deliberately NOT asserted: failing to parse comes
+        earlier, so the gate never reaches the `[env]` comparison. Asserting the
+        specific verdict here would re-pin the old, wrong premise.
         """
         toml = _fixture(
-            "ledger-env-multiline.toml",
+            "ledger-env-unparseable.toml",
             _FLY_TOML.replace(
                 "[env]\n",
                 '[env]\n  SENTRY_DSN =\n    "https://real.invalid/dsn"\n',
@@ -3672,10 +3713,13 @@ class TestTheMitigationLedger:
             },
         )
         assert proc.returncode == 2, (
-            "a multi-line `[env]` value was read as the `\"\"` placeholder, so a name "
-            f"`fly.toml` really assigns was certified as mitigaable: {proc.stdout}"
+            "an unparseable fly.toml did not fail closed: " + proc.stdout + proc.stderr
         )
-        assert "LEDGER NOT HONOURED" in proc.stdout, proc.stdout
+        assert "cannot determine secret provenance" in proc.stderr, proc.stderr
+        assert "MITIGATED" not in proc.stdout, (
+            "the gate certified a mitigation against a `[env]` table it could not "
+            "classify: " + proc.stdout
+        )
 
     def test_an_env_HEADER_with_a_trailing_comment_still_parses(self):
         """`[env] # versioned config` is legal TOML — it must not disable the table.

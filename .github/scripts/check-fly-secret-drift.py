@@ -164,6 +164,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import NamedTuple
 
@@ -922,37 +923,32 @@ def workflow_secret_refs(text: str) -> set[str]:
     return set(_SECRET_REF_RE.findall(text))
 
 
-#: A ``[env]`` assignment line, with its key as written. The key may be a TOML
-#: BASIC (``"NAME"``) or LITERAL (``'NAME'``) quoted string — TOML defines those
-#: as the same key as the bare form, and a bare-identifier-only pattern silently
-#: read them as no assignment at all (#11332 round 11, P2).
-_ENV_ASSIGNMENT_RE = re.compile(
-    r"""\s*("(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$"""
-)
-
-
-def _toml_key(token: str) -> str:
-    """A TOML key token with its quoting removed (``"env"`` -> ``env``).
-
-    TOML's quoted and bare key forms address the SAME key, so a reader that only
-    accepts the bare form reads a legal spelling as absent — which is a false
-    PASS in a fail-closed gate: `fly.toml [env]` still supplies the value while
-    the ledger certifies the name as deliberately absent.
-    """
-    token = token.strip()
-    if len(token) >= 2 and token[0] == token[-1] == '"':
-        return token[1:-1]
-    if len(token) >= 2 and token[0] == token[-1] == "'":
-        return token[1:-1]
-    return token
-
-
 def fly_toml_env_assignments(text: str) -> dict[str, str]:
-    """``[env]`` key -> the value it assigns, as written (comments stripped).
+    """``[env]`` key -> the value it assigns, via ``tomllib``.
 
-    Parsed, not substring-matched: a name that appears only in a *comment* (the
-    real fly.toml documents `TORTOISE_TRUST_X_FORWARDED_PROTO` that way) is not
-    an assignment and must not satisfy a ``fly-toml-env`` declaration.
+    ⛔ PARSED BY THE REFERENCE PARSER, NOT SCANNED BY A REGEX. This function was a
+    hand-rolled line scanner for four review rounds, and each round closed one
+    spelling and left the class open: a header with a trailing comment (round 5), a
+    value on the following line (round 6, P1), a quoted key or quoted header
+    (round 11, P2). Every escape is the same defect — `[env]` IS a second delivery
+    path, so reading a legal spelling as "no assignment" makes check (0b-ii) skip the
+    name and the ledger certify a mitigation the app is not actually running. The
+    last one (`"\u0053ENTRY_DSN" = …`) was demonstrated end to end: bare → exit 2
+    `LEDGER NOT HONOURED`, escaped → exit 0 `MITIGATED`, on identical semantics.
+
+    `tomllib` is stdlib on the 3.12 floor this file already requires, so the whole
+    class goes: bare / basic-quoted / literal-quoted / escaped keys, quoted and
+    spaced headers, dotted keys, inline tables and multi-line values all resolve the
+    way Fly's own parser resolves them.
+
+    ⛔ THE VALUE IS NORMALISED TO A NON-EMPTY STRING UNLESS IT IS GENUINELY EMPTY, and
+    that is load-bearing rather than cosmetic: the consumer's test is truthiness
+    (`if not env_assignments.get(name)`), and `tomllib` yields TYPED values, so
+    `X = 0` / `X = false` would read as FALSY where they are real values the deploy
+    applies — silently inverting the `"0"` / `"false"` rows of
+    `test_only_an_EMPTY_fly_toml_env_value_lets_the_entry_through` from "refuse" to
+    "certify". `str()` keeps every non-string value truthy, which can only cause a
+    REFUSAL, never a false PASS.
 
     The VALUE matters to #11122: `fly.toml` carries five `[env] = ""` placeholders
     (`TORTOISE_BACKUP_KEY`, `R2_*`) that exist only to document the names — a Fly
@@ -960,53 +956,24 @@ def fly_toml_env_assignments(text: str) -> dict[str, str]:
     i.e. the mitigation IS in effect. Only a NON-EMPTY `[env]` value is a second
     delivery path that would defeat a deliberate absence.
     """
+    document = tomllib.loads(text)
+    env = document.get("env")
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        # Fail CLOSED: `env = "x"` is not a table, so this guard cannot say which
+        # names `[env]` supplies — and an unclassifiable delivery path must not
+        # certify a mitigation (the caller turns this into exit 2).
+        raise ValueError(
+            "fly.toml `env` is not a table, so the `[env]` delivery path cannot be "
+            "classified — refusing to certify any deliberate absence against it"
+        )
     values: dict[str, str] = {}
-    in_env = False
-    for line in text.splitlines():
-        # ⛔ STRIP THE COMMENT BEFORE THE HEADER TEST, not only before the value:
-        # `[env] # versioned config` is a valid TOML header, and requiring the
-        # stripped line to END with `]` left `in_env` False for the WHOLE file, so
-        # `fly_toml_env_assignments` returned `{}` and the ledger's `[env]` check
-        # accepted an entry for a name `[env]` assigns a real value to — a false
-        # record on the green path (#11332 review round 5, P2).
-        code = line.split("#", 1)[0]
-        stripped = code.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            # ⛔ A QUOTED HEADER IS THE SAME TABLE. TOML defines `["env"]` and
-            # `[ 'env' ]` as identical to `[env]`, so requiring the bare spelling
-            # left `in_env` False for the whole file — the same false PASS the
-            # comment above describes, one quoting style over (#11332 round 11, P2).
-            header = _toml_key(stripped[1:-1])
-            in_env = header == "env"
+    for key, value in env.items():
+        if isinstance(value, dict):
+            # `[env.sub]` declares a nested TABLE, not an assignment to `sub`.
             continue
-        if not in_env:
-            continue
-        # ⛔ A QUOTED KEY IS THE SAME KEY. `"SENTRY_DSN" = "https://…"` is legal TOML
-        # and maps to exactly the entry the bare form does (`tomllib` agrees), but a
-        # bare-identifier-only pattern read it as NO assignment at all — so check
-        # (0b-ii) skipped the name and the ledger certified a mitigation that
-        # `fly.toml [env]` was still supplying: a green `MITIGATED` over a value the
-        # ledger says is absent. That is a false PASS on this gate's own subject, in
-        # the arm round 2 added for it (#11332 round 11, P2).
-        match = _ENV_ASSIGNMENT_RE.match(code)
-        if match:
-            name = _toml_key(match.group(1))
-            raw = match.group(2).strip()
-            # ⛔ A VALUE THAT DOES NOT START ON THIS LINE IS *NOT* EMPTY. TOML allows
-            # `X =` / newline / `"real value"`, and taking only this line's text read
-            # that as `""` — i.e. as the `[env] = ""` PLACEHOLDER — so check (0b-ii)
-            # skipped a name `[env]` really assigns and the ledger certified a
-            # mitigation that was not in effect (#11332 review round 6, P1). The
-            # sentinel is non-empty on purpose: it can only cause a REFUSAL.
-            if not raw:
-                raw = "<value on a following line>"
-            # Normalise the quoting so `X = ""` and `X = ''` are EMPTY, not a
-            # two-character value: a quoted-empty placeholder is exactly what the
-            # real `fly.toml` carries, and reading it as non-empty reproduced the
-            # unrecordable-mitigation defect the value test exists to fix.
-            elif len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
-                raw = raw[1:-1]
-            values[name] = raw
+        values[key] = value if isinstance(value, str) else str(value)
     return values
 
 

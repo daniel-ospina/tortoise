@@ -1001,17 +1001,19 @@ jobs:
           # ⛔ A TAIL-ONLY FILTER IS NOT ENOUGH, AND THE HOLE IS NOT COSMETIC. The
           # payload does not merely copy env vars into ARGS: it COMPOSES derived
           # values from them — `BACKUP_SWEEP_ENABLED=true` only when a conjunction
-          # of nine secrets is present, and the versioned LLM-model default chosen
+          # of nine secrets is present, and the `::warning::`/`::notice::` emitted
           # from `[ -z "$OPENROUTER_API_KEY" ]`. Filtering at the tail left those
           # computed from the UNFILTERED values, so a ledger entry for
           # `TORTOISE_BACKUP_KEY` shipped `BACKUP_SWEEP_ENABLED=true` in the same
           # argv that did NOT carry the key: at boot `tortoise/backup_config.py`
           # raises a ConfigError whose text asserts the now-FALSE invariant, the
           # alert channel swallows it, and the backup sweep plus the staleness
-          # watcher start disabled with only a warning. A ledger entry for
-          # `OPENROUTER_API_KEY` was worse in the other direction — the `-z` branch
-          # that WARNS never ran, so a payload naming the openrouter default was
-          # staged with no key and no warning (#11332 review, P1).
+          # watcher start disabled with only a warning. The `OPENROUTER_API_KEY`
+          # branch was worse in the other direction — it never ran, so a payload
+          # that omits the key was staged with NO warning at all. ⛔ The versioned
+          # model DEFAULT is not part of that arm: it is selected by
+          # `TORTOISE_SESSION_LLM_MODEL` (below, and runbook §8.1), not by the key.
+          # What the tail-only filter suppressed there was the WARNING (#11332).
           #
           # So the ledgered names are BLANKED in the environment here, and every
           # downstream `[ -n ]`, conjunction and default observes the deliberate
