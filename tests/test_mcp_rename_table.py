@@ -37,6 +37,8 @@ import re
 import sys
 from pathlib import Path
 
+from tests._docs_drift_step import EXPECTED_DOCS_DRIFT_STEP
+
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "mcp_rename_table.py"
 DOC = ROOT / "docs" / "product" / "mcp-rename-table.md"
@@ -1118,25 +1120,12 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
     # pin GREEN). Exactness is what closes the family — `|| true`, `; true`, an
     # `echo` decoy, and a commented-out command alike, since `_code` has already
     # filtered comments.
-    expected = (
-        "pip install -e . --quiet\n"
-        "python3 tools/bridge_table.py --check\n"
-        "python3 tools/mcp_rename_table.py --check\n"
-        "python3 tools/sdk_surface.py --check\n"
-        # #5086: the doc↔tree guard joins the same step for the same `#4454`
-        # reason (a docs-only edit selects no surface), plus one of its own: its
-        # `measured_at_commit` ancestry claim needs HISTORY, and this job is the
-        # one that checks out at `fetch-depth: 0` (#5086 review P1-1). Listed
-        # here, not exempted: the exactness of this assertion is the point.
-        "python3 tools/substrate_map_check.py --check\n"
-        # #11084: the #5090 integration-surface map's own guard, for the same
-        # `#4454` reason again (a docs-only edit of the map selects no surface, so
-        # a row could vanish with nothing running). It is the ONE entry with no
-        # `--check` flag — the tool is verify-only by construction (`main()`
-        # parses, checks, returns 0/1/2; it has no write path), so the bare
-        # invocation is already the fail-on-drift form.
-        "python3 tools/test_design_map_check.py"
-    )
+    # ONE list, shared with `tests/test_merge_throughput.py` (#11412 root 2): the
+    # two copies were hand-typed and byte-identical, so #11084's fifth invocation
+    # reded BOTH shards on every PR at once. The list, its order and the reason
+    # each command is there live in `tests/_docs_drift_step.py`, so an addition is
+    # ONE edit and cannot move one pin without the other.
+    expected = EXPECTED_DOCS_DRIFT_STEP
     assert _code(str(step.get("run", ""))).strip() == expected, (
         "the drift step must invoke EXACTLY the installer plus the five "
         "verify-only commands — no shell operator, no `echo` decoy, no wrapper, no "
