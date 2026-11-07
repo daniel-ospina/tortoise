@@ -1220,18 +1220,25 @@ jobs:
           # takes the default, resolved from the run's cwd (the workspace root).
           MITIGATED=" "
           MITIGATION_LEDGER="${FLY_MITIGATION_LEDGER:-${GITHUB_WORKSPACE:-.}/.github/scripts/fly-secret-mitigations.txt}"
-          if [ -r "$MITIGATION_LEDGER" ]; then
-            while IFS= read -r LEDGER_LINE || [ -n "$LEDGER_LINE" ]; do
-              case "$LEDGER_LINE" in ''|'#'*) continue ;; esac
-              LEDGER_NAME="${LEDGER_LINE%%[[:space:]]*}"
-              case "$LEDGER_NAME" in ''|'#'*) continue ;; esac
-              MITIGATED="$MITIGATED$LEDGER_NAME "
-            done < "$MITIGATION_LEDGER"
+          # ⛔ AN UNREADABLE LEDGER FAILS THE DEPLOY; IT IS NEVER READ AS "NO MITIGATIONS".
+          # The gate step above refuses the same state (exit 2), so this arm is the
+          # second reader of one rule, not a replacement for it — but a bare
+          # `if [ -r … ]; then … fi` with no `else` made a ledger-path divergence
+          # (a moved file, a wrong `$GITHUB_WORKSPACE`) a SILENT no-op that stages
+          # every mitigated secret while the provenance gate reports green (review
+          # round 2, P2). The gate's suppression proof is a simulation of this
+          # payload; failing loudly here keeps the production path from diverging
+          # from the thing that proves it.
+          if [ ! -r "$MITIGATION_LEDGER" ]; then
+            echo "::error::#11122 — the mitigation ledger could not be read at ${MITIGATION_LEDGER}, so this deploy cannot tell a deliberate absence from an unconfigured secret and must not stage anything. Restore the file (or the path) and re-run."
+            exit 1
           fi
-          # An absent ledger is NOT read as "no mitigations" by this step — the
-          # gate above has already refused the deploy for it (exit 2), so reaching
-          # here means the file exists. The `-r` test exists only so the harness's
-          # stub run cannot abort on a missing file before the gate reports why.
+          while IFS= read -r LEDGER_LINE || [ -n "$LEDGER_LINE" ]; do
+            case "$LEDGER_LINE" in ''|'#'*) continue ;; esac
+            LEDGER_NAME="${LEDGER_LINE%%[[:space:]]*}"
+            case "$LEDGER_NAME" in ''|'#'*) continue ;; esac
+            MITIGATED="$MITIGATED$LEDGER_NAME "
+          done < "$MITIGATION_LEDGER"
           STAGED_ARGS=()
           for ARG in "${ARGS[@]}"; do
             ARG_NAME="${ARG%%=*}"

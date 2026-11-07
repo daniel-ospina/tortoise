@@ -2839,6 +2839,76 @@ class TestTheMitigationLedger:
         assert "SENTRY_DSN" in proc.stdout
         assert "will CREATE" in proc.stdout
 
+    def test_the_DEFAULT_ledger_path_is_the_one_production_takes(self, tmp_path):
+        """The shipped block, executed with NO seam — the resolution a deploy uses.
+
+        Every other test sets `FLY_MITIGATION_LEDGER` (the gate's stub harness seeds
+        it so the sample it classifies is filtered by the same file), so the
+        `${FLY_MITIGATION_LEDGER:-${GITHUB_WORKSPACE:-.}/…}` DEFAULT branch was never
+        executed anywhere: a wrong directory there would pass the suite and, before
+        the fail-loud guard landed, silently stage every mitigated secret in
+        production (review round 2, P2). This runs the real block with the seam
+        UNSET and `GITHUB_WORKSPACE` pointing at a tree that holds a ledger with an
+        entry — and asserts, on the block's own emitted argv, that the name is gone.
+        """
+        repo = tmp_path / "workspace"
+        (repo / ".github" / "scripts").mkdir(parents=True)
+        (repo / ".github" / "scripts" / "fly-secret-mitigations.txt").write_text(_entry())
+        script = (
+            'ARGS=(FASTAPI_INTERNAL_KEY=k SENTRY_DSN=dsn OPT_SECRET=o)\n'
+            + _LEDGER_FILTER
+            + 'printf "%s\\n" "${ARGS[@]}"\n'
+        )
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            # ⛔ NO FLY_MITIGATION_LEDGER — that is the whole point of this test.
+            "GITHUB_WORKSPACE": str(repo),
+        }
+        assert "FLY_MITIGATION_LEDGER" not in env
+        proc = subprocess.run(
+            ["bash", "-e", "-u", "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        staged = [line.split("=", 1)[0] for line in proc.stdout.splitlines() if "=" in line]
+        assert "SENTRY_DSN" not in staged, (
+            "the DEFAULT ledger path resolved to nothing, so the shipped block staged "
+            f"a name the ledger records as deliberately absent: {staged}"
+        )
+        assert "FASTAPI_INTERNAL_KEY" in staged and "OPT_SECRET" in staged, (
+            f"the block staged nothing at all — the harness broke, not the filter: {staged}"
+        )
+
+    def test_an_unreadable_ledger_fails_the_deploy_instead_of_staging_everything(self, tmp_path):
+        """No `else` on the `-r` guard was a silent "no mitigations" (review round 2).
+
+        Executed, not read: the shipped block with a seam pointing at a path that does
+        not exist must FAIL, never fall through to an unfiltered payload.
+        """
+        script = 'ARGS=(FASTAPI_INTERNAL_KEY=k SENTRY_DSN=dsn)\n' + _LEDGER_FILTER
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "FLY_MITIGATION_LEDGER": str(tmp_path / "not-here.txt"),
+        }
+        proc = subprocess.run(
+            ["bash", "-e", "-u", "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+        assert proc.returncode != 0, (
+            "an unreadable ledger was read as 'no mitigations' — the payload staged "
+            f"every secret and nothing failed: {proc.stdout}"
+        )
+        assert "could not be read" in proc.stdout
+        assert "#11122" in proc.stdout
+
     def test_a_ledgered_name_the_payload_still_stages_fails_the_deploy(self):
         """Dropping the filter from the workflow must not be a silent re-arm.
 
