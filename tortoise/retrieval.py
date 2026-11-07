@@ -2331,9 +2331,11 @@ def _session_admission_key(
     material belongs to different conversations).
 
     ⛔ The camel leg is here so this grain AGREES with the pool authority
-    (:func:`session_key_of`) on every IDENTIFIED hit — before it, a
-    camel-only pool was N per-hit phantom buckets whose cap never bound and
-    which ``seeded_sessions`` read as NO session, while ``session_blocks``
+    (:func:`session_key_of`) on every hit whose identity BOTH grains read in
+    the SAME spelling (the snake-id and camel-id shapes; the divergences
+    below are where one grain reads an identity the other does not) — before
+    it, a camel-only pool was N per-hit phantom buckets whose cap never bound
+    and which ``seeded_sessions`` read as NO session, while ``session_blocks``
     built N singleton blocks, so ``assemble_session_context`` degraded to the
     fragment admission #2976 exists to replace. Measured: three ``{"id": …, "sessionId": "sessA"}``
     hits → ``session_blocks`` → 3 blocks of 1; with this leg → 1 block of 3.
