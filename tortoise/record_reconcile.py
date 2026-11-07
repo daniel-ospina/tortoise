@@ -102,16 +102,22 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   too), which the record does not carry — §17.1's chokepoint signature,
   DECLARED BY NOTHING and reported rather than detected
   here (its repair is *find the writer*; measured at `#11184`'s review, filed
-  `#11221`); and the two declared classes below, which the record's TABLE holds
-  and the record SIDE (this comparison's own projector-built map) omits — which
-  is why they are bucketed here rather than compared. The distinction is
+  `#11221`); and the two declared classes below, which the record's TABLE can
+  hold and the record SIDE (this comparison's own projector-built map) omits —
+  which is why they are bucketed here rather than compared. The distinction is
   load-bearing, not pedantry: a name is withheld from the comparison because
   ``record_props`` does not carry it, and for these classes that is because the
   projector declines them, not because the record has nothing to say. ⚠️ It is
   also PER ROW, not per class: the decline for ``_searchText`` is relaxed on a
   post-#10000 row (#10965), so the record side then HOLDS that one name, it is
   compared, and a cache that lost it is a ``field_mismatches`` entry — the
-  residue `#11233` owns on the other instrument.
+  residue `#11233` owns on the other instrument. ⛔ The row decides the
+  ``story_arc`` CLASS too, and there it decides whether a clear is
+  DESTRUCTIVE: the record holds it on a row whose ``public.{source,event}.story_arc``
+  or ``public.session_narrative.narrative`` carries the prose, and holds NOTHING
+  on every commit written before `#9555`'s ``SessionNarrated`` carrier — where the
+  graph copy is the ONLY copy, so a per-class reading of this paragraph licenses
+  the one clear that destroys it (see (5)).
   They are neither a mismatch nor invisible:
   :func:`reconcile_record_and_cache` partitions them into a named ``graph_only``
   count (the ``form_normalized`` precedent). ⚠️ THREE DECLARED classes arrive
