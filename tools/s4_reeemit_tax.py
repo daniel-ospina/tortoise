@@ -46,9 +46,13 @@ hits — bounded at ``max_queries=15`` × ``limit=3``, with the capture's own
 turn echoes dropped — never the session's own list relabelled as "already
 exists". The reconstruction therefore maximally SUPPRESSES gap emission in
 the delta arm (a "emit only what is missing" contract told that everything
-already exists emits nothing), which is why `compare` reports the delta
-arm's `s4_items` / `added_by_s4` next to the token number instead of
-leaving the saving to be read alone (#11385 review P1).
+already exists emits nothing) while maximally FRIENDING its correction channel —
+and only for the 231 of the 266 items it can offer (`_render_search_results`
+renders entities/points/events and has no `operators` section, so the 35
+operators are never shown). The two value channels therefore sit at OPPOSITE
+extremes and the aggregate's DIRECTION is not established, which is why
+`compare` reports the delta arm's `s4_items` / `added_by_s4` next to the token
+number instead of leaving the saving to be read alone (#11385 review P1/P3).
 
 Composition is recorded alongside the tokens (`_s4_merge_stats` /
 `_verbatim_reemissions`, the #2408 census quantities), so a reader can see
@@ -710,6 +714,46 @@ def _model_for(model_id: str):
     return DeepSeekDirectModel(model_id)
 
 
+# ⛔ The emitted caveats are a module-level constant so a TEST can pin them.
+# They were previously an inline list inside `cmd_run`, which made the one claim
+# that separates "fixed" from "re-permitted" — the README keeps the artifacts'
+# one-sided `caveats[2]` sentence on the strength of "the instrument at this head
+# emits a corrected string" — unpinnable: reverting the emitted prose to the
+# refuted CEILING wording passed every test (#11385 review P3).
+CAVEATS: tuple[str, ...] = (
+    "Measured per-session S4 output tokens on RECORDED real S2 geometry "
+    "(the 4 tax-surface sections); the prompt inputs are identical "
+    "across arms, so the delta is the output contract's effect.",
+    "The replayed S2 embed list is the 4 tax sections — 266 of the 311 "
+    "items the receipts record (chain_notes 7 and link_before_create 38 "
+    "are not in the prompt; retractions 0). Both arms see the same "
+    "narrowed list, so the A/B stays single-variable, but it shrinks the "
+    "legacy arm's re-emit target and therefore UNDERSTATES the measured "
+    "reduction (#11385 review P3).",
+    "One call per arm per session (no production-run composition): model "
+    "compliance in the wild is not measured here — it is OBSERVABLE per "
+    "row via verbatim_reemissions / added_by_s4 / corrected_by_s4 / "
+    "s4_delta_reemit_suspect.",
+    "The S3 search block is reconstructed from the session's own S2 list "
+    "and is NOT production geometry: extract_session_v2 runs S3 "
+    "(search_graph) BEFORE S4 and writes the session's items only "
+    "afterwards (execute_embed), so production S4 sees bounded "
+    "PREVIOUS-graph hits (max_queries=15 x limit=3, the capture's own "
+    "turn echoes dropped). Relabelling the session's own list as "
+    "already-in-the-graph is the maximally gap-SUPPRESSING input for a "
+    "delta contract AND the maximally correction-FRIENDLY one (a "
+    "correction is emitted only where the search shows the item exists) "
+    "— for the 231 of the 266 items it can offer: the block renders "
+    "entities/points/events only, so the 35 operators are never shown "
+    "(in production too) and their correction channel is structurally "
+    "zero here. So the two value channels are measured at opposite "
+    "extremes and the aggregate's direction is not established — "
+    "neither a ceiling nor a floor.",
+    "model_id is the model REQUESTED; the served id is not recorded here.",
+    "Accuracy / chunk@20 are the eval lane's gates and are NOT measured here.",
+)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     if not os.environ.get("DEEPSEEK_API_KEY"):
         print("REFUSED: DEEPSEEK_API_KEY is not set — an S4 A/B with no model "
@@ -771,38 +815,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             for p in pairs
         ],
         "summary": summary,
-        "caveats": [
-            "Measured per-session S4 output tokens on RECORDED real S2 geometry "
-            "(the 4 tax-surface sections); the prompt inputs are identical "
-            "across arms, so the delta is the output contract's effect.",
-            "The replayed S2 embed list is the 4 tax sections — 266 of the 311 "
-            "items the receipts record (chain_notes 7 and link_before_create 38 "
-            "are not in the prompt; retractions 0). Both arms see the same "
-            "narrowed list, so the A/B stays single-variable, but it shrinks the "
-            "legacy arm's re-emit target and therefore UNDERSTATES the measured "
-            "reduction (#11385 review P3).",
-            "One call per arm per session (no production-run composition): model "
-            "compliance in the wild is not measured here — it is OBSERVABLE per "
-            "row via verbatim_reemissions / added_by_s4 / corrected_by_s4 / "
-            "s4_delta_reemit_suspect.",
-            "The S3 search block is reconstructed from the session's own S2 list "
-            "and is NOT production geometry: extract_session_v2 runs S3 "
-            "(search_graph) BEFORE S4 and writes the session's items only "
-            "afterwards (execute_embed), so production S4 sees bounded "
-            "PREVIOUS-graph hits (max_queries=15 x limit=3, the capture's own "
-            "turn echoes dropped). Relabelling the session's own list as "
-            "already-in-the-graph is the maximally gap-SUPPRESSING input for a "
-            "delta contract AND the maximally correction-FRIENDLY one (a "
-            "correction is emitted only where the search shows the item exists) "
-            "— for the 231 of the 266 items it can offer: the block renders "
-            "entities/points/events only, so the 35 operators are never shown "
-            "(in production too) and their correction channel is structurally "
-            "zero here. So the two value channels are measured at opposite "
-            "extremes and the aggregate's direction is not established — "
-            "neither a ceiling nor a floor.",
-            "model_id is the model REQUESTED; the served id is not recorded here.",
-            "Accuracy / chunk@20 are the eval lane's gates and are NOT measured here.",
-        ],
+        "caveats": list(CAVEATS),
     }
     if args.out:
         out = Path(args.out)

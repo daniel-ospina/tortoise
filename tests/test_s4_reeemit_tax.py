@@ -901,6 +901,18 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
             f"{_thousands(prs['sum_delta_out_tokens'])} tokens, **−"
             f"{prs['token_weighted_reduction'] * 100:.2f} %**") in flat_all
 
+    # ⛔ the truncation cell quotes "the largest output in either arm of either run"
+    # — so BOTH runs' maxima must be in the document, each attributed. A
+    # primary-scoped cell quoting the re-run's maximum mixes runs, which is the
+    # transcription-slip class this pin exists for (#11385 review P3).
+    max_pri = max(a[arm].get("out_tokens") or 0
+                  for a in pri["arms"] for arm in ("legacy", "delta"))
+    max_rer = max(a[arm].get("out_tokens") or 0
+                  for a in rer["arms"] for arm in ("legacy", "delta"))
+    assert max_rer > max_pri, (max_pri, max_rer)   # else the cell's claim is moot
+    assert _thousands(max_rer) in flat_all, max_rer
+    assert _thousands(max_pri) in flat_all, max_pri
+
     for art in (pri, rer):
         s, comp = art["summary"], art["summary"]["composition"]
         lg, dl = comp["legacy"], comp["delta"]
@@ -1110,7 +1122,48 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
             if "1789" in ln and "re-emit tax" in ln]
     assert len(rows) == 1, f"expected exactly one #1789 index row, got {len(rows)}"
     flat = " ".join(rows[0].split())
+    # ⛔ DELIMITERS too, not just the wording: an orphan `)` survived TWO
+    # consecutive fixes of this very row and every test stayed green, because
+    # replacing a parenthesised group with an em-dash construction keeps the old
+    # closing delimiter unless something counts brackets (#11385 review P3).
+    assert _paren_depth_ok(flat), f"unbalanced parentheses in the #1789 row: {flat}"
+    assert flat.count("(") == flat.count(")"), f"unbalanced brackets: {flat}"
     assert "all 266 items offered" not in flat, "the refuted claim is back"
     assert "231 of the 266" in flat, "the corrected population is missing"
     assert "operators" in flat, (
         "the row must say WHY it is 231 — the never-rendered operators section")
+
+
+def _paren_depth_ok(text: str) -> bool:
+    """A cheap, structural delimiter check for a one-row markdown table cell.
+
+    ⛔ This exists because an unbalanced `)` survived TWO consecutive fixes in
+    `docs/00_index.md` and no pin noticed: a prose edit that replaces a
+    parenthesised group with an em-dash construction keeps the old delimiter
+    unless something counts it (#11385 review P3)."""
+    depth = 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
+    """The README keeps the artifacts' one-sided `caveats[2]` sentence by saying
+    "the instrument at this head emits a corrected string" — a claim about
+    emitted PROSE that nothing pinned: reverting the emitted caveat to the
+    refuted CEILING wording passed every other test.
+
+    ⛔ And the artifacts' own caveat list is SHORTER than the instrument's (5 vs
+    6), so a reader who trusts the artifact alone gets neither the corrected
+    direction nor either population caveat. This pins the emitted strings, so
+    the sentence in the README stays true (#11385 review P3)."""
+    caveats = " ".join(tool.CAVEATS)
+    assert "neither a ceiling nor a floor" in caveats, caveats
+    assert "231 of the 266" in caveats, "the offered population is not emitted"
+    assert "266 of the 311" in caveats, "the replayed-list narrowing is not emitted"
+    assert "is a CEILING" not in caveats, "the refuted one-sided wording is back"

@@ -24,7 +24,12 @@ written, so S4 sees it" reading, so that one string was replaced — with the
 **intermediate** caveat, which still ends "…so the measured saving is a CEILING and the
 delta arm's `added_by_s4` / `s4_items` read as a floor." That one-sided wording is itself
 superseded by *What this does not measure* below (it is a caveat, never a measurement, and
-no measured field was touched); the instrument at this head emits a corrected string. **No measured field was touched** — every token count,
+no measured field was touched); the instrument at this head emits a corrected string, pinned by
+`test_the_emitted_caveats_carry_the_corrected_population_and_direction`. ⚠️ The **caveats
+list** also postdates the artifacts in a second sense: they carry **5** entries and the
+instrument now emits **6** — the two added are the population caveats (231 of the 266
+rendered items; 266 of the 311 recorded items in the replayed list), so a reader who trusts
+the artifact's own caveats alone gets neither. **No measured field was touched** — every token count,
 composition channel and reduction is byte-identical to what the runs emitted; re-running
 needs a paid key and would move the numbers for reasons unrelated to the correction. The
 filenames are each
@@ -49,7 +54,7 @@ Task 10 (fresh 50-question E2E) was never run, so the delta contract's
 | issue target | measured | verdict |
 |---|---|---|
 | **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 787 → 2 038 output tokens over 7 sessions); median **−96.9 %**, worst session **−85.16 %**, best **−98.3 %** | **MET**, 2.3× the threshold; each of the 7 sessions clears 40 % on its own. ⚠️ **This is not production's saving, and its DIRECTION is not established by this artifact** — see *What this does not measure*: the reconstructed S3 block offers the delta arm **231 of the 266** S2 items as already existing — the block renders entities/points/events only, so the 35 `operators` items are never offered (in production too), and their correction channel is structurally zero — which is the **maximum** correction opportunity for those 231 (the arm took none: 0 collisions, which is therefore *not* evidence about operator corrections) while it is the **minimum** for gaps — so one channel is measured at its most favourable input and the other at its least, and the aggregate could be either |
-| truncation rate → near 0 | `truncated=False` on **14/14** arm calls, `attempts=1` | ⚠️ **NOT EVIDENCED.** The largest output either arm produced (7 814 tokens) is **under half** the 16 000-token default (`_S2_S4_MAX_TOKENS`), so this geometry has no plausible route to truncation and a null here is an artefact of the harness, not a measurement of the rate. ⚠️ The effective cap is `_stage_cap(_S2_S4_MAX_TOKENS)`, which is env-overridable (`TORTOISE_EXTRACTOR_MAX_TOKENS`) and is **not recorded in the artifact** — so the margin is stated against the DEFAULT, and a box with the override set would need its own reading. What the artifact does record is the outcome (`truncated: false` on every call). That target needs the eval lane's geometry. |
+| truncation rate → near 0 | `truncated=False` on **14/14** arm calls, `attempts=1` | ⚠️ **NOT EVIDENCED.** The largest output in either arm of either run (**7 814** tokens, the re-run's; this table's own primary run tops out at **6 521**) is **under half** the 16 000-token default (`_S2_S4_MAX_TOKENS`), so this geometry has no plausible route to truncation and a null here is an artefact of the harness, not a measurement of the rate. ⚠️ The effective cap is `_stage_cap(_S2_S4_MAX_TOKENS)`, which is env-overridable (`TORTOISE_EXTRACTOR_MAX_TOKENS`) and is **not recorded in the artifact** — so the margin is stated against the DEFAULT, and a box with the override set would need its own reading. What the artifact does record is the outcome (`truncated: false` on every call). That target needs the eval lane's geometry. |
 | accuracy ≥ 0.826 / chunk@20 ≥ 0.738 | **not measured here** — the eval lane's gates | see *What this does not measure* |
 
 Re-run (`ab-20261107T024226Z`): 33 912 → 2 047 tokens, **−93.96 %**, median
@@ -286,7 +291,7 @@ corrected items with the cap/census accounting above, composition totals, and th
 per-arm `s4_delta_empty` / `s4_delta_reemit_suspect` flags derived with
 production's own predicates) and `ab-20261107T024226Z.json` (the re-run).
 
-Instrument tests: `tests/test_s4_reeemit_tax.py` (**35** tests, offline, fake
+Instrument tests: `tests/test_s4_reeemit_tax.py` (**36** tests, offline, fake
 model) — they pin the ways a number like this goes wrong silently: a vacuous A/B, the
 two arms receiving different inputs, a mis-attributed cost (a per-call total
 rather than the final call; `null` rather than 0 when the provider reports
