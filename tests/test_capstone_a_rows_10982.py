@@ -683,11 +683,39 @@ def test_the_floor_clause_exemption_is_BOUND_to_the_rows_own_pinned_floor():
 
 # The one-directional binding the gate uses: a row absent from the map can never have a clause
 # stripped, which fails CLOSED rather than open.
-def test_an_unregistered_row_can_never_have_a_floor_clause_stripped():
+def test_a_row_ABSENT_from_the_floor_map_never_has_a_floor_clause_stripped():
+    """FAILS IF the absent-floor path lands on the LAUNDERING branch instead of a refusal.
+
+    ⛔ The first cut of this arm asserted the opposite of its own name: it pinned
+    `_strip_the_rows_own_floor(…, None) == " x"`, i.e. it DEMONSTRATED that an unbound row strips
+    the clause unconditionally — which put the absent-row path back on the laundering branch. The
+    composed consequence was measured: deleting `criteria[A4].floor` while writing a bar into
+    A4's cell left `capstone_preregistration_check.py` at **exit 0**, while the identical cell with
+    the pointer kept exited 1. A record-only edit REMOVED the refusal (#11331 review round 9).
+
+    Three directions are pinned: an unbound row strips NOTHING (fail CLOSED); a bound row strips
+    only its own value; and the CHECKER handed an empty map — what an unreadable record yields —
+    refuses a barred A4 exactly as it does with the real map.
+    """
     assert check._registered_floor_values(Path("/nonexistent-evidence-dir")) == {}
-    assert check._strip_the_rows_own_floor("floor of >= 30 x", None) == " x"  # no record: legacy
+    # An unbound row strips NOTHING — the comparator survives and reds the arm.
+    assert check._strip_the_rows_own_floor("floor of >= 0.5 x", None) == "floor of >= 0.5 x"
+    assert check._strip_the_rows_own_floor("floor of >= 30 x", None) == "floor of >= 30 x"
+    # A pinned row strips only the value the record pins.
     assert check._strip_the_rows_own_floor("floor of >= 0.5 x", 30.0) == "floor of >= 0.5 x"
     assert check._strip_the_rows_own_floor("floor of >= 30 x", 30.0) == " x"
+    # …and through the CHECKER: an EMPTY map is the unreadable-record / absent-pointer case, and it
+    # must refuse a laundered bar rather than excuse it.
+    rows = check.parse_criteria_rows(PREREG.read_text())
+    a4 = next(r for r in rows if r["id"] == "A4")
+    barred = "UNMEASURED(#10988 decides) floor of >= 0.5 typed_share"
+    failures = check.check_completeness(
+        [dict(r, threshold=barred) if r is a4 else r for r in rows], {})
+    assert any("outside its floor" in f for f in failures), (
+        "an EMPTY floor map must strip nothing and refuse the bar — this is the path an "
+        f"unreadable record takes: {failures}")
+    # The real map still accepts the record, so the fail-closed direction did not red the artifact.
+    assert check.check_completeness(rows, check._registered_floor_values(PREREG_DIR)) == []
 
 
 def test_a_REQUIRED_row_cannot_declare_itself_a_non_bar():
@@ -798,11 +826,17 @@ def test_the_rendered_block_emits_every_row():
     for row in ("a1 ", "a2 ", "a3 ", "a4 ", "a5 ", "TAGGED_edges=0"):
         assert row in rendered, rendered
     assert "UNMEASURED(" in rendered
-    for part in ("attach=", "mint=", "held=", "candidates=", "decided_candidates=",
-                 "attach_share="):
-        assert "a2 " in rendered and part in rendered.split("a2 ", 1)[1].split("\n", 1)[0], (
-            f"the a2 line does not render {part} — the block would carry a registered part the "
-            f"log never shows:\n{rendered}")
+    # ⛔ `"candidates="` IS A SUBSTRING OF `"decided_candidates="`, so a substring test cannot see
+    # the all-candidate count go missing — measured at #11331 review round 9: deleting
+    # `candidates={a2['candidates']}` from the renderer left the substring form GREEN. The key is
+    # matched at a word boundary that `_` does not satisfy, so `decided_candidates=` cannot stand
+    # in for `candidates=`.
+    a2_line = rendered.split("a2 ", 1)[1].split("\n", 1)[0]
+    for part in ("attach", "mint", "held", "candidates", "decided_candidates",
+                 "attach_share"):
+        assert re.search(rf"(?<![\w-]){re.escape(part)}=", a2_line), (
+            f"the a2 line does not render {part}= — the block would carry a registered part the "
+            f"log never shows:\n{a2_line}")
     # A5's registered denominator promises the Point population BESIDE the Subject count; a block
     # field the log never renders is one a scorer never reads (#11331 review round 8, P2-4b).
     assert "point_population=40" in rendered.split("a5 ", 1)[1].split("\n", 1)[0], rendered

@@ -421,7 +421,7 @@ FLOOR_CLAUSE = re.compile(
 
 
 def _strip_the_rows_own_floor(text: str, value: float | None) -> str:
-    """`text` with the row's OWN registered floor clause removed — never any `floor of …`.
+    """`text` with the row's OWN registered floor clause removed — and NOTHING when it has no pin.
 
     ⛔ THE CLAUSE IS IDENTIFIED BY ITS VALUE, not by the words in front of it. Only a number the
     record PINS is a floor (a refusal boundary, §3.7); a number it does not pin is a bar however
@@ -429,13 +429,22 @@ def _strip_the_rows_own_floor(text: str, value: float | None) -> str:
     floor this row's own registration names, and every other comparator stays in the cell and
     reds the arm.
 
-    `value is None` means the caller supplied no record (a unit test on a bare row list), and the
-    clause is then stripped unconditionally — the pre-existing behaviour. The GATE always passes
-    the map (`check()` reads it from the same record it validates), so the binding is what runs
-    on every real check; a caller that skips it loses the binding, never the gate.
+    ⛔ `value is None` STRIPS NOTHING — that is the absent-row case, and it must fail CLOSED.
+    An earlier cut stripped unconditionally on `None`, which put the ABSENT-row path back on the
+    laundering branch: measured at #11331 review round 9, deleting `criteria[A4].floor` while
+    writing a bar into A4's cell left the gate at exit 0, while the identical cell with the
+    pointer kept exited 1 — i.e. a record-only edit REMOVED the refusal, and both this function
+    and `_registered_floor_values` documented the opposite. A row the map does not name can never
+    have a clause stripped, so the comparator survives and the arm reds.
+
+    The no-record caller (a unit test on a bare row list) is the CHECKER's concern, not this
+    function's: `check_completeness` strips by shape alone only when it was handed no map at all.
+    The gate always hands it one (`check()` reads the map from the same record it validates), so
+    the value binding is what runs on every real check — and an unreadable record yields `{}`,
+    which strips nothing, which fails CLOSED.
     """
     if value is None:
-        return FLOOR_CLAUSE.sub("", text)
+        return text
 
     def _drop(match: re.Match[str]) -> str:
         try:
@@ -451,8 +460,10 @@ def _registered_floor_values(directory: Path) -> dict[str, float]:
 
     One direction only: `criteria[].floor` names a key in `denominator_floors`, and the pair is
     what makes a floor clause identifiable. A row with no floor, or a floor key the record does
-    not pin, is simply absent — and an absent row can never have a clause stripped, which fails
-    CLOSED. Unreadable or malformed records yield `{}` for the same reason.
+    not pin, is simply ABSENT from the result — and an absent row strips nothing at the caller
+    (`_strip_the_rows_own_floor` returns the cell untouched for `None`), which fails CLOSED.
+    Unreadable or malformed records yield `{}` for the same reason: nothing is pinned, so no
+    clause is a floor, so no comparator can be excused by the phrase in front of it.
     """
     try:
         record = json.loads((directory / MACHINE_RECORD).read_text())
@@ -3900,8 +3911,14 @@ def check_completeness(rows: list[dict[str, str]],
             # stripping any `floor of <comparator> <number>` let the two words launder a bar
             # (`floor of >= 0.5 typed_share` exited OK with no finding), which is a record-only
             # edit giving A4 a bar — the thing §7 item 1 says cannot happen.
-            remainder = _strip_the_rows_own_floor(
-                plain, (row_floors or {}).get(row["id"]))
+            remainder = (
+                # ⛔ NO MAP AT ALL is a unit test on a bare row list: strip by shape, the legacy
+                # behaviour. A map that is PRESENT but does not name this row is the absent-row
+                # case and strips nothing, so the comparator reds — the fail-closed direction the
+                # docstring promises. The gate always supplies a map, so `None` never reaches here
+                # on a real check (#11331 review round 9: `{}` used to fall into `None`).
+                FLOOR_CLAUSE.sub("", plain) if row_floors is None
+                else _strip_the_rows_own_floor(plain, row_floors.get(row["id"])))
             if any(c in remainder for c in COMPARATORS):
                 failures.append(
                     f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "

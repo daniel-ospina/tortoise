@@ -6054,6 +6054,18 @@ def _measurement_only(monkeypatch):
     # here keeps each block's coverage in the block that owns it, instead of making every ordering
     # test depend on a step declaration the ordering rule does not consume.
     monkeypatch.setattr(check, "check_step_partition_applies", lambda directory, pins, record: False)
+    # …and the ROW→FLOOR map the completeness half now binds its floor-clause exemption against
+    # (#11331 review round 9). It is read from the machine record, which these fixtures
+    # deliberately do not commit (that is what the `check_machine_record` stub above replaces), so
+    # without this the ABSENT record reads as "this row has no pinned floor" — which is now a
+    # REFUSAL of any comparator, and the REAL `A4` cell carries a legitimate one. Supplying the
+    # real map is again "satisfied rather than exercised": no arm below measures floors, and the
+    # floor binding has its own arms in `test_capstone_a_rows_10982.py`. Capturing the function
+    # before patching is required — calling `check._registered_floor_values` from inside the
+    # replacement would resolve to the replacement.
+    _real_floor_values = check._registered_floor_values
+    monkeypatch.setattr(check, "_registered_floor_values",
+                        lambda directory: _real_floor_values(PREREG_DIR))
 
 
 def test_a_bundle_with_no_log_does_not_claim_a_measured_ordering(tmp_path, monkeypatch, capsys):
@@ -6332,6 +6344,15 @@ def test_an_ordering_violation_is_not_reported_as_a_verified_claim(tmp_path, mon
     prereg = _commit_prereg(repo, epoch=1_700_003_000,
                             text=(PREREG_DIR / check.PREREG_NAME).read_text())
     _publish_base(repo)
+    # ⛔ The completeness half's floor binding reads the machine record, and this fixture commits
+    # only the DOCUMENT. Without the map, the ABSENT record means "A4 has no pinned floor", so the
+    # real A4 cell's legitimate floor clause is refused and its `UNMEASURED(...)` text lands in the
+    # output this test scans for an UNMEASURED *ordering* outcome — a red about a half the test does
+    # not measure (#11331 review round 9). Same "satisfied rather than exercised" shape as
+    # `_measurement_only`; the floor binding has its own arms in `test_capstone_a_rows_10982.py`.
+    _real_floor_values = check._registered_floor_values
+    monkeypatch.setattr(check, "_registered_floor_values",
+                        lambda directory: _real_floor_values(PREREG_DIR))
     log = prereg.parent / "capstone.log"
     log.write_text("x\n")
     _git(repo, "add", str(log.relative_to(repo)))
