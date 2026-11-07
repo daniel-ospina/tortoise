@@ -165,7 +165,7 @@ Straight from the `test-design` checklist, restricted to the items that actually
 | **R2** | a §1 row whose layer is empty or outside `{unit, contract, live-docker, doc-assert, guard}` |
 | **R3** | a §1 row whose failure cell is empty or under 8 words (a mechanism restated is not a failure) |
 | **R4** | a §1 surface named by **no** child in §4 (the issue's "no surface that no child touches") |
-| **R5** | a plan §5/§6/§7 seam missing from the §5 crosswalk, a crosswalk row that names a surface with no row in §1, a crosswalk row whose **surface cell names nothing** (the third "names nothing" arm, beside R1's and R4's), **a crosswalk row that is not the table's exact 4 columns** (a **deleted** surface cell shifts the note into the surface column, where the note's own words satisfy the arm beside it), or a row an editor **splits out of the table** with an inserted alignment line |
+| **R5** | a plan §5/§6/§7 seam missing from the §5 crosswalk (a seam matches only on the row's **whole** first cell, so `\| §5 row 10 \|` cannot stand in for `\| §5 row 1 \|` — a prefix match let one digit off hide the pinned crosswalk), a crosswalk row that names a surface with no row in §1, a crosswalk row whose **surface cell names nothing** (the third "names nothing" arm, beside R1's and R4's), **a crosswalk row that is not the table's exact 4 columns** (a **deleted** surface cell shifts the note into the surface column, where the note's own words satisfy the arm beside it), or a row an editor **splits out of the table** with an inserted alignment line |
 
 ⚠️ **R1's population pin is the load-bearing half**, and it is here because review measured the hole:
 deleting the `SF13` row **and every mention of it** leaves every referential check above satisfied, so
@@ -318,11 +318,11 @@ a rule that is quietly weakened in a way a *document* mutation can reach (a reve
 rule) reds the self-test rather than passing silently, because the arm nothing runs is not a guard.
 ⚠️ **One rule in that class is NOT covered, and this paragraph used to claim it was.**
 `MIN_FAILURE_WORDS` is a one-character edit (`8` → `7`) and the arm stays green through it — measured
-sweep: `8` → `18/18` exit 0, `7` → exit 0, `6` → exit 0, `5` → exit 0, `4` → exit 0, `3` → exit 1
-(`1/18 NOT caught`). The reason is in the population, not the arm: the only word-floor case shortens a
+sweep: `8` → `20/20` exit 0, `7` → exit 0, `6` → exit 0, `5` → exit 0, `4` → exit 0, `3` → exit 1
+(`1/20 NOT caught`). The reason is in the population, not the arm: the only word-floor case shortens a
 failure cell to **3** words, so a floor any higher than 3 still refuses it. The floor is therefore
 review-visible only, and a reviewer reading a `MIN_FAILURE_WORDS` diff is the whole control. What the
-arm does cover here is the *width* rule (`!= 7` → `< 7` → exit 1, `2/18 NOT caught`) and the parity rule
+arm does cover here is the *width* rule (`!= 7` → `< 7` → exit 1, `2/20 NOT caught`) and the parity rule
 (reverted `_is_escaped` → exit 1). That job is the **REQUIRED,
 path-filter-free** context, and it is the only one that can see a docs-only edit, because such an edit
 selects no test surface. So a lane that deletes a row here gets a red `docs` check rather than a green

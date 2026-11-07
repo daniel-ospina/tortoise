@@ -358,11 +358,16 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     crosswalk = sections["5"]
     present: set[str] = set()
     for seam in PLAN_SEAMS:
+        # The seam must EQUAL the row's first cell, not merely prefix it. A prefix
+        # match let a row labelled one digit off stand in for the pinned seam:
+        # rename `| §5 row 1 |` to `| §5 row 10 |` and the pinned `§5 row 1`
+        # crosswalk (SF1/SF2) was gone while the map graded CLEAN — measured, and
+        # the same for `§6.1` masked by `§6.10`. The message is unchanged.
         row = next(
             (
                 line
                 for line in crosswalk.splitlines()
-                if re.match(r"^\|\s*" + re.escape(seam), line)
+                if line.startswith("|") and cells(line)[:1] == [seam]
             ),
             None,
         )
