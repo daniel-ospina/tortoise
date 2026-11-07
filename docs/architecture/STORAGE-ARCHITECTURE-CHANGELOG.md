@@ -2130,7 +2130,10 @@ REFUSED as server-managed on BOTH anchors — `_SOURCE_SERVER_MANAGED_PROPS` / `
 with the stored value untouched) and **false on a
 `:Point`**, which has a non-destructive in-place one: `update_point(<id>, story_arc=None)` clears the property and KEEPS
 the node (measured — the `None` passes `sdk._refuse_unpaired_narrative`, whose refusal is on a NON-EMPTY narrative, and
-`update_point`'s `SET n += $props` removes a `None`-valued key). ⚠️ Its durability is JOURNAL-bound only — ⚠️ and that bound has a REACH: a `rebuild_all` asks the SAME L2 name guard as the restore (`_assert_test_graph`, refused PRE-WIPE on every production name), so on a production server graph the replay is REFUSED and the `:Point` clear IS durable there; it is defeated only on a graph a rebuild can reach (a `test_`/`tortoise_test` server name, or an embedded `path=` DB): the journal
+`update_point`'s `SET n += $props` removes a `None`-valued key). ⚠️ **That route is subject to the SAME per-row test as the
+anchors** — clear only where the record still HOLDS the text for the session (`public.session_narrative.narrative`, or the
+point's own `props` tail); where neither carries it the node's copy is the ONLY one and the clear deletes it, the
+`rebuild_all` that would put it back being refused PRE-WIPE on a production name (`§17.2`). ⚠️ Its durability is JOURNAL-bound only — ⚠️ and that bound has a REACH: a `rebuild_all` asks the SAME L2 name guard as the restore (`_assert_test_graph`, refused PRE-WIPE on every production name), so on a production server graph the replay is REFUSED and the `:Point` clear IS durable there; it is defeated only on a graph a rebuild can reach (a `test_`/`tortoise_test` server name, or an embedded `path=` DB): the journal
 records the `None`, but the `PointRevised` fold has no `story_arc` clause and the creation fold's open-set passthrough
 (`projection.entities._persist_extra_props`) SKIPS a `None` value, so a `rebuild_all` over a journal whose creation
 record carried the prose re-materialises it — that replay half is `#10429`'s. ⚠️ The RECORD→CACHE rebuild is the other
@@ -2139,11 +2142,13 @@ way round: the patch stores `props.story_arc = null`, `_props_from_row` returns 
 the MCP tool `tortoise_update_point`. A `:Point` carrying the
 prose whose record tail does NOT also carry it is a `graph_only` occurrence of THIS count (`:Point`'s placeable set
 omits `story_arc`, §17.2; ⚠️ where the tail DOES carry it, `_partition_cache_owned`'s `keep |= set(record_props)` makes
-it COMPARED, and `record-restore` then RESTORES it), so an UNSCOPED version of this correction — as this PR's own
-§17.2 DRAFT stated it ("no shipped route clears the PROPERTY while keeping the entity") — would have sent that
+it COMPARED, and `record-restore` then RESTORES it), so an UNSCOPED version of this correction — as an earlier revision of
+this change's own §17.2 stated it, *"no shipped route clears the PROPERTY while keeping the entity"*, since amended to the
+anchor-scoped wording that is live there now — would have sent that
 operator to `tortoise_delete`, which REMOVES the node and journals the delete that drops its record row, when a
-clear-and-keep route shipped. ⛔ That quotation is of the DRAFT, not of the entry above: this `#10394` entry never
-said "the PROPERTY" and never sent an operator to `tortoise_delete`.
+clear-and-keep route shipped. ⛔ That quotation is of the AMENDED revision, not of the entry above: this `#10394` entry never
+said "the PROPERTY" and never sent an operator to `tortoise_delete`, and `STORAGE-ARCHITECTURE.md` §17.2 at the merged
+tree states the bound per row rather than quoting the superseded phrase.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED

@@ -500,7 +500,10 @@ def test_the_point_clear_removes_the_prose_and_keeps_the_node():
     After `#11325` the reconciler's repair text says the not-projectable class has
     no route that RESTORES the value, and that on a `:Point` a targeted CLEAR
     does ship: `update_point(<id>, story_arc=None)` removes the property and
-    KEEPS the node. That is load-bearing operator guidance — it is the difference
+    KEEPS the node — ⛔ and ONLY where the record still holds the text for the
+    session (`public.session_narrative.narrative`, or the point's own `props`
+    tail); where neither carries it the node's copy is the only one, so that clear
+    deletes the prose. That is load-bearing operator guidance — it is the difference
     between "clear the stale copy" and "wipe the graph" — and it was asserted as
     measured at six prose sites while nothing in the suite exercised the door.
     `tests/test_10000_narrative_record_home.py` pins the REFUSAL of a non-empty
@@ -514,12 +517,15 @@ def test_the_point_clear_removes_the_prose_and_keeps_the_node():
     Two arms so neither can pass vacuously:
       (1) the property is GONE while the node and its OTHER props are still there
           — a clear that deleted the node is `tortoise_delete`, not this door;
-      (2) replaying the same creation record puts the prose BACK: the clear is
-          JOURNAL-bound (`#10429`'s replay half), so a JOURNAL replay of the
-          creation record re-materialises it, while a RECORD → CACHE rebuild
-          replays the stored `props.story_arc = null` and keeps it clear. If
-          this arm flips, the doc's JOURNAL-bound statement and the clear's
-          honest scope both have to be re-stated.
+      (2) re-running the SAME creation fold puts the prose BACK: the clear is
+          JOURNAL-bound (`#10429`'s replay half), so a journal replay — which
+          routes its `PointAdded` through `_upsert_point_props` — re-materialises
+          it, while a RECORD → CACHE rebuild replays the stored
+          `props.story_arc = null` and keeps it clear. ⚠️ SCOPE: this arm runs the
+          FOLD, not `rebuild_all`, so it pins that the creation fold still
+          persists the key (a point deny-set lever would red it) and does NOT pin
+          `rebuild_all`'s routing of that fold — that half is `#10429`'s, and §17.2
+          says so at the citation.
     """
     if not os.environ.get("TORTOISE_DB_URI"):
         pytest.skip("TORTOISE_DB_URI not set — the clear needs a graph to write")
@@ -566,9 +572,11 @@ def test_the_point_clear_removes_the_prose_and_keeps_the_node():
             "MATCH (n:Point {id:$id}) RETURN n.story_arc",
             params={"id": pid}).result_set
         assert rows and rows[0][0] == NARRATIVE, (
-            "the `PointAdded` replay fold no longer re-materialises the prose — the "
-            "`#10429` replay half has CLOSED, so `#11325`'s JOURNAL-bound statement "
-            "and the `update_point` clear's scope are stale and must be re-stated")
+            "the creation FOLD no longer re-materialises the prose from a record "
+            "that carries it — section 17.2's JOURNAL-bound statement rests on this "
+            "fold, so it and the `update_point` clear's scope must be re-stated "
+            "(note this arm does NOT cover `rebuild_all`'s routing of the fold, "
+            "which is `#10429`'s)")
     finally:
         sdk.close()
 

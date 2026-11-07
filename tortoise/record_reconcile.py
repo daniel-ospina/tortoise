@@ -167,12 +167,17 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   on BOTH anchors (``_SOURCE_SERVER_MANAGED_PROPS`` /
   ``_EVENT_SERVER_MANAGED_PROPS`` — each raises and the stored value is
   untouched, measured)) — ⚠️ **but the ``:Point`` half DOES have one, and it is
-  non-destructive**: ``update_point(<id>, story_arc=None)`` clears the property
+  non-destructive to the NODE**: ``update_point(<id>, story_arc=None)`` clears the property
   and KEEPS the node (measured — the ``None`` passes
   ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
   and ``update_point``'s ``SET n += $props`` REMOVES a property set to ``None``;
   the journal records the ``None``, and the same live door is bound by the MCP
-  tool ``tortoise_update_point``). ⚠️ **Its durability is FOLD-DEPENDENT, and the
+  tool ``tortoise_update_point``) — ⚠️ **and ONLY on the rows where the record still
+  HOLDS the text** (``public.session_narrative.narrative`` for the session, or the
+  point's own ``props`` tail): where neither carries it the point's copy is the ONLY
+  one, and NO clear may be applied to it — on a production name the ``rebuild_all``
+  that would put it back is REFUSED PRE-WIPE, so the clear there deletes the prose
+  rather than repairing the cache. ⚠️ **Its durability is FOLD-DEPENDENT, and the
   bound is the JOURNAL one**: ``_revise_point``'s SET list is a closed set that
   names no ``story_arc`` clause, and the creation fold's open-set passthrough
   (``_persist_extra_props``, which ``_revise_point`` never calls) skips a ``None``
@@ -202,9 +207,12 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``e.story_arc=$arc`` was NEVER journalled, and whose ``session_narrative`` TEXT
   columns measured NULL on every live capture (``hosted_api``'s 2b,
   ``#9567``/D7) — the graph copy is the ONLY copy, so NO clear may be applied
-  there: the destructive-clear routes above are for the first population. ⛔ Not
-  "no IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
-  clear — what is missing on those two ANCHORS is a route that KEEPS the value. ⚠️ No shipped
+  there: the destructive-clear routes above are for the first population, and every
+  targeted clear on the anchors is REFUSED with them (``update_entity(…,
+  story_arc=None)`` raises on BOTH). ⛔ Not
+  "no IN-PLACE repair": a targeted ``REMOVE`` IS in place — and destructive, and
+  issued by no instrument — so what is missing on those two ANCHORS is a route that
+  KEEPS the value. ⚠️ No shipped
   instrument performs that removal for THIS class: ``#10017``'s purge
   (``tools/purge_legacy_turns.py``) is the precedent on a DIFFERENT population
   (legacy episodic turn ``:Point``s — a ``DETACH DELETE``) and names no
@@ -689,11 +697,14 @@ def reconcile_record_and_cache(
     `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3), ⚠️ and
     refused PRE-WIPE on a production server graph name, #2944's L2 guard; or a
     graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today;
-    ⚠️ a ``:Point`` copy is the exception that IS repairable in place —
+    ⚠️ a ``:Point`` copy is repairable in place ON THE ROWS WHERE THE RECORD STILL
+    HOLDS THE TEXT (the module docstring's (5) states the per-row bound and its
+    only-copy edge) —
     ``update_point(<id>, story_arc=None)`` clears the property and keeps the
-    node (measured; see the module docstring's (5); pinned by
-    `test_the_point_clear_removes_the_prose_and_keeps_the_node` — both the clear
-    and what a replay of the creation record restores).
+    node (measured; pinned by
+    `test_the_point_clear_removes_the_prose_and_keeps_the_node` — the clear, and
+    the creation FOLD a journal replay routes through; ``rebuild_all``'s routing
+    of that fold is unpinned).
     ⛔ NOT ``#10017``'s purge: ``tools/purge_legacy_turns.py`` deletes legacy
     episodic turn ``:Point``s — a different population, though a legacy turn
     ``:Point`` that carries the prose is cleared by it, by node deletion — and
@@ -867,7 +878,11 @@ def log_result(result: RecordReconcileResult,
         # production SERVER graph name, #2944 L2 — or a graph-side
         # REMOVE n.story_arc that no instrument ships today; ⚠️ on a `:Point` the
         # clear is `update_point(<id>, story_arc=None)`, which keeps the node and
-        # needs no wipe — though its durability is the JOURNAL's only: a
+        # needs no wipe — ONLY where the record still holds the text for the session
+        # (`public.session_narrative.narrative`); where it does not, the point's copy
+        # is the ONLY one and that clear deletes it, the `rebuild_all` that would
+        # restore it being refused PRE-WIPE on a production name — its durability is
+        # otherwise the JOURNAL's only: a
         # `rebuild_all` over a journal whose creation record carried the prose
         # restores it (#10429), while the RECORD→CACHE rebuild replays the stored
         # null and keeps it clear. ⚠️ That is the bound's REACH, not an absolute:
