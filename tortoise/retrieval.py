@@ -740,7 +740,10 @@ def session_key_of(hit: dict) -> str:
       the READER already renders (``hit_session_id``) was dropped one layer
       below it;
     * else the hit's OWN ``id`` ⇒ ``idx:point:{id}``: two identity-less hits
-      are two DISTINCT entities and must not share a bucket. Before #3591
+      are two DISTINCT entities and must not share a bucket — ⚠️ except when
+      they share an ``id``, in which case they DO share one (the bucket is
+      per-ID, not per-hit; see :func:`_session_admission_key`'s divergence
+      list, which keeps them apart by object identity). Before #3591
       both read ``idx:-1``, so the C5 per-session cap
       (``max_chunks_per_session``) was applied across ALL of them at once
       and unrelated content was dropped collectively — measured 5-in/3-out
@@ -887,10 +890,13 @@ def dedup_pool(annotated: list[dict], *,
     #10540 — else — #3591 — a PER-HIT bucket for a hit with no session
     identity at all) —
     distinct sessions never share a bucket, and neither do two distinct
-    identity-less hits. The only shared bucket left is ``idx:-1``, for a hit
-    with nothing at all to key on (see :func:`session_key_of`).
-    ``idx:point:`` keys are per-hit, so the cap does NOT bind across the
-    identity-less population: the pool-wide budget is what bounds it.
+    identity-less hits — ⚠️ unless they share an ``id``: the ``idx:point:{id}``
+    bucket is per-ID, so equal ids DO collide there and the cap binds across
+    them (see :func:`session_key_of`). The other shared bucket is ``idx:-1``,
+    for a hit with nothing at all to key on (see :func:`session_key_of`).
+    ``idx:point:`` keys are per-ID, so the cap does NOT bind across the
+    identity-less population that has distinct ids: the pool-wide budget is
+    what bounds it.
     ⚠️ #10540: a raw chunk carrying ONLY the camel ``sessionId`` would now be
     grouped by its real session instead of getting a per-hit phantom bucket,
     so this cap would BIND there. No in-repo producer reaches that shape —
@@ -2342,23 +2348,32 @@ def _session_admission_key(
     ``tools/longmem_eval/retrieve.py``).
 
     ⚠️ "Two shapes" is the REACHED enumeration, NOT a proof of
-    exhaustiveness — four type/namespace seams diverge too, none reachable
+    exhaustiveness — five further seams diverge too, none reachable
     from an in-repo writer (measured): a non-``int`` ``lme_session_index``
     (the pool keys ``idx:{value}``, this grain skips the index leg — and a
     ``bool`` IS an ``int`` in Python, which is why this grain excludes it
     explicitly while the pool does not); a TRUTHY non-``str`` snake id
     (``session_id: 5`` keys the int ``5`` — the pool leg is untyped and can
-    return a non-``str``, at which point ``seeded_sessions`` raises
-    ``AttributeError`` on ``.startswith``); a whitespace-only snake id (the
+    return a non-``str``, and THREE callers then raise ``AttributeError`` on
+    ``.startswith``: ``seeded_sessions``, ``coverage_loop.coverage_gap``
+    (``coverage_loop.py``:497) and ``reader_window_displacement``
+    (``session_reinjection.py``:750-752) — while ``dedup_pool`` /
+    ``session_diverse_order`` / ``reinjection_merge_order`` only dict-key it
+    and are safe); a whitespace-only snake id (the
     pool keys it RAW because it is truthy, while this grain DISCARDS it
-    rather than stripping); and a WIRE id that
+    rather than stripping); a WIRE id that
     spells the ``idx:`` namespace — ``_SAFE_SESSION_TAG_RE`` permits ``:``,
     so a session literally named ``idx:3`` keys ``idx:3`` and FUSES, in the
     pool, with another hit's ``lme_session_index: 3`` bucket while this
-    grain keeps them apart. That last one belongs to the POOL's namespace,
-    not to this leg — a snake ``session_id: "idx:3"`` reaches the same
-    bucket — and tightening it, like reconciling the sentinel, is its own
-    decision rather than a rider here.
+    grain keeps them apart; and — the reverse direction — a SHARED ``id``,
+    where two DISTINCT hit dicts carry equal ``id`` values and so share the
+    pool's ``idx:point:{id}`` bucket and the C5 cap, while this grain's
+    object identity keeps them apart. That last one is the one shape the
+    ``idx:point:`` "PER-HIT" wording elsewhere cannot cover: the bucket is
+    per-ID, not per-hit. The ``idx:3`` fusion belongs to the POOL's
+    namespace, not to this leg — a snake ``session_id: "idx:3"`` reaches the
+    same bucket — and tightening it, like reconciling the sentinel, is its
+    own decision rather than a rider here.
     """
     sid = h.get(session_key)
     if isinstance(sid, str) and sid.strip():
