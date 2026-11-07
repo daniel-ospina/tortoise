@@ -672,6 +672,12 @@ _RE_OPTION_LEAD = re.compile(
 # ── shape templates (ordered high-precision) ─────────────────────────────
 
 # ordering: "Which <X> (did I …|…) first[,:] A or B?" / "Who … first, A or B?"
+# ⛔ READ BEFORE EDITING: the R13 recency guard consumes THIS template —
+# ``_recency_guard``'s `latest` arm asks `_RE_ORDERING.match` (a `latest`
+# inside a binary ordering request is an order endpoint, #8775). A change to
+# this regex therefore also changes which questions the guard vetoes BEFORE
+# any shape template runs, so re-run the guard's pinned map
+# (`test_recency_latest_ordering_frame_8775`) with any edit here.
 _RE_ORDERING = re.compile(
     r"^\s*(?:which|who|what)\b[^?]*?\bfirst\b[^?]*?\b(?P<a>.+?)\s+or\s+"
     r"(?P<b>[^?]+?)\??\s*$",
@@ -706,6 +712,11 @@ def _recency_guard(text: str, *, strict: bool = False) -> bool:
     would DROP the question's own recency constraint while REPLACING the
     legacy pool main fell back to. The shape-router call site in
     ``classify_question`` is the one that asks the narrowed question.
+
+    ⛔ If a SIBLING arm is ever narrowed the same way (`most\\W+recent` /
+    `the last one`), this flag must become a POLICY value (which arms are
+    narrowed for this surface) rather than a second boolean: `strict` names a
+    release, and a release cannot say which arm a call site means.
 
     Defined here rather than in the guard block above because the ordering
     frame is asked of the same templates the guard runs ahead of.

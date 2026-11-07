@@ -827,6 +827,76 @@ def test_recency_guard_strict_arm_protects_the_date_lookup_surface(monkeypatch):
             assert classify_question(q) is None, (q, flag)
 
 
+#: #8775 ACCEPTED RESIDUAL (#11458) — an attributive ``latest`` used as a
+#: SELECTOR inside the question's OWN subject ("my latest promotion") is no
+#: longer a veto, so a two-anchor/duration template may now fire where `main`
+#: returned ``None``. The extracted term keeps the qualifier verbatim, so
+#: resolution can drop the selection. The census carries NO row of this class
+#: (its 5 `latest` rows are 4 ordering instructions + `0db4c65d`), so the class
+#: cannot be decided by the measured corpus: #11458 owns measuring it. It is
+#: pinned BOTH WAYS here — pre-#8775 shape under the off-switch, head shape
+#: under it — so the class can never change silently.
+_ATTRIBUTIVE_LATEST_SELECTOR_SHAPES = {
+    "How many days passed between my latest promotion and my move to "
+    "Boston?": AssemblyShape.INTERVAL,
+    "How many weeks had passed since my latest project launch when I "
+    "moved?": AssemblyShape.INTERVAL,
+    "How many months passed between my latest trip to Paris and my "
+    "graduation?": AssemblyShape.INTERVAL,
+    "How many days passed between the day I bought my latest phone and my "
+    "trip?": AssemblyShape.INTERVAL,
+    "How long had I been using my latest laptop when I started the new "
+    "job?": AssemblyShape.DURATION_STATE,
+    "What is the current status of my latest car?":
+        AssemblyShape.CURRENT_STATE,
+}
+
+
+def test_attributive_latest_selector_class_is_declared_8775(monkeypatch):
+    """#8775 ACCEPTED RESIDUAL, pinned both ways (#11458 owns the measurement).
+
+    #8775's rule is measured on the census: of the 5 rows carrying a ``latest``,
+    4 are ordering instructions (the frame arm keeps vetoing them) and 1 is the
+    narrative attributive the guard mis-fired on. This class is a THIRD group
+    the census does not carry — an attributive ``latest`` that is a SELECTOR
+    inside the question's own subject — and the narrowing frees it too, so a
+    shape may fire on a recency-qualified anchor.
+
+    It is NOT silently accepted: each case is asserted to be ``None`` with the
+    off-switch armed (the pre-#8775 behaviour) and the mapped shape with the
+    narrowed arm, and every fired case must still carry the ``latest``
+    qualifier in an extracted term — which is precisely the hazard #11458
+    measures (the term survives extraction, and resolution may drop it).
+    """
+    monkeypatch.setenv(_RECENCY_FRAME_ENV, "1")
+    for q, expected in _ATTRIBUTIVE_LATEST_SELECTOR_SHAPES.items():
+        assert classify_question(q) is expected, q
+        assert _LATEST.search(q), q
+        assert _recency_guard(q) is False, q
+        terms = extract_subject_terms(q)
+        assert any("latest" in t.lower() for t in terms), (q, terms)
+
+    # the SAME questions are pre-#8775 rejections: the off-switch proves the
+    # class exists because the narrowing created it
+    monkeypatch.setenv(_RECENCY_FRAME_ENV, "0")
+    for q in _ATTRIBUTIVE_LATEST_SELECTOR_SHAPES:
+        assert classify_question(q) is None, q
+        assert _recency_guard(q) is True, q
+
+
+def test_env_example_declares_the_recency_frame_switch():
+    """#8775 — the documented operator kill switch IS the name the code reads.
+
+    The repo's convention for a default-ON switch (the #8488 / #2520 / #8933
+    family): one test asserting `.env.example` declares the literal name, so a
+    rename cannot rot the documented knob while the resolver tests stay green.
+    """
+    assert _RECENCY_FRAME_ENV == "TORTOISE_ASSEMBLY_RECENCY_ORDERING_FRAME"
+    env_example = (
+        Path(__file__).resolve().parent.parent / ".env.example").read_text()
+    assert f"# {_RECENCY_FRAME_ENV}=1" in env_example, _RECENCY_FRAME_ENV
+
+
 def test_recency_guard_off_switch_8775(monkeypatch):
     """#8775 OFF-SWITCH — off restores the pre-#8775 arm VERBATIM.
 
