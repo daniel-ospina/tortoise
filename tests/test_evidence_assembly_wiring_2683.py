@@ -105,12 +105,16 @@ def _no_embedder(monkeypatch):
     monkeypatch.setattr(_emb.EmbeddingModel, "get", staticmethod(lambda: None))
 
 
-#: Every env-gated knob ``retrieve_for_question`` reads ON ITS CALL PATH —
-#: directly, or through the ``_env_int``/``_TRUTHY`` helpers — that can move the
-#: POOL (membership/order), the WINDOW (item cap) or the ARM. A developer shell
-#: carrying any of them would red a pinned count or flip the anchor — a spurious
-#: red, never a false pass, but still a price for nothing. Scrubbed, not
-#: tolerated: the pool/window/arm set is exactly this module's subject.
+#: Every env-gated knob ``retrieve_for_question`` reads ON ITS CALL PATH that
+#: can move the POOL (membership/order), the WINDOW (item cap) or the ARM.
+#: "Reads" is taken literally and broadly, because the criterion is what decides
+#: membership: a bare ``os.environ.get`` (judged against the ``_TRUTHY`` token
+#: set — a vocabulary, never a read path of its own), or one mediated by
+#: ``_env_int`` / ``_env_float`` / ``_env_boost_float`` /
+#: ``resolve_pool_size(env_name=…)``. A developer shell carrying any of them
+#: would red a pinned count or flip the anchor — a spurious red, never a false
+#: pass, but still a price for nothing. Scrubbed, not tolerated: the
+#: pool/window/arm set is exactly this module's subject.
 #: ⛔ Scope, stated so the claim stays checkable: the ``TORTOISE_LME_GATE_*``
 #: singletons are read at MODULE import (``retrieve.py:3495-3511``), not on this
 #: path, so they are out of scope — a helper-mediated read is IN scope, which is
@@ -125,6 +129,9 @@ _ENV_SCRUB = (
     "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
     # pool membership / order
     "TORTOISE_LME_RERANK",
+    # its model choice — read by `_model_name` (`rerank.py:98`) via `get_scorer`,
+    # gated by the parent above; same shape as the TR sub-knobs below
+    "TORTOISE_LME_RERANK_MODEL",
     "TORTOISE_LME_RERANK_CAP",
     "TORTOISE_LME_RERANK_LAMBDA",
     "TORTOISE_LME_RERANK_POOL",
@@ -142,7 +149,7 @@ _ENV_SCRUB = (
     "TORTOISE_LME_AGGREGATIVE_FLAG",
     "TORTOISE_LME_TR_SESSION_ADMISSION",
     "TORTOISE_LME_TR_SESSION_COMPLETION",
-    # its gated sub-knobs, read through `_env_int` (`retrieve.py:2966-2985`)
+    # its gated sub-knobs, read through `_env_int` (`retrieve.py:2966-2983`)
     "TORTOISE_LME_TR_SESSION_COMPLETION_TOTAL",
     "TORTOISE_LME_TR_SESSION_COMPLETION_WINDOW",
     "TORTOISE_LME_TR_SESSION_COMPLETION_SESSIONS",
