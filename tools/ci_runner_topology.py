@@ -173,11 +173,12 @@ import sys
 
 # #5128: refuse a <3.12 interpreter before the imports below — an environment
 # refusal must never wear a VERDICT code (#11342). The real hazard here is
-# `datetime.UTC`, which is 3.11+ and is READ AT CALL TIME (`_dt.UTC` at :1014);
-# without this guard an old interpreter reaches a call and dies with an
-# unattributable AttributeError instead of naming the floor. 4 is free: 0-3 are
-# `EXIT_OK`/`EXIT_FAILED`/`EXIT_USAGE`/`EXIT_OWNER_GATED` (`:269-279`), and a
-# refusal that exited 1 would read to a caller as "the write failed".
+# `datetime.UTC` (3.11+), which this file reads AT CALL TIME (`_dt.UTC` inside
+# `fetch_queue_probe` and `_age_seconds`); without this guard an old interpreter
+# reaches a call and dies with an unattributable AttributeError instead of naming
+# the floor. 4 is free: `EXIT_OK` / `EXIT_FAILED` / `EXIT_USAGE` /
+# `EXIT_OWNER_GATED` below are the verdicts a wrapper branches on, and a refusal
+# that exited 1 would read to a caller as "the write failed".
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     print(
         f"tools/ci_runner_topology.py requires Python >= 3.12 (got "
