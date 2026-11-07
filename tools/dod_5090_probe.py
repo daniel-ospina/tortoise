@@ -242,8 +242,13 @@ _EMBED_WRITE = re.compile(
 #: ⛔ It was INVISIBLE until `#11274` (found by `#11085`'s review, P2): a new
 #: writer using this shape added NOTHING to the population, so the register's
 #: "an undeclared writer cannot bypass silently" guard stayed green — the exact
-#: hole `#11085` exists to close, in a shape two live functions already use
-#: (`sdk._journal_event_raw_write`, `sdk._write_capture_turns`).
+#: hole `#11085` exists to close. The live instances it was missing are the
+#: four named in `tortoise/embed_writer_register.py`'s container-key bullet
+#: (`api::add_point`, `consistency::_graph_fingerprint`, `sdk::_index_gate_read`,
+#: `sdk::_write_capture_turns`). ⚠️ `sdk._journal_event_raw_write` uses the same
+#: container key but was ALREADY in the population for a different reason (the
+#: `embedding=None` in its SIGNATURE matches `_EMBED_WRITE`), so it is not
+#: evidence that the shape was seen.
 #: Decided on the AST (`_writes_an_embedding`), NOT as an `_EMBED_WRITE`
 #: alternate: a regex reads raw SOURCE, so `["embedding"] =` as a pattern also
 #: matches PROSE quoting the shape, and this shape is exact enough to decide.
@@ -353,8 +358,17 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "vector\", and a foreign vector is CARRIED (restored verbatim on replay) "
         "with NO attestation, because its origin is not ours to vouch for. The "
         "server vector is stamped by `_point` (a different function, under its own "
-        "seam), and the SDK surface refuses a caller-supplied `embedding` outright, "
-        "so this is reachable only from a direct `EventAPI` caller"),
+        "seam). ⛔ A caller-supplied `embedding` is NOT refused by the SDK: `create_point`/"
+        "`update_point` store one VERBATIM by a recorded decision (PR `#3018` review P2), so a "
+        "TENANT can supply one on those paths — but not through THIS function. Here the branch "
+        "guards a vector a DIRECT `EventAPI` caller hands to `add_point(fields=…)` "
+        "(`tests/test_write_path_unreachable_seam_5148.py` pins that the key is CARRIED — under "
+        "its unimportable seam it cannot tell this branch from `p.update(fields)`); the tenant "
+        "doors' journal half lives in `tortoise.sdk` "
+        "(`_journal_snapshot_from_create_map` → `_emit_event`'s "
+        "`clean.setdefault(\"embedding\", None)`, and `update_point`'s `emit_props` on the "
+        "`PointRevised` record). Their gate-side half is `gated` and lies outside this "
+        "census's population"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "
