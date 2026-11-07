@@ -23,6 +23,11 @@ governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.14; STORAGE-ARCHITECTURE.md
 > and `markdownlint` fixes (bullet markers, blank lines, one cell whose `|` is escaped) — and appended **§7** and
 > **§8**: the decision-state table re-measured on `main = dbbf5d874`, and the workstream → child map.
 >
+> A later wave of the same lane corrected **§7**'s gate row and **§8**'s blocker list: both had been
+> derived from the owner's 2026-11-02 "evals postponed" ruling, which the owner's **2026-11-07**
+> finite-gate ruling (posted 1.5 h *before* this file was written) had already superseded. The finding and
+> the corrected rows are recorded in place, not silently rewritten.
+>
 > ⚠️ **§1's `path:line` citations are as-of 2026-09-05 and have drifted since.** Read them as
 > historical. §7 re-measures the **decisions**, not these citations; measured on this head,
 > `_validity_marker` is `retrieval.py:1289` (not `:398`) and `invalidate_point` is `sdk.py:20024`
@@ -403,11 +408,24 @@ wave by reading the tree, not inherited from a prior comment.
 - **D1-JUDGE, 2026-11-02 (owner):** the eval judge is **DeepSeek**; re-registering the pre-registration's
   judge line is **authorised**; the receipt records `unpinned:<deepseek-model>` so no number claims
   official-judge comparability. Carries its `OVERRIDES:` line on `#2281` and on `#11460`.
-- **Evals POSTPONED, 2026-11-02 (owner):** *"no point evaluating something we know needs a fix"* — no eval
-  runs until the P0/P1 queue drains. Measured 2026-11-07: **10** open `P0-blocker`, **15** open
-  `P1-severe` (down from 16/28 on 2026-11-02 and 13/21 on 2026-11-04) → **gate still closed**.
-  The gate's own text has a circularity for the eval issues themselves (flagged 2026-11-02, measured again
-  2026-11-04); the counting rule is the owner's to confirm and is **not** re-asked here.
+- **Eval gate, 2026-11-07 (owner) — this SUPERSEDES the 2026-11-02 "evals postponed" form.** Owner,
+  verbatim: *"if we have other p1,p0,p2 that we know affect the eval, then let's first fix those. And
+  then we run the eval. what i dont want is to waste an eval while we know what's broken"* — relayed with
+  its measured affected set on **#8486** (`comment 6710955512`, **2026-11-07T17:54Z**, i.e. *before* this
+  document was written; the local reading for this epic's measurement is #9097's latest comment). The
+  gate is therefore **finite and named**, not a queue depth: the run waits on the closed set of items a
+  recorded mechanism ties to a quantity this benchmark scores — **eight**, all still OPEN on
+  `dbbf5d874`: `#10360` (P1, verbatim state-value retention **49.4 % vs a 54.4 % baseline**), `#11070`
+  (P1, pre-`#10852` `:Source` prose still on searchable text), `#10538` (P1, time-aware query expansion,
+  the 53 %-of-misses partial-evidence class), `#2684` (P2, verbatim value-spans), `#2683` (P2,
+  dedup/cap/order the reader window), `#2518` (P2, entity/fact-augmented keys), `#2516` (P2,
+  per-category `evidence_recall@5` + official `recall_all@5` gates), `#8775` (P2, `_RE_RECENCY`'s bare
+  `latest` guard rejects a genuine interval question).
+  **The eval issues are outside the gate** — a measurement is not a defect that affects the measurement —
+  which is what removes the circularity the 2026-11-02 form had. Counting open `P0`/`P1` is **not** the
+  gate any more. This row previously did exactly that and concluded "gate still closed"; that reading was
+  superseded by the ruling above and is recorded here as the correction, not quietly replaced. The
+  ruling's own measured state at its time of writing: **6** `P0-blocker`, **9** `P1-severe`, **1** `P1`.
 
 Per `docs/ONTOLOGY.md` (v3.14) and the precedence recorded on `#2281`: the ontology outranks
 `#5013`/D10, which outranks `STORAGE-ARCHITECTURE.md` + `EXTRACTOR-V4-ARCHITECTURE.md`, which outrank
@@ -438,10 +456,24 @@ regression clause fired (`D8`: no superseded claim rendered live, no planted cla
 no case committed on the raw arm and not the distilled one). The knowledge-update rate is **reported,
 not thresholded** — the benchmark-side bar comes from the first published run.
 
-**The one thing that blocks it is not code.** It is (a) the queue (evals postponed) and (b) #11460 —
-because the pre-registration still pins `openai:gpt-4o-2024-08-06` / `ask-exit-anscheck-official-v1`,
-while the owner ruled the judge is DeepSeek. `measure_ask_distilled.py:1694-1700` compares both byte-exact,
-so a DeepSeek-graded run returns `inconclusive` today however green it is.
+The pre-registration does **not** yet carry the per-category rows (`evidence_recall@5`, type-stratified),
+nor the **D14/#5085 two-number split** (`tests/eval/write_path/runner.py:15-24`) stated explicitly
+(mechanical checks authoritative; the judge block never enters `metrics`). Both clauses are `#11460`'s to
+write into `tests/eval/ask/preregistration.json` — Indicators 5–6, with `Targets` extended to permit the
+`decision_rule`/`scoring` move; the gate **mechanism** those rows mirror stays `#2516`'s, which `#11460`
+declares as an edge rather than re-implementing. A headline-only bar cannot show which class moved.
+
+**What blocks it, after the 2026-11-07 ruling** — the gate is no longer the queue, so the blocker is a
+short sequence, and only the first of them is this epic's own **pre-publication** work — the run itself is
+`#9097`, the epic's publication child:
+
+1. **#11460, the pre-registration.** It pins `openai:gpt-4o-2024-08-06` /
+   `ask-exit-anscheck-official-v1` while the owner ruled the judge is DeepSeek (D1-JUDGE), and
+   `measure_ask_distilled.py:1694-1700` compares both byte-exact — so a DeepSeek-graded run returns
+   `inconclusive: config_mismatch` however green it is.
+2. **The eight named fixes above, `#2516` first** — the relay's recommended order, because the reporting
+   surface is what lets a per-category effect register at all.
+3. **Then** the run, under the unchanged `HARD_STOP_USD = 10.00` (`tools/longmem_eval/spend_guard.py:63`).
 
 **Why this document exists at all** (the #9701 class, re-measured here): a decomposition recorded only as
 prose in comments is invisible to every selector that reads the API. `gh api …/issues/2281/sub_issues`
