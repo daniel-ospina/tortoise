@@ -4238,6 +4238,16 @@ class TestSiteIconAndSocialPreviewContract:
         """
         return cls.WEB / urlsplit(image).path.lstrip("/")
 
+    @classmethod
+    def _og_card_bytes(cls, image: str) -> tuple[Path | None, bytes]:
+        """The file a declared card URL resolves to, and its bytes; `(None, b"")` if absent.
+
+        The default `load` for `_card_violations`: existence and the bytes come from the
+        served tree, through `_og_asset_path` (so a `?v=2` cache-bust still resolves).
+        """
+        path = cls._og_asset_path(image)
+        return (path, path.read_bytes()) if path.is_file() else (None, b"")
+
     @staticmethod
     def _filtered_png() -> tuple[bytes, dict[tuple[int, ...], int], list[int]]:
         """A 5-row RGB PNG whose rows use filter types 0–4, and the histogram it encodes.
@@ -4430,6 +4440,68 @@ class TestSiteIconAndSocialPreviewContract:
             f"og:image:type {declared_type!r} has no reader here — this guard reads "
             f"{sorted(readers)}; add a reader rather than dropping the assertion")
         return readers[declared_type](raw)
+
+    @classmethod
+    def _card_violations(cls, page_name: str, head: str, load=None) -> list[str]:
+        """Every way this page's link-preview card fails the contract; empty means it passes.
+
+        ⛔ SPLIT OUT SO THE PAGE-LEVEL APPLICATION IS DRIVEN BY A TEST, not only by this
+        tree's own pages — the same reason `_icon_trio_violations` is. MEASURED on the
+        code before this split, all 13 tests in this class GREEN under each of three
+        mutants: the encoded-size floor application deleted, `_card_size` reverted to
+        `_jpeg_size` (the JPEG-only dispatch this PR replaced), and the image resolved
+        with the raw `image.split("//", 1)[-1]` form (the `?v=2` false red this PR
+        fixed). The three behaviours this PR exists to add on the card path were pinned
+        only at the helpers they call, never at the loop that calls them — so the loop's
+        half could be `assert True` and nothing noticed.
+
+        `load` is the test seam: it maps an `og:image` URL to `(path | None, bytes)`. The
+        default reads the served tree (which is what the page loop uses), so the
+        query-stripping path is exercised by the real pages rather than bypassed.
+
+        Every check is collected rather than asserted, so a card that is BOTH the wrong
+        format and too small reports both — a guard that stops at the first defect is how
+        the second one stays hidden.
+        """
+        load = load or cls._og_card_bytes
+        image = cls._og(head, "image")
+        if not image:
+            return [f"{page_name} declares no og:image — a shared link renders no card"]
+        path, raw = load(image)
+        if path is None:
+            return [f"{page_name} points og:image at {image}, which is not in the served "
+                    f"tree (looked for {cls._og_asset_path(image)}) — the scraper fetches "
+                    "a 404 and shows no card"]
+
+        violations: list[str] = []
+        declared_type = cls._og(head, "image:type")
+        actual: tuple[int, int] | None = None
+        if not declared_type:
+            violations.append(
+                f"{page_name} declares no og:image:type — a scraper that has to sniff the "
+                "format is a scraper that can guess wrong")
+        else:
+            try:
+                actual = cls._card_size(declared_type, raw)
+            except AssertionError as exc:
+                violations.append(
+                    f"{page_name} declares og:image:type {declared_type!r} but "
+                    f"{path.name}'s bytes are not one: {exc}")
+
+        declared = (cls._og(head, "image:width"), cls._og(head, "image:height"))
+        if not all(value and value.strip().isdigit() for value in declared):
+            violations.append(
+                f"{page_name} declares og:image:width/height {declared[0]!r}x{declared[1]!r}, "
+                "which is not a pixel count — a scraper then reserves a box nobody promised")
+        elif actual is not None and (int(declared[0]), int(declared[1])) != actual:
+            violations.append(
+                f"{page_name} declares {int(declared[0])}x{int(declared[1])} but "
+                f"{path.name} is {actual[0]}x{actual[1]}")
+
+        floor = cls._card_floor_violation(page_name, path, raw)
+        if floor:
+            violations.append(floor)
+        return violations
 
     @staticmethod
     def _jpeg_size(data: bytes) -> tuple[int, int]:
@@ -4665,13 +4737,22 @@ class TestSiteIconAndSocialPreviewContract:
         return url.path
 
     @staticmethod
-    def _parse_declared_sizes(token: str) -> set[int]:
-        """The square, single-slot sizes a `sizes="32x32 48x48"` token promises."""
-        assert token, "the tag declares no sizes= — a renderer then guesses"
+    def _parse_declared_sizes(token: str) -> set[int] | None:
+        """The square, single-slot sizes a `sizes="32x32 48x48"` token promises.
+
+        `None` means "this token is not that list" — the CALLER turns it into a
+        violation, quoting the token. ⛔ IT MUST NOT RAISE. Its only caller is
+        `_declared_sizes_violation`, which is a VIOLATION COLLECTOR: `_icon_trio_
+        violations` documents itself as returning *every* way a page fails the contract,
+        and a raise here instead escapes the collector with ONE raw AssertionError,
+        losing every other violation on the page. Measured on the code that raised: a
+        spec-valid head whose `rel="icon"` links omit the OPTIONAL `sizes=` raised, and
+        a head that ALSO omitted two of the three icon links reported only the sizes
+        assertion — the two missing-link violations were never returned.
+        """
         pairs = re.findall(r"(\d+)x(\d+)", token)
-        assert pairs, f"sizes={token!r} is not a '<w>x<h>' list"
-        assert all(a == b for a, b in pairs), (
-            f"sizes={token!r} declares a non-square slot; a tab icon is square")
+        if not pairs or not all(a == b for a, b in pairs):
+            return None
         return {int(a) for a, _ in pairs}
 
     @classmethod
@@ -4692,29 +4773,55 @@ class TestSiteIconAndSocialPreviewContract:
         absent is not a defect. When it IS declared it is a promise like the others
         (MDN's own example is `rel="apple-touch-icon" sizes="114x114"`), and this
         guard knows the file's real geometry, so a wrong one must not pass silently.
+
+        ⛔ ON THE `rel="icon"` LINKS IT IS REQUIRED, AND THAT IS A HOUSE RULE, not the
+        spec. The spec makes `sizes` a hint that is optional everywhere; this site pins
+        both tab-icon slots so a renderer reserves the right box instead of guessing, so
+        a page that omits one is reported. Stated here because the alternative is that
+        the requirement looks like an accident of the parser. Every omission and every
+        token this guard cannot read is RETURNED as a violation — never raised — so one
+        defect can never hide the rest.
         """
         rels = link.get("rel", "").lower().split()
         path = cls._icon_ref(link.get("href", ""))
         declared = link.get("sizes")
         if "icon" in rels and path == f"/{cls.ICON_PNG}":
-            if cls._parse_declared_sizes(declared or "") == {png[0]}:
-                return None
-            return (f"{page_name} declares sizes={declared!r} for {cls.ICON_PNG}, whose "
-                    f"IHDR is {png[0]}x{png[1]} — the tag and the bytes must agree, or "
-                    "the tab reserves the wrong box")
+            return cls._sizes_violation(page_name, declared, {png[0]}, cls.ICON_PNG,
+                                       f"IHDR is {png[0]}x{png[1]}", "box")
         if "icon" in rels and path == f"/{cls.ICON_ICO}":
-            if cls._parse_declared_sizes(declared or "") == ico_sizes:
-                return None
-            return (f"{page_name} declares sizes={declared!r} for {cls.ICON_ICO}, whose "
-                    f"directory holds {sorted(ico_sizes)} — the tag and the container "
-                    "must agree")
+            return cls._sizes_violation(page_name, declared, ico_sizes, cls.ICON_ICO,
+                                       f"directory holds {sorted(ico_sizes)}", "container")
         if ("apple-touch-icon" in rels and path == f"/{cls.ICON_APPLE}"
                 and declared):
-            if cls._parse_declared_sizes(declared) == {apple[0]}:
-                return None
-            return (f"{page_name} declares sizes={declared!r} for {cls.ICON_APPLE}, "
-                    f"whose IHDR is {apple[0]}x{apple[1]} — the tag and the bytes must agree")
+            return cls._sizes_violation(page_name, declared, {apple[0]}, cls.ICON_APPLE,
+                                       f"IHDR is {apple[0]}x{apple[1]}", "box")
         return None
+
+    @classmethod
+    def _sizes_violation(cls, page_name: str, declared: str | None, expected: set[int],
+                         target: str, truth: str, unit: str) -> str | None:
+        """Why a `<link>`'s declared `sizes=` disagrees with what the bytes hold.
+
+        Returns a violation string — never raises — because every branch below is a way
+        a page can fail a contract, not a programming error. `truth` states what the file
+        actually holds (`"IHDR is 256x256"` / `"directory holds [32, 48]"`) and `unit`
+        names the thing that ends up wrong (`box` for a PNG, `container` for the ICO).
+        """
+        if not declared:
+            return (f"{page_name} declares no sizes= for {target} — this site pins that "
+                    f"slot ({truth}) so a renderer reserves the right {unit} instead of "
+                    "guessing. `sizes` is OPTIONAL in the spec, so this is a house rule "
+                    "(see `_declared_sizes_violation`); declare it, or change the rule "
+                    "deliberately")
+        parsed = cls._parse_declared_sizes(declared)
+        if parsed is None:
+            return (f"{page_name} declares sizes={declared!r} for {target}, which is not "
+                    "a square '<w>x<h>' slot list — a tab icon is square, and a token "
+                    "this guard cannot read is a promise it cannot check")
+        if parsed == expected:
+            return None
+        return (f"{page_name} declares sizes={declared!r} for {target}, whose {truth} — "
+                f"the tag and the {unit} must agree, or the tab reserves the wrong {unit}")
 
     def test_the_declared_sizes_guard_refuses_a_wrong_apple_slot(self):
         """NON-VACUITY: the branches no page in this tree drives must still be able to RED.
@@ -4842,21 +4949,88 @@ class TestSiteIconAndSocialPreviewContract:
             "token, not just the href, is what makes the link an icon")
         # ...and a NON-SQUARE `sizes=` token is rejected, not merely parsed: `32x32 48x16`
         # parses to {32, 48}, which EQUALS the ICO's directory, so without this the same
-        # declaration is ACCEPTED. The file does not import `pytest` (#8066), so the
-        # rejection is asserted by hand.
-        try:
-            self._parse_declared_sizes("32x32 48x16")
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(
-                'a non-square sizes= token was accepted — "48x16" is not a slot a tab can '
-                "draw, and it parses to the same set as the ICO's directory")
+        # declaration is ACCEPTED. Rejection is `None` (not a raise — see
+        # `_parse_declared_sizes`: the parser feeds a collector, which must return a
+        # violation rather than escape the whole page over one unreadable token).
+        assert self._parse_declared_sizes("32x32 48x16") is None, (
+            'a non-square sizes= token was accepted — "48x16" is not a slot a tab can '
+            "draw, and it parses to the same set as the ICO's directory")
+        # ...and the parser still PARSES what it should, so `None` is not the only answer
+        # it can give (a guard whose every input returns None passes the row above
+        # vacuously).
+        assert self._parse_declared_sizes("32x32 48x48") == {32, 48}, (
+            "a square multi-slot sizes= token did not parse — the ICO's own declaration "
+            "then rededs as unreadable")
+        assert self._parse_declared_sizes("any") is None, (
+            'sizes="any" parsed as a pixel slot — it is SVG-only syntax that names no '
+            "size at all, so it cannot be checked against a raster icon's IHDR")
         assert self._missing_icon_links(
             [dict(ln, href="//evil.example/favicon.ico")
              if ln["href"] == f"/{self.ICON_ICO}" else ln for ln in complete]
         ) == [f"/{self.ICON_ICO}"], (
             "an off-host href was accepted as this site's ICO — the origin was dropped")
+
+    def test_the_trio_collector_returns_every_violation_instead_of_raising(self):
+        """A violation COLLECTOR must return them all; one defect may not hide another.
+
+        ⛔ WHY THIS EXISTS. `_icon_trio_violations` is documented as returning *every* way
+        a page's `<head>` fails the icon contract, and `sizes` is OPTIONAL on
+        `rel="icon"` in the spec — so a minimal, universally-supported icon declaration
+        is honest markup. Measured on the code that ASSERTED instead of returning: that
+        head raised `AssertionError: the tag declares no sizes= — a renderer then
+        guesses` straight out of the collector, and a head that also omitted two of the
+        three icon links reported only the sizes assertion — the missing-link violations
+        were computed and then thrown away with the exception. On the `rel="icon"`
+        links the requirement is a HOUSE RULE (see `_declared_sizes_violation`) and it is
+        reported as a violation; the apple link's stays OPTIONAL.
+        """
+        png = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        apple = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
+        ico_sizes = {i["declared"][0]
+                     for i in self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())}
+
+        minimal = ("<head>"
+                   f'<link rel="icon" href="/{self.ICON_ICO}">'
+                   f'<link rel="icon" href="/{self.ICON_PNG}">'
+                   f'<link rel="apple-touch-icon" href="/{self.ICON_APPLE}">'
+                   "</head>")
+        trio = self._icon_trio_violations("synthetic.html", minimal, png, ico_sizes, apple)
+        assert len(trio) == 2, (
+            "a spec-valid head whose two rel=icon links omit the OPTIONAL sizes= must "
+            f"report exactly the two house-rule violations; got {trio}")
+        assert any(self.ICON_ICO in v and "sizes" in v for v in trio), (
+            f"omitting sizes= on the ICO link was not reported: {trio}")
+        assert any(self.ICON_PNG in v and "sizes" in v for v in trio), (
+            f"omitting sizes= on the PNG link was not reported: {trio}")
+        assert not any(self.ICON_APPLE in v for v in trio), (
+            "omitting the OPTIONAL sizes= on the apple link was reported as a violation — "
+            "the href alone is what iOS needs, and that exemption is deliberate")
+
+        # An unreadable token is a VIOLATION with the token quoted, not a raise: `any`
+        # is SVG-only syntax naming no size, and a non-square list cannot be a tab slot.
+        cases = {
+            "any": "SVG-only token",
+            f"{png[0]}x{apple[0]}": "non-square slot list",
+            "big": "not a <w>x<h> list at all",
+        }
+        for token, why in cases.items():
+            link = {"rel": "icon", "href": f"/{self.ICON_PNG}", "sizes": token}
+            violation = self._declared_sizes_violation(
+                "page.html", link, png, ico_sizes, apple)
+            assert violation and token in violation, (
+                f"sizes={token!r} ({why}) was not returned as a violation quoting the "
+                f"token; got {violation!r}")
+
+        # ...and ONE DEFECT MAY NOT HIDE ANOTHER. The head below omits two icon links
+        # AND the sizes= on the one link it does declare; both must come back.
+        partial = ("<head>"
+                   f'<link rel="icon" href="/{self.ICON_ICO}">'
+                   "</head>")
+        both = self._icon_trio_violations("synthetic.html", partial, png, ico_sizes, apple)
+        assert any("does not declare" in v for v in both), (
+            f"the missing icon links were not reported: {both}")
+        assert any("sizes" in v for v in both), (
+            f"the omitted sizes= was not reported alongside the missing links: {both}")
 
     def test_the_icon_files_exist_and_are_usable(self):
         """Every icon a page points at exists, and has the shape the tag implies."""
@@ -5247,59 +5421,103 @@ class TestSiteIconAndSocialPreviewContract:
                 f"with og:image ({image}) — one of the two platforms gets the wrong picture")
 
     def test_the_declared_preview_size_matches_the_file(self):
-        """The tag is a promise about bytes; check it against the bytes."""
+        """The tag is a promise about bytes; check it against the bytes.
+
+        The per-page checks live in `_card_violations` so the PAGE-LEVEL application can
+        be driven by a test (`test_the_page_card_predicate_applies_every_check_it_
+        declares`); this loop applies them to every shipped page, which is what makes the
+        tree's own cards guarded rather than only their helpers.
+        """
         for page in self._pages():
             head = self._head(page.read_text())
-            image = self._og(head, "image")
-            declared_w = int(self._og(head, "image:width"))
-            declared_h = int(self._og(head, "image:height"))
+            violations = self._card_violations(page.name, head)
+            assert not violations, "\n".join(violations)
 
-            # A cache-busting query is legitimate and does not change which file is
-            # served, so it is stripped before the URL becomes a path — otherwise a
-            # `?v=2` on a correct tag reports "not in the served tree".
-            path = self._og_asset_path(image)
-            assert path.is_file(), (
-                f"{page.name} points og:image at {image}, which is not in the served "
-                f"tree (looked for {path}) — the scraper fetches a 404 and shows no card")
+    def test_the_page_card_predicate_applies_every_check_it_declares(self):
+        """NON-VACUITY for `_card_violations`: each branch REDS through the predicate.
 
-            raw = path.read_bytes()
-            declared_type = self._og(head, "image:type")
-            assert declared_type, (
-                f"{page.name} declares no og:image:type — a scraper that has to sniff "
-                "the format is a scraper that can guess wrong")
-            # Dispatch on what the page SAYS the file is, and hold the bytes to it: the
-            # declared type is the page's own statement about its card, so the guard
-            # reads the format the page names rather than pinning one — a page that
-            # legitimately ships a PNG card would otherwise be reported as "not a
-            # JPEG", with a message that blames the type for being honest. (This
-            # comment used to justify that with "this repo already has one under
-            # blog/"; the PNG it meant is deleted by this change, so the justification
-            # is the dispatch itself — pinned by the non-vacuity test below.)
-            try:
-                actual = self._card_size(declared_type, raw)
-            except AssertionError as exc:
-                raise AssertionError(
-                    f"{page.name} declares og:image:type {declared_type!r} but "
-                    f"{path.name}'s bytes are not one: {exc}") from exc
+        ⛔ WHY. MEASURED on the code before this predicate existed, all 13 tests in this
+        class GREEN under each of three mutants — the floor application deleted,
+        `_card_size` reverted to `_jpeg_size`, and the image resolved with the raw
+        `image.split("//", 1)[-1]` form. The helpers were pinned and nothing pinned the
+        loop that called them, so the loop's half could be `assert True`. That is the
+        identical defect the icon half of this class was already fixed for.
+        """
+        good = self._head((self.WEB / "index.html").read_text())
+        image = self._og(good, "image")
+        assert image, "the fixture page declares no og:image"
+        assert self._card_violations("index.html", good) == [], (
+            "the shipped index.html was reported as violating its own card contract: "
+            f"{self._card_violations('index.html', good)}")
+        card_path, card_bytes = self._og_card_bytes(image)
+        assert card_path is not None and len(card_bytes) > self.CARD_MIN_BYTES, (
+            "the fixture card does not resolve in the served tree")
 
-            assert (declared_w, declared_h) == actual, (
-                f"{page.name} declares {declared_w}x{declared_h} but {path.name} is "
-                f"{actual[0]}x{actual[1]}")
+        def violations(head: str, load) -> list[str]:
+            return self._card_violations("synthetic.html", head, load=load)
 
-            # ⛔ A CARD CAN BE A RECTANGLE, and dimensions cannot tell. THE NUMBERS
-            # ARE MEASURED, not guessed, because the first version of this check used
-            # a 20 KB floor and a flat 1200x630 JPEG at maximum quality is 22,016
-            # bytes — it would have passed the assertion written to reject it:
-            #   authored card (gradient + wordmark + text) ....... 94,066 B
-            #   flat #060b14 rectangle, sips -s formatOptions best 22,016 B
-            #   the placeholder this PR deleted (2-colour PNG) ...  4,595 B
-            # 40 KB sits 1.82x above a flat one and 2.35x below the real card.
-            # A JPEG decoder is what would make this exact; shipping one for a guard
-            # would drag a wheel into the fast lane. If a future card is legitimately
-            # simple and lands under this line, LOOK AT IT, then lower the bound and
-            # write down what you saw. PNG icons get a real pixel check below.
-            floor = self._card_floor_violation(page.name, path, raw)
-            assert floor is None, floor
+        # 1. THE ENCODED-SIZE FLOOR, applied by the PREDICATE and not merely by the
+        #    helper: a flat 1200x630 JPEG whose pixels are nothing.
+        flat = b"\xff\xd8" + b"\x00" * (self.FLAT_CARD_BYTES - 2)
+        assert self._card_floor_violation("synthetic.html", card_path, flat), (
+            "the fixture is not the flat card this case needs — FLAT_CARD_BYTES no "
+            "longer trips the floor")
+        flat_v = violations(good, lambda _url: (card_path, flat))
+        assert any("floor" in v and "flat" in v for v in flat_v), (
+            "a flat card fed through the page predicate produced no floor violation, so "
+            f"the loop is not applying it; got {flat_v}")
+
+        # 2. THE FORMAT DISPATCH reads the type the PAGE declares, and holds the bytes to
+        #    it. Reverting `_card_size` to a JPEG-only reader reds the first case.
+        png = self._two_colour_png(180)
+        png_typed = good.replace('content="image/jpeg"', 'content="image/png"')
+        assert png_typed != good, "the fixture head does not declare og:image:type"
+        png_ok = violations(png_typed, lambda _url: (card_path, png))
+        assert not any("og:image:type" in v for v in png_ok), (
+            "a page that honestly declares a PNG card was reported as failing the "
+            f"format check — the predicate is not dispatching on the declared type: {png_ok}")
+        jpeg_typed_over_png = violations(good, lambda _url: (card_path, png))
+        assert any("og:image:type" in v for v in jpeg_typed_over_png), (
+            "a card whose bytes contradict the declared og:image:type passed the "
+            f"predicate; got {jpeg_typed_over_png}")
+
+        # 3. THE QUERY-STRIPPING PATH, with the REAL loader: a `?v=2` cache-bust on a
+        #    correct tag resolves to the served file. Restoring the raw split form reds
+        #    this — the helper test alone cannot, because it calls `_og_asset_path`
+        #    directly rather than through the predicate.
+        busted = good.replace(image, image + "?v=2")
+        assert busted != good, "the fixture head does not carry the card URL"
+        bust_v = self._card_violations("synthetic.html", busted)
+        assert not any("not in the served tree" in v for v in bust_v), (
+            "a legitimate ?v=2 cache-bust turned the card into a 404 in the predicate — "
+            f"the query is not being stripped on this path: {bust_v}")
+
+        # 4. AN ABSENT CARD and a page with no og:image at all, both reported.
+        missing = good.replace(image, image.rsplit("/", 1)[0] + "/nope.jpg")
+        assert any("not in the served tree" in v
+                   for v in self._card_violations("synthetic.html", missing)), (
+            "a card URL that resolves to nothing was accepted")
+        headless = self._head("<head></head>")
+        assert any("no og:image" in v
+                   for v in self._card_violations("synthetic.html", headless)), (
+            "a head with no og:image produced no violation")
+
+        # 5. A USER-ENTERED size that is not a pixel count is a violation, not a crash:
+        #    `int()` on a non-numeric attribute raised out of the loop before this split.
+        junk = good.replace('content="1200"', 'content="wide"')
+        assert junk != good, "the fixture head does not declare og:image:width"
+        junk_v = self._card_violations("synthetic.html", junk)
+        assert any("not a pixel count" in v for v in junk_v), (
+            f"og:image:width='wide' did not produce a dimension violation: {junk_v}")
+
+        # 6. A DECLARED size that disagrees with the bytes, so the dimension comparison
+        #    itself is pinned (deleting it otherwise leaves every case above green).
+        wrong = good.replace('content="1201"', 'content="1202"')
+        if wrong == good:
+            wrong = good.replace('content="1200"', 'content="1201"')
+        wrong_v = self._card_violations("synthetic.html", wrong)
+        assert any("1201x630" in v or "1x630" in v for v in wrong_v), (
+            f"a declared width one pixel off the file was not reported: {wrong_v}")
 
     def test_the_card_type_dispatch_reads_the_format_the_page_names(self):
         """NON-VACUITY for `_card_size`: BOTH reader branches, on real bytes.
