@@ -348,13 +348,18 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # what the run MEASURES through it, is pinned here and READ BACK like every other
 # switch (the ``arm:`` rule, applied to the door).
 #
-# ⛔ The set below is CLOSED over the modules the capture path DERIVES from —
-# and which modules those are is NOT restated here on purpose. A count in this
-# comment is a transcription that rots: it said "``extractor_v2.py`` plus the
-# three modules it reaches one call down" for three review rounds while the
-# derivation had already grown past it (cycle 9 measured the comment at four
-# modules against eight in `tests/test_7949_c2_door.py::path_modules`). The
-# authority is `path_modules` in that test; every ``TORTOISE_*`` those modules
+# ⛔ The set below is CLOSED over the **measurement modules the path renders
+# with**, and what is enforced MECHANICALLY is the CENSUS over that list, not the
+# list's membership: `path_modules` is a HAND-MAINTAINED tuple, and every
+# ``TORTOISE_*`` read inside those modules must be classified, or the suite reds.
+# The module names are NOT restated here on purpose — a count in this comment is a
+# transcription that rots: it said "``extractor_v2.py`` plus the three modules it
+# reaches one call down" for three review rounds while the list had already grown
+# past it (cycle 9 measured the comment at four modules against eight in
+# `tests/test_7949_c2_door.py::path_modules`). The authority is `path_modules` in
+# that test. ⚠️ Membership is hand-kept, so a read added to a module OUTSIDE that
+# tuple is NOT caught by it — the ``sdk``/``hosted_api`` helpers the two hops call
+# are the measured gap, tracked as #11410. Every ``TORTOISE_*`` those modules
 # read is accounted for,
 # either as an arm seam in ``SEAM_LEDGER`` (``TORTOISE_VET``,
 # ``TORTOISE_CLASSIFY_LATER``, ``TORTOISE_S4_DELTA``), or as a pin below, or as
@@ -797,10 +802,14 @@ def door_record(observed: dict[str, str | None]) -> dict:
 #:
 #: ⛔ ``error`` IS NOT ONE OF THOSE, and listing it here was a measured defect
 #: (#11298 review, round 14). ``error`` is a POST-dispatch outcome — the lane ran
-#: and raised — and the mode is emitted from INSIDE the lane
-#: (``_extract_session_v2``: ``sdk.py:17074``, the door itself;
-#: ``_extract_session_llm``: ``sdk.py:16222``), never by the pre-dispatch guards.
-#: ``sdk.capture_session`` maps a failed extraction onto it at ``sdk.py:15719``.
+#: and raised — and the mode is emitted from INSIDE the lane: by
+#: ``sdk._extract_session_v2`` (the door itself) and by ``sdk._extract_session_llm``
+#: (the other lane), each setting ``meta["mode"]`` to ``"error"`` iff its own
+#: ``errors`` is non-empty. ``sdk.capture_session`` then maps a failed extraction
+#: onto it (``elif not ok: effective_mode = "error"``). Never by the pre-dispatch
+#: guards. Rows are cited by FUNCTION rather than by ``sdk.py:<line>``, because a
+#: line number in prose re-stales on the next insertion — the case this file
+#: already carries three times.
 #: Counting it as a bypass refused a run for a cause that was false, AFTER its
 #: full spend, and — because ``require_door_entered`` raises before the log is
 #: written — threw away the ``errors`` that would have shown what actually
@@ -811,7 +820,9 @@ DOOR_ENTERED_PREFIX = "llm:"
 #: FAILED. Treated as entered, not bypassed, for the reason above. The failure is
 #: not swallowed by that: ``run_corpus`` keeps each receipt's ``errors``,
 #: ``main`` collects the non-``ok`` sessions into ``failed``, and the log — which
-#: a bypass no longer prevents — reports them (``sessions failed: […]``).
+#: a bypass no longer prevents — carries them per session (``errors=[…]`` on the
+#: session's own line and in the machine record) plus a ``sessions failed: […]``
+#: line on stderr after the write.
 DOOR_ENTERED_THEN_FAILED = ("error",)
 
 
@@ -871,9 +882,11 @@ def require_door_entered(runs) -> dict:
             f"reports a bare ``llm`` with no route. A table measured on a graph "
             f"they did not write is a measurement of another run (#10983). "
             f"NOTE: a capture that ENTERED the door and FAILED (mode ``error``) "
-            f"is not refused here — it is reported as ``sessions failed`` in "
-            f"the log, because that refusal would name a false cause and "
-            f"discard the errors that say what actually happened")
+            f"is not refused here — its ``errors`` are carried on its own log "
+            f"line and in the machine record, with a ``sessions failed: […]`` "
+            f"line on stderr after the write, because a refusal here would "
+            f"name a false cause AND discard the errors that say what "
+            f"actually happened")
     return witness
 
 

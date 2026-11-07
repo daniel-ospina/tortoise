@@ -1161,9 +1161,13 @@ def test_a_capture_that_ENTERED_the_door_and_FAILED_is_not_a_BYPASS():
 
     ⛔ ``error`` used to sit in the refused tuple above, and that was a measured
     defect, not a conservative default. ``sdk.capture_session`` maps a failed
-    extraction onto ``extraction_mode="error"`` (``sdk.py:15719``) and the mode
-    is emitted from INSIDE the lane — ``_extract_session_v2``, i.e. THE DOOR,
-    at ``sdk.py:17074`` — so a receipt carrying it took the door and raised.
+    extraction onto ``extraction_mode="error"`` (its ``elif not ok:
+    effective_mode = "error"`` branch) and the mode is emitted from INSIDE the
+    lane — ``sdk._extract_session_v2``, i.e. THE DOOR, sets
+    ``meta["mode"] = "error"`` iff its own ``errors`` is non-empty — so a
+    receipt carrying it took the door and raised. (Cited by FUNCTION, never by
+    ``sdk.py:<line>``: a line number in prose re-stales on the next insertion,
+    which is the defect class this whole file exists to retire.)
     Refusing it did three wrong things at once: it named a cause that was false
     (``returned BEFORE sdk._extract_session_v2``), it did so AFTER the run's full
     spend, and because ``require_door_entered`` raises before the log is written
