@@ -1109,6 +1109,8 @@ place a machine reads it.
   to this file.
 
 
+## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
+
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
 both required **all eight** steps of §4.1 in one pass. One of the eight cannot always run, so that
 requirement was **false by construction** — no run of any corpus could satisfy it — and a gate that
