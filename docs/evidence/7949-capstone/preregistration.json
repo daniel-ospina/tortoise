@@ -225,7 +225,7 @@
         "default": "on",
         "behaviour_seam": true,
         "unset_behaviour": "ON since #10996. The mechanical identifier-only predicate runs inside the VET pass, and extractor_v2 ORs this term into vet_enabled — so the S2.2 pass is ARMED on the fleet's default write path even with TORTOISE_VET unset. #10983's ledger said this seam was default-off; the code says otherwise at this head",
-        "evidence": "value_gate.value_gate_enabled / extractor_v2.vet_enabled"
+        "evidence": "value_gate.value_gate_enabled / extractor_v2.regulator"
       },
       {
         "env": "TORTOISE_S4_DELTA",
