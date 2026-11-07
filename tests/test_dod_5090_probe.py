@@ -3689,6 +3689,23 @@ def test_the_width_probe_report_says_the_rows_were_ENGINE_CHOSEN():
             f"doc now understate what it does — update all three: {statement}")
 
 
+def _doc_section(text: str, start: str, end: str) -> str:
+    """The slice of a markdown doc between two headings, both halves required.
+
+    A pin that claims "the doc's §3 states this" must read §3, not the whole
+    file: every string in a pasted transcript is also "in the document", so a
+    whole-file search cannot falsify a deleted statement (#11389 review, P2).
+    Fails LOUDLY when either heading is gone, rather than silently slicing from
+    the wrong place — a renamed heading must red the pin, never widen it.
+    """
+    assert start in text, f"the census doc lost its {start!r} heading"
+    assert end in text, f"the census doc lost its {end!r} heading"
+    begin = text.index(start)
+    stop = text.index(end, begin)
+    assert stop > begin, f"{end!r} precedes {start!r} in the census doc"
+    return text[begin:stop]
+
+
 def test_the_census_doc_states_the_same_probe_bound_the_report_does():
     """The doc must state the bound the CODE emits, not a parallel wording.
 
@@ -3730,9 +3747,23 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
         assert "volunteer_context" not in text, (
             "the scan declares nothing and the census doc still presents "
             "`volunteer_context` as a declared reach")
-        assert "nested `def`'s decorators and parameter defaults" in text, (
+        # ⛔ THE SAME PROPERTY RULE APPLIES TO THE RESIDUAL ITSELF (#11389
+        # review, P2): this arm used to require ONE exact sentence
+        # ("nested `def`'s decorators and parameter defaults"), so any
+        # legitimate rewording of that clause red a doc+code pair that still
+        # agreed — the very failure the comment four lines up names. Assert the
+        # CLAIM instead: some SENTENCE of §3 must say the walk does not visit a
+        # nested function's decorators or defaults. Same-sentence is the binding
+        # that keeps it falsifiable — a whole-document "nested" + "default"
+        # search stays green with the clause deleted, because both words appear
+        # elsewhere in the document.
+        s3 = _doc_section(text, "## 3.", "## 4.").lower()
+        residual = [sentence for sentence in s3.split(". ")
+                    if "nested" in sentence
+                    and ("decorator" in sentence or "default" in sentence)]
+        assert residual, (
             "the doc claims the declaration is total; the walk does not visit a "
-            "nested def's defaults/decorators, and the doc must say so")
+            "nested def's defaults/decorators, and no sentence of §3 says so")
     else:
         assert ("no such shape exists" not in text
                 and "no such body mention exists" not in text), (
@@ -3746,9 +3777,22 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
         body = declared.split(": ", 1)[1].split(" —")[0]
         passers = [n for n in re.findall(r"(\w+) \(", body) if n != "getattr"]
         assert passers, f"no passer could be read out of the declaration: {declared}"
+        # ⛔ SCOPED TO §3, because that is what the doc CLAIMS (#11389 review,
+        # P2). `assert name in text` searched the WHOLE document, and
+        # `volunteer_context` appears three times in it — §3's doctrine
+        # sentence, §4's provenance note, and the pasted transcript block that
+        # this PR itself added. So deleting §3's statement left this green on
+        # the other two mentions (measured), which is exactly the residual the
+        # docstring concedes for a SECOND passer while claiming the primary one
+        # is pinned. The slice makes the falsifier match the claim: §3 is where
+        # the doc says a passer is declared, so that is what must name it.
+        section = _doc_section(text, "## 3.", "## 4.")
         for name in passers:
-            assert name in text, (
-                f"the run declares {name!r} and the census doc does not name it")
+            assert name in section, (
+                f"the run declares {name!r} and §3 of the census doc does not "
+                f"name it (it appears elsewhere in the document: "
+                f"{name in text}) — a mention in the transcript or §4 is not "
+                f"the doc stating the bound")
 
 
 def test_the_census_doc_collects_what_the_file_collects():
