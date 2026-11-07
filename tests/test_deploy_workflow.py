@@ -4979,16 +4979,26 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         #   "The note never says (as the row records) that the tree immediately before #9548
         #    was wrong."                                       -> ADMITTED here, main REFUSES
         # A parenthetical is INSIDE the clause exactly as a comma aside is, so it may not end
-        # the reporting frame; only `;` `.` `:` and a dash do (the delimiters
-        # `_clause_before_phrase` already cuts at). `\u2014`/`\u2013` stay excluded for the
-        # reason the r34 comment gives: the em-dash aside is a CLAUSE break, not an incise.
+        # the reporting frame; only `;` `.` and a dash do (the delimiters `_clause_before_phrase`
+        # already cuts at). ⛔ `:` IS **NOT** ONE OF THEM (#11191 review r8, P2 — the two
+        # sentences here and below said it was, and `_CLAUSE_DELIM` at `:4739` has no `:`
+        # member: verified by reading the pattern, and by mutation — dropping `:` from the
+        # tail below flips the two `:` aside rows ADMITTED->REFUSED while the coordinated
+        # rows stay ADMITTED, which an inert `:` could not do). A `:` ends the reporting frame
+        # through THIS pattern's excluded set, not through clause cutting. `\u2014`/`\u2013`
+        # stay excluded for the reason the r34 comment gives: the em-dash aside is a CLAUSE
+        # break, not an incise.
         # ⛔ THE `$` ANCHOR — VERIFIED, THEN RE-MEASURED AS INERT (#11191 review r6, P3). The
         # review reported it load-bearing (dropping it flipped a parenthetical sentence
         # ADMIT->REFUSE). That was true while `(`/`)` were excluded; AFTER the parenthetical
-        # fix above, deleting `$` reddens NOTHING (measured: `111 passed`), because
-        # `_clause_before_phrase` has already cut the window at every clause delimiter, so no
-        # delimiter survives into it for an unanchored gap to stop at. The anchor stays — it
-        # is the correct form and costs nothing — but it is NOT pinned, and this comment says
+        # fix above, deleting `$` reddens NOTHING (measured: `111 passed`). ⛔ THE MECHANISM IS
+        # NARROWER THAN "every clause delimiter" (#11191 review r8, P2 — corrected):
+        # `_clause_before_phrase` cuts at `_CLAUSE_DELIM`'s members, which do NOT include `:`,
+        # so a `:`-bearing aside DOES survive into this window and is stopped by the excluded
+        # `:` in the tail below, not by the window. For the delimiters the window does cut at,
+        # an unanchored gap has nothing left to stop at, so the anchor is inert there — which
+        # is the measured claim, and the narrower one. The anchor stays — it is the correct
+        # form and costs nothing — but it is NOT pinned, and this comment says
         # so rather than leaving a control that cannot red.
         r"[^.;:\u2014\u2013]*$",
         re.I,
@@ -10060,10 +10070,12 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # `_clause_before_phrase` cuts at `;` regardless of paren depth, so the aside's own
         # interior ends the reporting frame. Closing the class needs clause cutting to be
         # paren-depth aware — a change to the primitive every arm in this predicate reads
-        # (27 call sites), which is not made blind here. Filed with its measurement on
-        # #11304, which owns the surviving-prose-families list; #11301 owns the structural
-        # fix. Widening this veto without that measurement is how the next round gets a
-        # truth-RED.
+        # measured denominator: `_clause_before_phrase(` appears FOUR times in this file (1
+        # definition + 3 call sites) and `_CLAUSE_DELIM` 25 times, four of them in code — the
+        # r8 review measured both counts at `be09daf2d4`, `e3dc1d9ce9` and the r8 head alike.
+        # Filed with its measurement on #11304, which owns the surviving-prose-families list;
+        # #11301 owns the structural fix. Widening this veto without that measurement is how
+        # the next round gets a truth-RED.
         # ⛔ THE CONTRACTION FAMILY (#11191 review r33-R3, P2 — MEASURED inert leg). The
         # first cut listed `n't` inside a `\b(?:…|n't)\b` alternation, which CANNOT match:
         # a word boundary cannot sit between `n` and `'` inside a contraction, so all three
