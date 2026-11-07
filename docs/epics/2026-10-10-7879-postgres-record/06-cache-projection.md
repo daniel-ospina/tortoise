@@ -461,7 +461,10 @@ restore's whole-graph wipe on either ANCHOR (⚠️ refused PRE-WIPE on a produc
 `update_point(<id>, story_arc=None)` clears the property and keeps the node (measured; the `None` passes
 `_refuse_unpaired_narrative` and `SET n += $props` removes a `None`-valued key — but JOURNAL-bound only: the
 `PointRevised` fold has no `story_arc` clause and the creation fold's open-set passthrough drops a `None`, so a
-`rebuild_all` over a journal whose creation carried the prose RESTORES it, `#10429`, while the RECORD→CACHE
+`rebuild_all` over a journal whose creation carried the prose RESTORES it, `#10429` — ⚠️ on a graph a rebuild can
+REACH: `rebuild_all` asks the SAME L2 name guard as the restore (`_assert_test_graph`, refused PRE-WIPE on every
+production name), so on a production server graph the replay is refused and the clear IS durable there, and it is
+defeated only on a `test_`/`tortoise_test` graph or an embedded `path=` DB — while the RECORD→CACHE
 rebuild replays the stored null and keeps it clear; and on EITHER anchor `update_entity(…, story_arc=None)` is
 refused as server-managed, the stored value untouched). **The seam is the fix, and a post-restore sweep is not an alternative**: a purge pass would
 rent the RAM for the duration of the write and would have to run on every restore forever.
