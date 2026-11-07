@@ -485,8 +485,10 @@ def _closure_stamp(fn):
     in a module that merely HOLDS the stamp would then read as delegating,
     which is a false GREEN on the "the stamp still runs" property. The residue
     is stated rather than papered over: a MODULE-SCOPE plain wrapper that
-    reaches the stamp through globals still reads as "never installed" — no
-    static check can tell a reference from a call.
+    reaches the stamp through globals still reads as "never installed". The
+    reason is not that a static check cannot see the call — bytecode can — but
+    that no static check can prove the call site is REACHED (a dead branch that
+    calls the stamp looks identical), so a recovered "link" would be a guess.
     """
     for cell in getattr(fn, "__closure__", None) or ():
         try:
@@ -564,10 +566,13 @@ def _stamp_problems(start) -> list[str]:
        module reload the reloaded module captures
        ``_ORIG_THREAD_START = Thread.start`` — the PREVIOUS stamp, either
        directly or under a vendor ``@wraps`` wrapper — so a re-install wraps a
-       wrapper. Identity cannot see it (``Thread.start`` and the reloaded
-       module's function are then the SAME object), and neither can a one-hop
-       test: the delegate is frequently a WRAPPER whose inner frame is the
-       previous stamp, which is why fact 2 is checked by REACHABILITY.
+       wrapper, or, on a PLAIN reload (no re-install at all), the assignment
+       rewrites the ALREADY-INSTALLED stamp's delegate to itself, because the
+       module body re-executes in the same ``__dict__``. The marker prevents a
+       re-install; it cannot prevent that rewrite. Neither shape is visible to a
+       chain-LENGTH check (the count stays 1), and one-hop fails when the
+       delegate is a WRAPPER whose inner frame is the previous stamp — which is
+       why fact 2 is checked by REACHABILITY.
     """
     links = _stamp_links(start)
     problems = []
@@ -578,8 +583,9 @@ def _stamp_problems(start) -> list[str]:
     for link in links:
         delegate = link.__globals__.get("_ORIG_THREAD_START")
         if any(_is_stamp(frame) for frame in _delegation_path(delegate)):
-            message = ("a test-stem stamp delegates THROUGH another stamp — a genuine "
-                       "double wrap (module reloaded, then re-installed)")
+            message = ("a test-stem stamp delegates THROUGH another stamp — a double "
+                       "wrap (a reload rewrote the delegate, and/or a re-install "
+                       "stacked a stamp)")
             if message not in problems:  # one report, however many stamps stack
                 problems.append(message)
     return problems
@@ -754,9 +760,11 @@ def test_the_double_wrap_verdict_reads_the_CHAIN_not_the_identity():
         ONE pytest process.
     (2) FALSE GREEN — a genuine double wrap. After a module reload the reloaded
         module captures ``_ORIG_THREAD_START = Thread.start`` (the PREVIOUS
-        stamp), so re-installing stacks a stamp on a stamp — and
-        ``Thread.start`` then IS the module's function object, so identity is
-        TRUE and the check the message promised cannot see it.
+        stamp): re-installing then stacks a stamp ON a stamp, and
+        ``Thread.start`` is that new function, so identity is TRUE and the check
+        the message promised cannot see it. A PLAIN reload with no re-install is
+        worse still — the assignment rewrites the installed stamp's delegate to
+        ITSELF, so the stamp count stays 1 and ``Thread.start()`` recurses.
     """
     links = _stamp_links(threading.Thread.start)
     assert len(links) == 1, links
