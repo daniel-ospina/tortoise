@@ -970,11 +970,11 @@ def test_wire_session_identity_keys_the_pool_and_seeds_the_session():
     i.e. the identity WAS on the retrieved answer (the reader rendered
     ``[session sessA]``) and the pool authority one layer below it dropped
     it, so ``seeded_sessions`` rejected every turn hit as a phantom
-    (``_is_real_session_id`` refuses ``idx:*``) and no TURN hit could seed
-    its own session — the arm fired only on a pool whose hits already
-    carried an id in a spelling the authority read (an extracted point's
-    snake ``session_id``, an ``annotate_ask_hits`` Event join, or an eval
-    hit)."""
+    (``_is_real_session_id`` refuses ``idx:*``) and on the raw search pool
+    no hit could seed a session at all — the fetch pops the snake id from
+    every point hit, turn or extracted, so the camel key was the only
+    identity left. Scope in full: see ``session_reinjection``'s module
+    docstring."""
     pool = [_wire_turn("A_t0", "sessA"), _wire_turn("B_t0", "sessB"),
             _wire_turn("A_t1", "sessA"), _wire_turn("B_t1", "sessB")]
 
