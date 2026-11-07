@@ -6,7 +6,7 @@ doc_status: live
 created: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph, FalkorDB cache, cache eviction
-aboutObjects: "#10976, #11167, #10593, #7879, #11004, tortoise/cache_evictor.py, tools/cache_evict.py, tools/cache_eviction_census.py"
+aboutObjects: "#10976, #11167, #10593, #7879, #11004, tortoise/cache_evictor.py, tortoise/cache_eviction.py, tools/cache_evict.py, tools/cache_eviction_census.py, docs/architecture/STORAGE-ARCHITECTURE.md"
 ---
 
 # #10976 — cache EGRESS: the measurement
