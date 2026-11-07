@@ -79,11 +79,21 @@ run could not answer from (missing document, no git, shallow clone).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/problem_map_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/problem_map_check.py`"
+    )
+
 import argparse
 import json
 import re
 import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 

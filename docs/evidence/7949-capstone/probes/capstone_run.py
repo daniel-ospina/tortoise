@@ -17,7 +17,7 @@ the corrected reading:
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:16258``, called at ``:15295``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:11609``) calls
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:12664``) calls
    ``_edus_from_conversation`` (S0, ``:11727``), ``run_s1`` (S1, ``:11767``),
    ``run_s2`` (S2.1, ``:11791``), ``_run_vet_pass`` (S2.2, ``:11835``),
    ``kind_classifier.classify_items`` (S2.3, ``:11850``),
