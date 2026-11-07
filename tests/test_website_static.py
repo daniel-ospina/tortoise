@@ -4981,8 +4981,8 @@ class TestSiteIconAndSocialPreviewContract:
             # inline `data:` icon is legitimate HTML, so "another host" would be a
             # false statement about it. The branch says what is true of every case.
             return (f"{page_name} links an icon that is not a file this site serves "
-                    f"(rel={link.get('rel')!r} href={link.get('href')!r}) — the tab "
-                    "draws nothing this site controls")
+                    f"(rel={link.get('rel')!r} href={link.get('href')!r}) — this guard "
+                    "cannot verify it")
         assert "/logo.png" not in path_part, (
             f"{page_name} uses the wordmark as an icon: rel={link.get('rel')!r} "
             f"href={link.get('href')!r}")
@@ -5457,9 +5457,11 @@ class TestSiteIconAndSocialPreviewContract:
         # measure. The current segment/scan walk reads `logo.png` at its full 35,670 B
         # even when handed the JPEG branch, so it does NOT stop at an interior `FF D9`.
         # What the pin below therefore witnesses is narrower than the bug story: that
-        # `_encoded_length` took the PNG branch and that branch ended at IEND. The
-        # padded-PNG fixture above is what catches a dispatch regression; this assertion
-        # catches a PNG walk that over-reads the image.
+        # whichever branch ran ended at the file's own end. HEAD-MEASURED, it can NOT
+        # tell the PNG branch from the JPEG one on `logo.png` — deleting the PNG branch
+        # leaves it green, because the current JPEG walk also reads this PNG in full.
+        # The padded-PNG fixture above is what catches a dispatch regression; this
+        # assertion only catches a walk that ends anywhere but the file's own end.
         padded_png = self._flat_png(64)
         padded_png += b"\x00" * (self.CARD_MIN_BYTES + 1_000 - len(padded_png))
         assert self._card_floor_violation("page.html", Path("card.png"), padded_png), (
@@ -5472,8 +5474,9 @@ class TestSiteIconAndSocialPreviewContract:
             "state that this witness is gone)")
         assert self._encoded_length(in_tree_png) == len(in_tree_png), (
             f"website/logo.png ({len(in_tree_png)} B) measures "
-            f"{self._encoded_length(in_tree_png)} B — the PNG walk did not end at its "
-            "IEND chunk, so it over-read past the image (or it is not the PNG branch)")
+            f"{self._encoded_length(in_tree_png)} B — the PNG chunk walk did not end at "
+            "the file's own end (a mis-parsed chunk length, or trailing bytes after "
+            "IEND)")
         assert self._encoded_length(shipped) == len(shipped), (
             f"the shipped JPEG ({len(shipped)} B) measures "
             f"{self._encoded_length(shipped)} B — its stream must end at its own EOF")
