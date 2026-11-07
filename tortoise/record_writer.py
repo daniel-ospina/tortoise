@@ -204,6 +204,7 @@ import contextvars
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -322,16 +323,37 @@ CONNECT_TIMEOUT_SECONDS = 10
 #:
 #: 60 s — not seconds, not infinity. It rides the ``options`` STARTUP packet, so
 #: it costs **no round trip** and therefore does not undo the change it escorts.
-#: The WRITE door parks IDLE, so this bound never fires on the path the pool
-#: exists for; it only reclaims a READ-door handle, and a read borrow issues its
-#: statements back to back. A handle the server ends is handled by the path that
-#: already exists — the borrow-time reset raises, the handle is discarded, the
-#: caller gets a fresh connect (see ``_take_idle_connection``) — so expiring one
-#: costs a reconnect, never a surfaced error. A DSN that sets its own
-#: ``idle_in_transaction_session_timeout`` WINS, for the same reason
-#: :data:`CONNECT_TIMEOUT_SECONDS` defers to a ``connect_timeout`` the operator
-#: named.
+#: It reaches two doors differently, and the difference is worth stating rather
+#: than glossing:
+#:
+#: * the WRITE door's HAPPY path parks IDLE, so the bound never fires there; its
+#:   failure path parks INERROR, which *is* still an open transaction, so the
+#:   bound can fire there — where it costs one reconnect on a handle that was
+#:   dirty anyway, i.e. the cheap case;
+#: * the READ door parks INTRANS by design, which is the case this bound exists
+#:   for, and a read borrow issues its statements back to back.
+#:
+#: ⚠️ For a **PARKED** handle, being expired is invisible: the borrow-time reset
+#: raises, the handle is discarded, the caller gets a fresh connect (see
+#: ``_take_idle_connection``) — no surfaced error. That is NOT a promise about a
+#: **HELD** handle: one that is still checked out (a caller walking a long
+#: read inside one open transaction — e.g. `record_turn_reader` in
+#: `session_source_prose_migration`, driven per-node from graph-scripts) can now
+#: have the session ended underneath it and surface the driver's
+#: `OperationalError` on its next statement, where before it merely held locks.
+#: That is the trade this bound makes, stated rather than hidden; a caller with a
+#: >60 s inter-statement gap inside one borrow is the shape to watch for.
+#:
+#: A DSN that sets its own ``idle_in_transaction_session_timeout`` WINS, for the
+#: same reason :data:`CONNECT_TIMEOUT_SECONDS` defers to a ``connect_timeout``
+#: the operator named — and the bound is APPENDED to the operator's ``options``,
+#: never passed in its place (see ``_default_connect``).
 IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
+
+#: The server parameter name the bound above sets. A constant, not an inline
+#: string, because the SET and the "is it already set?" TOKEN match must agree —
+#: two spellings of it is how a guard silently stops guarding.
+_PARKED_BOUND_OPTION = "idle_in_transaction_session_timeout"
 
 #: How long the LIVE door stops trying after a connect to the record FAILED, in
 #: seconds. :data:`CONNECT_TIMEOUT_SECONDS` bounds ONE connect; it does not bound
@@ -974,6 +996,41 @@ def _refused_tenant_env_note() -> str:
     )
 
 
+def _parked_handle_bound() -> str:
+    """The STARTUP `-c` fragment that bounds a parked handle's transaction."""
+    return (
+        f"{_PARKED_BOUND_OPTION}="
+        f"{IDLE_IN_TRANSACTION_TIMEOUT_SECONDS * 1000}"
+    )
+
+
+def _parked_handle_bound_is_set(options: str) -> bool:
+    """Does this `options` string already name the bound?
+
+    A TOKEN match, not a substring of anything: `-c name=value` arrives as two
+    tokens and `-cname=value` as one, and either spelling sets it. Matching the
+    bare name anywhere would also fire on a value that merely mentions it.
+    """
+    for token in options.split():
+        if re.fullmatch(rf"-c?{_PARKED_BOUND_OPTION}=.*", token):
+            return True
+    return False
+
+
+def _operator_options(dsn: str) -> str:
+    """The `options` an operator already set, from the DSN query or `PGOPTIONS`.
+
+    Read from the PARSED query, never a substring of the URI: a password such as
+    `postgresql://svc:options@host/db` parses to no query at all, and a substring
+    test would then think an `options` existed (or, for the guard the bound
+    needs, that it was already set).
+    """
+    query = parse_qs(urlsplit(dsn).query)
+    if query.get("options"):
+        return query["options"][-1]
+    return os.environ.get("PGOPTIONS", "")
+
+
 def _default_connect(dsn: str) -> Any:
     """Open the record's connection. The ONE place a driver choice lives.
 
@@ -1027,16 +1084,20 @@ def _default_connect(dsn: str) -> Any:
         pass
     else:
         connect_kwargs["connect_timeout"] = CONNECT_TIMEOUT_SECONDS
-    # ⛔ EVERY connect carries the parked-handle bound (#9558 review cycle 4,
-    # P1), because the handle it opens can be PARKED later and the bound has to
-    # be on the session, not on the call that happened to create it. `options`
-    # is a STARTUP parameter, so this adds no round trip and cannot be lost on
-    # reuse. An operator's own value wins, same rule as `connect_timeout`.
-    if "idle_in_transaction_session_timeout" not in dsn:
-        connect_kwargs["options"] = (
-            "-c idle_in_transaction_session_timeout="
-            f"{IDLE_IN_TRANSACTION_TIMEOUT_SECONDS * 1000}"
-        )
+    # ⛔ APPEND the parked-handle bound, never REPLACE the operator's `options`
+    # (#9558 review cycle 5, P1). `psycopg2.connect(dsn, options=…)` merges
+    # kwargs OVER the DSN, so a bare `options=` DROPS whatever the operator put
+    # there — and this repo's own app-role DSN spells the record's RLS posture
+    # exactly that way (`options=-c role=tortoise_record_app`, see
+    # `_app_role_dsn()` in `tests/test_9078_record_written_by_production_path.py`
+    # and `docs/infra-runbook.md`). Replacing it would silently disarm the
+    # tenancy gate: every record write would run as a role that bypasses RLS
+    # and be refused. Same class as the `connect_timeout` guard above, which is
+    # why this reads the parsed query and `PGOPTIONS` rather than the URI text.
+    existing = _operator_options(dsn)
+    if not _parked_handle_bound_is_set(existing):
+        existing = f"{existing} -c {_parked_handle_bound()}".strip()
+    connect_kwargs["options"] = existing
     raw = psycopg2.connect(dsn, **connect_kwargs)
     return _pooled_connection(raw, dsn)
 
