@@ -3486,7 +3486,9 @@ def _taint_keys(node: ast.expr) -> set[str]:
 
 
 def _taint_over_imports(
-    trees: list[tuple[str, ast.AST]], file_taint: dict[str, set[str]]
+    trees: list[tuple[str, ast.AST]],
+    file_taint: dict[str, set[str]],
+    package: str | None = None,
 ) -> set[str]:
     """Widen each file's taint set over the IMPORT graph, then return the UNION.
 
@@ -3513,6 +3515,19 @@ def _taint_over_imports(
         module_files[mod] = rel
         if mod.endswith(".__init__"):
             module_files[mod[: -len(".__init__")]] = rel
+        elif mod == "__init__" and package:
+            # The scanned ROOT's own `__init__.py`. Its id here is the bare
+            # `__init__`, so the `.__init__` strip above never fires and the root
+            # package had NO id at all — while `from tortoise import X` (82 such
+            # lines under `tortoise/`, several of them RENAMED: `from tortoise import
+            # hosted_api as _ha`) names exactly it, and a rename there is the only way
+            # that name reaches a use site at all. The suffix retry in `resolve()`
+            # cannot reach it either: the module is a SINGLE component, so there is no
+            # leading component to drop. Measured: `from pkg import Q as R` with the
+            # fragment bound in `pkg/__init__.py` read as ABSENT (`assembled == []`)
+            # while the same rename through a SUBpackage resolved via the suffix
+            # retry.
+            module_files[package] = rel
 
     def resolve(module: str | None, level: int, rel: str) -> str | None:
         """The file a `from … import` came from, ABSOLUTE or RELATIVE.
@@ -3524,7 +3539,9 @@ def _taint_over_imports(
         against a root-relative id). Exact matches are tried first, then the module
         with its leading components dropped one at a time, longest suffix first — so
         a package-absolute import resolves to the file the pin is actually scanning,
-        and an exact id still wins over any suffix.
+        and an exact id still wins over any suffix. The one id NEITHER half reaches
+        is the root package itself (`from tortoise import X`, a single component with
+        nothing to drop), so the caller registers `package` explicitly.
         """
         if level:
             pkg = rel.rsplit("/", 1)[0].replace("/", ".") if "/" in rel else ""
@@ -3961,7 +3978,9 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
     # is followed to a fixpoint so a fragment carried ACROSS modules — aliased,
     # qualified, re-exported under a new name, or reached through a relative import —
     # is refused exactly like the single-file spelling.
-    tree_taint = _taint_over_imports([(rel, tree) for rel, tree, *_ in parsed], file_taint)
+    tree_taint = _taint_over_imports(
+        [(rel, tree) for rel, tree, *_ in parsed], file_taint, root.name
+    )
 
     for rel, tree, docstrings, bindings in parsed:
         for node in ast.walk(tree):
@@ -4635,9 +4654,14 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
             "followed transitively, not one hop"
         )
     # AN ALIASED from-import of the QUALIFIER: `from carrier import obj as O` then
-    # `O.ddl`. The qualifier is renamed, so the carrier's `expr:obj.ddl` is reachable
-    # only by substituting the imported name — measured: without that substitution the
-    # spelling read as ABSENT.
+    # `O.ddl`. ⚠️ This passes WITHOUT any qualifier substitution, and what it pins is
+    # the FINAL-name taint key, NOT the import graph: `_taint_keys` mints `name:ddl`
+    # for `O.ddl` (`:3484`) exactly as it does for `obj.ddl`, and `carrier.py`'s
+    # class-body binding already put `name:ddl` into the tree-wide UNION — so
+    # deleting `_taint_over_imports` outright leaves this fixture GREEN (measured).
+    # Kept as the CROSS-MODULE statement of the final-name arm (the single-file
+    # version is the deeper-qualifier fixture above); nothing in the fixpoint
+    # translates an `expr:` key — it mints `name:` keys only.
     (tmp_path / "carrier.py").write_text(
         'class obj:\n    ddl = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
     )
@@ -4929,6 +4953,32 @@ def test_the_cross_module_reach_arms_are_each_load_bearing(tmp_path) -> None:
         f"module ids are relative, so the resolver must retry a suffix: {assembled}"
     )
     for stray in ("pkg4/carrier.py", "pkg4/user.py", "pkg4"):
+        target = tmp_path / stray
+        target.rmdir() if target.is_dir() else target.unlink()
+    # The ROOT package ITSELF. The pin scans `tortoise/`, so the scanned root IS a
+    # package whose own `__init__.py` is the root — and `from tortoise import X` (82
+    # such lines under `tortoise/`, several of them RENAMED: `from tortoise import
+    # hosted_api as _ha`) names a module id that is neither in the map (`__init__` is
+    # keyed, the PACKAGE name is not) nor reachable by the suffix retry above (a
+    # single component has nothing to drop). The RENAME is what makes it load-bearing:
+    # without it the use matches the union's own `name:Q`, so the missing import edge
+    # cannot show. Measured before the root-package id was registered:
+    # `assembled == []` — a fragment re-exported by the root package and renamed at
+    # the use site read as ABSENT.
+    (tmp_path / "pkg5").mkdir()
+    (tmp_path / "pkg5" / "__init__.py").write_text(
+        'Q = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg5" / "user.py").write_text(
+        'from pkg5 import Q as R\ng.query(R + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path / "pkg5")
+    assert assembled, (
+        "a RENAME of a fragment bound in the scanned ROOT's own `__init__.py` was "
+        "not refused — `from pkg import Q as R` names the root package, which has "
+        f"no id of its own unless the scan root's name is registered: {assembled}"
+    )
+    for stray in ("pkg5/__init__.py", "pkg5/user.py", "pkg5"):
         target = tmp_path / stray
         target.rmdir() if target.is_dir() else target.unlink()
     # A RENAME CHAIN ORDERED AGAINST THE FILENAME SORT: propagation runs files in
