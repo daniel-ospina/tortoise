@@ -693,6 +693,42 @@ def test_the_rule_HONOURS_the_switch_the_caller_handed_it(monkeypatch):
     assert any("REWRITES its own verbatim quote" in w for w in warnings), warnings
 
 
+def test_the_emit_site_SUPPLIES_the_reading_the_rule_honours(monkeypatch):
+    """The handoff's SUPPLY end, which `armed=`-honouring alone does not pin.
+
+    Review round 5's mutation attribution measured an un-killed mutant (M9): dropping
+    `armed=_value_fidelity_judged` at the emit site left the whole file green,
+    because in a static environment the caller's read and the rule's own re-read
+    cannot disagree — which is exactly the round-2 defect shape (one point judged
+    under two answers) that the handoff exists to prevent.
+
+    This pins the supply by making the two reads DISAGREE: the helper answers from a
+    call counter, so the emit site's read says ON and any later re-read says OFF.
+    With the handoff supplied the rule refuses (the point's own reading wins); with
+    the handoff dropped the rule re-reads, gets OFF, and writes the divergent point.
+
+    MUTATION CHECK TARGET: remove `armed=_value_fidelity_judged` from the call site
+    and this reds on the call count (2 reads) and on the written point.
+    """
+    calls: list[int] = []
+
+    def _one_reading_then_off() -> bool:
+        calls.append(1)
+        return len(calls) == 1
+
+    monkeypatch.setattr(v2, "_state_value_verbatim_enforced",
+                        _one_reading_then_off)
+    result = _write("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    assert calls == [1], (
+        "the emit site did not hand its own reading to the rule — the rule read "
+        f"the switch again ({len(calls)} reads for one point), so a mid-batch "
+        "flip can judge one point under two answers and write the divergent "
+        "value with no warning")
+    assert result["payload"]["points"] == [], (
+        "the emit site's ON reading was not honoured by the rule: the divergent "
+        f"point was written {result['payload']['points']!r}")
+
+
 def test_the_off_switch_is_INTRINSIC_so_a_second_call_site_cannot_bypass_it(
         monkeypatch):
     """The switch is checked INSIDE the rule, not only at the emit site.
