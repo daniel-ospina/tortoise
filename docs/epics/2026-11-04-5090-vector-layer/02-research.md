@@ -180,40 +180,41 @@ comparables now say what that measurement will probably show, and how to run it:
 
 **⇒ So the epic's S1 was under-specified — but not in the way this section first said.** Arming a default does not resolve G2: the step list is the **eight steps of §4.1** — `S0`, `S1`, `S2.1`, `S2.2`, `S2.3`, `S3`, `S5`, `S6` (⛔ *"There is no S4 — do not restore one"*) — and **none of them is an EMBED decision**. `S2.2` is the VET/`DISCARD` point; the EMBED question ("is this row worth an embedding?") has no home **in that step list** — its only home is the embedding submission seam in code (see the write path above). That is a **step-list** gap, and no flag can close it.
 
-### ✅ The VALUE gate's default half is ALREADY satisfied (`#10996`)
+### ⚠️ The VALUE gate's default half has SINCE been satisfied (`#10996`) — the draft was right when written
 
-This section first claimed *"the VALUE gate is off too"*. ⛔ **That was false at this head.** §S2.2 never said otherwise — it *requires* the mechanical half to default ON. The stale teacher was a **code docstring**: `tortoise/embed_gate.py`'s *"The flag (off by default)"* line was read as covering **both** flags, when the very next sentence of that docstring says `TORTOISE_VALUE_GATE` *"was the third member of that precedent until `#10996` flipped it ON by default"*. `#10996` (`277a559b1`) is an ancestor of this head, and its follow-up `7ca0c0ff4` had to fix the docstrings that still taught the old precedent.
+This section first claimed *"the VALUE gate is off too"*. **At this document's `Head` pin (`641e5f1b37`) that was true**: `tortoise/value_gate.py` there resolves `is_truthy(os.environ.get(ENV_FLAG))`, with no default. It is no longer true — `#10996` (`277a559b1`) landed before this PR and flipped the gate **ON**.
 
-Verified at this head:
+⛔ **So the draft was correct and went stale**, which is a different defect from being wrong: a requirement already met is a criterion that can never fail. Measured at the **branch head**, which is later than this document's `Head` pin — that distinction is the whole point:
 
-- `tortoise/value_gate.py` resolves the flag as `is_truthy(os.environ.get(ENV_FLAG, "1"))` — **unset means ON**, and its own comment says so: *"The predicate is ON unless this says otherwise (`#10996`)"*, citing this very §S2.2 sentence as the reason.
-- `tortoise/embed_gate.py` is the one still off by default — and its docstring says exactly that of the other flag: `TORTOISE_VALUE_GATE` *"was the third member of that precedent until `#10996` flipped it ON by default — copy this pattern, not that one."*
+- `tortoise/value_gate.py` now resolves `is_truthy(os.environ.get(ENV_FLAG, "1"))` — **unset means ON** — and its own comment says so: *"The predicate is ON unless this says otherwise (`#10996`)"*, citing §S2.2's requirement as the reason it was flipped.
+- `tortoise/embed_gate.py` is the one still off by default. `277a559b1` also updated its docstring, which now says of the other flag: `TORTOISE_VALUE_GATE` *"was the third member of that precedent until `#10996` flipped it ON by default — copy this pattern, not that one."*
 - `tests/test_value_gate_4899.py::test_unset_arms_the_predicate` pins it, and states the rule as *"unset must not mean 'the predicate never runs'"*.
 
 ⇒ **Requiring `TORTOISE_VALUE_GATE` to be "set" is a criterion that measures nothing**: unset already means ON, so an explicit set has a zero delta by construction, and no shipped config sets it. What S1 owes is (i) `TORTOISE_EMBED_GATE`, the second enforcement point, and (ii) G2's step-list home.
 
+⚠️ Note what this does **not** claim: §S2.2 was never the stale source. It always required the default; at the pin, the code simply did not yet do what it said.
+
 ### ✅ The DISCARD-before-EMBED wiring is IMPLEMENTED
 
-This section first repeated v4's wiring note as an open defect. At this head the prune happens **before** the classify pass:
+This section first repeated v4's wiring note as an open defect. At the branch head the prune happens **before** the classify pass:
 
 - `_run_vet_pass` **returns** the list and the caller assigns it back (`tortoise/extractor_v2.py`), and `_collect_classify_items` is called **after** that assignment — so it collects from the already-pruned candidate set, not the whole one;
 - `apply_vet`'s Rule 1 is *"Only an explicit `DISCARD` removes anything"* (`tortoise/vet_gate.py`);
 - `vet_s2_pool` carries the S2 pass's removals forward: an **operator** the live `S4` gap-filler re-added against an `S2.2`-discarded item is **not** re-minted by `execute_embed`, and an entity it started referencing does not 422 the session (`S4` here is the code's second extraction pass, which is not the design's removed *"S4 — granularity review"*). Item removal itself is driven by the union pass's own `DISCARD` decisions, not by the pool.
 
-⇒ `DISCARD` already precedes `EMBED`. (`classify_consolidation` is a per-point dedup API, not the pruning site — citing it for this was wrong twice over.) v4's wiring note still **reads** as outstanding because its citations belong to the `c79ba1cf2` pin; that passage is stale at this head, and re-asserting it here is how the stale claim would have propagated.
+⇒ `DISCARD` already removes from the candidate set before it is classified or committed. (`classify_consolidation` is a per-point dedup API, not the pruning site — citing it for this was wrong twice over.) v4's wiring note still **reads** as outstanding because its citations belong to the `c79ba1cf2` pin; that passage is stale at the branch head, and re-asserting it here is how the stale claim would have propagated.
 
-⚠️ **And it has already propagated to a child.** `#11086`'s body still carries the superseded premise (*"`S2.3 — CLASSIFY` collects from `embed_list` … while `classify_consolidation` never removes items from it … A `DISCARD` would therefore still be classified, and still be embedded."*). The epic doc can only stop the NEXT copy; the issue body is what a lane building S1 reads as its brief, so correcting it there is part of S1, not a follow-up.
-
-### The ordering, as two live constraints (v4 §4.2, §S2.2)
+### The ordering (v4 §4.2, §S2.2)
 
 | constraint | source |
 |---|---|
 | the **value** predicate stays **subordinate to VET** | v4 §S2.2: the predicate is the mechanical half of the step whose adversarial question is VET's, and its flag switches that pass on (`vet_enabled` folds `_value_gate_enabled()`) |
-| **EMBED before `execute_embed`** | v4 §4.2's order table: the embed pass is last, and `classify_consolidation` lives **inside** it (`tortoise/extractor_v2.py`) |
 
-⚠️ **Not** both: `embed_gate_enabled()` reads only `TORTOISE_EMBED_GATE` and is **not** folded into `vet_enabled`, so the EMBED point is not subordinate to VET — it sits at the embedding submission seam (`embeddings.encode_for_row`, storage §12.2a), a different step from `S2.2`. A lane that folded it in on the strength of "one rule set, two enforcement points" would be inventing a subordination no source records.
+⚠️ **Not** both gates: `embed_gate_enabled()` reads only `TORTOISE_EMBED_GATE` and is **not** folded into `vet_enabled`, so the EMBED point is not subordinate to VET — it sits at the embedding submission seam (`embeddings.encode_for_row`, storage §12.2a), a different step from `S2.2`. A lane that folded it in on the strength of "one rule set, two enforcement points" would be inventing a subordination no source records.
 
-(The other ordering constraint, `DISCARD` before `EMBED`, is **implemented** — see above.)
+⛔ **And there is no EMBED row to add to that table — its absence IS G2.** v4 §4.2's "resulting order" block has no EMBED entry at all, which is exactly what G2 records as missing. The code applies the gate at `encode_for_row`, called from the graph writers **inside** the commit that `execute_embed` performs (*"S5: deterministic embed EXECUTION"*), so it is neither "before `execute_embed`" nor a step of its own. Stating it as an ordering constraint would invent the placement the design says is absent.
+
+(`DISCARD` already precedes the classify/commit pass — see above.)
 
 ### Two v4 passages that CONFIRM the epic's sequencing
 
@@ -222,9 +223,16 @@ This section first repeated v4's wiring note as an open defect. At this head the
 
 ### What this changes for the epic
 
-- **S1 / #11086** — arms `TORTOISE_EMBED_GATE` (the second enforcement point) and gives the EMBED decision a home in the step list (**G2**). It does **not** need `TORTOISE_VALUE_GATE` set: that is already ON by default since `#10996` (`03-scope.md`, S1). ⚠️ The issue body must ALSO have its two superseded premises corrected — the value gate is no longer off by default, and a `DISCARD` no longer reaches `S2.3`/`execute_embed`.
+- **S1 / #11086** — arms `TORTOISE_EMBED_GATE` (the second enforcement point) and gives the EMBED decision a home in the step list (**G2**). It does **not** need `TORTOISE_VALUE_GATE` set: that is already ON by default since `#10996` (`03-scope.md`, S1).
 - **S3 / #11088** — states that it removes **vectors**, never rows, and cites the 48%-precision measurement as the reason that distinction is not negotiable (`03-scope.md`, S3; the issue body carries the same).
 - **V1 stays out of scope** and unaffected: v4 is silent on where the index lives, and §14.3 remains the decision's home.
+
+### ⚠️ The stale premises have already propagated into the child issues
+
+This doc can only stop the NEXT copy; each issue body is what a lane building that slice reads as its brief.
+
+- **`#11086`** carries **three** superseded premises, not one: the value gate is no longer off by default; a `DISCARD` no longer reaches `S2.3`/`execute_embed`; and its ordering table *and* its checklist both require **both** gates to stay subordinate to VET — the invented subordination this section disclaims. Correcting all three is part of S1, not a follow-up.
+- **`#11088`** carries the stale v4 §4.2 wiring note too (*"`S2.3 — CLASSIFY` collects from `embed_list`, and `classify_consolidation` does not remove items from it — so anything this issue stops embedding must also be skipped there, or it is classified and embedded anyway"*). The "embedded anyway" half is false: the gate is at `encode_for_row`, so a row that is not embedded gets no vector whatever the classifier does.
 
 ## Review gate
 
