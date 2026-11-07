@@ -137,14 +137,32 @@ def read_doc(path: Path) -> str:
 
 
 def split_sections(text: str) -> dict[str, str]:
-    """Split on `## <n>.` headings. Returns {"1": body, ...}."""
+    """Split on `## <n>.` headings. Returns {"1": body, ...}.
+
+    A DUPLICATE number is a refusal, not a last-wins overwrite. Overwriting meant an
+    appended decoy section (`## 1. The surfaces (appendix)` + a clean copy of the
+    table) replaced the real one, so a map that had LOST a surface row graded CLEAN
+    over the copy — measured, two edits: delete `| **SF13** | … |` and append the
+    decoy -> `CLEAN`, exit 0, where the row deletion alone red red `R1 SF13: pinned
+    surface is missing`; likewise a blanked §7 cell plus an appended §5 decoy. The
+    document then renders two sections with the same number, which no reader can
+    resolve — an unreadable map is exit 2 everywhere else in this file, so it is here
+    too. The self-test cannot see this (it mutates the document, not the splitter),
+    which is why the arm reports it as a REFUSAL rather than a violation.
+    """
     marks = list(SECTION.finditer(text))
     if not marks:
         raise Refusal("no `## <n>.` sections found — the map's structure is gone")
     sections: dict[str, str] = {}
     for i, match in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-        sections[match.group(1)] = text[match.start() : end]
+        number = match.group(1)
+        if number in sections:
+            raise Refusal(
+                f"section `## {number}.` appears twice — two sections cannot share a "
+                "number, and grading the last one would hide whatever the first one lost"
+            )
+        sections[number] = text[match.start() : end]
     return sections
 
 
@@ -359,83 +377,66 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     # its seam token, so its violation message is unchanged. (A surface number
     # typed a digit OFF still lands on a real row, so R5 does NOT catch that; its
     # wording is "names a surface with no row in §1", and that is all it claims.)
-    # Grade the crosswalk TABLE, not every `|` line in §5: the section may carry a
-    # second, ordinary table, and grading its rows as seams reds the REQUIRED `docs`
-    # job on a docs-only edit that improves the map (measured: a legit 2-column table
-    # appended to §5 produced three false `R5 …: names no surface` violations).
+    # Grade EVERY `|` line in §5, and let a line out only two ways: it is an
+    # alignment row (`|---|---|`), or it IS the crosswalk header, judged by CONTENT
+    # (`_is_crosswalk_header`). Nothing else is exempt — in particular the section
+    # is NOT split into "the crosswalk table" and "other tables" and graded block by
+    # block, because that split was itself the last false PASS:
     #
-    # The header is identified by the SEPARATOR THAT FOLLOWS IT, not by being the
-    # first `|` line. A positional skip was one-shot for the whole section, so
-    # deleting the header line made the first DATA row the "header" and left it
-    # ungraded — two document edits (drop the header, blank a cell) graded CLEAN
-    # (measured). Re-armed per table, a deleted header just leaves the first row
-    # graded like any other.
-    # Grade every data row of every CROSSWALK-HEADED table in §5 — and nothing
-    # else. Three shapes had to be got right here, each measured:
+    #   A block counted as the crosswalk only when its separator was FOLLOWED by a
+    #   header, so a bare `|---|---|---|---|` inserted above `| §7 | … |` started a
+    #   block that HAD a separator and NO header. That block was excluded from
+    #   grading, so every row beneath it went unread: blank §7's surface cell, insert
+    #   the separator, and the map graded CLEAN (exit 0, measured) while the same
+    #   document with the cell blanked and NO split red (`R5 §7: names no surface`,
+    #   exit 1). One inserted line was the difference between the arm firing and the
+    #   arm blind, which makes it a bypass rather than a nuance.
     #
-    # 1. A positional header skip was one-shot for the whole section, so deleting
-    #    the header made the first DATA row the "header" and left it ungraded
-    #    (measured: header deleted + §5 row 1's cell blanked -> CLEAN).
-    # 2. Breaking at the first non-`|` line graded only the FIRST table, so a
-    #    second validly-headed crosswalk table's rows were never read (measured:
-    #    §5 split into two headed tables, one cell blanked in the second -> CLEAN),
-    #    and a decorative table ABOVE the crosswalk produced false violations
-    #    (measured: three invented `R5 …: names no surface` on a clean map).
-    # 3. Selecting by header CONTENT only (not position) is what makes both
-    #    directions right: a 2-column table has no `_is_crosswalk_header` row, so
-    #    it is not graded wherever it sits.
-    blocks: list[list[str]] = []
-    current: list[str] = []
-    for line in crosswalk.splitlines():
-        if line.startswith("|"):
-            current.append(line)
-        elif current:
-            blocks.append(current)
-            current = []
-    if current:
-        blocks.append(current)
-
-    def _separator(block: list[str]) -> int | None:
-        return next(
-            (
-                index
-                for index, line in enumerate(block)
-                if all(set(cell) <= {"-", ":", ""} for cell in cells(line))
-            ),
-            None,
-        )
-
-    def _is_crosswalk_block(block: list[str]) -> bool:
-        separator = _separator(block)
-        return separator is not None and separator > 0 and _is_crosswalk_header(block[separator - 1])
-
-    # Fail CLOSED when §5 no longer holds a crosswalk header: the header itself is the
-    # thing a shrinker deletes, and once it is gone no block can be told apart from
-    # the crosswalk. Grading nothing would be a false PASS on every remaining row
-    # (measured: header deleted + a cell blanked -> CLEAN before this fallback), so
-    # every block in the section is graded instead. A decorative table sharing §5
-    # with a MISSING crosswalk header is therefore a false RED — the direction that
-    # costs a re-run, never a gate that reports green over an ungraded row.
-    headed = [block for block in blocks if _is_crosswalk_block(block)]
-    if headed:
-        # A block with NO separator is a continuation of the table above it (a blank
-        # line splits the markdown table in the parser but not on the page). Grading
-        # only the headed blocks left a split table's tail ungraded — measured: a
-        # blank line before §6.4 plus a blanked §6.4 cell graded CLEAN.
-        graded_blocks = [block for block in blocks if _is_crosswalk_block(block) or _separator(block) is None]
-    else:
-        graded_blocks = blocks
-
-    rows: list[str] = []
-    for block in graded_blocks:
-        separator = _separator(block)
-        start = 0 if separator is None else separator + 1
-        rows.extend(block[start:])
+    # Two earlier shapes stay closed under the content rule:
+    # 1. A one-shot positional header skip left the first DATA row ungraded once the
+    #    header was deleted (measured: header deleted + §5 row 1's cell blanked ->
+    #    CLEAN). Skipping by CONTENT cannot do that: a deleted header leaves every
+    #    row graded, and a data row sitting where the header used to be is still read.
+    # 2. Grading only the FIRST table left a second crosswalk table unread (measured:
+    #    §5 split into two headed tables, one cell blanked in the second -> CLEAN).
+    #    Every line is read now, so a split in either direction is read.
+    #
+    # ⚠️ The cost, accepted in this file's own stated direction ("a false RED costs a
+    # re-run, never a gate that reports green over an ungraded row"): an ordinary,
+    # non-crosswalk table placed INSIDE §5 is graded as if it were the crosswalk, so
+    # its rows red `R5 <label>: names no surface` (measured: a 2-column decorative
+    # table appended to §5 produced three such violations on an otherwise clean map).
+    # The remedy is to put a second table in its own section, which is where §6's
+    # checklist table already lives — trading that false RED for a one-line bypass is
+    # the trade this arm is supposed to make. Rewording the crosswalk HEADER reds for
+    # the same reason (measured: `| plan section | seam / interface | surface names |
+    # note |` -> `R5 plan section: names no surface`), because the exemption below
+    # recognises the header by its two identifying strings, not by position.
+    #
+    # The header exemption is TWO conditions, and both are load-bearing. Content alone
+    # was not enough: `_is_crosswalk_header` accepts either of two signals, so as a
+    # per-LINE exemption it also swallowed a DATA row whose surface cell had been
+    # rewritten to the bare token `surface` — that row then escaped BOTH R5 arms
+    # (measured: `| §6.4 … | surface |  |` graded CLEAN, exit 0, while the same cell
+    # blanked red). Position alone was not enough either — that is the bypass above.
+    # So a line is exempt only when it content-matches a header AND the next `|` line
+    # is an alignment row, which is what a table header IS.
+    pipe_lines = [line for line in crosswalk.splitlines() if line.startswith("|")]
+    header_indexes = {
+        index
+        for index, line in enumerate(pipe_lines)
+        if _is_crosswalk_header(line)
+        and index + 1 < len(pipe_lines)
+        and _is_separator_line(pipe_lines[index + 1])
+    }
+    rows: list[str] = [
+        line
+        for index, line in enumerate(pipe_lines)
+        if not _is_separator_line(line) and index not in header_indexes
+    ]
 
     for line in rows:
         row = cells(line)
-        if not row:
-            continue
         label = row[0] or "?"
         # A crosswalk row that names NO surface was the third "names nothing" hole:
         # R1 (`R1 <capability>: names no surface`) and R4 (`R4 #<issue>: touches no
@@ -524,12 +525,31 @@ _HEADER_SURFACE_CELLS = frozenset({"surface(s)", "surfaces", "surface"})
 
 
 def _is_crosswalk_header(line: str) -> bool:
-    """True when this `|` line is the crosswalk's header row, judged by CONTENT."""
+    """True when this `|` line is the crosswalk's header row, judged by CONTENT.
+
+    BOTH identifying strings must survive, because this predicate is also asked of
+    DATA rows (the row selection exempts a header from grading): accepting either
+    signal let a crosswalk row whose surface cell reads the bare token `surface`
+    impersonate the header and escape both R5 arms (measured: CLEAN, exit 0). A real
+    crosswalk row's label column holds a seam (`§5 row 1`, `§6.4`, `§7`), never
+    `plan §`, so requiring the label as well costs nothing a correct map can produce.
+    """
     row = cells(line)
-    if not row:
-        return False
     surface_cell = row[2].strip().lower() if len(row) > 2 else ""
-    return surface_cell in _HEADER_SURFACE_CELLS or row[0].strip() == "plan §"
+    return row[0].strip() == "plan §" and surface_cell in _HEADER_SURFACE_CELLS
+
+
+def _is_separator_line(line: str) -> bool:
+    """True when a `|` line is a markdown table's alignment row (`|---|---|`).
+
+    Deliberately stricter than "every cell is blank": at least one cell must carry a
+    dash run, so a row an editor blanked to `|  |  |  |  |` is still GRADED (and reds
+    `names no surface`) instead of being read as an alignment row and skipped.
+    """
+    parsed = cells(line)
+    return bool(parsed) and any("-" in cell for cell in parsed) and all(
+        set(cell) <= {"-", ":", ""} for cell in parsed
+    )
 
 
 def _insert_before(text: str, prefix: str, inserted: str) -> str:
@@ -588,6 +608,46 @@ def _drop_line(text: str, prefix: str) -> str:
     if len(kept) == len(text.splitlines(keepends=True)):
         raise AssertionError(f"self-test mutation target {prefix!r} not found")
     return "".join(kept)
+
+
+def _split_and_blank_crosswalk_row(text: str, seam: str) -> str:
+    """Blank one crosswalk row's surface cell AND split it off with a bare separator.
+
+    The bypass a BLOCK-BY-BLOCK selection allowed, in one edit: a `|---|---|---|---|`
+    (plus a blank line) placed above the row starts a block that has a separator and
+    no header, and such a block was excluded from grading — so the blanked row
+    beneath it was never read and the map graded CLEAN (measured: exit 0), while the
+    same document with the cell blanked and NO split red
+    (`R5 §7: names no surface`, exit 1). The separator's width is taken from the
+    crosswalk header so the split stays a plausible edit rather than a malformed
+    table, and both anchors raise instead of no-oping.
+    """
+    lines = text.splitlines(keepends=True)
+    index = next((i for i, line in enumerate(lines) if line.startswith(f"| {seam}")), None)
+    if index is None:
+        raise AssertionError(f"self-test mutation target {seam!r} not found")
+    header = next((line for line in lines if _is_crosswalk_header(line)), None)
+    if header is None:
+        raise AssertionError("the crosswalk header moved — cannot size the separator")
+    separator = "|" + "---|" * len(cells(header)) + "\n"
+    blanked = _rewrite_cell(lines[index], 2, "", seam)
+    return "".join([*lines[:index], "\n", separator, blanked, *lines[index + 1 :]])
+
+
+def _duplicate_section_decoy(text: str) -> str:
+    """Append a SECOND `## 1.` section carrying a clean copy of the first — the decoy.
+
+    The splitter used to overwrite on a duplicate number, so this decoy REPLACED the
+    real §1: a map that had lost a surface row graded CLEAN over the copy (measured —
+    deleting SF13's row alone red, deleting it plus appending this decoy graded
+    `CLEAN`, exit 0), and the rendered document still carries the loss. Duplicate
+    numbers are now a REFUSAL, which is a different posture from a rule violation and
+    is why this case expects `refusal`.
+    """
+    sections = split_sections(text)
+    if "1" not in sections:
+        raise AssertionError("self-test mutation target `## 1.` not found")
+    return text.rstrip("\n") + "\n\n" + sections["1"].rstrip("\n") + "\n"
 
 
 def _drop_section_heading(text: str) -> str:
@@ -701,6 +761,28 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         "violation",
     ),
     (
+        # The block-selection bypass: a blank cell is refused ONLY while the row sits
+        # in a block the selection recognises. Insert a bare separator above it and
+        # the row used to fall into an excluded block and go unread (measured: CLEAN,
+        # exit 0, against a control that reds without the split). This case fails if
+        # the selection ever goes back to grading some blocks and not others.
+        "blank the §7 surface cell AND split it off with a bare separator (a row in an ungradeable block)",
+        lambda t: _split_and_blank_crosswalk_row(t, "§7"),
+        "violation",
+    ),
+    (
+        # A crosswalk row must not be able to impersonate the header. The header is
+        # matched by CONTENT (so a deleted header cannot make the first data row the
+        # header), and while that content test accepted EITHER of its two identifying
+        # signals, a row whose surface cell read the bare token `surface` was exempted
+        # from grading along with the header — both R5 arms skipped it (measured:
+        # CLEAN, exit 0). This case fails if the exemption ever goes back to a
+        # content-only test.
+        "retype §6.4's surface cell as the bare token `surface` (a row impersonating the header)",
+        lambda t: _rewrite_crosswalk_row(t, "§6.4", "surface"),
+        "violation",
+    ),
+    (
         # The width rule must be covered by the arm that is supposed to catch a
         # quietly weakened rule. Without this case, reverting `!= 7` to the old
         # `< 7` floor left --self-test green at 10/10 — the false PASS this rule
@@ -726,6 +808,14 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         "refusal",
     ),
     (
+        # A duplicated section number was last-wins, so an appended decoy replaced the
+        # real section and a map that had lost a row graded CLEAN over the copy
+        # (measured). This case fails if the splitter ever goes back to overwriting.
+        "append a duplicate `## 1.` section carrying a clean copy (a decoy that hides a shrink)",
+        _duplicate_section_decoy,
+        "refusal",
+    ),
+    (
         # Anchored on the section NUMBER and asserted to have moved. A bare
         # `t.replace("## 4. Every surface", …)` is a silent NO-OP once the heading
         # is reworded — and `check()` still grades such a map CLEAN, because
@@ -747,7 +837,7 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 #: exit 0 (measured), which is the false PASS this arm exists to prevent. The
 #: map's own residual covers a THREE-place edit (row + pin + case together), so
 #: the shrink that is two places short of that must still be loud.
-MIN_SELF_TEST_MUTATIONS = 15
+MIN_SELF_TEST_MUTATIONS = 18
 
 
 def self_test(text: str) -> int:
