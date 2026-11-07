@@ -150,18 +150,21 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``team_<org_id>`` alike), so on a production cache no shipped route clears the
   PROPERTY on either ANCHOR while keeping the entity (``tortoise_delete`` reaches
   the node only by REMOVING it, and journals the delete that removes its record
-  row; ``update_entity(…, story_arc=None)`` is REFUSED on a ``:Source``
-  (server-managed) and leaves the stored value in place on an ``:Event`` — both
-  measured; an embedded ``path=`` DB is exempt from the name check, not from
+  row; ``update_entity(…, story_arc=None)`` is REFUSED as server-managed on
+  BOTH anchors (``_SOURCE_SERVER_MANAGED_PROPS`` / ``_EVENT_SERVER_MANAGED_PROPS``
+  — each raises and the stored value is untouched, measured; an embedded
+  ``path=`` DB is exempt from the name check, not from
   supervision) — ⚠️ **but the ``:Point`` half DOES have one, and it is
   non-destructive**: ``update_point(<id>, story_arc=None)`` clears the property
   and KEEPS the node (measured — the ``None`` passes
   ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
   and ``update_point``'s ``SET n += $props`` REMOVES a property set to ``None``;
-  the journal keeps the ``None`` too, so a rebuild clears it rather than leaving
-  it, and the same door is bound by the MCP tool ``tortoise_update_point``) — the
-  targeted clear for a ``:Point`` copy exists and needs no wipe, which is what
-  ``#10429``'s replay half does not change. And on NO label is there a repair that
+  ⚠️ that is a LIVE clear, NOT a durable one — the journal records the ``None``
+  but the replay fold SKIPS a ``None`` value, so a journal rebuild of a legacy
+  copy whose creation record carried the prose re-materialises it (which IS
+  ``#10429``'s replay half), and the same live door is bound by the MCP tool
+  ``tortoise_update_point``) — the targeted clear for a ``:Point`` copy exists
+  and needs no wipe. And on NO label is there a repair that
   RESTORES the value. ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
@@ -825,8 +828,9 @@ def log_result(result: RecordReconcileResult,
         # destructive clear: a full restore's wipe — refused pre-wipe on a
         # production SERVER graph name, #2944 L2 — or a graph-side
         # REMOVE n.story_arc that no instrument ships today; ⚠️ on a `:Point` the
-        # clear is `update_point(<id>, story_arc=None)`, which KEEPS the node —
-        # measured, and the only one of the three that needs no wipe; #10017's
+        # clear is `update_point(<id>, story_arc=None)`, which keeps the node and
+        # needs no wipe (LIVE only — a journal rebuild re-materialises it,
+        # #10429); #10017's
         # purge is
         # a DIFFERENT population — legacy episodic turn :Points — and names no
         # story_arc). Calling them all "owned" sends the operator to the
