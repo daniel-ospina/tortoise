@@ -233,7 +233,8 @@ site that was correct before), and a handle parked in `autocommit` mode is
 normalised first — a transaction-local `set_config` sets NOTHING there, so the
 tenant GUC would have failed every later record with an error naming the DSN.
 
-**Re-measured after these fixes — an observation, deliberately without numbers.**
+**Re-measured after these fixes — an observation, deliberately without wall-clock
+values.**
 Four runs on the same instrument, on a box now carrying other work, showed the
 per-record cost varying materially run-to-run with load while `connect` per
 record stayed **0 in every run**. ⛔ Those four runs' JSON was not kept, so their
