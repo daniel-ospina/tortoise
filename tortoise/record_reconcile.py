@@ -680,14 +680,14 @@ def reconcile_record_and_cache(
     that still carries the prose reads as a ``graph_only`` occurrence (one
     property the projection declines to write), NOT as a ``field_mismatches``
     against a record that is correct. The repair for that occurrence on either
-    ANCHOR is a DESTRUCTIVE CLEAR **only where the record still HOLDS the text**
-    (⚠️ where neither home holds it the graph copy is the only one — see the
-    module docstring's (5)) — a full ``record-restore`` (whose wipe is
-    whole-graph, so
-    it clears the copy too; measured by
-    `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3) — ⚠️ but
-    refused PRE-WIPE on a production server graph name, #2944's L2 guard; see
-    the module docstring's (5)), or a
+    ANCHOR is a DESTRUCTIVE CLEAR, and its only shipped route is a full
+    ``record-restore`` — whose wipe is whole-graph and **cannot** be narrowed to
+    those rows, so a graph holding ANY row the record does not carry must not be
+    restored at all: copy that prose out first, because the wipe destroys it and
+    the record has nothing to restore it from (the module docstring's (5) states
+    the rule and its pin) — measured by
+    `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3), ⚠️ and
+    refused PRE-WIPE on a production server graph name, #2944's L2 guard; or a
     graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today;
     ⚠️ a ``:Point`` copy is the exception that IS repairable in place —
     ``update_point(<id>, story_arc=None)`` clears the property and keeps the
