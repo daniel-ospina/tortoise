@@ -124,7 +124,9 @@ The column-map half is **~1.2 ms** of that — and on the MEDIAN, because the wa
 cost is what the per-record path pays: the probe's 20-sample loop runs before the
 first write, so its single cache-miss sample sits in the mean (AFTER mean
 0.460–0.583 vs median 0.332–0.353; the BEFORE pair is 1.582–1.651 vs 1.546–1.588,
-a 1.5 % gap that shows the miss is an AFTER-tree artifact). 1.546–1.588 →
+a **1.5–4.7 % gap** per run — 1.54 / 3.36 / 4.69 / 3.72 % — which shows the miss is
+an AFTER-tree artifact: the AFTER means sit 35–76 % above their medians, the
+BEFORE means a few per cent). 1.546–1.588 →
 0.332–0.353 ms = **1.193–1.256 ms**. The connection half is therefore the rest —
 **13.7–15.1 ms**, pairing the win's lower end with the column half's UPPER end and
 its upper end with the column half's lower end — i.e. **91.6–92.7 %**, ~92 % of the
@@ -309,11 +311,12 @@ coverage, in EITHER direction:
   `(name, size, inode)` key passed the whole file. The pin now performs a
   SAME-SIZE rewrite, first with the mtime forced forward and then with the mtime
   RESTORED (the `cp -p` shape). ⛔ **Corrected in review cycle 3:** dropping
-  `mtime_ns` ALONE no longer reds it — once `ctime_ns` joined the key, ctime
-  changes on the same step and catches it — so the surviving falsifier for the
-  mtime component is the inode-only mutation (`(name, 0, size, inode, …)`), which
-  reds. Keeping the old sentence would have been a falsifier claim no test can
-  fail, which is worse than having none.
+  `mtime_ns` ALONE is caught only when the mtime-restore step lands in a later
+  inode-clock tick than the force-forward step — i.e. sometimes, not always, which
+  is why it is not a row the census can count. The mutation that reds is the
+  INODE-ONLY one, `(name, 0, 0, inode, …)` (mtime and size both ignored), which is
+  the row in the table above. Keeping the old sentence would have been a falsifier
+  claim no test can fail, which is worse than having none.
 * committing inside the hook's FRESH-connection branch was never reached by a
   single-write test. The pin now performs two writes (fresh, then reused), which
   is the only shape that exercises the branch; re-mutated to the reuse branch, it
@@ -334,8 +337,11 @@ $ python -m pytest tests/test_9558_record_write_cost.py -q
 $ python -m pytest tests/test_9078_record_written_by_production_path.py \
     tests/test_9548_record_arming_health.py tests/test_9558_record_write_cost.py \
     tests/test_record_writer_seam.py tests/test_record_projection.py -q
-327 passed
+332 passed
 ```
 
-`TEST_RECORD_DB_URI` armed (the throwaway container above), so the record's
-Postgres legs ran rather than skipping.
+`TEST_RECORD_DB_URI` armed (the throwaway container above) **and `psycopg2`
+installed (the `[postgres]` extra)**, so the record's Postgres legs ran rather
+than skipping. ⛔ Without the extra the SAME tree collects 332 and reports
+**318 passed / 14 skipped**: the driver-gated legs skip, which is exactly why the
+`test-record-postgres` job installs the extra and fails on any skip.
