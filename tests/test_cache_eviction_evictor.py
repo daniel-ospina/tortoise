@@ -107,9 +107,11 @@ def lane():
     # (b) inside `_SWEEP_OWNED_PREFIXES` (the `test_` stem) — the session-end
     #     sweep's name gate is FAIL-CLOSED (#7795), so a journaled name outside
     #     that family is PRESERVED rather than dropped and one empty graph
-    #     leaks per run (the #8746 cache-churn pressure). The old
+    #     leaks per run (the #8746 cache-churn pressure). The pre-#11167
     #     `evict_<hex>` spelling was outside it: journaling alone would NOT
-    #     have made it reapable;
+    #     have made it reapable. `main` repaired that independently (#11392,
+    #     to `test_evict_<hex>`), so the `10976_` infix here is a RENAME on
+    #     top of that repair, not a second fix;
     # (c) JOURNALLED (`_journal_append`) — the record that tells a live PEER's
     #     `scope=None` sweep this graph is in use, without which a peer may
     #     `GRAPH.DELETE` it MID-TEST (#3074/#3214). The `finally:` teardown

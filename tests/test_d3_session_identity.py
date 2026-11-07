@@ -214,9 +214,10 @@ def test_captured_turn_hits_seed_their_own_session_10540():
     The chain this pins end to end: ``capture_session``'s turn Points carry
     NO ``sessionId``/``session_id`` prop, the point fetch derives the
     identity from the ``(:Session)-[:CONTAINS]->(:Point)`` edge and hands it
-    back as the camel key ONLY (pinned by the siblings above:
-    ``h["sessionId"] == SID_A`` and ``"session_id" not in h``), and the pool
-    authority (``retrieval.session_key_of``) must resolve that same spelling.
+    back as the camel key ONLY (``h["sessionId"] == SID_A`` pinned by the
+    sibling above; the snake key's ABSENCE pinned below, in this test), and
+    the pool authority (``retrieval.session_key_of``) must resolve that same
+    spelling.
 
     MEASURED on this tree BEFORE the fix, with exactly these two turns:
     ``retrieval.hit_session_id`` → ``SID_A`` for both hits, while
