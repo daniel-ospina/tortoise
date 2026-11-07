@@ -2067,11 +2067,13 @@ def _residual_region(text: str) -> str:
 #: waiver swallowed the second claim (`the SPELLING gap is open while the
 #: remaining gap is not closed` GREEN; the same claim unwrapped RED — #11258 review
 #: round 4 `P2`, measured).
-#: ⛔ `yet` IS NOT ONE OF THESE JOINERS (#11258 review round 23, MEASURED): it is
-#: named in the negator bar below, NOT in the alternation, because splitting at
-#: `yet` severed `hasn't yet opened again`. An earlier revision of this note
-#: listed `yet` among the joiners, which was false about the pattern — and a
-#: `yet` mutation would then RED with or without the splitter, pinning nothing.
+#: ⛔ `yet` IS A JOINER TOO, GUARDED — and an earlier cut of this note said the
+#: opposite (#11258 review round 23 re-review, MEASURED): `yet\s+` IS a branch of
+#: the alternation, behind `(?<![n'\u2019]t\s)(?<!\bnot\s)(?<!\bnever\s)` so that
+#: `hasn't yet opened again` is not severed. Those lookbehinds narrow WHEN it may
+#: split; they do not remove it from the group. Deleting the branch greens
+#: `the SPELLING gap is open yet the remaining gap is not closed.`, which is pinned
+#: in `_RESIDUAL_REOPENING_MUTATIONS`.
 #: ⚠️ This is a CLOSED list standing in for a clause
 #: boundary; a joiner not named here still joins. That residual is disclosed in
 #: `WHAT THIS CANNOT CATCH` rather than implied to be covered.
@@ -2706,15 +2708,17 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half isn't only kept open.",
     # ⛔ ONE FALSIFIER PER `_RESIDUAL_OPEN_VERBS` ALTERNATIVE (#11258 review round 23
     # `P1`, MEASURED at `6c3c18b828` by SOURCE-level mutation — delete the
-    # alternative, re-import, re-scan): ten of the sixteen alternatives had NO
+    # alternative, re-import, re-scan): ELEVEN of the sixteen alternatives had NO
     # falsifier at all, so any one of them could be deleted with the whole file
-    # GREEN. Only `is`/`keep`/`remains`/`stays`/`keeps`/`kept`/`held` were pinned.
-    # ⛔ EACH SHAPE BELOW IS MEASURED AS A FALSIFIER, not merely as a RED: it REDs
-    # with the alternative present and goes GREEN when that ONE alternative is
-    # removed from the tuple. A plain `<verb> open` sentence is NOT usable here —
-    # `the ADJACENCY halves are open.` stays RED with `are` deleted, because another
-    # arm catches it, so it would pin nothing. These are the shapes only this arm
-    # reaches.
+    # GREEN. Only `is`/`remains`/`stays`/`keeps`/`kept` were pinned — five of
+    # sixteen, NOT the seven an earlier cut of this comment claimed: `keep` and
+    # `held` were named there as pinned and were not (round-23 re-review, MEASURED:
+    # deleting either flips NO entry in this list). ⛔ EACH SHAPE BELOW IS MEASURED AS
+    # A FALSIFIER, not merely as a RED: it REDs with the alternative present and
+    # goes GREEN when that ONE alternative is removed from the tuple. A plain
+    # `<verb> open` sentence is NOT usable here — `the ADJACENCY halves are open.`
+    # stays RED with `are` deleted, because another arm catches it, so it would pin
+    # nothing. These are the shapes only this arm reaches.
     "the carve-outs are still open.",
     "the carve-out was still open.",
     "the carve-outs were still open.",
@@ -2724,15 +2728,26 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the carve-out stayed open.",
     "the ADJACENCY gap can hold open.",
     "the ADJACENCY gap holds open.",
-    # ⛔ `whereas` AND `though` ARE LOAD-BEARING JOINERS (#11258 review round 23
-    # `P1`, MEASURED): deleting either from `_RESIDUAL_CLAUSE_SPLIT` left the whole
-    # file GREEN while these sentences flipped RED -> GREEN, i.e. the honest
-    # `spelling` waiver swallowed the second claim again. ⛔ `yet` IS DELIBERATELY
-    # ABSENT FROM THIS GROUP: it is NOT an alternative in the splitter (it appears
-    # only in the negator bar's lookahead), so a `yet` mutation here would RED with
-    # or without the splitter and would pin NOTHING.
+    # ⛔ THE LAST TWO (#11258 round-23 RE-REVIEW `P1`, MEASURED): `keep` and `held`
+    # were the two alternatives this round's first cut left unpinned while claiming
+    # them pinned. `the ADJACENCY gap is held open.` above does NOT pin `held` —
+    # `is` matches it with `held` as filler, so deleting `held` flips nothing.
+    "the ADJACENCY half may keep the gap open.",
+    "the ADJACENCY gap held open.",
+    # ⛔ `whereas`, `though` AND `yet` ARE ALL LOAD-BEARING SPLITTER BRANCHES
+    # (#11258 review round 23 `P1` + re-review, MEASURED by deleting each branch
+    # from `_RESIDUAL_CLAUSE_SPLIT` and re-running): with the branch gone the whole
+    # file stayed GREEN while these sentences flipped RED -> GREEN, i.e. the honest
+    # `spelling` waiver swallowed the second claim again. ⛔ THE FIRST CUT OF THIS
+    # COMMENT CLAIMED `yet` WAS NOT AN ALTERNATIVE — that was FALSE, and false
+    # because the probe that "measured" it replaced the substring `|yet`, which
+    # does not occur in the source (`yet` sits behind
+    # `(?<![n'\u2019]t\s)(?<!\bnot\s)(?<!\bnever\s)`). A no-op edit was read as a
+    # measurement. `yet` IS a branch of the same alternation; those lookbehinds
+    # guard WHEN it may fire, they do not keep it out of the group.
     "the SPELLING gap is open whereas the remaining gap is not closed.",
     "the SPELLING gap is open though the remaining gap is not closed.",
+    "the SPELLING gap is open yet the remaining gap is not closed.",
     # ⛔ `_RESIDUAL_CLASS_ANCHOR`'s `retention` / `the guarantee` / the SPACED
     # `time unit` had no falsifier either (same round, MEASURED): the fused arm's
     # own subject list does not reach these, and each sentence below goes GREEN the
@@ -3256,15 +3271,18 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 153, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 156, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (153 — 149 raised by round 23's fourteen falsifiers: one "
+        "THE CURRENT LENGTH (156 — 149 raised by round 23's fourteen falsifiers: one "
         "per `_RESIDUAL_OPEN_VERBS` alternative that had none, `whereas`/`though`, "
         "and the three `_RESIDUAL_CLASS_ANCHOR` members; plus four this round adds "
         "for the restored waived `reopen` arm. A FIFTH shape,"
         " `the unit-spelling case reopens.`, was measured GREEN and is recorded at "
-        "that arm as a disclosed residual rather than pinned), i.e. ZERO SLACK: at "
+        "that arm as a disclosed residual rather than pinned; plus three from the "
+        "round-23 re-review, which found `keep` and `held` still unpinned and the "
+        "`yet` splitter branch — the first cut of that round had CLAIMED those "
+        "pinned, and its `yet` note was false), i.e. ZERO SLACK: at "
         "`>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
