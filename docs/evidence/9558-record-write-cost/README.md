@@ -466,8 +466,9 @@ $ python -m pytest tests/test_9558_record_write_cost.py -q
 15 passed, 13 skipped   # the same file WITHOUT the extra
 ```
 
-Both readings are of ONE tree — the commit below that added the wrapper's cursor
-fence — differing only in whether the `[postgres]` extra is installed; every skip
+Both readings are of ONE tree — `594c4ae570`, the commit that added the
+wrapper's cursor fence — differing only in whether the `[postgres]` extra is
+installed; every skip
 is a `_fake_driver` `importorskip` arm, which is why `test-record-postgres`
 installs the extra and fails on any skip. The wider record-suite reading is
 `docs/evidence/9558-record-write-cost/runs/`, NOT this console block — those
