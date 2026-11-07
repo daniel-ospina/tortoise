@@ -1360,7 +1360,13 @@ mechanisms:
       statement with an incomplete fragment) wherever it is used — ACROSS MODULES
       TOO, and not only along an import edge: the taint is the UNION of every scanned
       file's tainted spellings, so a fragment bound in one module and used in another
-      is refused even when the two modules never import each other. Keying on the
+      is refused even when the two modules never import each other — with ONE shape
+      excepted, which this pin does NOT reach: a SUBSCRIPT target (`D["k"] = …`)
+      mints only a receiver-qualified `expr:` key, so `carrier.D["k"]` completed in
+      another module is reported as neither found nor assembled (measured: `found`
+      holds the binding, `assembled` is empty; identical on `main`, which makes it a
+      DETECTOR gap and not a property of this pin — tracked, with two remedies, on
+      #9901). Keying on the
       SPELLING is what makes that reach, and it is deliberately fail-CLOSED: a
       coincident name in an unrelated module refuses too (a false block on a name
       nobody assembled, never a false pass on one that was). A RENAME that hides the
