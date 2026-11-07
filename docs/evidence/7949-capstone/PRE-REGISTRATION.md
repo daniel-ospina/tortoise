@@ -1347,8 +1347,9 @@ would have scored `A1` RED forever on a correct product. The pin is now the ONE 
 **What enforces it.** `tools/capstone_preregistration_check.py` — the amended record must pass it, which
 means the five new §3.1 cells and the five `criteria[]` entries agree character for character, the
 floors agree between pins and record in both directions, a threshold that declares `UNMEASURED(...)`
-names the owner decision rather than borrowing a number from its own floor clause (§7 item 1), and
-`document_sha256` is re-cut in this same commit (§8). `tools/capstone_verdict_check.py` — a table that
+names an issue (`#NNNN`) gating the row rather than borrowing a number from its own floor clause
+(§7 item 1 — the check is "names an issue", it is **not** "names the registered decision" that
+decides the row), and `document_sha256` is re-cut in this same commit (§8). `tools/capstone_verdict_check.py` — a table that
 carries an `A`-row is checked by the same `V1`–`V12` rules as an `E`-row, including `V12`'s refusal of
 a row whose `blocked_by` has **CLOSED**.
 

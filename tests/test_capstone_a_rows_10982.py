@@ -534,6 +534,15 @@ def test_a_registered_non_bar_must_name_its_owner_decision_and_cannot_borrow_the
         return check.check_completeness([dict(r, threshold=cell) if r is a4 else r for r in rows])
 
     assert with_threshold("UNMEASURED(the bar is owner-gated — `#10988` decides)") == []
+    # ⛔ The floor's comparator is accepted in EVERY spelling `COMPARATORS` declares, because the
+    # pinned record itself writes floors the unicode way (`(floor ≥ 30 Objects)`,
+    # PRE-REGISTRATION.md:268). The hand-written alternation omitted ≤/≥ and refused those rows as a
+    # false RED (#10982 review round 4).
+    for floor in (">= 30", "≥ 30", "≤ 30", ">=30"):
+        assert with_threshold(
+            f"UNMEASURED(owner-gated — `#10988` decides) above the floor of `{floor}` typed "
+            "statements"
+        ) == [], floor
     for bad, needle in (
         ("UNMEASURED(the bar is owner-gated on a fork nobody opened)", "names no issue"),
         ("UNMEASURED(nothing here) `>= 30` typed statements", "outside its floor"),

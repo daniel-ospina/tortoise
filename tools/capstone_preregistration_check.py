@@ -382,7 +382,7 @@ PLACEHOLDER_CELLS = frozenset(
 #: A threshold must carry a comparator AND a number. Prose without both is not a threshold.
 COMPARATORS = ("<=", ">=", "<", ">", "=", "≤", "≥")
 #: A threshold that declares itself a REGISTERED NON-BAR (`UNMEASURED(<ground>)`, §3.1's A4 row).
-#: Such a cell is complete only when its ground names the owner decision gating the row — and the
+#: Such a cell is complete only when its ground names an issue (`#NNNN`) that gates the row — and the
 #: floor clause beside it may never be what satisfies the numeric arm (see `check_completeness`).
 REGISTERED_NO_BAR = re.compile(r"\bUNMEASURED\(")
 #: The `… above the floor of `` >= 30 `` …` clause a threshold cell may carry *beside* its bar.
@@ -390,9 +390,16 @@ REGISTERED_NO_BAR = re.compile(r"\bUNMEASURED\(")
 #: boundary and not a bar (§3.7, §7 item 1). ⛔ It strips the COMPARATOR THE FLOOR OWNS, not a run of
 #: characters: an earlier `floor of[^;]*` ate everything to the next `;`, so a cell that declared its
 #: real bar AFTER the floor clause read as bar-less — the arm could not fail on the property it names
-#: (#10982 review round 3).
+#: (#10982 review round 3). ⛔ The alternation is BUILT FROM `COMPARATORS`, never re-typed: the hand
+#: -written one omitted `≤`/`≥`, so a floor written `` `≥ 30` `` — the spelling the pinned record
+#: itself uses at :268,:271,:272 — read as a bar and the row was refused as a false RED
+#: (#10982 review round 4).
 FLOOR_CLAUSE = re.compile(
-    r"floor of\s*`{0,2}\s*(?:<=|>=|<|>|=)\s*\d+(?:\.\d+)?", re.IGNORECASE)
+    "floor of\\s*(?:"
+    + "|".join(re.escape(c) for c in sorted(COMPARATORS, key=len, reverse=True))
+    + r")\s*\d+(?:\.\d+)?",
+    re.IGNORECASE,
+)
 #: A registered non-bar must name WHO gates it. ⛔ The check is `#\d+` — "names an issue" — NOT "names
 #: the row's registered decision": the record's cells and §7 item 1 were restated to claim exactly
 #: what this tests, because the stronger sentence would be a claim the code does not perform.
