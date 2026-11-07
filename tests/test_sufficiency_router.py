@@ -1256,9 +1256,11 @@ def test_a_store_that_contradicts_itself_is_refused_not_decided_by_row_order() -
 
     ``setdefault`` would keep whichever row arrived first, so the verdict would
     depend on the caller's row ORDER — and one order reported ``ok``/``settled``
-    for a key the store contradicts (measured: ``[episodic, semantic]`` settled,
-    ``[semantic, episodic]`` refused). The store is the record; the caller
-    repairs it and re-plans. Both orders must fail, identically.
+    for a key the store contradicts (measured on the pre-fix module with THIS
+    test's ``semantic`` batch: ``[semantic, episodic]`` settled,
+    ``[episodic, semantic]`` refused — it is whichever row arrives FIRST that
+    wins, so an ``episodic`` batch reverses that). The store is the record; the
+    caller repairs it and re-plans. Both orders must fail, identically.
     """
     episodic = plan_writeback([_finding(claim="acme corp signed",
                                        claim_class="episodic")]).units[0]

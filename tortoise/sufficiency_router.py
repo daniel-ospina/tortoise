@@ -1414,7 +1414,8 @@ def unit_key(span: SourceSpan, claim: str) -> str:
     Over ``(span, normalised claim)`` so that the SAME verified finding written
     back twice is ONE unit. This is the attribution loop's whole mechanism: the
     second escalation of the same question must not pay for a duplicate, or
-    §12.5's "escalation is a permanent tax" is exactly what we ship.
+    §12.8 item 4's "escalation is a permanent tax rather than an investment"
+    is exactly what we ship.
     """
     if not isinstance(span, SourceSpan):
         raise TypeError("unit_key needs a SourceSpan — a unit without an address is unattributable")
