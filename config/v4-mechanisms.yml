@@ -1380,7 +1380,13 @@ mechanisms:
       colliding key `rebound` and took the keyword-split join with it — measured, and
       pinned). That join therefore stays per-module, so a cross-module fragment is
       reported as an unverifiable USE rather than classified — the refusal polarity,
-      never a reading of absence. What no static
+      never a reading of absence. The JOIN is the one place that is per-module: a
+      statement SPLIT across two modules, where the keyword half is not itself a
+      fragment the scan recognises (`carrier.PREFIX = "CREATE "` joined with
+      `"CONSTRAINT pt UNIQUE NODE Point"` in another module), is NOT joined and is
+      therefore not reported — measured, identical on main before this change, and no
+      such shape exists under `tortoise/`; it is a detector gap on #9901, not a
+      property of the refusal. What no static
       scan reaches is stated as EXAMPLES rather than as a closed list — a fragment
       whose keyword lives entirely outside the scanned module (handed in by a
       helper or a default argument), a lookup resolved dynamically

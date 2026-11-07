@@ -3515,7 +3515,17 @@ def _taint_over_imports(
             module_files[mod[: -len(".__init__")]] = rel
 
     def resolve(module: str | None, level: int, rel: str) -> str | None:
-        """The file a `from … import` came from, ABSOLUTE or RELATIVE."""
+        """The file a `from … import` came from, ABSOLUTE or RELATIVE.
+
+        ⚠️ `module_files` keys are ROOT-RELATIVE (`event_store`, not
+        `tortoise.event_store`), while the repo's dominant idiom names the package
+        absolutely (`from tortoise.event_store import …` — measured: 2678 absolute
+        from-imports inside `tortoise/`, 206 of them renamed, and NOT ONE resolved
+        against a root-relative id). Exact matches are tried first, then the module
+        with its leading components dropped one at a time, longest suffix first — so
+        a package-absolute import resolves to the file the pin is actually scanning,
+        and an exact id still wins over any suffix.
+        """
         if level:
             pkg = rel.rsplit("/", 1)[0].replace("/", ".") if "/" in rel else ""
             parts = pkg.split(".") if pkg else []
@@ -3524,7 +3534,15 @@ def _taint_over_imports(
             return module_files.get(cand) or None
         if not module:
             return None
-        return module_files.get(module)
+        exact = module_files.get(module)
+        if exact is not None:
+            return exact
+        parts = module.split(".")
+        for start in range(1, len(parts)):
+            found = module_files.get(".".join(parts[start:]))
+            if found is not None:
+                return found
+        return None
 
     changed = True
     while changed:
@@ -4888,6 +4906,29 @@ def test_the_cross_module_reach_arms_are_each_load_bearing(tmp_path) -> None:
         f"refused: {assembled}"
     )
     for stray in ("user.py", "pkg3/carrier.py", "pkg3/__init__.py", "pkg3"):
+        target = tmp_path / stray
+        target.rmdir() if target.is_dir() else target.unlink()
+    # A PACKAGE-ABSOLUTE import inside the scanned ROOT: the pin scans `tortoise/`,
+    # so its module ids are ROOT-RELATIVE (`event_store`) while the repo's dominant
+    # idiom names the package absolutely (`from tortoise.event_store import X as Y`
+    # — measured: 2678 absolute from-imports inside `tortoise/`, 206 renamed, NONE of
+    # which resolves against a root-relative id). Here the root IS the package dir, so
+    # this fixture reproduces the pin's own invocation rather than tmp_path's parent
+    # shape.
+    (tmp_path / "pkg4").mkdir()
+    (tmp_path / "pkg4" / "carrier.py").write_text(
+        'POINT_UNQ = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg4" / "user.py").write_text(
+        'from pkg4.carrier import POINT_UNQ as _P\ng.query(_P + "Point")\n',
+        encoding="utf-8",
+    )
+    _, _, assembled = ddl_scan(tmp_path / "pkg4")
+    assert assembled, (
+        "a PACKAGE-ABSOLUTE renamed import was not resolved — the scanned root's "
+        f"module ids are relative, so the resolver must retry a suffix: {assembled}"
+    )
+    for stray in ("pkg4/carrier.py", "pkg4/user.py", "pkg4"):
         target = tmp_path / stray
         target.rmdir() if target.is_dir() else target.unlink()
     # A RENAME CHAIN ORDERED AGAINST THE FILENAME SORT: propagation runs files in
