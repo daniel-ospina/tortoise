@@ -947,6 +947,42 @@ def test_the_archive_writer_selects_the_surface_that_guards_it():
     )
 
 
+def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
+    """#11318: the ICON SET and the shared CARD are binaries, and they must select.
+
+    `website/` is in NON_PYTHON_PREFIXES, so `_keep_changed` dropped all four new
+    assets *before* the SOURCE_PATTERNS pass and a binary-only diff took the
+    docs-only tier-1 early return. MEASURED before the entries, with the CI's own
+    selector: `select(["website/favicon.png"], "pull_request", load_manifest())` →
+    `surfaces: []`, `full: False`, and `test_website_static.py` — the file whose
+    whole job is to read these bytes — was NOT selected. So a PR that re-exported the
+    favicon at 512px, replaced the card with a flat rectangle, or hand-edited the ICO
+    directory would have run none of the assertions written to catch it. That is the
+    #1349/#3332/#3616 silent-drop class, and it is the class this file exists for.
+
+    Asserted per-asset, on the surface AND on the guard file: `tests/` falls through
+    to `core` on its own, so a bare "non-empty" check can pass with the wiring absent.
+    """
+    assets = (
+        "website/favicon.ico",
+        "website/favicon.png",
+        "website/apple-touch-icon.png",
+        "website/assets/og-tortoise.jpg",
+    )
+    for changed in assets:
+        assert (REPO / changed).is_file(), f"the asset this test guards is gone: {changed}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{changed} selects {r['surfaces']} — a binary under website/ matches no "
+            "SOURCE_PATTERNS row and falls to the docs-only early return, so the byte "
+            "assertions never run on the one diff that can break them (#1349 class)"
+        )
+        assert "test_website_static.py" in r["test_files"], (
+            f"{changed} does not select test_website_static.py"
+        )
+        assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
+
+
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """#3332: a public *site surface* change selects `onboarding`.
 

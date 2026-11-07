@@ -3,7 +3,7 @@
 // Server-rendered HTML (no client JS required for content — AI-crawler
 // visible). Renders published, non-held posts from Supabase; markdown→HTML
 // sanitized (plan §6). Catch-all: non-post paths (static assets like
-// og-image, favicons) fall through to ASSETS.
+// covers, favicons) fall through to ASSETS.
 //
 // NOTE: /blog/sitemap.xml and /blog/feed.xml are routed by more-specific
 // Function files (#1796) — longest-prefix routing wins over this catch-all.
@@ -20,8 +20,12 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   const url = new URL(request.url);
   const path = url.pathname; // "/blog" or "/blog/<slug>"
 
-  // ── ASSETS fallback for non-post paths (favicons, og-image, ...) ─────────
-  // E2E-1 asserts /blog/og-image.png returns 200 via this fallback.
+  // ── ASSETS fallback for non-post paths (favicons, covers, ...) ───────────
+  // A path with a dot is not a post slug, so it is offered to ASSETS before the
+  // router. NO TEST DRIVES THIS BRANCH: `tests/e2e/test_blog.py` fetches `/blog`
+  // and `/blog/<slug>`, neither of which contains a dot, and the markdown
+  // harness's ASSETS stub answers 404. So this is DESIGN, not covered behaviour —
+  // serving a static path under /blog/ needs its own test.
   if (path.includes(".")) {
     const res = await env.ASSETS.fetch(request);
     if (res.status !== 404) return res;

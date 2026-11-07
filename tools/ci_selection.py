@@ -401,6 +401,22 @@ SOURCE_PATTERNS = {
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html",
+                   # #11318: the SITE ICON SET and the shared link-preview card.
+                   # These are binaries, and `website/` is in NON_PYTHON_PREFIXES,
+                   # so `_keep_changed` dropped all four and a binary-only PR took
+                   # the docs-only early return — measured: `select(
+                   # ["website/favicon.png"])` → surfaces=[] and
+                   # `test_website_static.py` was NOT in the selected set, so a PR
+                   # that re-exported the favicon at the wrong size, replaced the
+                   # card with a flat rectangle, or hand-edited the ICO directory
+                   # ran NONE of the byte assertions written to catch exactly that.
+                   # Named as CONCRETE files, not `website/assets/` as a prefix:
+                   # that prefix would also claim every CSS/JS edit in the tree and
+                   # make this surface's blast radius meaningless. Same
+                   # #1349/#3332/#3616 silent-drop class as the entries above.
+                   "website/favicon.ico", "website/favicon.png",
+                   "website/apple-touch-icon.png",
+                   "website/assets/og-tortoise.jpg",
                    # #3673: the served skill documents and the installer belong to
                    # this surface. The parity contract between
                    # `tortoise/onboarding/SKILL.md` and its served mirror is
