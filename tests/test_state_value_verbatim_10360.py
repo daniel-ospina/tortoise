@@ -2213,6 +2213,37 @@ def _residual_reopening_claims(text: str) -> list[str]:
                             f"{m.group(0)!r} in sentence {sentence.strip()!r}")
                         break
                 continue
+            # ⛔ THE FLOOR JUDGES EACH HONEST CLAUSE — it is what the waived clause
+            # is judged BY, so it must not be reachable only when EVERY clause is
+            # honest (#11258 review `P1`, MEASURED at `0f48bcd05db`). Removing the
+            # honest clauses from `scan` and then never running the floor on them
+            # left `the SPELLING gap is reopened, and the pair is fused.` GREEN: the
+            # second clause is TRUE and carries no anchor, and it decided the
+            # verdict for a reopening in the first — the class round 18's `P1` was
+            # filed for. THIRTEEN of the 157 pinned mutations went GREEN once one
+            # truthful clause was appended, so the list is non-vacuous alone and
+            # vacuous under composition. `origin/main` ran this floor PER CLAUSE
+            # (`_SPELLING_SENTENCE_REOPENING`), so the all-honest-only path was a
+            # COVERAGE REGRESSION, not a widening — measure it against the same
+            # site inside residual `(d)` and main REDS the three mixed shapes this
+            # head passed.
+            # ⚠️ The all-honest branch above searches the WHOLE SENTENCE and is
+            # left alone: a per-clause search is a subset of it, so changing it
+            # could only narrow the floor's reach there. The floor still omits
+            # `not closed` / `is open` deliberately, so the honest disclosures it
+            # exists to allow cannot be blocked by this pass.
+            floor_hit = None
+            for clause in honest:
+                for pattern in _SPELLING_FLOOR:
+                    m = re.search(pattern, clause)
+                    if m is not None:
+                        floor_hit = m.group(0)
+                        break
+                if floor_hit is not None:
+                    break
+            if floor_hit is not None:
+                claims.append(f"{floor_hit!r} in sentence {sentence.strip()!r}")
+                continue
             # ⛔ REJOINED WITH `, `, NOT `. ` — see the round-5 note below.
             scan = " , ".join(c for c in clauses if not _is_honest_spelling(c))
         else:
@@ -2818,6 +2849,26 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # honest `…the owner's decision reopened there, not a rung bolted on here.`
     # (`_RESIDUAL_TRUTHFUL_STATEMENTS`). Same trade as every bounded arm in this
     # file, recorded here rather than left to be discovered.
+    # ⛔ THE MIXED-CLAUSE FORM (#11258 review `P1`, MEASURED at `0f48bcd05db`): a
+    # reopening written inside an honest `spelling` clause was REMOVED from `scan`
+    # and then judged by NOTHING as soon as a second, truthful clause shared the
+    # sentence — `_SPELLING_FLOOR`, the only tuple a waived clause is ever judged
+    # by, ran only when EVERY clause was honest. All five shapes below were GREEN,
+    # and THIRTEEN of the mutations above go GREEN the same way once
+    # `, and the pair is fused.` is appended to them, so the list was non-vacuous
+    # alone and vacuous under composition. `origin/main` ran the floor PER CLAUSE,
+    # so this was a coverage REGRESSION rather than a widening, and each sentence
+    # here is RED at the same insertion site under main's own
+    # `_SPELLING_SENTENCE_REOPENING`. The second clause is the row's own `(d2)`
+    # truth and carries no anchor, i.e. it is the framework of the must-stay-GREEN
+    # `the SPELLING gap has never been closed, and the ADJACENCY half is closed by
+    # the tables` below — an UNRELATED truthful clause decided the verdict, which
+    # is the class round 18's `P1` was filed for.
+    "the SPELLING gap is reopened, and the pair is fused.",
+    "the SPELLING gap is unclosed, and the pair is fused.",
+    "the SPELLING gap no longer fuses, and the pair is fused.",
+    "the SPELLING gap is open again, and the pair is fused.",
+    "the SPELLING gap opens again, and the ADJACENCY half is closed by the tables.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -3180,6 +3231,20 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     "the ADJACENCY half has not to date been reopened.",
     "the ADJACENCY half has not, in practice, been reopened.",
     "the ADJACENCY half has not yet, in practice, been re-opened.",
+    # ⛔ THE `carve-out` + `spelling` OVER-BLOCK, which was recorded in a COMMENT
+    # only (#11258 review `P3`, MEASURED RED at the append point): `_RESIDUAL_
+    # CLASS_ANCHOR`'s note accepts the cost — an honest clause naming BOTH
+    # `spelling` and the carve-out is refused — and the ledger's own rule is that an
+    # over-block is acceptable "only if it is RECORDED rather than left to be
+    # discovered". Nothing re-measured it, while the refusal it triggers says "THE
+    # ROUTE OUT IS THE OVER-BLOCK LEDGER, ALWAYS" and pointed at a ledger with no
+    # matching entry — the defect rounds 19/20/25 removed for other arms on that
+    # same stated ground. The sentence is the row's OWN truthful claim ("What
+    # SURVIVES of the old (d) is the SPELLING case"). ⛔ The fix is NOT to add
+    # `spelling`+`carve-out` to the waiver's withhold set: that set is what keeps an
+    # appended reopening from hiding behind the word `spelling`, so widening the
+    # waiver is the round-1 `P2` direction.
+    "what survives of the carve-out is the SPELLING case, which is open by design.",
 )
 
 
@@ -3347,10 +3412,13 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 157, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 162, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (157 — 156 raised by round 24's four falsifiers for the "
+        "THE CURRENT LENGTH (162 — 157 plus FIVE for the mixed `spelling`+truthful "
+        "clause form the floor used to skip (#11258 review `P1`, MEASURED: thirteen "
+        "of these mutations went GREEN under it); before that, "
+        "156 raised by round 24's four falsifiers for the "
         "restored waived `reopen` arm, plus ONE this round adds for the "
         "`not only fails open` shape that pins the NARROWNESS of "
         "`_RESIDUAL_FAIL_OPEN`'s new negation veto (#11258 review round 25 `P2`); "
@@ -3401,11 +3469,13 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         _RESIDUAL_REFUSED_TRUTHFUL), (
         "the over-block ledger has duplicate entries — a duplicate pays for a "
         "dropped cost while the count stays constant")
-    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 16, (
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 17, (
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
         "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (16 — 15 plus this round's bounded-lookbehind cost of the "
+        "CURRENT LENGTH (17 — 16 plus the `carve-out` + `spelling` cost that was "
+        "recorded in a COMMENT only until #11258 review `P3`; before that, 15 plus "
+        "the bounded-lookbehind cost of the "
         "new `fails open` negation veto, #11258 review round 25 `P2`), i.e. ZERO "
         "SLACK: the round-11 entries are the "
         "`not … closed` cost, round 19 added the two `fails open` costs, round 20 "
@@ -3474,7 +3544,12 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # duplicate of an entry above — uniqueness and length survive and the
             # measured cost leaves the ledger, the same defect round 9 closed one
             # entry over.
-            "the ADJACENCY half does not actually fail open.",):
+            "the ADJACENCY half does not actually fail open.",
+            # ⛔ AND THE `carve-out` + `spelling` COST (#11258 review `P3`): without
+            # membership it is substitutable by a duplicate of an entry above —
+            # uniqueness and length survive and the measured cost leaves the ledger,
+            # the same defect round 9 closed one entry over.
+            "what survives of the carve-out is the SPELLING case, which is open by design.",):
         assert required in _RESIDUAL_REFUSED_TRUTHFUL, (
             f"the over-block ledger no longer carries {required!r} — that shape's "
             "refusal is the measured price of a specific rule; if it is no longer "
