@@ -2042,8 +2042,9 @@ class _EntityHandlers:
         # and a graph-side `REMOVE n.story_arc` is issued by nobody;
         # `update_entity(…, story_arc=None)` is REFUSED here as server-managed
         # (the `:Point` half DOES have an in-place clear,
-        # `update_point(<id>, story_arc=None)` — #11325); `#10017`'s purge is the legacy
-        # turn `:Point` population and never matches a `:Source` (`#11325`).
+        # `update_point(<id>, story_arc=None)` — #11325); `#10017`'s purge is
+        # the legacy turn `:Point` population and never matches a `:Source`
+        # (`#11325`).
         #
         # ⛔ Scope, so this is not read as more than it is: it denies the KEY.
         # Another spelling (`storyArc`) still lands, exactly as any unknown key

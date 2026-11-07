@@ -166,9 +166,8 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``_persist_extra_props``, skips a ``None`` by design), so a journal rebuild of a
   legacy copy whose CREATION record carried the prose RESTORES it — the live node
   is clean and the replayed node is not, which is ``#10429``'s replay half. Do not
-  read the clear as a durable repair until that lands. And on NO label is there a
-  repair that
-  RESTORES the value. ⛔ That is the
+  read the clear as a durable repair until that lands. And on NO label is
+  there a repair that RESTORES the value. ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
   forbids the RECORD→CACHE projection from writing it onto either ANCHOR and no
