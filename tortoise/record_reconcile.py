@@ -154,8 +154,8 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   NO repair that RESTORES the value. ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
-  forbids every RECORD→CACHE projection from writing it into the graph and no
-  in-tree route re-derives it on either ANCHOR (the ``:Point`` journal REPLAY
+  forbids the RECORD→CACHE projection from writing it onto either ANCHOR and no
+  in-tree route re-derives it there (the ``:Point`` journal REPLAY
   half is ``#10429``'s own), so no repair can put the value back. ⛔ Not "no
   IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
   clear — what is missing is a route that KEEPS the value. ⚠️ No shipped
