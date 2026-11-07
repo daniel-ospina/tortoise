@@ -474,7 +474,10 @@ def test_problem_map_guard_runs_on_the_diffs_it_guards():
     Measured at this head: a docs-only edit of the map gives ``surfaces == []``
     with the pin present (the ``tier1`` row is the whole fix for that arm, and it
     is the arm that matters — the map IS a document); a tool-only edit resolves
-    through ``CORE_ALSO``; and an index-only edit is ``core`` for the same reason.
+    through ``CORE_ALSO`` (the entry beside its `substrate_map_check.py` sibling,
+    added in review round 11 — before it, that arm reached the pin only through
+    ``tier1``, which is thinner than the sentence above implies); and an
+    index-only edit is ``core`` for the same reason.
     """
     docs = _sel(["docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md"])
     assert docs["full"] is False

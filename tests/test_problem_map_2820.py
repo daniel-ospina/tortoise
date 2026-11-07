@@ -51,6 +51,25 @@ def _doc_copy(tmp_path: Path) -> Path:
     return copy
 
 
+def _decoy_and_ours() -> tuple[str, str]:
+    """The `**N fixed · N open · N unknown**` headline: the document's OWN, and a wrong one.
+
+    The decoy is derived from `parse_summary` on the real document rather than
+    frozen, so the two check-6 controls keep their discriminating power through any
+    count move: a decoy that EQUALS §2 is what makes the whole-body mutant
+    (`_INDEX_COUNTS.search(body)`) agree and therefore FAIL, while the fixed check
+    reads the entry row and still reports the disagreement.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    counts = pmc.parse_summary(text)
+    assert counts, "the document has no §2 summary — the fixtures cannot be built"
+    decoy = (f"**{counts['VERIFIED-FIXED']} fixed · {counts['OPEN']} open · "
+             f"{counts['UNKNOWN']} unknown**")
+    ours = (f"**{counts['VERIFIED-FIXED'] + 1} fixed · {counts['OPEN'] - 1} open · "
+            f"{counts['UNKNOWN']} unknown**")
+    return decoy, ours
+
+
 def _rewrite_row(text: str, issue: int, old: str, new: str) -> str:
     """Replace `old` with `new` on the row naming `issue`, and only there."""
     out, hit = [], 0
@@ -349,10 +368,19 @@ def test_a_decoy_index_ROW_cannot_satisfy_the_count_check(tmp_path):
     repo = tmp_path / "repo"
     (repo / "docs").mkdir(parents=True)
     index = repo / pmc.INDEX_REL
+    # ⛔ THE DECOY CARRIES THE DOCUMENT'S OWN COUNTS, DERIVED. A frozen literal
+    # (this control shipped `20 fixed · 6 open`, true when it was written) stops
+    # discriminating the moment §2 moves: with the real 21/5 the "ours" row is
+    # ALREADY wrong, so BOTH the fixed check and the whole-body mutant report a
+    # disagreement and the assertion passes either way — a control that cannot
+    # fail for the reason it states (#2820 review round 11, measured by mutating
+    # `_INDEX_COUNTS.search(body)` back in). Deriving the decoy from `parse_summary`
+    # makes the fixture impossible to age out that way.
+    decoy, ours = _decoy_and_ours()
     index.write_text(
         "# index\n"
-        "| decoy map | **20 fixed · 6 open · 0 unknown** | `some-other-map.md` |\n"
-        "| ours | **22 fixed · 4 open · 0 unknown** | `" + DOC.name + "` |\n",
+        f"| decoy map | {decoy} | `some-other-map.md` |\n"
+        f"| ours | {ours} | `{DOC.name}` |\n",
         encoding="utf-8",
     )
     errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
@@ -365,7 +393,7 @@ def test_an_earlier_MENTION_of_the_path_cannot_satisfy_the_count_check(tmp_path)
     Reachable, and found by the THIRD review round on the version that had
     already been fixed once for the same class: selecting the first line that
     merely NAMES the file let a ``| supersedes `MEMORY-SUBSTRATE-PROBLEM-MAP.md`
-    — **20 fixed · 6 open · 0 unknown** |`` cross-reference answer for a row that
+    — **N fixed · N open · N unknown** |`` cross-reference answer for a row that
     was stale. `docs/00_index.md` rows already cross-reference other docs by bare
     filename, so this is one "see also" from a false PASS. The registration is the
     row whose LAST cell is the path.
@@ -373,10 +401,11 @@ def test_an_earlier_MENTION_of_the_path_cannot_satisfy_the_count_check(tmp_path)
     repo = tmp_path / "repo"
     (repo / "docs").mkdir(parents=True)
     index = repo / pmc.INDEX_REL
+    decoy, ours = _decoy_and_ours()
     index.write_text(
         "# index\n"
-        "| another map | supersedes `" + DOC.name + "` — **20 fixed · 6 open · 0 unknown** |\n"
-        "| the map | **22 fixed · 4 open · 0 unknown** | `" + DOC.name + "` |\n",
+        f"| another map | supersedes `{DOC.name}` — {decoy} |\n"
+        f"| the map | {ours} | `{DOC.name}` |\n",
         encoding="utf-8",
     )
     errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
