@@ -3900,7 +3900,14 @@ def _residual_sentences(s3: str) -> list[str]:
 
     * an exclusion stated with none of `not`/`never`/`outside`, or one that says
       `skipped`, or one phrased `"…are never inside the walk"` — `inside the
-      walk` is an affirm marker and `never` does not outrank it.
+      walk` is an affirm marker and `never` does not outrank it;
+    * an HONEST sentence that uses a marker as an ASIDE — both measured RED
+      (#11437 review, round 2, P3): a concessive `"…except that a default is
+      evaluated when the outer method runs"`, which trips the `except that`
+      reverser that exists to red its inverse twin, and `"…from inside the walk's
+      enclosing frame"`, where the `\binside the walk\b` marker matches the
+      possessive `walk's`. Declared rather than paid for: narrowing either marker
+      re-opens the inverse it was added for.
 
     ⛔ The false-GREEN direction is the one that matters: a missed inverse is a
     false PASS in the file whose purpose is to be false-PASS-free, while a false
@@ -4094,20 +4101,29 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
 def test_the_residual_pin_separates_the_claim_from_its_inverse():
     r"""The residual predicate must RED the inverse, and must not red the claim.
 
-    ⛔ THIS TEST EXISTS BECAUSE THE PIN IS DORMANT (#11437 review, P2). The
-    predicate it guards lives in `test_the_census_doc_states_the_same_probe_bound
-    _the_report_does`, inside the `declared is None` arm. On a tree whose scan
-    declares a bound — which is every tree where `volunteer_context` is taken by
-    reference, `tortoise/sdk.py` holding exactly one such shape — that arm never
-    runs. Measured before this test: reverting the predicate to
-    `"not" in sentence` left the whole file GREEN, so the nine-row table in the
-    PR body was a hand-measurement with no executor behind it. Same shape as
-    `test_the_doc_slice_requires_a_UNIQUE_LINE_ANCHORED_H2`, which exists for the
-    same reason ("that measurement lived only in the docstring").
+    ⛔ THIS TEST EXISTS BECAUSE THE PIN WAS DORMANT (#11437 review, P2). The
+    predicate it guards **lived** in
+    `test_the_census_doc_states_the_same_probe_bound_the_report_does`, inside the
+    `declared is None` arm, so on a tree whose scan declares a bound — every tree
+    where `volunteer_context` is taken by reference, `tortoise/sdk.py` holding
+    exactly one such shape — that arm never ran. Measured then: reverting the
+    predicate to `"not" in sentence` left the whole file GREEN, so the nine-row
+    table in the PR body was a hand-measurement with no executor behind it. Same
+    shape as `test_the_doc_slice_requires_a_UNIQUE_LINE_ANCHORED_H2`, which
+    exists for the same reason ("that measurement lived only in the docstring").
+    ⛔ IT IS NO LONGER DORMANT, and saying so in the present tense would be the
+    defect this PR is about: the pin now runs through
+    `_assert_census_states_the_residual` from
+    `test_the_census_doc_states_the_same_probe_bound_the_report_does` on EVERY
+    tree, outside the `if declared is None` branch — measured, deleting §3's
+    residual clause reds both that test and this one. This test still earns its
+    keep: the doc pin's ability to FAIL is what the mutations at the end of this
+    file pin, and a row set that names the measured defeats is what keeps the
+    helper's declared surface honest.
 
-    Each row here was measured on this doc (`## 3.`→`## 4.`) and every variant is
-    asserted to actually differ from the original first, so a row cannot pass by
-    being the original sentence mistyped.
+    Each `must_red` row is asserted to differ from the original sentence, so a row
+    cannot pass by being the original mistyped (#11437 review, round 2, P3: the
+    green rows and the decoys carry that assertion too, below).
     """
     def _red(sentence: str) -> bool:
         return _residual_sentences(f"## 3.\n\n{sentence}\n\n## 4.\n") == []
@@ -4183,8 +4199,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
     # ⛔ The other direction: honest restatements of the SAME claim must stay
     # GREEN, or the pin is tied to this doc's exact wording — the doc+code-agrees
     # -but-reds class in this file's own history (#11389 review, P2/P3). The
-    # present-tense rows are why the coverage alternation is `(?:s|ed)?` and not
-    # `ed?` (#11437 review, P2): under `ed?` they were all RED.
+    # present-tense rows are why the coverage alternation is `(?:s|es|ed)?` and not
+    # `ed?` (#11437 review, P2; the `es` alternative added in round 2 for
+    # `reaches`): under `ed?` they were all RED.
     must_stay_green = {
         "honest: are not reported by this walk":
             "a nested `def`'s decorators and parameter defaults are not reported "
@@ -4215,6 +4232,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
             "the scan never reports a nested `def`'s decorators or defaults",
     }
     for label, sentence in must_stay_green.items():
+        assert sentence != original, f"green row {label!r} merely restates the claim"
         assert not _red(sentence), (
             f"the residual pin reds an honest statement of its own claim "
             f"({label}): {sentence!r}")
@@ -4233,6 +4251,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
             "decorator and default nodes are not visited by the closure walk",
     }
     for label, sentence in decoys.items():
+        assert sentence != original, f"decoy row {label!r} merely restates the claim"
         assert not _red(sentence), (
             f"the declared residual ({label}) is no longer open — the predicate "
             "now tells WHICH walk a sentence is about. That is better than this "
