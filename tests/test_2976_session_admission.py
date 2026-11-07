@@ -650,3 +650,73 @@ def test_admission_grain_agrees_with_the_pool_authority_on_a_camel_only_pool():
     junk = [{"id": "J_t0", "sessionId": "  ", "content": "j0"},
             {"id": "J_t1", "sessionId": 7, "content": "j1"}]
     assert [len(b) for b in session_blocks(junk)] == [1, 1]
+
+
+def test_the_agreement_with_the_pool_authority_is_scoped_to_identified_hits():
+    """#10540/#11381: the grains agree on IDENTIFIED hits and deliberately
+    diverge on the identity-LESS ones — the SCOPE of
+    `_session_admission_key`'s claim, pinned so it cannot be re-widened.
+
+    The camel leg exists so a product pool is ONE session to both grains. It
+    is not an unconditional equality, and the docstring says so out loud: a
+    reader who takes "agrees" for "cannot disagree" re-derives the
+    divergence below as a bug. Measured here, both directions:
+
+    * `lme_session_index: -1` (the eval annotator's DEFAULT, with
+      `session_id: ""`): `session_key_of` keeps the historical `idx:-1`
+      bucket for the whole pool, while `session_blocks` refuses to fuse
+      identity-less hits and gives each its own block. Both are intended —
+      #3591 kept the sentinel's key, and fusing unrelated conversations is
+      the defect this file exists to prevent;
+    * the same shape WITH the wire id now groups in admission (`sessA`) and
+      still keys `idx:-1` in the pool — one block, but not the pool's key;
+    * a padded snake id is RAW in the pool authority (it strips nothing) and
+      STRIPPED in the admission grain.
+
+    Neither divergence ships a wrong answer: no module under `tortoise/`
+    imports `session_reinjection`, so the `-1` shape arrives only through the
+    eval annotator, and the identified shapes — the ones the camel leg is
+    about — are asserted EQUAL at the end of this test.
+    """
+    from tortoise.retrieval import (
+        _session_admission_key,
+        dedup_pool,
+        session_key_of,
+    )
+
+    sentinel = [{"id": "X_t0", "session_id": "", "lme_session_index": -1},
+                {"id": "X_t1", "session_id": "", "lme_session_index": -1}]
+    assert {session_key_of(h) for h in sentinel} == {"idx:-1"}
+    assert [len(b) for b in session_blocks(sentinel)] == [1, 1]
+    assert [_session_admission_key(h)[0] for h in sentinel] == ["hit", "hit"]
+
+    sentinel_wire = [{"id": "Y_t0", "sessionId": "sessA",
+                      "lme_session_index": -1},
+                     {"id": "Y_t1", "sessionId": "sessA",
+                      "lme_session_index": -1}]
+    assert {session_key_of(h) for h in sentinel_wire} == {"idx:-1"}
+    assert len(session_blocks(sentinel_wire)) == 1
+
+    padded = {"id": "P_t0", "session_id": " sessA "}
+    assert session_key_of(padded) == " sessA "
+    assert _session_admission_key(padded) == ("session", "sessA")
+
+    # and the C5 cap's delta, measured: a camel-only RAW-CHUNK pool now caps
+    # per session, where N per-hit phantoms left the cap unable to bind
+    # (`is_raw_chunk` is the only population the cap touches at all)
+    chunks = [{"id": f"A_c{i}", "sessionId": "sessA", "content": f"a{i}",
+               "point_kind": "session-transcript"} for i in range(3)]
+    assert len(dedup_pool(chunks, max_chunks_per_session=1)) == 1
+
+    # the claim the docstring DOES make: every identified hit is ONE session in
+    # both grains (the two ENCODE it differently — a string there, a tagged
+    # tuple here — so this compares identity, never encoding)
+    for h in ({"id": "I_t0", "session_id": "sessA"},
+              {"id": "I_t1", "sessionId": "sessA"},
+              {"id": "I_t2", "sessionId": "sessA",
+               "lme_session_index": 3}):
+        if h.get("lme_session_index") is None:
+            assert _session_admission_key(h) == ("session", session_key_of(h))
+        else:
+            assert _session_admission_key(h) == (
+                "index", h["lme_session_index"])

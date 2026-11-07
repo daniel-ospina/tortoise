@@ -720,10 +720,17 @@ def session_key_of(hit: dict) -> str:
       ``reinjection_merge_order`` could not find a seeded session's own base
       ranks. What this fixes is the SEED's blindness on the product grain,
       NOT the arm's measured effect: #8713's own receipt
-      records the arm firing on the EVAL grain (``seeded_sessions: 354``,
-      ``injected_total_merged: 617/617 at cap10``, ``recall_all@5 0.6761 →
-      0.8592``), so the arm was never globally inert — on a product pool it
-      could not seed at all. Pre-change there was no seed and
+      records the arm FIRING on the EVAL grain (``seeded_sessions: 354``,
+      ``injected_total_merged: 617/617 at cap10``), so the arm was never
+      globally inert — on a product pool it could not seed at all.
+      ⛔ That receipt is cited THREE WAYS or not at all (pinned by
+      ``tests/test_window_arm_baseline_10538.py``): its ``recall_all@5
+      0.6761 → 0.8592`` is the session-diverse GUARD's net gain, while the
+      INJECTION's own eviction costs ``reader_surface@5 0.9436 → 0.9289``
+      and the guard adds ``evidence_recall@5 0.527 → 0.4706``. Quoting the
+      gain alone — as an earlier draft of this docstring did — inverts the
+      attribution this fix exists to keep straight and re-arms the arm
+      #8713 refuted. Pre-change there was no seed and
       therefore no fetch, so no injected group existed to place; and a
       group whose key the merge does not expect is DROPPED, not tailed
       (see ``session_reinjection.source_session_chunk_pass``). The identity
@@ -2304,17 +2311,46 @@ def _session_admission_key(
     never be grouped as one "session" (that would fabricate a block whose
     material belongs to different conversations).
 
-    ⛔ The camel leg is here so this grain cannot disagree with the pool
-    authority (:func:`session_key_of`) — before it, a camel-only pool was
-    ONE session to ``dedup_pool``/``seeded_sessions`` and N singleton blocks
-    to ``session_blocks``, so ``assemble_session_context`` degraded to the
-    fragment admission #2976 exists to replace. Measured: three
-    ``{"id": …, "sessionId": "sessA"}`` hits → ``session_blocks`` → 3 blocks
-    of 1; with this leg → 1 block of 3. It moves no key the eval grain
-    already had (that pool carries the snake ``session_id``, which still
-    wins) and it fails CLOSED in the same direction as the authority: a
-    whitespace-only or non-``str`` camel value falls through to the
-    per-hit singleton.
+    ⛔ The camel leg is here so this grain AGREES with the pool authority
+    (:func:`session_key_of`) on every IDENTIFIED hit — before it, a
+    camel-only pool was N per-hit phantom buckets whose cap never bound and
+    which ``seeded_sessions`` read as NO session, while ``session_blocks``
+    built N singleton blocks, so ``assemble_session_context`` degraded to the
+    fragment admission #2976 exists to replace. Measured: three ``{"id": …, "sessionId": "sessA"}``
+    hits → ``session_blocks`` → 3 blocks of 1; with this leg → 1 block of 3.
+    It moves no key the eval grain already had (that pool carries the snake
+    ``session_id``, which still wins) and it fails CLOSED in the same
+    direction as the authority: a whitespace-only or non-``str`` camel value
+    falls through to the per-hit singleton.
+
+    ⚠️ Scoped to IDENTIFIED hits — do NOT read the line above as "cannot
+    disagree". Measured, the two shapes a real pool REACHES still diverge: a
+    hit carrying ``lme_session_index: -1`` keys ``idx:-1`` in the pool (the
+    sentinel keeps its historical bucket) but a per-hit block here —
+    ``idx >= 0`` skips the sentinel, and with a wire id present this leg now
+    groups those hits into one block that is still not the pool's ``idx:-1``
+    — and a padded snake id is raw in the pool, stripped here. Neither is a
+    defect in either grain: a BUCKET and a BLOCK answer different questions,
+    and fusing identity-less hits is exactly what #3591 and the rule above
+    refuse. No module under ``tortoise/`` imports ``session_reinjection``
+    (measured: ``grep -rn 'import session_reinjection' tortoise/`` → none),
+    so the ``-1`` shape arrives only through the EVAL annotator
+    (``session_id: ""`` plus ``lme_session_index`` defaulted to ``-1``,
+    ``tools/longmem_eval/retrieve.py``).
+
+    ⚠️ "Two shapes" is the REACHED enumeration, NOT a proof of
+    exhaustiveness — three type/namespace seams diverge too, none reachable
+    from an in-repo writer (measured): a non-``int`` ``lme_session_index``
+    (the pool keys ``idx:{value}``, this grain skips the index leg); a
+    whitespace-only snake id (the pool keys it RAW because it is truthy,
+    while this grain DISCARDS it rather than stripping); and a WIRE id that
+    spells the ``idx:`` namespace — ``_SAFE_SESSION_TAG_RE`` permits ``:``,
+    so a session literally named ``idx:3`` keys ``idx:3`` and FUSES, in the
+    pool, with another hit's ``lme_session_index: 3`` bucket while this
+    grain keeps them apart. That last one belongs to the POOL's namespace,
+    not to this leg — a snake ``session_id: "idx:3"`` reaches the same
+    bucket — and tightening it, like reconciling the sentinel, is its own
+    decision rather than a rider here.
     """
     sid = h.get(session_key)
     if isinstance(sid, str) and sid.strip():
