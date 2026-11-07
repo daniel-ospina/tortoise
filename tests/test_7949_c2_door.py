@@ -695,11 +695,11 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
         "session_existed and (not retry_failed_capture)",
         door_test,
     }, (
-        "sdk.capture_session has "
-        f"{len(effectful)} arms that can change what a capture returns, not the "
-        "five pinned (two early-return gates, the two replay short-circuits, and "
-        "the door). A sixth arm — above the chain, below it, or nested inside one "
-        "of them — reroutes captures the record still declares v2 (#10983): "
+        "sdk.capture_session's set of arms that can change what a capture "
+        f"returns is not the five pinned (got {len(effectful)}: two early-return "
+        "gates, the two replay short-circuits, and the door). A sixth arm — above "
+        "the chain, below it, or nested inside one of them — reroutes captures "
+        "the record still declares v2 (#10983): "
         f"{sorted(effectful)}")
     assert effectful[door_test] == {"binds"}, (
         f"the m2 arm's effect changed: {sorted(effectful[door_test])} — it must be "
@@ -772,11 +772,27 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
 
 
 def test_the_door_citation_is_derived_not_typed():
-    """A typed ``:16975`` is the #8506 rot class. Resolve it every run."""
+    """A typed ``:16975`` is the #8506 rot class. Resolve it every run.
+
+    ⛔ The resolution is checked against a source TEXT SCAN, not against the
+    AST walk ``_cite`` is itself built from: comparing ``_cite`` to its own
+    derivation is a tautology, and it stayed GREEN in the #10983 mutation pass
+    when ``_cite`` was rewritten to return a typed constant — the dead-weight
+    shape of #3442 rule 3, where an assertion's value cannot vary under any
+    mutation of the diff. The text scan cannot be moved by editing ``_cite``,
+    so that mutation now reds this row.
+    """
     cite = _cite(HOSTED, "_capture_lane")
     line = int(cite.rsplit(":", 1)[1])
-    text = HOSTED.read_text(encoding="utf-8").splitlines()[line - 1]
-    assert "def _capture_lane" in text, (
+    text = HOSTED.read_text(encoding="utf-8").splitlines()
+    scanned = [n for n, ln in enumerate(text, 1)
+               if ln.startswith("def _capture_lane")]
+    assert scanned == [line], (
+        f"the derived cite {cite} does not land on the def — _cite returned "
+        f"{line} while a text scan finds `def _capture_lane` at {scanned}, so "
+        f"the citation is TYPED rather than derived (or the derivation is "
+        f"broken) (#8506)")
+    assert "def _capture_lane" in text[line - 1], (
         f"the derived cite {cite} does not land on the def — the derivation "
         f"itself is broken")
 
@@ -1226,6 +1242,15 @@ def test_an_unmeasured_door_never_claims_a_read_back():
     record = probe.door_record({})
     assert record["measured"] is False, record
     assert "pinned_off" not in record and "source" not in record, record
+    # ⛔ The lane is asserted in the UNMEASURED branch too. At the #10983
+    # mutation pass, rewriting this branch's `"lane": DOOR_LANE` to a literal
+    # `"unknown"` left all 22 tests GREEN: the measured branch is covered by
+    # `test_the_probe_records_the_door_in_the_log_and_the_machine_record`, and
+    # the test above pins `measured`/`pinned_off`/`source` but never the lane
+    # (#3442 rule 3 — an unasserted field is the borrowing the docstring's
+    # "lane follows the READ-BACK" rule forbids).
+    assert record["lane"] == probe.DOOR_LANE == "v2", record
+    assert record["lane_env"] == probe.DOOR_LANE_ENV, record
     # A read-back of an all-unset set IS a measurement (that is the passing
     # state), so it must not be confused with the absent one.
     all_unset = {key: None for key in
