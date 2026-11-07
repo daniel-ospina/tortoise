@@ -92,10 +92,12 @@ rejected — see the floor test):
   too;
 * nary-ordering — 3+ named options ("Mark and Sarah or Tom"), sibling
   #2653; and bare "latest" as an ORDERING INSTRUCTION ("from earliest to
-  latest"). The census's nary-ordering class is RE-MEASURED to 2
-  named-subject rows (#2653; the census stored 160-char question
-  TRUNCATIONS at the time, which is why the class was filed as 4 — #8055
-  replaced them with the verbatim dataset questions): the 2 genuine N-ary
+  latest" — #8775 scoped this to the ordering BOUND: an attributive
+  "latest" inside an interval question's own anchor clauses is narrative
+  text, not an instruction). The census's nary-ordering class is
+  RE-MEASURED to 2 named-subject rows (#2653; the census stored 160-char
+  question TRUNCATIONS at the time, which is why the class was filed as 4 —
+  #8055 replaced them with the verbatim dataset questions): the 2 genuine N-ary
   rows (gpt4_f49edff3 / gpt4_18c2b244) now FIRE as ORDERING with 3 terms;
   gpt4_70e84552_abs is the binary `_abs` twin of an ordering row and
   already fired (adjudicated noise, pinned in test_assembly_pure.py);
@@ -142,6 +144,7 @@ from tortoise.calendar_anchors import (  # #2655 calendar-anchor resolution
     CalendarAnchorKind, find_anchor_spans, resolve_calendar_anchor)
 from tortoise.entity_identity import (  # #3633 route-then-refuse
     display_holder_ids, record_non_folded)
+from tortoise.env_truthy import env_flag  # #8775 off-switch resolution
 from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
 
 __all__ = ["AssemblyShape", "ClassWindow", "RelativeAnchor",
@@ -190,7 +193,12 @@ class AssemblyShape(StrEnum):
 #         CALENDAR-ANCHOR family of sibling #2655 (census
 #         relative-date-lookup: Valentine's / last Saturday)
 #       * bare 'latest' / 'the last one' — an ORDERING INSTRUCTION
-#         ('from earliest to latest'), sibling #2653's discovery family
+#         ('from earliest to latest'), sibling #2653's discovery family.
+#         #8775 SCOPED the bare-`latest` half: an ORDERING BOUND still
+#         vetoes, and so does any `latest` an interval template does not
+#         own — but inside an interval question's own resolved anchors an
+#         attributive `latest` is narrative text, not an instruction (see
+#         ``_recency_vetoes``).
 #       * the ATTRIBUTIVE 'most recent' — the SAME ordering instruction
 #         spelled the other way ('from earliest to most recent'): it is
 #         deliberately NOT promoted, so it falls through to the legacy
@@ -525,8 +533,47 @@ _RE_FREQUENCY = re.compile(
 # The guard is checked BEFORE the shape templates, so an attributive
 # recency question can never fall through and fire
 # ORDERING/CURRENT_STATE/INTERVAL.
+#
+# #8775 — `\blatest\b` is no longer a BARE token match. Measured over the
+# census's 133-row temporal corpus: 5 rows carry a recency surface, 4 are the
+# ORDERING BOUND "from earliest to latest" (the guard is CORRECT for them),
+# and exactly 1 (``0db4c65d``) is the ATTRIBUTIVE "…is discussing her latest
+# thriller novel" — a narrative relative clause INSIDE an anchor the interval
+# template already resolved, so the guard's reason ("the arms cannot read an
+# ordering instruction") does not apply there and the row was vetoed out of a
+# fire it should have had (#8055's un-truncation is what surfaced it). Bare
+# `latest` is therefore split in two:
+#   * as an ORDERING BOUND (``_RE_RECENCY_LATEST_BOUND``) it is part of
+#     ``_RE_RECENCY``, the surface that ALWAYS vetoes — so every ordering
+#     instruction (`from earliest to latest`, `from latest to earliest`,
+#     `latest first`) keeps rejecting, which is what keeps this pattern from
+#     becoming dead code for the ordering-list arm below;
+#   * anywhere ELSE it still vetoes, EXCEPT where an interval template owns
+#     the question — see ``_recency_vetoes``, the ONE predicate both guard
+#     sites call.
+# The ATTRIBUTIVE `most recent` is deliberately UNCHANGED: it is the same
+# instruction spelled the other way, no census row measures a narrative use of
+# it, and widening on an unmeasured surface is what the precision floor exists
+# to prevent.
+_RE_RECENCY_LATEST_BOUND = re.compile(
+    r"\b(?:earliest|oldest|first|newest)\W+(?:to|and|through|till|until)\W+"
+    r"(?:the\s+)?latest\b"
+    r"|\blatest\W+(?:to|and|through|till|until)\W+(?:the\s+)?"
+    r"(?:earliest|oldest|first|newest)\b"
+    r"|\blatest\s+first\b",
+    re.IGNORECASE)
 _RE_RECENCY = re.compile(
+    r"\bmost\W+recent\b|" + _RE_RECENCY_LATEST_BOUND.pattern +
+    r"|\bthe\s+last\s+one\b", re.IGNORECASE)
+#: The bare `latest` token whose veto #8775 SCOPES (see ``_recency_vetoes``).
+_RE_RECENCY_LATEST = re.compile(r"\blatest\b", re.IGNORECASE)
+#: #8775's off-switch target: the pre-#8775 guard, BYTE-FOR-BYTE. With
+#: ``TORTOISE_RECENCY_NARRATIVE_LATEST=0`` this is the only recency surface
+#: consulted, so the pre-fix routing is provably unchanged.
+_RE_RECENCY_BARE = re.compile(
     r"\bmost\W+recent\b|\blatest\b|\bthe\s+last\s+one\b", re.IGNORECASE)
+#: #8775 off-switch (default ON = the narrowed guard; ``0`` = main's guard).
+RECENCY_NARRATIVE_LATEST_ENV = "TORTOISE_RECENCY_NARRATIVE_LATEST"
 # advice / preference / recommendation (R16 misfire): "which SHOULD I do
 # first, A or B" carries ordering morphology but is preference, not fact —
 # firing would REPLACE the working pool with a shape block. Modal + advice
@@ -571,9 +618,10 @@ _RE_OR_CHAIN = re.compile(r"\sor\s.+?\sor\s", re.IGNORECASE | re.DOTALL)
 # 'A', 'B', and 'C'"). The colon is the strong signal: the two head forms
 # carry no " or " at all, so _RE_ORDERING cannot see them.
 # The "earliest to latest" head form is deliberately NOT an alternative here:
-# a question containing it always matches ``_RE_RECENCY`` ("\blatest\b") and
-# is rejected by the R13 guard before this pattern is ever tried, so the
-# alternative was dead code that contradicted that guard.
+# a question containing it never reaches this pattern — with a bounded window
+# the class-plural branch above claims it, without one the R13 guard's
+# ORDERING-BOUND arm (``_RE_RECENCY_LATEST_BOUND``, #8775) rejects it — so the
+# alternative would be dead code contradicting that guard.
 _RE_ORDERING_LIST = re.compile(
     r"^\s*(?:which|who|what)\b[^?:]*?"
     r"(?:\border\b|\bsequence\b|\bfirst\s+to\s+last\b)"
@@ -744,6 +792,54 @@ _RE_WH_LOOKUP = re.compile(r"\b(?:what|which|who|whom|whose|where|when)\b",
                            re.IGNORECASE)
 
 
+def recency_narrative_latest_enabled() -> bool:
+    """Is #8775's narrowed recency guard armed? (default ON).
+
+    ``TORTOISE_RECENCY_NARRATIVE_LATEST=0`` reverts to main's bare-token
+    guard, BYTE-FOR-BYTE (``_RE_RECENCY_BARE``), so the old routing is
+    reachable and provably unchanged — the off-switch the fix must carry.
+    """
+    return env_flag(RECENCY_NARRATIVE_LATEST_ENV, True)
+
+
+def _interval_template_owns(question: str) -> bool:
+    """Does one of the three interval templates match ``question`` cleanly?
+
+    Each template CAPTURES its own two anchors (named groups a/b), so the
+    shape never re-reads the anchors' text: an attributive adjective inside an
+    anchor's narrative extension is not an instruction any arm has to obey.
+    """
+    return bool(_RE_INTERVAL_SINCE.match(question)
+                or _RE_INTERVAL_BETWEEN.match(question)
+                or _RE_INTERVAL_BETWEEN_LEAD.match(question))
+
+
+def _recency_vetoes(question: str) -> bool:
+    """R13 recency guard — #2165, narrowed by #8775.
+
+    * ``most recent`` / ``the last one`` / bare `latest` as an ORDERING BOUND
+      (``_RE_RECENCY``) ALWAYS veto — main's reject, unchanged;
+    * any OTHER bare `latest` vetoes too, UNLESS an interval template owns the
+      question (#8775): there both anchors are already resolved by the
+      template, so a narrative "her latest thriller novel" inside one anchor
+      is not an ordering instruction the arms must read.
+    * off-switch off -> main's bare-token guard is the whole predicate.
+
+    ONE predicate for both guard sites (the anchor-stripped residual in
+    ``_date_lookup_surface`` and the blanket block in ``classify_question``),
+    so the two cannot drift apart the way the #8487 duplicated resolver did.
+    """
+    if not recency_narrative_latest_enabled():
+        return bool(_RE_RECENCY_BARE.search(question))
+    if _RE_RECENCY.search(question):
+        return True
+    if not _RE_RECENCY_LATEST.search(question):
+        return False
+    # #8775: a narrative/attributive `latest` cannot change what the interval
+    # arms read — their anchors are the template's own capture.
+    return not _interval_template_owns(question)
+
+
 def _strip_anchor_spans(question: str, spans) -> str:
     """``question`` with each matched anchor span blanked (R2655).
 
@@ -813,7 +909,7 @@ def _date_lookup_surface(question: str, residual: str, spans) -> bool:
         or _relative_match(residual) is not None
         or _RE_AGO_RESIDUAL.search(residual)
         or _RE_DURATION.search(residual)
-        or _RE_FREQUENCY.search(residual) or _RE_RECENCY.search(residual)
+        or _RE_FREQUENCY.search(residual) or _recency_vetoes(residual)
         or _RE_ADVICE.search(residual) or _RE_OR_CHAIN.search(residual))
 # duration-state (#2654): "how long had I been <state> when <event>?" — the
 # past-elapsed-state form that needs a state's ENTRY date and the question's
@@ -1048,7 +1144,7 @@ def classify_question(question: str) -> AssemblyShape | None:
     # reachable, and `_RE_DURATION` rejects every OTHER duration/count
     # morphology right after it.
     if (_RE_AGO_OTHER.search(q) or _RE_FREQUENCY.search(q)
-            or _RE_RECENCY.search(q) or _RE_ADVICE.search(q)):
+            or _recency_vetoes(q) or _RE_ADVICE.search(q)):
         return None
     # N-ary (3+ options) is a R13 reject for EVERY shape template that
     # follows — including duration-state — so it stays ahead of all of

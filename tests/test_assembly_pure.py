@@ -18,18 +18,18 @@ shorter question: ``gpt4_f49edff3`` lost its third option, and ``0db4c65d``
 lost the word that trips a guard — so the measurements below are only
 meaningful against full text.
 
-* In-scope census rows that fire: 49/55 (was 50/55 while the artifact stored
-  the 160-char truncations — #8055 un-truncated the text and surfaced the
-  difference). 5 of the 6 non-fires are duration / count / single-anchor rows
-  the SEMANTIC census filed under in-scope classes ("how long did it take",
-  "how many charity events … before", "how long have I been working
-  before") — no shape template must fire on them; the classifier's
-  shape-based rejection is the point. The 6th is a ROUTER DEFECT the
-  truncation had masked: ``0db4c65d`` is a clean two-anchor interval-since
-  row whose interval template MATCHES, vetoed by ``_RE_RECENCY``'s bare
-  ``latest`` on the narrative clause "her latest thriller novel". It is
-  pinned as a MISS, not as a desired rejection, and #8775 owns the guard
-  narrowing that returns the count to 50/55.
+* In-scope census rows that fire: 50/55. The count was 49/55 for exactly one
+  reason: #8055's un-truncation surfaced ``0db4c65d``, a clean two-anchor
+  interval-since row whose interval template MATCHES, vetoed by
+  ``_RE_RECENCY``'s bare ``latest`` on the narrative clause "her latest
+  thriller novel" — a GUARD FALSE POSITIVE, never a desired rejection. #8775
+  narrowed the guard (an ORDERING BOUND still vetoes; a narrative `latest`
+  inside an interval question's own resolved anchors does not) and the count
+  is back to 50/55. The remaining 5 non-fires are duration / count /
+  single-anchor rows the SEMANTIC census filed under in-scope classes ("how
+  long did it take", "how many charity events … before", "how long have I
+  been working before") — no shape template must fire on them; the
+  classifier's shape-based rejection is the point.
 * Residual measured-negative rows that fire (after the #2652 ago/recency
   promotion, the #2654 duration-state promotion, #2653's nary-ordering
   re-measurement, and #2655's calendar-anchor day lookup): exactly 1
@@ -94,10 +94,14 @@ from tortoise.assembly import (
     _RE_INTERVAL_SINCE,
     _RE_OR_CHAIN,
     _RE_RECENCY,
+    _RE_RECENCY_BARE,
+    _RE_RECENCY_LATEST_BOUND,
+    RECENCY_NARRATIVE_LATEST_ENV,
     AssemblyShape,
     RelativeAnchor,
     ResolveResult,
     _count_is_fragment,
+    _recency_vetoes,
     classify_question,
     extract_subject_terms,
     resolve_relative_anchor,
@@ -220,14 +224,12 @@ _CLASS_PLURAL_NON_WINDOW = {
     # enumeration (this shape is temporal by definition)
     "gpt4_7abb270c",  # "… the six museums I visited from earliest to latest?"
 }
-# #8055: the in-scope row whose interval morphology the router REJECTS — a
-# MEASURED MISS, not a desired rejection (see the module docstring, first
-# bullet). The census stored this row truncated at 160 chars ("…where the
-# aut"), which cut the word that trips the guard, so the defect was invisible
-# until #8055 un-truncated the artifact; #8775 owns the fix. Asserted as a
-# MISS on purpose: this pin fails the moment the guard is narrowed, which is
-# the signal to move the row into the fired count and restore 50/55.
-_IN_SCOPE_SURFACED_MISS = "0db4c65d"
+# #8775: the row #8055's un-truncation surfaced — a clean two-anchor
+# interval-since question the bare-`latest` recency guard vetoed. It now FIRES
+# as ``interval``; pinned by qid here and by the mechanism test below
+# (``test_recency_narrative_latest_is_not_an_ordering_instruction``), which is
+# what fails if the narrowing is ever reverted.
+_IN_SCOPE_RECENCY_ROW = "0db4c65d"
 # in-scope rows whose DURATION/COUNT morphology must NOT fire (pinned)
 _IN_SCOPE_NO_FIRE = {
     "How many days did it take for me to find a house I loved after "
@@ -668,14 +670,15 @@ def test_census_nary_ordering_remeasured():
 
 
 def test_census_in_scope_recall_and_shape_rejections():
-    """In-scope census rows: 49 of the 55 shape-typical rows fire, 6 do not.
+    """In-scope census rows: 50 of the 55 shape-typical rows fire, 5 do not.
 
-    5 of the non-fires are the pinned duration/count mis-files (shape-based
-    rejection is the point); the 6th (``_IN_SCOPE_SURFACED_MISS``) is the
-    router defect #8055's un-truncation surfaced — it is a clean
-    interval-since row that the interval template matches and ``_RE_RECENCY``
-    vetoes (#8775). The two sets are asserted SEPARATELY so a real rejection
-    can never be confused with a recall miss.
+    The 5 non-fires are the pinned duration/count mis-files (shape-based
+    rejection is the point). The 6th row this test used to carve out
+    (``0db4c65d``) was never a rejection at all — it was the bare-`latest`
+    recency guard's false positive, fixed by #8775, and it now FIRES as
+    ``interval`` with its 2 clean subject terms (asserted below, and pinned
+    mechanism-by-mechanism in
+    ``test_recency_narrative_latest_is_not_an_ordering_instruction``).
 
     The in-scope set is the census's three fired classes (interval /
     ordering-compare / current-state, 55 rows — #2653's nary-ordering class
@@ -684,27 +687,212 @@ def test_census_in_scope_recall_and_shape_rejections():
     assert len(rows) == 55
     fired = [r for r in rows if classify_question(r["question"]) is not None]
     no_fire = [r for r in rows if classify_question(r["question"]) is None]
-    assert len(fired) == 49, \
-        f"in-scope fires drifted: {len(fired)} (expected 49)"
-    assert len(no_fire) == 6
-    surfaced = [r for r in no_fire if r["qid"] == _IN_SCOPE_SURFACED_MISS]
-    assert len(surfaced) == 1, "the surfaced miss is no longer in the census"
-    by_text = {r["question"]: r for r in no_fire
-               if r["qid"] != _IN_SCOPE_SURFACED_MISS}
+    assert len(fired) == 50, \
+        f"in-scope fires drifted: {len(fired)} (expected 50)"
+    assert len(no_fire) == 5
+    by_text = {r["question"]: r for r in no_fire}
     assert set(by_text) == _IN_SCOPE_NO_FIRE, \
         f"in-scope rejection set drifted: {sorted(set(by_text) ^ _IN_SCOPE_NO_FIRE)}"
 
-    # the surfaced miss is a DEFECT, pinned with its mechanism: the interval
-    # template matches this row cleanly and only the bare-`latest` recency
-    # guard stands between it and a FIRE. When #8775 narrows the guard this
-    # assertion fails, which is the signal to move the row into `fired` and
-    # restore 50/55 — it must never be silently re-read as a desired reject.
-    miss = surfaced[0]
-    assert _RE_INTERVAL_SINCE.match(miss["question"]), miss["qid"]
-    assert _RE_RECENCY.search(miss["question"]), miss["qid"]
+    # #8775: the row #8055's un-truncation surfaced is a FIRE now — and the
+    # shape it fires as is the one its interval template resolves, with both
+    # anchor terms intact (indicator 1 of the issue: "2 clean subject terms").
+    recency_row = next(r for r in rows if r["qid"] == _IN_SCOPE_RECENCY_ROW)
+    assert classify_question(recency_row["question"]) is AssemblyShape.INTERVAL, \
+        "the #8775 row is no longer firing as interval"
+    terms = extract_subject_terms(recency_row["question"])
+    assert len(terms) == 2 and all(t.strip() for t in terms), terms
+    # ... and the interval template still matches it cleanly, so a future
+    # template change cannot silently take the credit for this fire.
+    assert _RE_INTERVAL_SINCE.match(recency_row["question"]), recency_row["qid"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #8775 — the R13 recency guard's bare `latest` is scoped, not dropped
+#
+# Measured over the census's 133-row temporal corpus: 5 rows carry a
+# ``_RE_RECENCY`` surface. 4 are the ORDERING BOUND "from earliest to
+# latest" and the guard is CORRECT for them. The 5th (``0db4c65d``) is an
+# ATTRIBUTIVE "…is discussing her latest thriller novel" — a narrative
+# relative clause INSIDE an anchor the interval template already resolved —
+# so the guard vetoed a fire it should never have touched.
+# ══════════════════════════════════════════════════════════════════════════
+
+#: the census's row the narrowing frees (verbatim, untruncated — #8055)
+_NARRATIVE_LATEST_Q = (
+    "How many days had passed since I finished reading 'The Seven Husbands of "
+    "Evelyn Hugo' when I attended the book reading event at the local library, "
+    "where the author of 'The Silent Patient' is discussing her latest thriller "
+    "novel?")
+
+#: the census rows whose `latest` IS an ordering instruction — derived from the
+#: census, never transcribed, so the pin cannot drift from the artifact
+_RECENCY_ORDERING_INSTRUCTION_QIDS = {
+    "gpt4_7f6b06db", "gpt4_7abb270c", "gpt4_e061b84f", "gpt4_f420262c",
+}
+
+
+def test_recency_narrative_latest_is_not_an_ordering_instruction():
+    """#8775 MECHANISM: a narrative `latest` inside an interval question's own
+    resolved anchors must not veto that question.
+
+    The row is not a recency question at all: the interval template matches it
+    cleanly and CAPTURES both anchors, so the adjective in the second anchor's
+    extension ("…the author of 'The Silent Patient' is discussing her latest
+    thriller novel") is text no arm re-reads. Before the narrowing it returned
+    ``None``; the shape is ``interval`` with its 2 anchor terms intact.
+
+    Non-vacuous: the off-switch test below shows the same question returning
+    ``None`` under the pre-fix guard, so this assertion is the fix, not a
+    tautology.
+    """
+    assert _RE_INTERVAL_SINCE.match(_NARRATIVE_LATEST_Q)
+    # the token is present, but NOT as an ordering bound — that distinction is
+    # the whole narrowing
+    assert _RE_RECENCY.search(_NARRATIVE_LATEST_Q) is None
+    assert _RE_RECENCY_LATEST_BOUND.search(_NARRATIVE_LATEST_Q) is None
+
+    assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL
+    terms = extract_subject_terms(_NARRATIVE_LATEST_Q)
+    assert len(terms) == 2, terms
+    assert terms[0] == "I finished reading 'The Seven Husbands of Evelyn Hugo'"
+    assert terms[1].startswith(
+        "I attended the book reading event at the local library")
+
+    # the same defect in the OTHER interval arm: an attributive `latest` inside
+    # a "between A and B" question is narrative text too
     assert classify_question(
-        _RE_RECENCY.sub("newest", miss["question"])) is AssemblyShape.INTERVAL, \
-        "the surfaced miss is no longer the bare-`latest` guard's false positive"
+        "How many days passed between the day I saw the latest Marvel film "
+        "and my birthday?") is AssemblyShape.INTERVAL
+
+
+def test_recency_ordering_bounds_still_reject():
+    """#8775 indicator 2: the census rows whose `latest` IS an ordering
+    instruction are UNCHANGED by the narrowing, and the spellings of the same
+    bound the corpus does not carry still reject.
+
+    MEASURED CORRECTION to the issue's wording: the issue says all 4 census
+    rows still return ``None``, but two of them (#8056 landed afterwards) fire
+    ``CLASS_PLURAL`` — a bounded relative window makes the class-plural branch
+    own them, and that branch is entered BEFORE the R13 guard under its own
+    recorded OVERRIDES, so the recency veto never sees them. The bound is still
+    present in all 4 and the routing is identical with the narrowing on and off,
+    which is what this test pins.
+    """
+    rows = {r["qid"]: r for r in _CENSUS["rows"]}
+    assert set(rows) >= _RECENCY_ORDERING_INSTRUCTION_QIDS
+    expected = {
+        # window-less + open-left: not a TEMPORAL enumeration, so the guard's
+        # reject is the answer
+        "gpt4_7abb270c": None,
+        "gpt4_f420262c": None,
+        # bounded window: #8056's class-plural branch (its own recorded
+        # OVERRIDES) owns these, so the guard is never consulted
+        "gpt4_7f6b06db": AssemblyShape.CLASS_PLURAL,
+        "gpt4_e061b84f": AssemblyShape.CLASS_PLURAL,
+    }
+    for qid in sorted(_RECENCY_ORDERING_INSTRUCTION_QIDS):
+        q = rows[qid]["question"]
+        assert _RE_RECENCY_LATEST_BOUND.search(q), qid
+        assert classify_question(q) is expected[qid], qid
+
+    for q in [
+        "Order the concerts from latest to earliest.",
+        "List the events from earliest to latest.",
+        "Rank my jobs from the oldest to the latest.",
+        "Give me the events latest first.",
+    ]:
+        assert classify_question(q) is None, q
+
+
+def test_recency_narrowing_is_scoped_to_the_interval_arms():
+    """#8775 SCOPE: the narrowing admits a bare `latest` ONLY where an interval
+    template owns the question.
+
+    A global bare-token drop (the tempting one-line fix) also frees
+    "what is the current status of my latest car?" to fire CURRENT_STATE and
+    "Which did I buy first, my latest phone or my laptop?" to fire ORDERING —
+    both are pinned rejections on surfaces whose subject the arms cannot
+    resolve ("latest car" is a recency-selected referent, not an entity name),
+    i.e. exactly the "REPLACE the working pool" hazard the guard exists for.
+    Every one of them must still be ``None``.
+    """
+    for q in [
+        # a recency-SELECTED referent: the arms cannot resolve which car it is
+        "what is the current status of my latest car?",
+        "what is the current status of my latest phone?",
+        # a two-subject ordering question whose option is recency-selected
+        "Which did I buy first, my latest phone or my laptop?",
+        "Which came first, my latest trip to Paris or my graduation?",
+        # an interval question that ALSO carries an ordering bound: the bound
+        # still vetoes (the exemption is for narrative text, not instructions)
+        "How many days had passed since I finished the book when I attended "
+        "the fair, from earliest to latest?",
+        # the ATTRIBUTIVE `most recent` is deliberately unchanged — no census
+        # row measures a narrative use of it
+        "What is the order of the six museums I visited from earliest to "
+        "most recent?",
+        "Rank the shows from most-recent to earliest.",
+    ]:
+        assert classify_question(q) is None, q
+        assert extract_subject_terms(q) == [], q
+    # ... while the anchor-stripped residual path sees the same predicate
+    assert _recency_vetoes("…where the author is discussing her latest novel")
+
+
+def test_recency_narrative_latest_off_switch_restores_the_pre_fix_path(
+        monkeypatch):
+    """#8775 OFF-SWITCH: ``TORTOISE_RECENCY_NARRATIVE_LATEST=0`` restores main's
+    guard BYTE-FOR-BYTE, so the old routing is provably unchanged.
+
+    Asserted at three levels: the exported pattern is main's pattern verbatim,
+    the one predicate answers as main did, and the CENSUS measures 49/55 again —
+    the measurement that detected the defect in the first place, reproduced on
+    demand.
+    """
+    # main's guard, verbatim (this string is the pre-#8775 pattern)
+    assert _RE_RECENCY_BARE.pattern == r"\bmost\W+recent\b|\blatest\b|\bthe\s+last\s+one\b"
+
+    # the 4 ordering-instruction rows' shapes WITH the fix armed
+    ordered_shapes = {
+        r["qid"]: classify_question(r["question"])
+        for r in _CENSUS["rows"]
+        if r["qid"] in _RECENCY_ORDERING_INSTRUCTION_QIDS
+    }
+
+    monkeypatch.setenv(RECENCY_NARRATIVE_LATEST_ENV, "0")
+    assert _recency_vetoes(_NARRATIVE_LATEST_Q) is True
+    assert classify_question(_NARRATIVE_LATEST_Q) is None
+    assert extract_subject_terms(_NARRATIVE_LATEST_Q) == []
+
+    in_scope = [r for r in _CENSUS["rows"] if r["cls"] in _IN_SCOPE_CLASSES]
+    fired = [r for r in in_scope
+             if classify_question(r["question"]) is not None]
+    assert len(fired) == 49, (
+        "the off-switch does not reproduce the pre-#8775 measurement: "
+        f"{len(fired)}/55")
+
+    # the ordering-instruction rows do not depend on the switch at all
+    rows = {r["qid"]: r for r in _CENSUS["rows"]}
+    for qid in sorted(_RECENCY_ORDERING_INSTRUCTION_QIDS):
+        assert classify_question(rows[qid]["question"]) is ordered_shapes[qid], qid
+        assert _RE_RECENCY_LATEST_BOUND.search(rows[qid]["question"]), qid
+
+
+def test_recency_guard_flag_defaults_on_and_is_tristate(monkeypatch):
+    """The #8775 knob is an ordinary default-ON flag resolved by the ONE
+    truthiness contract (``tortoise.env_truthy``): unset/blank/garbage keep the
+    fix armed; only an explicit falsy spelling disarms it."""
+    monkeypatch.delenv(RECENCY_NARRATIVE_LATEST_ENV, raising=False)
+    assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL
+    for raw in ("", "  ", "banana"):
+        monkeypatch.setenv(RECENCY_NARRATIVE_LATEST_ENV, raw)
+        assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL, raw
+    for raw in ("0", "false", "no", "off", " OFF "):
+        monkeypatch.setenv(RECENCY_NARRATIVE_LATEST_ENV, raw)
+        assert classify_question(_NARRATIVE_LATEST_Q) is None, raw
+    monkeypatch.setenv(RECENCY_NARRATIVE_LATEST_ENV, "1")
+    assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL
 
 
 def test_census_duration_state_coverage():
