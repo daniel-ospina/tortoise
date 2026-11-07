@@ -5207,8 +5207,17 @@ class Test4051ChargeCoversTheLoopShape:
         window's own `used`, the figure a refusal reports — and then the
         boundary that figure implies: at an allowance of `2 × charge - 1` the
         FIRST `points: []` commit is admitted and the SECOND is refused, so the
-        spend is exactly `commit_ingest_charge_bytes(payload)`, not
-        approximately it and not the node floor only.
+        endpoint spends exactly `commit_ingest_charge_bytes(payload)` and not
+        some fraction of it.
+
+        ⛔ **What this leg does NOT pin: the payload term's SPEND.** For this
+        shape the charge IS the node floor (834 measured body bytes against a
+        4,096 B floor), so a spend site that passed
+        `declared_commit_write_count(payload) * COMMIT_INGEST_BYTES_PER_NODE`
+        would satisfy every assertion here. The payload term is exercised at
+        the spend site by NO test (its unit test has no HTTP); that gap is a
+        follow-up, and closing it needs a body wider than the floor, which this
+        class deliberately does not measure.
 
         Mutations this REDs (each measured): charge the endpoint `0`; charge it
         `charge - 1` (two then fit in `2 × charge - 1`, so the second is
@@ -5257,9 +5266,10 @@ class Test4051ChargeCoversTheLoopShape:
         `declared_commit_write_count` charges `_COMMIT_FLAT_NODE_LANES` one node
         per entry — a rate the FORMULA pins
         (`TestDeclaredCommitWriteCount::test_each_collection_entry_is_charged_once`)
-        but that **no test measured against the graph**: the existing invariant
-        legs measure `points[]` and `operators[]` only, and `supersessions[]` is
-        pinned by nothing at all (see this class's docstring). An entry
+        that **no invariant leg measured against the graph before this one**:
+        `TestCommitOrgIngestBound`'s legs measure `points[]` and `operators[]`
+        only, and `supersessions[]` is pinned by nothing at all (see this
+        class's docstring). An entry
         that minted a node AND a durability `:GraphEvent` would make that rate a
         2× fail-open — the same defect review cycles 2 and 3 found on the points
         and operator lanes, one lane over. Measured: declared 7 / minted 7 for
