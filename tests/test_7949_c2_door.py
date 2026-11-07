@@ -87,7 +87,11 @@ REFERENTIALITY = REPO / "tortoise/referentiality.py"
 CONTEXT_ENRICH = REPO / "tortoise/context_enrich.py"
 MODEL_ADAPTERS = REPO / "tortoise/model_adapters.py"
 CHANGE_FEED = REPO / "tortoise/change_feed.py"
-#: Round 9 of the #10983 review, and the reason this list is now SEVEN modules
+#: A WHOLE env-var name, so a message string that merely starts with a flag
+#: (``"TORTOISE_EXTRACTOR_PROVIDER=openrouter but …"``) is not counted as a read.
+_ENV_NAME = re.compile(r"TORTOISE_[A-Z0-9_]+")
+
+#: Round 9 of the #10983 review, and the reason this list keeps growing: an
 #: wide: `sparse.py:226` reads ``TORTOISE_IDENTIFIER_TOKENS`` (default ON) and
 #: `projection/entities.py:1208` gates the alias derivation on it
 #: (`point_identifier_aliases`), reached from the write path the acceptance
@@ -100,6 +104,18 @@ CHANGE_FEED = REPO / "tortoise/change_feed.py"
 #: yield an alias; 0 turns across the 7 fixtures), which is why it is a closure
 #: defect and not a wrong figure.
 SPARSE = REPO / "tortoise/sparse.py"
+#: Round 10: `subject_binding.py` reads two `TORTOISE_*` variables through a
+#: PARAMETER (`:210-211 _pick(tau_hi, "TORTOISE_SUBJECT_TAU_HI", …)` -> `:189
+#: os.environ.get(env_name)`), reached from the write path the acceptance takes
+#: (`sdk.py:16716 bind_point_subjects` inside `_extract_session_v2`, on a genuine
+#: create), and it gates whether the `:aboutSubject`/`:aboutObject` edge is
+#: written at all (`:405 decide_binding` -> `if outcome != BOUND: continue`).
+#: MEASURED: `resolve_thresholds()` -> `(0.7, 0.4)` and `decide_binding(0.90)` ->
+#: `bound`; with `TORTOISE_SUBJECT_TAU_HI=0.99` -> `(0.99, 0.4)` and `suspected`,
+#: i.e. the edge is not written. `_env_reads` returns the EMPTY SET for that
+#: module because the literal is passed to a helper as an argument — which is
+#: why the census below reads LITERALS as well as resolved reads.
+SUBJECT_BINDING = REPO / "tortoise/subject_binding.py"
 PROBE = REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
 REGISTRATION = REPO / "docs/evidence/7949-capstone/preregistration.json"
 
@@ -452,6 +468,30 @@ def _env_read_names_in(node: ast.AST) -> set[str]:
                 and arg.value.startswith("TORTOISE_")):
             names.add(arg.value)
     return names
+
+
+def _env_literals(path: Path) -> set[str]:
+    """Every ``TORTOISE_*`` name SPELLED in this module, whatever reads it.
+
+    The complement of :func:`_env_reads`: that function resolves the two read
+    SHAPES it understands, this one collects the spellings. A module that hands
+    its variable to a helper (``_pick(tau_hi, "TORTOISE_SUBJECT_TAU_HI", …)`` ->
+    ``os.environ.get(env_name)``) is invisible to the first and obvious to this
+    one — the blind spot that let `subject_binding.py` sit on the acceptance path
+    unaccounted through five review rounds (#10983, cycle 10).
+
+    Docstrings and message strings are excluded: only a WHOLE env-var name (the
+    ``TORTOISE_[A-Z0-9_]+`` shape) counts, so
+    ``"TORTOISE_EXTRACTOR_PROVIDER=openrouter but …"`` is prose, not a read.
+    """
+    tree = _tree(path)
+    doc_nodes = {id(n.value) for n in ast.walk(tree)
+                 if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+                 and isinstance(n.value.value, str)}
+    return {n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in doc_nodes
+            and _ENV_NAME.fullmatch(n.value) is not None}
 
 
 def _env_reads(path: Path) -> set[str]:
@@ -1150,12 +1190,11 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     set did not cover (`TORTOISE_SESSION_LLM_MOCK`, then the two truncation
     budgets), because "every switch that changes what the run measures" was
     prose. This derives the list from the module instead: every
-    ``TORTOISE_*`` variable read by the SEVEN modules in ``path_modules`` below
-    (``extractor_v2`` plus the six it reaches) must be EXACTLY ONE OF FOUR
-    things — the lists are the authority, and this docstring deliberately does
-    NOT restate their sizes or the module names, because the enumeration that
-    used to live here was three modules and three categories while the code was
-    already wider (review cycle 9):
+    ``TORTOISE_*`` variable read by the modules in ``path_modules`` below must be
+    EXACTLY ONE OF FOUR things — the lists are the authority, and this docstring
+    deliberately does NOT restate their sizes or the module names, because the
+    enumeration that used to live here was three modules and three categories
+    while the code was already wider (review cycle 9):
 
       * an arm seam in ``SEAM_LEDGER`` (the VET/CLASSIFY_LATER/S4_DELTA flags),
       * a member of ``DOOR_PINNED_OFF`` / ``DOOR_PINNED_ON``,
@@ -1227,7 +1266,8 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     #: deliberately out of scope, NAME it here with the switch it reads and the
     #: reason, rather than leaving its reads invisible.
     path_modules = (EXTRACTOR, REFERENTIALITY, VALUE_GATE, SEAM,
-                    CONTEXT_ENRICH, MODEL_ADAPTERS, CHANGE_FEED, SPARSE)
+                    CONTEXT_ENRICH, MODEL_ADAPTERS, CHANGE_FEED, SPARSE,
+                    SUBJECT_BINDING)
 
     read: set[str] = set()
     for module in path_modules:
@@ -1235,6 +1275,19 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     assert read, (
         "no TORTOISE_* reads resolved from the capture path's modules — the "
         "derivation itself is broken, so this pin would pass over anything")
+    #: ⛔ THE LITERAL CENSUS (cycle 10). `read` above only sees two SHAPES, so a
+    #: module that passes its name to a helper (``_pick(tau_hi,
+    #: "TORTOISE_SUBJECT_TAU_HI", …)`` -> ``os.environ.get(env_name)``) resolves to
+    #: NOTHING — measured: `_env_reads(subject_binding.py)` -> `set()` while the
+    #: file holds both spellings. So every ``TORTOISE_*`` string CONSTANT in the
+    #: module's AST is collected too (message strings such as
+    #: ``"TORTOISE_EXTRACTOR_PROVIDER=deepseek-direct but …"`` are excluded by the
+    #: full-name shape) and asserted to be accounted for. That is what makes this
+    #: a CLOSURE over the modules rather than over the two shapes the resolver
+    #: happens to understand.
+    literals: set[str] = set()
+    for module in path_modules:
+        literals |= _env_literals(module)
 
     probe = _load_probe()
     accounted = ({env for env, _w, _d, _s in probe.SEAM_LEDGER}
@@ -1242,7 +1295,7 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
                  | {env for env, _v in probe.DOOR_PINNED_ON}
                  | acknowledged_inputs
                  | set(acknowledged_not_a_measurement_seam))
-    unaccounted = sorted(read - accounted)
+    unaccounted = sorted((read | literals) - accounted)
     assert not unaccounted, (
         f"{[m.name for m in path_modules]} read {unaccounted} and the door "
         f"accounts for none of "
@@ -1261,7 +1314,8 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     # in the #10983 review, cycle 5. Each pin must be a RESOLVED READ somewhere on
     # the path; the probe is included because it is the code that pops and
     # re-reads them.
-    read_anywhere = read | _env_reads(SDK) | _env_reads(HOSTED) | _env_reads(PROBE)
+    read_anywhere = (read | literals | _env_reads(SDK) | _env_reads(HOSTED)
+                     | _env_reads(PROBE))
     # ⛔ And the reverse check covers the ARM and LEDGER spellings too (cycle 9):
     # it used to look only at `DOOR_PINNED_OFF`/`DOOR_PINNED_ON`, so a
     # `SEAM_LEDGER` row or an `ARM_ON`/`ARM_OFF` member naming a variable the code

@@ -253,13 +253,20 @@ packs dir, embedding gates, store connection): those are inputs a run needs in o
 settings that move the measured population, and they are deliberately outside the door's partition —
 stated because an earlier revision of this section called the whole path "closed", which the review
 measured false (`TORTOISE_REFERENTIALITY` was read on every v2 capture and accounted for by
-nothing). The closure is derived over `extractor_v2.py` **and** the SEVEN modules the path reaches one call
-down — `referentiality.py`, `value_gate.py`, `s2_decision_seam.py`, `context_enrich.py`,
-`model_adapters.py`, `change_feed.py` and `sparse.py` — so the arm seams, the mention arm, the per-turn embed
-rewrite, the request's `response_format`, the change-feed writer and the identifier-token writer are inside the derived
-surface, not hand-listed beside it. That list grew one review round at a time (the last three are
+nothing). The closure is derived over the modules the test names in `path_modules` — a POINTER rather than a
+count, because a count in this paragraph went stale three rounds running (six, then seven, then eight) while
+the derivation grew, which is itself the defect this section is about. Cycle 10 also made the derivation
+read the `TORTOISE_*` **literals** in those modules, not only the two read shapes its resolver understands:
+`subject_binding.py` holds both of its spellings and passes one to a helper as an argument, so it resolved
+to the EMPTY SET while sitting on the write path (`sdk.py:16716` `bind_point_subjects`, inside
+`_extract_session_v2`) and gating whether the `:aboutSubject`/`:aboutObject` edge is written at all
+(measured: `decide_binding(0.90)` is `bound` at the defaults and `suspected` with
+`TORTOISE_SUBJECT_TAU_HI=0.99`) — so the arm seams, the mention arm, the per-turn embed
+rewrite, the request's `response_format`, the change-feed writer, the identifier-token writer and the
+confidence-gated subject binder are inside the derived
+surface, not hand-listed beside it. That list grew one review round at a time (the last four are
 `TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`, then
-`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, each found by a
+`TORTOISE_IDENTIFIER_TOKENS` in cycle 9, then `TORTOISE_SUBJECT_TAU_HI`/`_LO` in cycle 10, each found by a
 measured mutation that left the previous derivation green), which is the honest reason to state
 it as a CLOSURE over what the path reaches rather than as a list somebody curated. Every one is written in-process, **read back**, and a run whose read-back
 disagrees is **refused** (`probes/capstone_measure.py`); the measurement switches were
