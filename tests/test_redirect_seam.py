@@ -551,10 +551,35 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     # (b) install idempotence: conftest installed the wrapper at session
     # start (install_thread_stamp called after _TEST_SESSION_ACTIVE=True),
     # the marker is set, and re-invoking the installer is a no-op.
+    #
+    # ⛔ WHAT IS ASSERTED IS ONE STAMP LAYER, NOT ONE FUNCTION OBJECT. The
+    # invariant install_thread_stamp documents is "installed exactly once …
+    # cannot double-wrap even if re-invoked after a reload" — and a `reload`
+    # re-executes the module into its EXISTING dict, so the class attribute
+    # keeps the PREVIOUS instance's wrapper while `proj_mod` holds the NEW one:
+    # two objects with the same qualname, still ONE layer. Object identity
+    # therefore reds on a legitimate reload AND reports "double-wrapped", which
+    # is not what it measured — measured on main `23d227c534` (shard (b), run
+    # 42334964535): `<function _thread_start_inherit_stem at 0x7efff24c8f40> is
+    # <function _thread_start_inherit_stem at 0x7efffa7a3ce0>`, two distinct
+    # stamp functions, with the class marker True. A DOUBLE WRAP is one stamp
+    # WRAPPING another, so it is asserted where it is observable: the
+    # `_ORIG_THREAD_START` the installed wrapper reads out of its own globals
+    # must not itself be a stamp — except in the reload's self-reference, where
+    # the reload re-binds that name to the same installed wrapper.
+    installed = threading.Thread.start
     assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
         "Thread.start stamp not installed in the test session"
-    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
-        "Thread.start was double-wrapped (installer re-ran without the marker guard)"
+    assert getattr(installed, "__name__", "") == "_thread_start_inherit_stem", \
+        f"Thread.start is not the test-stem stamp: {installed!r}"
+    assert getattr(installed, "__globals__", None) is proj_mod.__dict__, \
+        ("Thread.start is a stamp from OUTSIDE tortoise.projection's namespace "
+         f"(the installer never ran, or something else wrapped start): {installed!r}")
+    original = installed.__globals__.get("_ORIG_THREAD_START")
+    assert original is installed or getattr(original, "__name__", "") \
+        != "_thread_start_inherit_stem", (
+            "Thread.start was double-wrapped: the installed stamp calls ANOTHER "
+            f"stamp ({original!r}) instead of the original threading start")
     proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
-    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
-        "re-invoked installer double-wrapped Thread.start"
+    assert threading.Thread.start is installed, \
+        "a re-invoked installer re-wrapped Thread.start despite the marker"
