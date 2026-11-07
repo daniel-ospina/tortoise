@@ -623,3 +623,84 @@ def test_a_raised_retry_makes_the_arm_unmeasured():
     # …and the healthy case (every attempt contributed) still publishes the total
     stats = {"cost": {"calls": 2, "completion_tokens": 9000}, "attempts": 2}
     assert tool.arm_out_tokens(stats) == (9000, "stats.cost.completion_tokens")
+
+# ── the evidence artifact is the deliverable, so pin it to its README ────────
+
+_EVID = _REPO / "docs" / "evidence" / "1789-s4-reeemit-tax"
+_PRIMARY = _EVID / "ab-20261107T023958Z.json"
+_RERUN = _EVID / "ab-20261107T024226Z.json"
+
+
+def _thousands(n: int) -> str:
+    """How the README renders an integer: 32 787 (thin/plain space groups)."""
+    return f"{n:,}".replace(",", " ")
+
+
+def test_the_readme_figures_reproduce_from_the_committed_artifacts():
+    """The numbers ARE the deliverable, and nothing else stops a transcription
+    slip: two revisions of this README carried figures the artifacts contradict
+    (an arithmetic slip between the two arms' `s4_items`, and a "no kind
+    changed" sentence next to a `slots` pair that changed one). This recomputes
+    the headline set from the two committed artifacts and asserts the README
+    carries each one — drift in either direction fails here — and pins the two
+    checkable PROSE claims the retired phrasing got wrong.
+
+    ⛔ This is the LITERAL-FIGURE counterpart of
+    `test_every_committed_artifact_reconciles_with_its_own_rows`, which pins the
+    artifacts' INTERNAL consistency and deliberately hard-codes no number. The
+    two are not redundant and the split is a considered one: that test must
+    survive a legitimate regeneration (an artifact-only edit re-runs the
+    instrument), while this one must NOT — regenerating the artifacts changes
+    the published figures, and a README that silently keeps the old ones is
+    exactly the corruption this bundle exists to be auditable against. So a
+    regeneration legitimately reds here, and the fix is to update the document."""
+    readme = (_EVID / "README.md").read_text()
+    pri = json.loads(_PRIMARY.read_text())
+    rer = json.loads(_RERUN.read_text())
+
+    for art in (pri, rer):
+        s, comp = art["summary"], art["summary"]["composition"]
+        lg, dl = comp["legacy"], comp["delta"]
+        assert _thousands(s["sum_legacy_out_tokens"]) in readme
+        assert _thousands(s["sum_delta_out_tokens"]) in readme
+        assert f"{s['token_weighted_reduction'] * 100:.2f}" in readme \
+            or f"{s['token_weighted_reduction'] * 100:.1f}" in readme
+        assert f"{s['min_session_reduction'] * 100:.2f}" in readme
+        # composition: the legacy tax vs the delta arm's zero
+        assert lg["verbatim_reemissions"] > 0 and dl["verbatim_reemissions"] == 0
+        assert _thousands(lg["s4_items"] - dl["s4_items"]) in readme
+        # the census-vs-mask divergence, and the cap that never fired
+        assert (lg["corrected_by_s4"] - lg["verbatim_reemissions"]) \
+            - sum(a["legacy"]["corrected_items"]["recorded"]
+                  for a in art["arms"]) in (0, 1)
+        for a in art["arms"]:
+            assert a["legacy"]["corrected_items"]["cap_hit"] is False
+            assert a["legacy"]["corrected_items"]["cap_dropped"] == 0
+        # the partition the residual rests on: 62 / 1 / 1, no content change
+        pairs = [i for a in art["arms"] for i in a["legacy"]["corrected_items"]["items"]]
+        assert sum(i["changed_fields"] == ["lifecycle"] for i in pairs) == 62
+        assert sum(i["changed_fields"] == ["slots"] for i in pairs) == 1
+        assert sum(i["changed_fields"] == ["supersedes"] for i in pairs) == 1
+        assert not any({"content", "name"} & set(i["changed_fields"]) for i in pairs)
+        # the delta arm's honest limitation, not a hidden one
+        assert sum(a["delta"]["s4_delta_empty"] is False for a in art["arms"]) == 7
+    assert f"{pri['summary']['median_session_reduction'] * 100:.1f}" in readme
+    assert f"{rer['summary']['median_session_reduction'] * 100:.2f}" in readme
+
+    # the two checkable PROSE claims: the retired absolute ("no kind changed")
+    # is contradicted by the `slots` pair, so its absence (in either wording) is
+    # asserted, and the re-type it actually is must be stated.
+    # Neither the original wording nor its paraphrase may come back. The match
+    # is on WHITESPACE-COLLAPSED text: a raw substring pin is typography-
+    # dependent and therefore wrong in both directions — a re-assertion wrapped
+    # across a line break passes it (false green), while a legitimate reflow of
+    # the disowning sentence fails it (false red).
+    flat = " ".join(readme.split())
+    for retired in ("a name or a kind", "no kind changed"):
+        assert retired not in flat, f"the retired claim came back: {retired!r}"
+    slots = next(i for a in pri["arms"]
+                 for i in a["legacy"]["corrected_items"]["items"]
+                 if i["changed_fields"] == ["slots"])
+    assert "core:code" in readme and "dev:code" in readme
+    assert "core:code" in slots["s2_before"]["slots"]
+    assert "dev:code" in slots["s4_after"]["slots"]

@@ -43,7 +43,7 @@ Task 10 (fresh 50-question E2E) was never run, so the delta contract's
 | issue target | measured | verdict |
 |---|---|---|
 | **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 787 → 2 038 output tokens over 7 sessions); median **−96.9 %**, worst session **−85.16 %**, best **−98.3 %** | **MET**, 2.3× the threshold; each of the 7 sessions clears 40 % on its own. ⛔ **Read this as a CEILING, not as production's saving** — see *What this does not measure*: the reconstructed S3 block tells the delta arm that the session's own items already exist, which is the input under which a delta contract has the least to emit, so the real saving can only be smaller |
-| truncation rate → near 0 | `truncated=False` on **14/14** arm calls, `attempts=1` | ⚠️ **NOT EVIDENCED.** The largest output either arm produced is 7 814 tokens against a 16 000-token cap (`_S2_S4_MAX_TOKENS`), so this geometry cannot truncate and a null here is an artefact of the harness, not a measurement of the truncation rate. That target needs the eval lane's geometry. |
+| truncation rate → near 0 | `truncated=False` on **14/14** arm calls, `attempts=1` | ⚠️ **NOT EVIDENCED.** The largest output either arm produced (7 814 tokens) is **under half** the 16 000-token default (`_S2_S4_MAX_TOKENS`), so this geometry has no plausible route to truncation and a null here is an artefact of the harness, not a measurement of the rate. ⚠️ The effective cap is `_stage_cap(_S2_S4_MAX_TOKENS)`, which is env-overridable (`TORTOISE_EXTRACTOR_MAX_TOKENS`) and is **not recorded in the artifact** — so the margin is stated against the DEFAULT, and a box with the override set would need its own reading. What the artifact does record is the outcome (`truncated: false` on every call). That target needs the eval lane's geometry. |
 | accuracy ≥ 0.826 / chunk@20 ≥ 0.738 | **not measured here** — the eval lane's gates | see *What this does not measure* |
 
 Re-run (`ab-20261107T024226Z`): 33 912 → 2 047 tokens, **−93.96 %**, median
@@ -96,7 +96,9 @@ Summed over the 7 sessions (`composition`, primary run):
 | `added_by_s4` — the gap channel (`added_items`) | 12 | 6 | see the residual |
 | `s4_items` emitted | 278 | 6 | 272 fewer items per 7 sessions |
 
-(Re-run: legacy 201 verbatim / 266 collisions / 9 added; delta 0 / 0 / 6.)
+(Re-run: legacy 201 verbatim / 266 collisions / 9 added / **275** emitted; delta
+0 / 266 kept with no collision, 0 verbatim, 6 added / **6** emitted — i.e. 269
+fewer items.)
 
 The artifact records **64 correction pairs** against the census's 65, and — this
 is the point of recording both numbers — **no list reached the 40-item cap in
@@ -116,7 +118,7 @@ can be answered without another paid run, and the answer is in the data:**
 
 | bucket | primary | re-run |
 |---|---|---|
-| `content` / `name` / kind changed (**a rewritten claim**) | **0** | **0** |
+| `content` / `name` changed (**a rewritten claim**) | **0** | **0** |
 | `lifecycle` only | 62 | 62 |
 | `slots` only | 1 | 1 |
 | `supersedes` only | 1 | 1 |
@@ -165,10 +167,24 @@ and its identity only inside the 160-char `key`. In the primary run 5 of 12 lega
 and 2 of 6 delta gaps are operators, so that partition needs the receipt, not just the
 artifact.
 
+⚠️ And `s4_delta_empty: False` is weaker evidence than it looks for a *different*
+reason: production's `_s4_section_is_content` counts an unknown, model-invented
+section key as content by design, while `merge_embed_lists` iterates a fixed
+section tuple and therefore DROPS such a key. So on those 5 rows the flag is
+equally consistent with (a) a non-tax section the merge kept and (b) only an
+invented key that contributed nothing to the graph — and the artifact records
+neither the section names nor their lengths, so it cannot tell them apart. The
+follow-up is to record, per row, the emitted section names and lengths; until
+then "carried some section" means "production's predicate saw content", not
+"the graph received content".
+
 ## What this does **not** measure
 
 - **Accuracy / `chunk_evidence@20`** — the eval lane's gates (#1789 target 3).
-- **The truncation rate** — this geometry cannot truncate (see the verdict table).
+- **The truncation rate** — no call truncated and none came within half of the
+  default cap (see the verdict table), which is *not* the rate.
+- **The effective stage cap, per row** — the artifact records `truncated` but not
+  the cap it was measured against, so the margin above is against the default.
 - **Model compliance in the wild** — one call per arm per session, not a
   production run. Non-compliance is *observable* per row
   (`verbatim_reemissions`, `corrected_by_s4`, `s4_delta_reemit_suspect`).
@@ -205,12 +221,39 @@ corrected items with the cap/census accounting above, composition totals, and th
 per-arm `s4_delta_empty` / `s4_delta_reemit_suspect` flags derived with
 production's own predicates) and `ab-20261107T024226Z.json` (the re-run).
 
-Instrument tests: `tests/test_s4_reeemit_tax.py` (offline, fake model)
-— they pin the ways a number like this goes wrong silently: a vacuous A/B, the
+Instrument tests: `tests/test_s4_reeemit_tax.py` (**29** tests, offline, fake
+model) — they pin the ways a number like this goes wrong silently: a vacuous A/B, the
 two arms receiving different inputs, a mis-attributed cost (a per-call total
 rather than the final call; `null` rather than 0 when the provider reports
 nothing, when any of the three "counted nowhere" counters fires, or when the
 recovery accumulator is provably incomplete), a "measured zero" pretending to be
 a measurement, a cap and a mask deficit conflated into one flag, a corrections
 channel an items-not-in-S2 filter drops, and `s4_delta_empty` diverging from
-production's predicate.
+production's predicate. One more came from review:
+`test_a_failed_arm_keeps_the_SPEND_it_incurred` — `_complete` accumulates cost
+on its SUCCESS return *before* the parse, so a failed arm often HAS incurred
+spend; hard-coding `null` on the error path discarded it, and the arm it
+discarded is the expensive (truncating / unparseable) one, which biased the
+comparison toward the arm that never fails. A genuinely tokenless failure is
+still `null`, never 0.
+
+Two of them cover this bundle. `test_every_committed_artifact_reconciles_with_its_own_rows`
+pins each artifact's **internal** consistency and hard-codes no figure, so a
+legitimate regeneration does not red it.
+`test_the_readme_figures_reproduce_from_the_committed_artifacts` is its
+literal-figure counterpart: it reads both
+committed JSONs and asserts every headline figure above is *recomputed* from
+them — the token sums, both reductions and medians, the worst session, the
+composition difference, the census-vs-mask deficit, `cap_hit`/`cap_dropped` on
+every row, the 62/1/1 partition with no content or name change, and
+`s4_delta_empty` on every delta row.
+
+⚠️ It does **not** pin this document's PROSE, and that gap is where this file
+went wrong four times: an arithmetic slip between the two arms' `s4_items`, and
+a sentence claiming no correction changed a kind while the `slots` pair beside
+it changed one — both survived every test and were caught only by reading the
+artifact. Two prose claims are checkable, and are checked: this file may not
+re-assert that no correction touched an item's name or re-typed its kind (the
+claim the `slots` pair contradicts), and it must state the `core:code` →
+`dev:code` re-type. Everything else in the prose still rests on a reader opening
+the artifact.
