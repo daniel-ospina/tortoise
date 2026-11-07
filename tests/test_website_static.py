@@ -4241,6 +4241,27 @@ class TestSiteIconAndSocialPreviewContract:
                 "`ffmpeg -q:v 4` measures 37,024 B). Then lower CARD_MIN_BYTES in "
                 "tests/test_website_static.py and record what you measured.")
 
+    @classmethod
+    def _card_size(cls, declared_type: str, raw: bytes) -> tuple[int, int]:
+        """The card's real pixel size, read with the reader the page's TYPE names.
+
+        Split out of the guard so BOTH dispatch branches run against real bytes (see
+        `test_the_card_type_dispatch_reads_the_format_the_page_names`): every page in
+        this tree declares `og:image:type: image/jpeg`, and the only PNG card the repo
+        ever had is deleted by this PR, so without that fixture the `image/png` branch
+        is executed by nothing and a JPEG-only dispatch reads green.
+
+        The declared type is the page's own statement about its card, so it is taken at
+        its word and the BYTES are held to it — a page that legitimately ships a PNG
+        card is read by the PNG reader instead of being reported as "not a JPEG", and
+        a page that lies about the type still reds.
+        """
+        readers = {"image/jpeg": cls._jpeg_size, "image/png": cls._png_size}
+        assert declared_type in readers, (
+            f"og:image:type {declared_type!r} has no reader here — this guard reads "
+            f"{sorted(readers)}; add a reader rather than dropping the assertion")
+        return readers[declared_type](raw)
+
     @staticmethod
     def _jpeg_size(data: bytes) -> tuple[int, int]:
         assert data[:2] == b"\xff\xd8", "not a JPEG"
@@ -4892,20 +4913,20 @@ class TestSiteIconAndSocialPreviewContract:
             assert declared_type, (
                 f"{page.name} declares no og:image:type — a scraper that has to sniff "
                 "the format is a scraper that can guess wrong")
-            # Dispatch on what the page SAYS the file is, and hold the bytes to it.
-            # Pinning JPEG outright would false-red on a page that legitimately ships
-            # a PNG card — this repo already has one under blog/ — with a message
-            # that blames the type for being honest.
-            readers = {"image/jpeg": self._jpeg_size, "image/png": self._png_size}
-            assert declared_type in readers, (
-                f"{page.name} declares og:image:type {declared_type!r}; this guard reads "
-                f"{sorted(readers)} — add a reader rather than dropping the assertion")
+            # Dispatch on what the page SAYS the file is, and hold the bytes to it: the
+            # declared type is the page's own statement about its card, so the guard
+            # reads the format the page names rather than pinning one — a page that
+            # legitimately ships a PNG card would otherwise be reported as "not a
+            # JPEG", with a message that blames the type for being honest. (This
+            # comment used to justify that with "this repo already has one under
+            # blog/"; the PNG it meant is deleted by this change, so the justification
+            # is the dispatch itself — pinned by the non-vacuity test below.)
             try:
-                actual = readers[declared_type](raw)
+                actual = self._card_size(declared_type, raw)
             except AssertionError as exc:
                 raise AssertionError(
                     f"{page.name} declares og:image:type {declared_type!r} but "
-                    f"{path.name} is not one: {exc}") from exc
+                    f"{path.name}'s bytes are not one: {exc}") from exc
 
             assert (declared_w, declared_h) == actual, (
                 f"{page.name} declares {declared_w}x{declared_h} but {path.name} is "
@@ -4925,6 +4946,47 @@ class TestSiteIconAndSocialPreviewContract:
             # write down what you saw. PNG icons get a real pixel check below.
             floor = self._card_floor_violation(page.name, path, raw)
             assert floor is None, floor
+
+    def test_the_card_type_dispatch_reads_the_format_the_page_names(self):
+        """NON-VACUITY for `_card_size`: BOTH reader branches, on real bytes.
+
+        Every page in this tree declares `og:image:type: image/jpeg`, and the only PNG
+        card the repo ever had is deleted by this PR — so the `image/png` branch of the
+        dispatch was executed by NOTHING. A branch that returned the other format's
+        numbers, or a `readers` dict reduced to JPEG alone, read green.
+
+        Each branch is run here against bytes it must accept AND against bytes of the
+        other format, so the dispatch cannot be weakened by deleting a reader; and an
+        unknown type must be REFUSED rather than sniffed, because a sniffing guard
+        accepts a lie about the type it was written to catch.
+        """
+        card = (self.WEB / "assets" / "og-tortoise.jpg").read_bytes()
+        assert self._card_size("image/jpeg", card) == (1200, 630), (
+            "the shipped card, declared as what it is, does not read its own SOF frame")
+
+        png = self._two_colour_png(180)
+        assert self._card_size("image/png", png) == (180, 180), (
+            "a PNG card must be read by the PNG reader and report its own IHDR")
+
+        for declared, raw, expected in (("image/jpeg", png, "not a JPEG"),
+                                        ("image/png", card, "not a PNG")):
+            try:
+                size = self._card_size(declared, raw)
+            except AssertionError as exc:
+                assert expected in str(exc), (
+                    f"declaring {declared!r} over the OTHER format must red with "
+                    f"{expected!r}, got: {exc}")
+            else:
+                raise AssertionError(
+                    f"declaring {declared!r} over bytes of the other format returned "
+                    f"{size} — a lying og:image:type passed the guard")
+
+        try:
+            self._card_size("image/webp", card)
+        except AssertionError as exc:
+            assert "no reader" in str(exc), exc
+        else:
+            raise AssertionError("an unknown og:image:type was accepted, not refused")
 
     def test_the_content_guards_reject_a_blank_image_and_keep_their_measured_floors(self):
         """NON-VACUITY: each content guard must FAIL on the image it was written for.
