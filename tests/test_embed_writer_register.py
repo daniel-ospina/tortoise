@@ -674,6 +674,20 @@ INVISIBLE_SHAPES = {
         '_CLAUSE = "SET n.embedding = $e"\n'
         'def w(tx):\n    tx.query(_CLAUSE)\n'
     ),
+    # A dict LITERAL carrying a constant `"embedding"` key (round-2 review): `_EMBED_WRITE` needs
+    # `embedding =` or `set_embedding_clause(`, and `_writes_an_embedding`'s AST pass inspects
+    # ASSIGNMENT targets only (`ast.Assign`/`AugAssign`/`AnnAssign` -> a `Subscript` with a
+    # `Constant` slice), so an `ast.Dict` handed to a CALL is invisible to both passes. Measured:
+    # the writer below is ABSENT from the map entirely. Two live carriers keep it from being
+    # hypothetical — `sdk::_session_event_write` and `sdk::_embedding_repair_attempt` emit
+    # `**{**payload, "embedding": embedding}` into the journaled payload — and BOTH are in the
+    # discovered map as `unresolved_write` for a DIFFERENT reason (their bodies also call
+    # `set_embedding_clause(`), which is exactly the "visible for another door" case the register
+    # draws for `sdk::_journal_event_raw_write`.
+    "dict_literal_embedding_key": (
+        'def w(rec, props, v):\n'
+        '    rec._emit_event("X", **{**props, "embedding": v})\n'
+    ),
     # A container-key store at MODULE or CLASS scope (round-14 review): the walk visits `def`s only
     # (`probe._embedding_writers` iterates `FunctionDef`/`AsyncFunctionDef`), so the literal-slice
     # AST pass is never applied to it and `_EMBED_WRITE` has no function source to read. It is a

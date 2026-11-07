@@ -65,9 +65,11 @@ claim and a slogan:
   `projection.entities::_upsert_point_props`, `projection.entities::_upsert_subject`,
   `projection.entities::_upsert_object`, `projection.entities::_upsert_document`,
   `projection.entities::_upsert_event`, `sdk::create_point`, `sdk::update_point`. ⛔ That list is
-  not maintained by hand and is not counted here — it is re-derived at HEAD from the instrument by
-  `tests/test_embed_writer_register.py::test_the_seam_CALL_population_is_the_one_the_register_names`,
-  which reds when this sentence loses a member or names one discovery does not class that way. It
+  not counted here and is not its own authority — the INSTRUMENT is:
+  `tests/test_embed_writer_register.py::test_the_seam_CALL_population_is_the_one_the_register_names`
+  re-derives it at HEAD and reds when this sentence loses a member or names one discovery does not
+  class that way. (The sentence itself is prose a lane edits — a pin can read it, not rewrite it;
+  the red is what makes the edit unavoidable, which is the whole mechanism.) It
   had to be re-derived once already: this paragraph named four of the population (the AST pass's own
   exemplars) while five `projection.entities` writers reach the seam by the `encode_for_row` CALL
   branch, one file over — and they do NOT hold the container-key shape (`set_embedding_clause(…)`
@@ -119,18 +121,25 @@ census), and it named the shape it deliberately will not decide:
 not syntax). Measured at this head, further shapes are still ABSENT from the census — not
 unclassified, absent, which is why the guard in `tests/test_embed_writer_register.py` stays green
 for them: an inline property map (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace
-(`SET n = $map`), a property name INTERPOLATED into the clause, and the container-HELPER /
+(`SET n = $map`), a property name INTERPOLATED into the clause, the container-HELPER /
 COMPUTED-KEY forms a regex and a literal-slice test both miss
-(`clean.setdefault("embedding", None)`, `d[KEY] = v`) — and those forms are not hypothetical.
-⚠️ The SHAPE is what is blind, not necessarily the WRITER carrying it: the interpolation is live in
-`tortoise.cache_projection::node_statement` and the helper in `tortoise.sdk::_emit_event`, and BOTH
-of those writers are genuinely ABSENT from the census (neither holds a decidable statement, so
-neither is in `WRITER_CENSUS` or this register at all); by contrast the computed key in
-`tortoise.sdk::update_point` is in the instrument's **discovered map** (`embedding_writers()`) as
-`gated` — it carries no `WRITER_CENSUS` row at all, and that table's class vocabulary
-(`recognised_producer`/`exempt`/`bypass`) cannot spell `gated` — while
-`tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
-`set_embedding_clause`, NOT off its whole-node replace. The authority for SHAPES is
+(`clean.setdefault("embedding", None)`, `d[KEY] = v`), and a DICT LITERAL carrying a constant
+`"embedding"` key (`**{**payload, "embedding": v}`) — the regex cannot read it (no `=` follows the
+key) and the AST pass never visits it (its targets are assignments, not an `ast.Dict` handed to a
+call) — and those forms are not hypothetical. ⚠️ The SHAPE is what is blind, not necessarily the
+WRITER carrying it: the interpolation is live in `tortoise.cache_projection::node_statement` and the
+helper in `tortoise.sdk::_emit_event`, and BOTH of those writers are genuinely ABSENT from the
+census (neither holds a decidable statement, so neither is in `WRITER_CENSUS` or this register at
+all); by contrast the computed key in `tortoise.sdk::update_point` is in the instrument's
+**discovered map** (`embedding_writers()`) as `gated` — it carries no `WRITER_CENSUS` row at all,
+and that table's class vocabulary (`recognised_producer`/`exempt`/`bypass`) cannot spell `gated` —
+while `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
+`set_embedding_clause`, NOT off its whole-node replace. The dict literal has visible carriers for
+the SAME reason of another door: `tortoise.sdk::_session_event_write` and
+`tortoise.sdk::_embedding_repair_attempt` hold it and are in the discovered map as
+`unresolved_write`, because their bodies ALSO call `set_embedding_clause(` — so their membership is
+not evidence the literal was seen, exactly the distinction the `sdk::_journal_event_raw_write`
+bullet below draws. The authority for SHAPES is
 `tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which holds both the shapes neither pass can
 spell AND the SCOPES the walk never enters: a count written
 here re-stales with every shape added, so this paragraph names forms and instances and does not
