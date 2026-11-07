@@ -2814,17 +2814,17 @@ undone.
   vault at boot. This app pins `auto_start_machines = true` (§6.2) as its self-heal
   path, so a Machine that stops — host failure, crash-loop give-up, an operator stop —
   starts again on the next request and boots **with** the staged secret. That re-arms
-  the mitigation with **no deploy and no run**, before any gate sees it. **Settled**
-  (the ledger header carried this as the one path it had not closed): `fly secrets
-  list --json` — the source this gate reads — lists a staged secret by name (the
-  `Staged` deployment status is what the CLI's own table shows), so the NEXT run's
-  presence check SEES it
-  and an entry for that name fails the run with `MITIGATION NOT IN EFFECT`, ahead of
-  that run's `flyctl deploy` and ahead of the `Set all app secrets on Fly.io` staging
-  step. ⛔ That red is on the next run, and it is **exit 1**, the
-  `skip-fly-secret-provenance` class: an operator arming that bypass for an unrelated
-  stale declaration applies the pending value silently, and the entry also freezes
-  rotation while it stands. Clear the stage before re-running
+  the mitigation with **no deploy and no run**, before any gate sees it — this is the
+  one path the ledger header records as NOT closed. **What the gate settles** (the
+  header's open question): `fly secrets list --json` — the source this gate reads —
+  lists a staged secret by name (the `Staged` deployment status is what the CLI's own
+  table shows), so the NEXT run's presence check SEES it and an entry for that name
+  fails the run with `MITIGATION NOT IN EFFECT`, ahead of that run's `flyctl deploy`
+  and ahead of the `Set all app secrets on Fly.io` staging step. ⛔ That red is on the
+  next run, and it is **exit 1**, the `skip-fly-secret-provenance` class: an operator
+  arming that bypass for an unrelated stale declaration applies the pending value
+  silently, and the entry also freezes rotation while it stands. Clear the stage
+  before re-running
   (`flyctl secrets unset <NAME> --stage -a tortoise-y4mjjq`, then
   `flyctl secrets deploy -a tortoise-y4mjjq`, and confirm `flyctl secrets list` shows
   no staged entry for the name) instead of bypassing. ⛔ Clearing it is a secret-set
