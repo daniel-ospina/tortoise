@@ -1572,11 +1572,13 @@ def _refused(table: str) -> frozenset[str]:
 #: episodic turn `:Point`s, never `:Source`/`:Event`, and names no `story_arc` —
 #: so this class's targeted repair is a graph-side `REMOVE` that no instrument
 #: ships, or the full restore's whole-graph wipe (itself refused pre-wipe on a
-#: production server graph name, `#2944`'s L2 guard). ⚠️ BOTH are destructive and
-#: neither is unconditional: key either on what the RECORD holds for the session
-#: (`public.{source,event}.story_arc` / `public.session_narrative.narrative`) —
-#: where neither carries it, the graph copy is the ONLY copy and a clear or wipe
-#: destroys it (STORAGE-ARCHITECTURE.md §17.2's per-row bound, `#11325`).
+#: production server graph name, `#2944`'s L2 guard). ⚠️ BOTH are destructive, and
+#: the WIPE cannot be row-scoped — `_wipe_all_nodes` is `MATCH (n) DETACH DELETE n`,
+#: so it cannot be restricted to the rows whose prose the record still carries: a
+#: graph holding ANY row whose PROSE neither `public.{source,event}.story_arc` nor
+#: `public.session_narrative.narrative` carries must NOT be restored at all — copy
+#: that prose out first, because the wipe destroys the only copy
+#: (STORAGE-ARCHITECTURE.md §17.2, `#11325`).
 #:
 #: So an entry here is a statement about the CACHE, not about the record: the
 #: placement table keeps the row's class (`P` — the record does store it) and

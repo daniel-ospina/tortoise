@@ -202,7 +202,11 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``e.story_arc=$arc`` was NEVER journalled, and whose ``session_narrative`` TEXT
   columns measured NULL on every live capture (``hosted_api``'s 2b,
   ``#9567``/D7) — the graph copy is the ONLY copy, so NO clear may be applied
-  there: the destructive-clear routes above are for the first population. ⛔ Not
+  THERE. ⛔ And the unit is the GRAPH, not the row: the destructive routes above
+  wipe whole-graph (``MATCH (n) DETACH DELETE n``) and cannot be narrowed to the
+  rows where the record holds the text, so a graph holding ANY row whose PROSE
+  the record does not carry must NOT be restored at all — copy that prose out
+  first. ⛔ Not
   "no IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
   clear — what is missing on those two ANCHORS is a route that KEEPS the value. ⚠️ No shipped
   instrument performs that removal for THIS class: ``#10017``'s purge
@@ -680,7 +684,7 @@ def reconcile_record_and_cache(
     that still carries the prose reads as a ``graph_only`` occurrence (one
     property the projection declines to write), NOT as a ``field_mismatches``
     against a record that is correct. The repair for that occurrence on either
-    ANCHOR is a DESTRUCTIVE CLEAR, and its only shipped route is a full
+    ANCHOR is a DESTRUCTIVE CLEAR, and its only RECORD-SOURCED route is a full
     ``record-restore`` — whose wipe is whole-graph and **cannot** be narrowed to
     those rows, so a graph holding ANY row whose prose neither
     ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``

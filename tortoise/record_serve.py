@@ -1210,10 +1210,11 @@ def parity_difference(cache_props: Mapping[str, Any],
       (on either ANCHOR a destructive clear — a full ``record-restore``'s
       whole-graph wipe (refused PRE-WIPE on a production server graph name,
       #2944's L2 guard), or a graph-side ``REMOVE n.story_arc`` no instrument
-      ships today — ⚠️ and neither is unconditional: where the record's row carries
-      no text for this session (``public.{source,event}.story_arc`` /
-      ``public.session_narrative.narrative``), the graph copy is the ONLY copy and a
-      destructive clear destroys it (§17.2's per-row bound, `#11325`); ⚠️ a ``:Point``
+      ships today — ⚠️ and the WIPE cannot be row-scoped: ``_wipe_all_nodes`` is
+      ``MATCH (n) DETACH DELETE n``, so a graph holding ANY row whose PROSE neither
+      ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+      carries must NOT be restored at all — copy that prose out first, because the
+      wipe destroys the only copy (§17.2, `#11325`); ⚠️ a ``:Point``
       copy has a NON-destructive one:
       ``update_point(<id>, story_arc=None)`` clears the property and keeps the
       node (measured; ``record_reconcile``'s module docstring states the door);

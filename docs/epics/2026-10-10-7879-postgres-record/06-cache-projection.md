@@ -457,10 +457,10 @@ non-durably. ⚠️ `#10017`'s purge is NOT the lane that was undone (`#11325`):
 statement deletes legacy episodic turn `:Point`s, never `:Source`/`:Event`, and names no `story_arc` — so
 this class's targeted repair is a graph-side `REMOVE n.story_arc` that no instrument ships, or the full
 restore's whole-graph wipe on either ANCHOR (⚠️ refused PRE-WIPE on a production SERVER graph name by
-`#2944`'s L2 guard; ⚠️ BOTH are destructive and neither is unconditional — key it on what the RECORD
-holds for the session, `public.{source,event}.story_arc` /
-`public.session_narrative.narrative`, because where neither carries the text the graph copy is the
-ONLY copy and a clear or wipe destroys it, `STORAGE-ARCHITECTURE.md` §17.2's per-row bound, `#11325`) — ⚠️ **except on a `:Point`, which has a non-destructive one**:
+`#2944`'s L2 guard; ⚠️ BOTH are destructive and the WIPE cannot be row-scoped — `_wipe_all_nodes` is
+`MATCH (n) DETACH DELETE n`, so a graph holding ANY row whose PROSE neither
+`public.{source,event}.story_arc` nor `public.session_narrative.narrative` carries must NOT be
+restored at all: copy that prose out first, `STORAGE-ARCHITECTURE.md` §17.2, `#11325`) — ⚠️ **except on a `:Point`, which has a non-destructive one**:
 `update_point(<id>, story_arc=None)` clears the property and keeps the node (measured; the `None` passes
 `_refuse_unpaired_narrative` and `SET n += $props` removes a `None`-valued key — but JOURNAL-bound only: the
 `PointRevised` fold has no `story_arc` clause and the creation fold's open-set passthrough drops a `None`, so a

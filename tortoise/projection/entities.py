@@ -2037,9 +2037,10 @@ class _EntityHandlers:
         # parameter), and the destructive removal of what DOES exist has no
         # shipped instrument ON A PRODUCTION SERVER GRAPH — a full restore's
         # whole-graph wipe clears it where the L2 name rule admits the target
-        # (`test_`/`tortoise_test`-prefixed, or an embedded `path=` DB) AND the record
-        # still holds the text for that session — where it does not, the graph copy is
-        # the ONLY copy and a wipe destroys it (§17.2's per-row bound, `#11325`) — and
+        # (`test_`/`tortoise_test`-prefixed, or an embedded `path=` DB) — ⚠️ and it cannot
+        # be row-scoped (`MATCH (n) DETACH DELETE n`), so a graph holding ANY row whose
+        # PROSE the record does not carry must NOT be restored at all: copy that prose
+        # out first, because the wipe destroys the only copy (§17.2, `#11325`) — and
         # is refused pre-wipe on a production name (`org_<org_id>`, its child, a
         # legacy `team_…`),
         # and a graph-side `REMOVE n.story_arc` is issued by nobody;
