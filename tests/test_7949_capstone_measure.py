@@ -4587,12 +4587,18 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # refusal. A hand-recheck did not hold across one commit, so the numbers
         # are pinned here instead. The sentence wraps over three lines and a row
         # scopes to ONE line, so the claim takes three rows.
+        # ⛔ RE-DERIVED at `#10982`, not offset: the A-row emitter-key drift arm added
+        # above `STEPS` moved it `:136` -> `:146`, and the same commit's additions
+        # inside the accounting block moved `_step_accounting` `:607` -> `:675` —
+        # TWO different deltas from one commit, which is why the numbers are read
+        # off the tree (`grep -n '^STEPS = ('` / `'^def _step_accounting('`) and
+        # never carried forward as an offset.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
-            ("136", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:607`) refuses a GREEN row whose", (
-            ("607", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:675`) refuses a GREEN row whose", (
+            ("675", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
@@ -4602,7 +4608,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # and the rows above covered ONE document. Every doc that prints a
         # `tools/*.py` number needs its own row here, not just the first one.
         ("docs/00_index.md", "declares the eight steps", (
-            ("136", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
+            ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
         # ⛔ THE VET BLOCK'S OWN "BEFORE" CLAIM (#10833 review, P2 — the SECOND
