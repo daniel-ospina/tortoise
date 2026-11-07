@@ -1069,7 +1069,8 @@ def commit_ingest_charge_bytes(payload) -> int:
       understate the bytes a client actually sends (``docs/INGEST_CONTRACT.md``
       §9 states the unit in these terms);
     * the **node floor** stops the reverse — a ``points: []`` commit's ~1 KB
-      body mints ~3 KB of nodes, which is the cheapest iteration of the very
+      body mints ~4 KB of nodes (``_COMMIT_FIXED_NODES`` = 4), which is the
+      cheapest iteration of the very
       loop #4051 is about (measured pre-fix: unbounded).
 
     Serializing the payload costs one pass; the commit path ALSO canonicalizes
