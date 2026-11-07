@@ -39,15 +39,24 @@ n      60 timed records after 5 warmup, per run
 `_migrations_fingerprint` pass and the rejected blake2b digest
 (`fingerprint_cost.py` re-takes both). Re-derive instead of trusting the prose.
 
-The ONE item that is neither: the server-logged `connection authorized` counts
-(a `grep -c` delta on the container's log, taken beside each run and recorded in
-the table below). Earlier revisions quoted a run set whose JSON was not kept,
-which made its numbers unfalsifiable — that is what `runs/` and
-`fingerprint-cost.json` fix, and `fingerprint_cost.py` exists because the first
-fix covered only the probe. ⛔ The same rule is why the re-measurement paragraph
-under "Review cycle 2" carries NO numbers: its four runs' JSON was not kept
-either, so it states the observation and nothing a reader would have to take on
-trust.
+**The FOUR items that are neither**, each named so a reader knows which sentences
+to re-derive and which to read as a local observation:
+
+1. the server-logged `connection authorized` counts — a `grep -c` delta on the
+   container's log, taken beside each run and recorded in the table below;
+2. the `ctime_ns` "delta 0 ns" observation — a reading of THIS box's ext4 inode
+   clock, not a probe field. What is reproducible is the pin that reds without
+   `ctime_ns`; the 0 ns figure is not;
+3. "4 skips in 10 runs" — the historical skip rate of the pre-fix pin, quoted to
+   explain why the pin now burns a clock tick explicitly. It is not re-derivable
+   now that the skip is gone;
+4. the re-measurement paragraph under "Review cycle 2" — its four runs' JSON was
+   not kept, so it quotes NO numbers and its one observation (`connect` per
+   record 0) is labelled there as an observation, not as a figure.
+
+Earlier revisions quoted a run set whose JSON was not kept, which made its
+numbers unfalsifiable — that is what `runs/` and `fingerprint-cost.json` fix, and
+`fingerprint_cost.py` exists because the first fix covered only the probe.
 
 ⚠️ **The BEFORE tree is 164 commits behind the AFTER tree's parent**
 (`1730570510` is 2026-11-03; this branch's base is `23d227c534`, 2026-11-06), and
@@ -200,7 +209,9 @@ bounds are deliberately not the same shape) — and the pin parks
 release comment claimed "no round trip" — true of the write door's happy path
 (`commit()` leaves the connection IDLE), false of a read, which ends INTRANS and
 therefore takes a `rollback()` on 100% of borrows. One round trip against the
-~19 ms connect+auth it replaces; named here rather than averaged away.
+**13.7–15.1 ms** of connect+auth it replaces (bullet (a)'s connection half — not
+the whole 18.9–20.1 ms BEFORE record, which also contains work the read still
+does); named here rather than averaged away.
 
 **Two silent-failure shapes are closed on the wrapper.** `close()` is now a fence
 (`cursor`/`commit`/`rollback` raise the driver's `InterfaceError` once returned,
@@ -216,9 +227,10 @@ per-record cost varying materially run-to-run with load while `connect` per
 record stayed **0 in every run**. ⛔ Those four runs' JSON was not kept, so their
 numbers are not quoted here: an unkept run set is exactly what the provenance
 note at the top of this document refuses, and this paragraph is worth less than
-that rule. The mechanism claim — no handshake, no re-parse — is what the change
-is; the wall-clock headline above is the quiet-box measurement and stays labelled
-as such.
+that rule — the `connect` count stands as an OBSERVATION from unkept runs
+(named as such in that note), never as a quoted figure. The mechanism claim — no
+handshake, no re-parse — is what the change is; the wall-clock headline above is
+the quiet-box measurement and stays labelled as such.
 
 ## Reproducing
 

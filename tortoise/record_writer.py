@@ -1216,8 +1216,10 @@ def _park_connection(key: str, conn: Any) -> None:
     ends INTRANS — it issues a statement and never commits — so every read
     release takes the `rollback()` branch, i.e. ONE round trip the previous
     ``close()`` did not wait for. That is still an order of magnitude cheaper
-    than the connect+auth it replaces (~19 ms measured), but it is not free and
-    is named here rather than averaged away.
+    than the connect+auth it replaces (**13.7–15.1 ms**, the connection half of
+    the BEFORE record's 18.9–20.1 ms — not the whole record, per
+    `docs/evidence/9558-record-write-cost/`), but it is not free and is named
+    here rather than averaged away.
 
     ⚠️ It also NORMALISES `autocommit` back to False. The wrapper forwards session
     state on purpose (`__setattr__`), so a caller may legitimately set it — but a
