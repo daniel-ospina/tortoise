@@ -883,7 +883,9 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
     assert refs == sorted(i["s2_reference"]["completion_tokens"] for i in rer["inputs"])
     assert (f"{_thousands(refs[0])}–{_thousands(refs[-1])} tokens, median "
             f"{_thousands(round(__import__('statistics').median(refs)))}") in flat_all
-    assert f"{ps['token_weighted_reduction'] / 0.40:.1f}× the threshold" in flat_all
+    # ⛔ anchored: a bare `2.3` also matches inside a longer number elsewhere.
+    assert (f"**MET**, {ps['token_weighted_reduction'] / 0.40:.1f}× the threshold"
+            in flat_all), ps["token_weighted_reduction"]
     _spread = round((prs["token_weighted_reduction"]
                      - ps["token_weighted_reduction"]) * 100, 2)
     assert f"differ by {_spread:.2f} points" in flat_all
@@ -966,7 +968,10 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # so a reduction anywhere in [93.80, 93.89] left the 2-dp figure at the
         # summary line free to go stale — a window half the observed run-to-run
         # spread, i.e. a legitimate re-run can land in it (#11385 review P3).
-        assert f"−{s['token_weighted_reduction'] * 100:.2f} %" in readme, s
+        # ⛔ the 2-dp reduction is NOT checked here: it appears once, in the
+        # spread parenthetical, and the ANCHORED pin below (`(`−a %` / `−b %`)`)
+        # is the one that bites — a bare `in` here was satisfied by that same
+        # parenthetical whichever run it belonged to (#11385 review P3).
         # ⛔ anchored: a bare "85.16" also matches inside a longer number, and a
         # computed 5.16 would satisfy it (#11385 review P3). The two runs state
         # their worst differently — the table cell (primary) bolds it, the re-run
@@ -1049,6 +1054,23 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # the TITLE states the same reduction in its own 1-dp rendering
         assert (f"measured: −{s['token_weighted_reduction'] * 100:.1f} %"
                 in flat_all), "the title's reduction drifted"
+        # ⛔ the VERDICT CELL is the surface a reader reads, and its population
+        # figures were unguarded: `**231 of the 266**` → `**all 266**`, →
+        # `**230 of the 266**`, `those 231` → `those 230`, and
+        # `the arm took none: 0 collisions` → `2 collisions` each left 36/36
+        # green, because the only population pin matched the OTHER copy of the
+        # claim (#11385 review P1). The refuted reading is also banned outright,
+        # doc-wide, since re-introducing it is the whole failure being guarded.
+        # `_tables()` returns the MEASURED column only, so these are pinned on the
+        # flattened document, each anchored to wording unique to the VERDICT cell
+        # (the second copy of the claim reads "the reconstruction offers 231 …").
+        assert ("offers the delta arm **231 of the 266** S2 items as already "
+                "existing") in flat_all, "the verdict cell's population drifted"
+        assert "for those 231" in flat_all, "the verdict cell's population drifted"
+        assert ("the arm took none: 0 collisions" in flat_all), (
+            "the verdict cell's collision count drifted")
+        assert "all 266" not in flat_all, (
+            "the refuted population reading is back in the document")
         # the census-vs-mask divergence, as the SENTENCE that states it
         census = lg["corrected_by_s4"] - lg["verbatim_reemissions"]
         recorded = sum(a["legacy"]["corrected_items"]["recorded"]
@@ -1260,6 +1282,13 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
     # matters *because* it is read FIRST, which applies to its numbers, not only
     # its prose (#11385 review P3). Recomputed from the primary artifact.
     _pri = json.loads(_PRIMARY.read_text())
+    _rer = json.loads(_RERUN.read_text())
+    _rs = _rer["summary"]
+    _rlg, _rdl = (_rs["composition"]["legacy"], _rs["composition"]["delta"])
+    _max_out = max(a[arm].get("out_tokens") or 0
+                   for a in _rer["arms"] for arm in ("legacy", "delta"))
+    _zeros = sum(1 for a in _pri["arms"]
+                 if (a["delta"].get("added_by_s4") or 0) == 0)
     _ps = _pri["summary"]
     _plg = _ps["composition"]["legacy"]
     _pdl = _ps["composition"]["delta"]
@@ -1274,6 +1303,21 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
         f"**{_thousands(_ps['sum_legacy_out_tokens'])} → "
         f"{_thousands(_ps['sum_delta_out_tokens'])} output tokens, "
         f"−{_ps['token_weighted_reduction'] * 100:.2f} %**",
+        # ⛔ the rest of the row's figures, the same false-pass class one
+        # column over: each of these stayed green when mutated on its own
+        # (#11385 review P3).
+        f"`merged_items` stays {_pdl['merged_items']} against an S2 base of "
+        f"{_plg['s2_items']}",
+        f"**{_ps['token_weighted_reduction'] / 0.40:.1f}× the 40 % target",
+        f"({_plg['added_by_s4']}/{_rlg['added_by_s4']} → "
+        f"{_pdl['added_by_s4']}/{_rdl['added_by_s4']})",
+        f"a 16 k cap with a {_max_out / 1000:.1f} k max output",
+        f"−{_rs['token_weighted_reduction'] * 100:.2f} %",
+        "266 of the 311 items the receipts record",
+        "0 content/name rewrites",
+        "62 lifecycle (61 `created`→`unchanged` + 1 `changed`→`unchanged`), "
+        "1 `slots` (`core:code`→`dev:code`), 1 `supersedes`",
+        f"{_zeros} of {len(_pri['arms'])} sessions",
     ):
         assert _fig in flat, ("the index row's figure drifted: " + _fig)
 
@@ -1337,3 +1381,16 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     assert len(tool.CAVEATS) == 6, len(tool.CAVEATS)
     assert len(tool.CAVEATS) == len(_artifact_caveats) + 1
     assert len(json.loads(_RERUN.read_text())["caveats"]) == len(_artifact_caveats)
+    # ⛔ the MAPPING, entry by entry — the note has been wrong twice (first
+    # "5 + 2", then "one added plus one rewritten"), and neither the README's
+    # counts nor the "ONE ADDED plus TWO EDITED" claim was enforced: `emits
+    # **6**` → `**7**`, `carry **5**` → `**4**`, and reverting the
+    # `CAVEATS[0]` edit all left 36/36 green (#11385 review P2).
+    assert tool.CAVEATS[0].replace(" (the 4 tax-surface sections)", "") == (
+        _artifact_caveats[0]), "CAVEATS[0] must be artifact[0] plus the scoping"
+    assert tool.CAVEATS[2] == _artifact_caveats[1], "CAVEATS[2] == artifact[1]"
+    assert tool.CAVEATS[4:] == tuple(_artifact_caveats[3:]), (
+        "the tail must be the artifacts' own entries, unchanged")
+    assert "ONE ADDED plus TWO EDITED" in _readme, "the mapping sentence drifted"
+    assert f"they carry **{len(_artifact_caveats)}** entries" in _readme, _readme[:0]
+    assert f"emits **{len(tool.CAVEATS)}**" in _readme
