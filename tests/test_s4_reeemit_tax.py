@@ -662,3 +662,10 @@ def test_every_row_records_the_numbers_the_residual_says_it_does(tmp_path):
         assert isinstance(row["attempts"], int), row
         assert isinstance(row["calls"], int), row
     assert ok["attempts"] >= 1, "the success row made at least one attempt"
+    # ⛔ a VALUE assertion, not just presence: `calls` must come from
+    # `stats["cost"]["calls"]` (where `_accumulate_call_cost` counts). Reading
+    # the never-populated top-level `stats["calls"]` instead publishes
+    # `calls: 0` on every row, which passes a presence check and silently
+    # re-creates the "documented but unbacked" state this pin exists to
+    # prevent (#11385 review P3).
+    assert ok["calls"] >= 1, "the successful call was accumulated into cost[\"calls\"]"
