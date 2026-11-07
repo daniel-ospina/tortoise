@@ -78,7 +78,13 @@ SCRATCH_DB_ENV = "TEST_RECORD_SCRATCH_URI"
 #: Measured 2026-11-06: `pg_dump (PostgreSQL) 16.15` inside `postgres:16` — so
 #: "this box has no `pg_dump`" is not a reason to skip D8 (#9567 §1 of comment
 #: 6690574287), it is a reason to borrow the record's own image.
-CLIENT_IMAGE = "mirror.gcr.io/postgres:16"
+#: The CANDIDATE ORDER is the provision action's own (`image_candidates()` in
+#: `.github/actions/postgres-provision/provision.sh`): mirror first, upstream
+#: second, and a locally-present image before any pull — the action resolves that
+#: way so a rate-limited or unreachable mirror cannot fail a job that needs no
+#: pull (#7867), and a single hard-coded reference here would reintroduce exactly
+#: that failure at test time.
+CLIENT_IMAGES = ("mirror.gcr.io/postgres:16", "postgres:16")
 
 #: One drill's wall clock (dump + encrypt + upload + download + decrypt + restore
 #: + two counts). `record_backup.RECORD_SUBPROCESS_TIMEOUT_S` bounds the drill's
@@ -521,12 +527,24 @@ def _pg_client_runner(workdir: Path):
     if shutil.which("pg_dump") and shutil.which("pg_restore"):
         return None
 
+    image = next(
+        (
+            candidate
+            for candidate in CLIENT_IMAGES
+            if subprocess.run(
+                ["docker", "image", "inspect", candidate], capture_output=True
+            ).returncode
+            == 0
+        ),
+        CLIENT_IMAGES[-1],
+    )
+
     def run(argv, *, env=None, capture_output=True, text=True, timeout=None, **_ignored):
         cmd = ["docker", "run", "--rm", "--network", "host", "-v", f"{workdir}:{workdir}"]
         for key, value in sorted((env or {}).items()):
             if key.startswith("PG"):
                 cmd += ["-e", f"{key}={value}"]
-        cmd += [CLIENT_IMAGE, *argv]
+        cmd += [image, *argv]
         return subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout or _CLIENT_TIMEOUT_S
         )
@@ -604,9 +622,14 @@ def test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires(
     Two halves in one run, because the second is the first's falsifier: a green
     that cannot be broken on purpose is not evidence.
 
-      1. `verdict == "RESTORED"`, with EVERY record table carrying the source's row
-         count — per table, never a total (a total hides a table that lost rows to
-         one that gained them);
+      1. `verdict == "RESTORED"`, with no record table holding FEWER rows than the
+         source read — per table, never a total (a total hides a table that lost
+         rows to one that gained them). ⚠️ The upper bound is deliberately the
+         DRILL's, not this test's: acceptance there is the window
+         `[min(source, source_after), max(source, source_after, cut)]`
+         (`compare_row_counts`, #9601 review cycle 4), `cut` is not exposed per
+         table, and asserting `restored == source` would red a healthy artifact on
+         a live record — the false red that window exists to remove.
       2. delete one table's rows in the RESTORED copy and require the module's own
          `verify_restore` to RED, naming the table.
 
@@ -630,9 +653,10 @@ def test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires(
         f"{sorted(rb.record_tables())}"
     )
     for table, row in tables.items():
-        assert row["restored"] == row["source"], (
+        floor = min(row["source"], row["source_after"])
+        assert row["restored"] >= floor, (
             f"{table}: the restored record holds {row['restored']} of the source's "
-            f"{row['source']} rows ({row})"
+            f"{row['source']} rows — a table LOST rows ({row})"
         )
 
     # ── the falsifier: the same counting step, on a copy that lost a table ──

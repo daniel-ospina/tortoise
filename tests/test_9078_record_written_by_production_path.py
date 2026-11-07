@@ -3708,6 +3708,13 @@ POSTGRES_PROVISION = (REPO_ROOT / ".github" / "actions"
 RECORD_LEG_GATE = (REPO_ROOT / ".github" / "scripts"
                    / "record-postgres-leg-gate.py")
 
+#: The capstone file, by the path the job's pytest argument list spells. It is a
+#: SEPARATE requirement from this file's own presence: the capstone's D8 leg is the
+#: only restore drill on any CI leg, and its self-pin
+#: (`test_ci_runs_this_file_in_the_armed_record_job`) cannot fire when the file is
+#: not collected at all — a file that does not run cannot assert that it ran.
+CAPSTONE_FILE = "tests/test_9567_record_capstone.py"
+
 
 def _record_ci_job():
     """(job name, job) for the python-ci leg that ARMS the record database.
@@ -3767,6 +3774,17 @@ def test_ci_arms_the_record_against_a_real_postgres():
         f"reason and the job passes by skipping (#9551)")
     assert Path(__file__).name in runs, (
         f"{name} arms a database but runs none of this file's legs")
+    # ⛔ AND THE CAPSTONE FILE, asserted from HERE rather than only from inside it
+    # (#11429 review, fail-open): a pin living in the capstone cannot fire when the
+    # capstone is deselected, so dropping one line from the job's pytest list would
+    # leave the required job green with D8 — the only restore drill on any CI leg —
+    # never executed. This file IS required by the zero-skip gate
+    # (`ARMED_LEG_FILES` in `record-postgres-leg-gate.py`), so the two pins chain:
+    # deselect the capstone → red here; deselect this file → red at the gate.
+    assert CAPSTONE_FILE in runs, (
+        f"{name} no longer runs {CAPSTONE_FILE}: its D8 leg is the only restore "
+        "drill the record has on a CI leg, and a file that is not collected cannot "
+        "red itself")
     # ⛔ The assertion that was here — `"skipped" in runs and "exit 1" in runs`
     # — did not discriminate, and #9772's review PROVED it by mutation: delete
     # the clause that fails the job on a real skip and both substrings survive
