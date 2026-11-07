@@ -2393,7 +2393,7 @@ def _assert_the_row_names_its_closure(row: str) -> None:
     # after the last adjacency sentence — was defeated by appending the reopening
     # OUTSIDE it, and the block a lane reads is 10,019 chars while the residual
     # list it appends to runs to the end of the row. `_residual_reopening_claims`
-    # carries the whole rule (clause-scoped, class-anchored, spelling floor) and
+    # carries the whole rule (sentence-scoped, class-anchored, spelling floor) and
     # its own proof list is `test_the_residual_region_is_scanned_WHERE_a_lane_
     # appends` below — this call is the pin, that test is the pin's own proof.
     claims = _residual_reopening_claims(row)
@@ -3152,6 +3152,14 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
 #:   SURVIVES of the old (d) is the SPELLING case". Re-measure this set before
 #:   quoting it again: a comment that names the wrong reason is how the next lane
 #:   concludes the arm can be anchored.
+#: * `the ADJACENCY half is no longer open, and the pair is fused.` — the
+#:   UNANCHORED `no longer … (closed|fuses|judged|…)` arm's 25-char `[^.;]` window
+#:   crosses a comma+coordinator, so `no longer OPEN, and the pair is FUSED` is
+#:   read as `no longer … fused`. Both clauses are true (the gap is closed; the
+#:   pair IS fused, the row's own `(d2)`). MEASURED, not repaired: the
+#:   coordinator bound that `_RESIDUAL_ANCHORED_OPENNESS` already carries neither
+#:   un-refuses this sentence nor keeps `the pair is no longer fused, and the
+#:   tables are stale.` RED — it loses that catch. Recorded, per the rule below.
 #:
 #: ⛔ WHEN ONE OF THESE STOPS BEING REFUSED, THAT IS AN IMPROVEMENT — move it into
 #: `_RESIDUAL_TRUTHFUL_STATEMENTS` in the same commit. Do NOT delete the test's
@@ -3245,6 +3253,25 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     # appended reopening from hiding behind the word `spelling`, so widening the
     # waiver is the round-1 `P2` direction.
     "what survives of the carve-out is the SPELLING case, which is open by design.",
+    # ⛔ THE COMPOSED CLOSURE + `(d2)` TRUTH — measured while re-verifying the
+    # round-26 fix at this head, and recorded rather than left to be discovered.
+    # The UNANCHORED `no longer … (closed|fuses|judged|caught|compared|enforced|
+    # retained)` arm takes a 25-char `[^.;]` window, so it crosses a
+    # comma+coordinator and reads `no longer OPEN, and the pair is FUSED` as
+    # `no longer … fused` — a claim the sentence does not make. BOTH clauses are
+    # true: the ADJACENCY gap is no longer open (the row says it is CLOSED) and
+    # the pair IS fused (the row's own `(d2)`), and the second clause alone is a
+    # `_RESIDUAL_TRUTHFUL_STATEMENTS` entry, so an unrelated truthful clause is
+    # deciding the verdict again — the class round 26's `P1` was filed for, in the
+    # over-block direction instead of the fail-open one.
+    # ⛔ NOT REPAIRED, and the reason is MEASURED, not assumed: bounding that
+    # window with the same coordinator bound `_RESIDUAL_ANCHORED_OPENNESS` already
+    # carries does NOT un-refuse this sentence (measured still RED) and DOES lose
+    # a real catch — `the pair is no longer fused, and the tables are stale.` goes
+    # RED → GREEN under it. A window that reaches the target verb only before the
+    # coordinator is the trade this artifact refuses; the over-block is the
+    # direction it chooses, so it is paid openly here, per entry, at zero slack.
+    "the ADJACENCY half is no longer open, and the pair is fused.",
 )
 
 
@@ -3469,11 +3496,15 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         _RESIDUAL_REFUSED_TRUTHFUL), (
         "the over-block ledger has duplicate entries — a duplicate pays for a "
         "dropped cost while the count stays constant")
-    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 17, (
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 18, (
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
         "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (17 — 16 plus the `carve-out` + `spelling` cost that was "
+        "CURRENT LENGTH (18 — 17 plus the composed closure + `(d2)` truth the "
+        "unanchored `no longer …` window reads across a comma+coordinator, "
+        "measured while re-verifying round 26, and the ONE repair attempt for it "
+        "was measured to cost a real catch instead — see the entry's own note; "
+        "before that, 16 plus the `carve-out` + `spelling` cost that was "
         "recorded in a COMMENT only until #11258 review `P3`; before that, 15 plus "
         "the bounded-lookbehind cost of the "
         "new `fails open` negation veto, #11258 review round 25 `P2`), i.e. ZERO "
@@ -3549,7 +3580,14 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # membership it is substitutable by a duplicate of an entry above —
             # uniqueness and length survive and the measured cost leaves the ledger,
             # the same defect round 9 closed one entry over.
-            "what survives of the carve-out is the SPELLING case, which is open by design.",):
+            "what survives of the carve-out is the SPELLING case, which is open by design.",
+            # ⛔ AND THE COMPOSED CLOSURE + `(d2)` COST: without membership it is
+            # substitutable by a duplicate of an entry above — uniqueness and
+            # length survive and the measured cost leaves the ledger, the same
+            # defect round 9 closed one entry over. It is also the ONLY entry that
+            # pins the 25-char window's cross-coordinator reach, so narrowing that
+            # window reds here.
+            "the ADJACENCY half is no longer open, and the pair is fused.",):
         assert required in _RESIDUAL_REFUSED_TRUTHFUL, (
             f"the over-block ledger no longer carries {required!r} — that shape's "
             "refusal is the measured price of a specific rule; if it is no longer "
