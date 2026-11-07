@@ -638,7 +638,7 @@ def reconcile_record_and_cache(
     a record-sourced clear IN PLACE for the declined pair —
     ``session_source_prose_migration.reconcile_session_source_prose`` (#11070),
     ⛔ NOT a re-projection, which is additive and leaves an existing pair on the
-    node, the graph-side purge for a not-projectable column (below), or *find
+    node, the graph-side ``REMOVE`` for a not-projectable column (below), or *find
     the writer* for the undeclared second-writer population the partition also
     counts.
 
