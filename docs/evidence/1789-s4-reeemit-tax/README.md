@@ -231,17 +231,17 @@ artifact.
   directions, and they point opposite ways:
 
   - the **correction** channel is measured under a MAXIMALLY CORRECTION-FRIENDLY
-    input — every one of the 231 offered items is labelled already-existing, so the
-    channel has more to correct here than it will usually find in production. The
+    input — every one of the 231 offered items is labelled already-existing. The
     bound that survives is the FLOOR, not a maximum:
     `S4_TMPL_DELTA` emits a correction only where the search shows the item
     already exists, and the reconstruction offers 231 of the 266 items as
     existing (the block renders entities/points/events only — the 35 `operators`
     are never shown, in production too) — the
     delta arm nevertheless emitted **0** corrections in all 7 sessions of both
-    runs. **0 is the minimum a correction channel can emit**, so production cannot do
-    better on this channel whatever its block offers — the comparison needs no claim
-    about which items production shows, and the "fewer" reading does not hold anyway:
+    runs. **0 is the minimum a correction channel can emit**, so that channel cannot
+    emit FEWER than this block did, in production either, whatever its block offers —
+    the comparison needs no claim about which items production shows, and the "fewer"
+    reading does not hold anyway:
     this block's 231 is a 7-session total while production's search is bounded
     PER SESSION (`max_queries=15` x `limit=3` = 45), and this block offers 25–45 items
     per session — so in 6 of the 7 sessions production's cap is the LARGER number and

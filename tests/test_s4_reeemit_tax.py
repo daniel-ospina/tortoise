@@ -1180,6 +1180,15 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         assert "measured under a MAXIMALLY CORRECTION-FRIENDLY" in flat_all
         assert "the FLOOR, not a maximum" in flat_all
         assert "cannot go BELOW it" in flat_all
+        # ⛔ "better" is ambiguous in exactly the direction this section spends 30 lines
+        # retracting: a minimum bounds production from BELOW, and "do better" reads as
+        # "emit more corrections" — the sentence now names the direction (#11385 P3).
+        assert "cannot emit FEWER than this block did" in flat_all
+        assert "cannot do better on this channel" not in flat_all
+        # ⛔ and the "more to correct here than in production" clause restated the
+        # cross-session "production can only offer fewer" reading the same bullet
+        # retracts 4 lines later (#11385 P2).
+        assert "than it will usually find in production" not in flat_all
         assert "measured at its *production maximum*" not in flat_all
         assert "it is measured at its production maximum" not in flat_all
         assert "no room to add to it" not in flat_all
@@ -1448,6 +1457,17 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
     assert flat.count("(") == flat.count(")"), f"unbalanced brackets: {flat}"
     assert "all 266 items offered" not in flat, "the refuted claim is back"
     assert "231 of the 266" in flat, "the corrected population is missing"
+    # ⛔ The framing fix stopped at the README: the row still called this block
+    # "the correction channel at its production MAXIMUM", which the README's own
+    # arithmetic retracts (production's cap is PER SESSION, and larger in 6 of 7).
+    # Nothing redded, because the README ban list reads README.md only (#11385 P2).
+    assert "production MAXIMUM" not in flat, (
+        "the removed upper-bound framing is back on the routing surface")
+    assert "no room to add" not in flat, "the removed framing is back"
+    assert "MAXIMALLY CORRECTION-FRIENDLY" in flat, (
+        "the row must state what the input IS (maximally correction-friendly)")
+    assert "the FLOOR, not a maximum" in flat, (
+        "the bound that survives must be named as the floor")
     # ⛔ the bare word does not discriminate: the row also says "has no `operators`
     # section", so deleting the explanatory clause left a green test (#11385
     # review P3). Pin the CLAUSE.

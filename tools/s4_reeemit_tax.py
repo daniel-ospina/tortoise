@@ -206,8 +206,8 @@ graph, so S4's search results are the S2 items themselves").
     0 collisions is NOT evidence that it declined operator corrections. The direction
     argument does not run through a subset relation at all — production's block
     holds PREVIOUS-graph hits, not this session's own items — it runs through the
-    floor: 0 is the minimum a correction channel can emit, so production cannot do
-    better on that channel whatever its block offers. The COUNT was wrong, and an
+    floor: 0 is the minimum a correction channel can emit, so that channel cannot emit
+    FEWER than this block did, in production either, whatever its block offers. The COUNT was wrong, and an
     earlier revision of the evidence document said "all 266".
 
     ⛔ THE IDS ARE SYNTHETIC (`s2-ent-0`, `s2-pt-1`, …): the receipts record no
