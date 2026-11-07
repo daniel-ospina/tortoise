@@ -324,7 +324,9 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
             "truncated": bool(stats.get("truncated")),
             # ⛔ the raised-attempt case the docstring's residual describes IS
             # this branch, so the row that most needs these two numbers is the
-            # one that previously recorded neither (#11385 review P2).
+            # one that previously recorded neither (#11385 review P1/P2). The
+            # pair is the disclosure: `attempts` beside `calls`, so a reader can
+            # see a retry whose spend never reached the accumulator.
             "attempts": int(stats.get("attempts") or 0),
             "calls": int((stats.get("cost") or {}).get("calls") or 0),
             "elapsed_s": round(time.monotonic() - started, 2),
@@ -593,7 +595,27 @@ def compare(pairs: list[dict]) -> dict:
             "legacy_error": lg.get("error"),
             "delta_error": dl.get("error"),
         })
-    usable = [r for r in rows if r["reduction"] is not None]
+    # ⛔ A pair with a FAILED arm is not a measurement of output size, even
+    # though the failed arm now keeps its spend (deliberately — the spend is
+    # data). The direction matters: a legacy arm that emitted 32 k and then
+    # failed to parse would enter `sum_lg` and INFLATE the reduction, which is
+    # the flattering direction this instrument exists to prevent. Both
+    # committed runs have zero errors, so no published number moves; the row
+    # keeps `legacy_error`/`delta_error` and `sessions_attempted` keeps the
+    # excluded population visible (#11385 review P2).
+    failed = sum(1 for r in rows
+                 if r.get("legacy_error") or r.get("delta_error"))
+    usable = [r for r in rows
+              if r["reduction"] is not None
+              and not r.get("legacy_error") and not r.get("delta_error")]
+    # the SAME filter, expressed over the input pairs — `composition` MUST be
+    # summed over exactly the population the token totals use (the docstring of
+    # `_composition_totals` states that invariant, so a second, looser filter
+    # here would publish a value-channel table describing sessions the headline
+    # excludes — #11385 review P2).
+    usable_pairs = [p for p, r in zip(pairs, rows, strict=True)
+                    if r["reduction"] is not None
+                    and not r.get("legacy_error") and not r.get("delta_error")]
     sum_lg = sum(r["legacy_out_tokens"] for r in usable)
     sum_dl = sum(r["delta_out_tokens"] for r in usable)
     reductions = sorted(r["reduction"] for r in usable)
@@ -605,6 +627,7 @@ def compare(pairs: list[dict]) -> dict:
     return {
         "sessions_measured": len(usable),
         "sessions_attempted": len(rows),
+        "sessions_failed": failed,
         "sum_legacy_out_tokens": sum_lg,
         "sum_delta_out_tokens": sum_dl,
         # THE number the issue asks for:
@@ -612,9 +635,7 @@ def compare(pairs: list[dict]) -> dict:
         "median_session_reduction": median,
         "min_session_reduction": reductions[0] if reductions else None,
         "max_session_reduction": reductions[-1] if reductions else None,
-        "composition": _composition_totals(
-            [p for p, r in zip(pairs, rows, strict=True)
-             if r["reduction"] is not None]),
+        "composition": _composition_totals(usable_pairs),
         "rows": rows,
     }
 

@@ -669,3 +669,113 @@ def test_every_row_records_the_numbers_the_residual_says_it_does(tmp_path):
     # re-creates the "documented but unbacked" state this pin exists to
     # prevent (#11385 review P3).
     assert ok["calls"] >= 1, "the successful call was accumulated into cost[\"calls\"]"
+
+
+# ── the evidence artifact is the deliverable, so pin it to its README ────────
+
+_EVID = _REPO / "docs" / "evidence" / "1789-s4-reeemit-tax"
+_PRIMARY = _EVID / "ab-20261107T023958Z.json"
+_RERUN = _EVID / "ab-20261107T024226Z.json"
+
+
+def _thousands(n: int) -> str:
+    """How the README renders an integer: 32 787 (thin/plain space groups)."""
+    return f"{n:,}".replace(",", " ")
+
+
+def test_the_readme_figures_reproduce_from_the_committed_artifacts():
+    """The numbers ARE the deliverable, and nothing else stops a transcription
+    slip: two revisions of this README carried figures the artifacts contradict
+    (an arithmetic slip between the two arms' `s4_items`, and a "no kind
+    changed" sentence next to a `slots` pair that changed one). This recomputes
+    the headline set from the two committed artifacts and asserts the README
+    carries each one — drift in either direction fails here — and pins the two
+    checkable PROSE claims the retired phrasing got wrong.
+
+    ⛔ This is the LITERAL-FIGURE counterpart of
+    `test_every_committed_artifact_reconciles_with_its_own_rows`, which pins the
+    artifacts' INTERNAL consistency and deliberately hard-codes no number. The
+    two are not redundant and the split is a considered one: that test must
+    survive a legitimate regeneration (an artifact-only edit re-runs the
+    instrument), while this one must NOT — regenerating the artifacts changes
+    the published figures, and a README that silently keeps the old ones is
+    exactly the corruption this bundle exists to be auditable against. So a
+    regeneration legitimately reds here, and the fix is to update the document."""
+    readme = (_EVID / "README.md").read_text()
+    pri = json.loads(_PRIMARY.read_text())
+    rer = json.loads(_RERUN.read_text())
+
+    for art in (pri, rer):
+        s, comp = art["summary"], art["summary"]["composition"]
+        lg, dl = comp["legacy"], comp["delta"]
+        assert _thousands(s["sum_legacy_out_tokens"]) in readme
+        assert _thousands(s["sum_delta_out_tokens"]) in readme
+        assert f"{s['token_weighted_reduction'] * 100:.2f}" in readme \
+            or f"{s['token_weighted_reduction'] * 100:.1f}" in readme
+        assert f"{s['min_session_reduction'] * 100:.2f}" in readme
+        # composition: the legacy tax vs the delta arm's zero
+        assert lg["verbatim_reemissions"] > 0 and dl["verbatim_reemissions"] == 0
+        assert _thousands(lg["s4_items"] - dl["s4_items"]) in readme
+        # the census-vs-mask divergence, and the cap that never fired
+        assert (lg["corrected_by_s4"] - lg["verbatim_reemissions"]) \
+            - sum(a["legacy"]["corrected_items"]["recorded"]
+                  for a in art["arms"]) in (0, 1)
+        for a in art["arms"]:
+            assert a["legacy"]["corrected_items"]["cap_hit"] is False
+            assert a["legacy"]["corrected_items"]["cap_dropped"] == 0
+        # the partition the residual rests on: 62 / 1 / 1, no content change
+        pairs = [i for a in art["arms"] for i in a["legacy"]["corrected_items"]["items"]]
+        assert sum(i["changed_fields"] == ["lifecycle"] for i in pairs) == 62
+        assert sum(i["changed_fields"] == ["slots"] for i in pairs) == 1
+        assert sum(i["changed_fields"] == ["supersedes"] for i in pairs) == 1
+        assert not any({"content", "name"} & set(i["changed_fields"]) for i in pairs)
+        # the delta arm's honest limitation, not a hidden one
+        assert sum(a["delta"]["s4_delta_empty"] is False for a in art["arms"]) == 7
+    assert f"{pri['summary']['median_session_reduction'] * 100:.1f}" in readme
+    assert f"{rer['summary']['median_session_reduction'] * 100:.2f}" in readme
+
+    # the two checkable PROSE claims: the retired absolute ("no kind changed")
+    # is contradicted by the `slots` pair, so its absence (in either wording) is
+    # asserted, and the re-type it actually is must be stated.
+    # Neither the original wording nor its paraphrase may come back. The match
+    # is on WHITESPACE-COLLAPSED text: a raw substring pin is typography-
+    # dependent and therefore wrong in both directions — a re-assertion wrapped
+    # across a line break passes it (false green), while a legitimate reflow of
+    # the disowning sentence fails it (false red).
+    flat = " ".join(readme.split())
+    for retired in ("a name or a kind", "no kind changed"):
+        assert retired not in flat, f"the retired claim came back: {retired!r}"
+    slots = next(i for a in pri["arms"]
+                 for i in a["legacy"]["corrected_items"]["items"]
+                 if i["changed_fields"] == ["slots"])
+    assert "core:code" in readme and "dev:code" in readme
+    assert "core:code" in slots["s2_before"]["slots"]
+    assert "dev:code" in slots["s4_after"]["slots"]
+
+
+def test_a_failed_arm_that_SPENT_is_still_excluded_from_the_reduction():
+    """The spend a failed arm keeps (deliberately — it is data) must not enter
+    the headline. Direction matters: `_complete` accumulates cost BEFORE the
+    parse, so a legacy arm that emitted 32 k and then failed to parse HAS a
+    populated total — counting it would INFLATE the reduction, which is the
+    flattering direction this instrument exists to prevent (#11385 review P2).
+
+    The row keeps the spend and the error; `sessions_failed` keeps the excluded
+    population visible so the exclusion cannot be silently shrunk."""
+    bad = _pair("a", 32000, 100, legacy={"error": "ParseError: no JSON"})
+    ok = _pair("b", 2000, 200)
+    s = tool.compare([bad, ok])
+    assert s["sessions_measured"] == 1
+    assert s["sessions_attempted"] == 2
+    assert s["sessions_failed"] == 1
+    # the flattering 32000 never reaches the sum
+    assert s["sum_legacy_out_tokens"] == 2000
+    assert s["token_weighted_reduction"] == pytest.approx(0.9)
+    # …and the spend is still on the row, which is what makes it auditable
+    assert s["rows"][0]["legacy_out_tokens"] == 32000
+    assert s["rows"][0]["legacy_error"] == "ParseError: no JSON"
+    # ⛔ and the value-channel table must describe the SAME population as the
+    # headline: a looser filter here would report the excluded session's census
+    # beside a one-session reduction (#11385 review P2).
+    assert s["composition"]["legacy"]["s4_items"] == 10      # the healthy pair
+    assert s["composition"]["delta"]["s4_items"] == 10
