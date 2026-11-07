@@ -717,6 +717,20 @@ _FROM_ANY_IMPORT = re.compile(
     r"(?:\((?P<paren>[^)]*)\)|(?P<bare>[^\n\\]*))",
     re.MULTILINE | re.DOTALL)
 
+#: `X = <anything>.FalkorDB` — the STATIC ASSIGNMENT ALIAS shape. This is a
+#: CHEAP GATE, not the resolver: it decides only whether the `ast.parse` in
+#: `_raw_client_call_positions` is worth paying for on this file, and the AST
+#: decides what the alias actually is (#11217 review round-14 P1). Reading it as
+#: the resolver would repeat the regex-spelling game the arm keeps losing.
+#:
+#: `[^=\n]*` spans a plain assignment without crossing a line; the `\\`+newline
+#: the caller normalises into spaces is what lets a CONTINUATION between the `=`
+#: and the class reach the parse. It runs on the MASKED source, so a `FalkorDB`
+#: mentioned only in a comment or a docstring cannot open the gate.
+_ASSIGNMENT_ALIAS_HINT = re.compile(
+    r"^[ \t]*[A-Za-z_]\w*[ \t]*(?::[^=\n]+)?=[^=\n]*\bFalkorDB\b",
+    re.MULTILINE)
+
 
 def _raw_client_call_positions(source: str) -> list[int]:
     """Offsets of every raw-client CONSTRUCTION CALL in `source`.
@@ -848,6 +862,52 @@ def _raw_client_call_positions(source: str) -> list[int]:
             if not bits or bits[0] != "FalkorDB":
                 continue
             names.add(bits[2] if len(bits) >= 3 and bits[1] == "as" else "FalkorDB")
+    # ⛔ A STATIC ASSIGNMENT ALIAS is the same blindness one statement over
+    # (#11217 review round-14 P1). Every branch above reads an `import`
+    # STATEMENT, so `C = tortoise.FalkorDB` resolved no name, `C(` was never a
+    # site, and an unowned, un-journaled bulk DETACH in that file read CLEAN
+    # (measured: `sites=[]`). The mention test does not rescue it — the raw
+    # `FalkorDB` mention opens the file, and the only name in `names` is the
+    # conventional one the CALL does not use. The spelling is in this tree
+    # (`tests/test_uri_username_consumed_3081.py:71`, `REAL_FALKORDB =
+    # falkordb.FalkorDB`), which is why it is closed rather than disclosed: a
+    # lane that hoists a client alias to module scope for tidiness would switch
+    # the arm off for every site in its file.
+    #
+    # RHS FINAL COMPONENT, not a module whitelist: `falkordb.FalkorDB`,
+    # `tortoise.FalkorDB` and a bare `FalkorDB` are the same class arriving by
+    # three routes, and `FakeFalkorDB` / `FalkorDBStub` stay excluded because
+    # the comparison is on the whole final component. This only ever EXTENDS
+    # `names`, so it cannot narrow the gate.
+    #
+    # ⛔ The `ast.parse` is behind a regex CHEAP GATE on purpose: the census
+    # walks the whole judged corpus, and parsing every file to look for a shape
+    # one file has would pay the cost everywhere. `[^=\n]*` spans a plain
+    # assignment; the `\\\n`-normalised copy is what lets a CONTINUATION between
+    # the `=` and the class (`C = \\\n tortoise.FalkorDB`) reach the parse at all
+    # — without it the gate would open on a spelling it then failed to resolve.
+    if _ASSIGNMENT_ALIAS_HINT.search(normalised):
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            # An unparseable file is not this arm's business; the site scan
+            # above is regex-based and still reports its DETACH blocks.
+            tree = None
+        if tree is not None:
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    targets, value = node.targets, node.value
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    targets, value = [node.target], node.value
+                else:
+                    continue
+                tail = (value.attr if isinstance(value, ast.Attribute)
+                        else value.id if isinstance(value, ast.Name) else None)
+                if tail != "FalkorDB":
+                    continue
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
     gated = bool(names)
     names.add("FalkorDB")
     # Nothing resolved a name and the file may not touch falkordb at all —
@@ -889,8 +949,19 @@ def _raw_client_call_positions(source: str) -> list[int]:
     if not gated and not re.search(r"\b(?:falkordb|FalkorDB)\b", source):
         return []
     pattern = "|".join(re.escape(n) for n in sorted(names))
+    # ⛔ The SITE scan reads the SAME continuation-normalised copy as the import
+    # loop (#11217 review round-14 P1). It ran on `masked`, so the two halves of
+    # this function disagreed about what a joined line is: the HEAD commit
+    # exists because `from tortoise import \\⏎ FalkorDB as C` read CLEAN, and
+    # the IDENTICAL joining on the construction side
+    # (`c = FalkorDB \\⏎ (host="h")`, which `compile()`s) still read CLEAN —
+    # `\s*` stops at the backslash, so the family was shut at the import and
+    # open at the call (measured: `sites=[]`). `\\`+newline becomes TWO SPACES,
+    # which is length-preserving, so every offset reported here is still the
+    # offset in `source` and `_enclosing_block_span` keeps resolving the same
+    # block.
     return [m.start()
-            for m in re.finditer(rf"(?<![\w])(?:{pattern})\s*\(", masked)]
+            for m in re.finditer(rf"(?<![\w])(?:{pattern})\s*\(", normalised)]
 
 
 def _raw_detach_violations(root=None):
@@ -1900,8 +1971,15 @@ def _journal_sites(source: str) -> list[tuple[int, int, str]]:
     if "_journal_append" not in source:
         # Fast path: any CALL of the symbol (bare, or via an attribute/getattr)
         # names it in the source, so a file without the substring journals
-        # nothing. The census walks 1,360 files to find 9 calls in 5 of them,
-        # and parsing each one cost ~+12 s (#11217 review round 8, A5).
+        # nothing. The census walks the 1,183 NON-EXEMPT top-level test files it
+        # actually parses (`test_*.py` less `_is_exempt`) to find 9 calls in 5
+        # of them, and parsing each one cost ~+12 s (#11217 review round 8, A5).
+        # ⛔ 1,183, not 1,360 and not the 1,244 that `test_*.py` globs to: the
+        # exempt check `continue`s BEFORE this function is called, so a larger
+        # number can only be a different population. Measured at f3691d498
+        # (#11217 review round-14 P2) — the earlier number exceeded the whole
+        # top-level glob, which is the population conflation the neighbouring
+        # comment in `_raw_client_call_positions` warns about.
         return []
     try:
         with warnings.catch_warnings():
@@ -1973,11 +2051,24 @@ def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
     """Cycle-6 P1-3: every raw `from falkordb import FalkorDB` bulk-DETACH
     site in a migrated test file must (a) resolve its graph handle to a
     per-test-unique name (never a FIXED shared literal — concurrent sessions
-    would DETACH each other's live writes) and (b) journal the name via
+    would DETACH each other's live writes) and (b) journal a handle via
     tests/_embedded._journal_append so the session-end sweep drops it (the
     raw client bypasses _assert_test_graph AND the per-test wipe scope —
     cycle-8 P2-2: a per-test-unique name alone leaks one empty graph per run;
     the journal closes the leak).
+
+    ⛔ WHAT (b) ACTUALLY ENFORCES, stated precisely because the loose wording
+    read as more than it is (#11217 review round-14 P2): the arm requires a
+    `_journal_append` IN THE BLOCK'S OWN SCOPE whose received name resolves to
+    an OWNED static prefix — a per-BLOCK PRESENCE + OWNERSHIP test over the
+    whole file's journals. It does NOT check that the journaled name IS the
+    handle this block DETACHes: `_journal_append(other)` with `other =
+    "test_other_…"` followed by a DETACH against an unowned `name` reads CLEAN
+    (measured: `violations=[]`). Correspondence is a FILED residual, not a
+    claim of this test — it needs a dataflow the AST walk here does not have,
+    and the shape is an authoring mistake rather than the reachable
+    spelling-switch-off the import/site halves exist for. Recorded on #11344
+    with `#11344 F4` so it is not re-discovered as new.
 
     Per-SITE scan (review P1): a module-level presence sniff ("the module
     contains _journal_append AND os.urandom") trusts a file after ONE fixed
@@ -2315,6 +2406,34 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         # `tests/test_guard.py:148,169`).
         "module-qualified, no import parser resolves it": (
             "import tortoise\n", "tortoise.FalkorDB"),
+        # ⛔ THE CONSTRUCTION SIDE OF A CONTINUATION (#11217 review round-14 P1).
+        # The HEAD commit closed `from tortoise import \\\n FalkorDB as C`; the
+        # IDENTICAL joining on the CALL — `c = FalkorDB \\\n (host="h")`, which
+        # `compile()`s — still read CLEAN, because `\\s*` stops at the backslash
+        # and the site scan ran on the UN-normalised `masked` while the import
+        # loop ran on the normalised copy. Measured: `sites=[]`, `violations=[]`.
+        # It pins the site scan's normalisation exactly: reverting it to `masked`
+        # reds THIS case and no other. ⛔ The continuation must stay INDENTED —
+        # a `(` back at column 0 is a new top-level statement, so the enclosing
+        # block would legitimately end above the DETACH and the case would pass
+        # for the wrong reason.
+        "call site, BACKSLASH-joined": (
+            "from falkordb import FalkorDB\n", "FalkorDB \\\n        "),
+        # ⛔ A STATIC ASSIGNMENT ALIAS (#11217 review round-14 P1). Every parser
+        # above reads an `import` STATEMENT, so `C = tortoise.FalkorDB` resolved
+        # no name, `C(` was never a site, and the whole file read CLEAN
+        # (measured: `sites=[]`). The mention test does not rescue it — the raw
+        # `FalkorDB` mention opens the file, and the only name in `names` is the
+        # conventional one the CALL never uses. The spelling is in this tree
+        # (`tests/test_uri_username_consumed_3081.py:71`,
+        # `REAL_FALKORDB = falkordb.FalkorDB`), which is why it is closed rather
+        # than disclosed.
+        "static ASSIGNMENT alias": (
+            "import tortoise\nC = tortoise.FalkorDB\n", "C"),
+        "static ASSIGNMENT alias, ANNOTATED": (
+            "import tortoise\nC: object = tortoise.FalkorDB\n", "C"),
+        "static ASSIGNMENT alias, BACKSLASH-joined": (
+            "import tortoise\nC = \\\n    tortoise.FalkorDB\n", "C"),
     }
     site = tmp_path / "test_spelling.py"
     for label, (header, construct) in spellings.items():
