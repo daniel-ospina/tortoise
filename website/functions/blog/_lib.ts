@@ -44,6 +44,14 @@ export interface Env {
 
 export const SITE_URL = "https://tortoise.premiselabs.co";
 
+// The blog's own link-preview card: 1200x630, in the asset tree, and served by
+// the functions fallback (the E2E suite asserts /blog/og-image.png is a 200).
+// It is the fallback for every blog surface that has no cover of its own — the
+// index, tag pages, and a post whose cover_image_url is NULL.
+export const DEFAULT_OG_IMAGE = `${SITE_URL}/blog/og-image.png`;
+export const DEFAULT_OG_IMAGE_WIDTH = 1200;
+export const DEFAULT_OG_IMAGE_HEIGHT = 630;
+
 /**
  * The article author — ONE name, four places that must agree (#1383): this
  * constant (the SSR renderer's fallback), the `author` column DEFAULT
@@ -1060,13 +1068,33 @@ export function headHtml(opts: {
   description: string;
   url: string;
   image?: string | null;
+  imageAlt?: string | null;
   type?: "website" | "article";
   jsonLd?: unknown[];
   noindex?: boolean;
 }): string {
-  const { title, description, url, image = null, type = "website", jsonLd: schemas = [], noindex = false } = opts;
-  const safeImage = image && validUrl(image) ? escapeHtml(image) : "";
-  const imageTag = safeImage ? `<meta property="og:image" content="${safeImage}">` : "";
+  const { title, description, url, image = null, imageAlt = null, type = "website", jsonLd: schemas = [], noindex = false } = opts;
+  // ⛔ A CARD WITHOUT AN IMAGE IS NOT A CARD, and `twitter:card` below says
+  // `summary_large_image` unconditionally — so every surface with no cover used
+  // to advertise a large image and ship none, which renders as a bare title.
+  // The fallback is the blog's own 1200x630 card, already in the asset tree and
+  // already served (the E2E suite asserts /blog/og-image.png is a 200).
+  const safeImage = image && validUrl(image) ? escapeHtml(image) : DEFAULT_OG_IMAGE;
+  // Dimensions are declared ONLY for the card we authored. A post cover is
+  // whatever the author uploaded, and stating 1200x630 for it would be a
+  // promise the bytes do not keep — scrapers that trust the tag then crop the
+  // wrong region.
+  const isDefaultCard = safeImage === DEFAULT_OG_IMAGE;
+  const sizeTags = isDefaultCard
+    ? `\n<meta property="og:image:width" content="${DEFAULT_OG_IMAGE_WIDTH}">\n<meta property="og:image:height" content="${DEFAULT_OG_IMAGE_HEIGHT}">`
+    : "";
+  // `alt` is what a reader gets when the image is suppressed. The description
+  // is the honest default: it is already the sentence this page is about.
+  const safeAlt = escapeHtml((imageAlt ?? description ?? "").trim() || title);
+  const imageTags = `<meta property="og:image" content="${safeImage}">${sizeTags}
+<meta property="og:image:alt" content="${safeAlt}">
+<meta name="twitter:image" content="${safeImage}">
+<meta name="twitter:image:alt" content="${safeAlt}">`;
   const noindexTag = noindex ? `<meta name="robots" content="noindex,nofollow">` : "";
   const schemaTags = schemas.map(jsonLd).join("\n");
   return `
@@ -1078,7 +1106,7 @@ export function headHtml(opts: {
 <meta property="og:description" content="${escapeHtml(description)}">
 <meta property="og:type" content="${type}">
 <meta property="og:url" content="${escapeHtml(url)}">
-${imageTag}
+${imageTags}
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${escapeHtml(title)}">
 <meta name="twitter:description" content="${escapeHtml(description)}">
@@ -1092,7 +1120,9 @@ export function htmlPage(opts: { head: string; body: string; extraHead?: string 
 <html lang="en">
 <head>
 ${opts.head}
-<link rel="icon" href="/blog/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="32x32 48x48">
+<link rel="icon" type="image/png" href="/favicon.png" sizes="256x256">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 ${opts.extraHead ?? ""}
 <style>
 :root{--bg:#060b14;--bg-soft:#0b1220;--text:#cbd5e1;--text-dim:#94a3b8;--accent:#06b6d4;--border:#1e293b;--serif:Georgia,'Times New Roman',serif;--mono:ui-monospace,SFMono-Regular,'SF Mono',Menlo,'Cascadia Code','Fira Code','JetBrains Mono',monospace}
