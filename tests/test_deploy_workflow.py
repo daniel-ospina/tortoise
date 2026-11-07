@@ -5050,8 +5050,12 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #:   "`ff6379eb2` is not what the note means by the tree before #9548; that tree is
     #:    `047c91f7a`."                                             -> accepted (33 chars)
     #:   "… by the tree IMMEDIATELY before #9548 …"                     -> REFUSED (45 chars)
-    #: ⛔ AND THE WIDENING IS CONTROLLED — the long spelling above is row 5 of
-    #: `_restored_corrections` (#11191 review r29 F1, P2). MEASURED: `{0,90}` accept,
+    #: ⛔ AND THE WIDENING IS CONTROLLED — the long spelling above (`is not what the note
+    #: means by the tree immediately before #9548`) is one of the rows of
+    #: `_restored_corrections` (#11191 review r29 F1, P2). ⛔ NOT "row 5": that row is the
+    #: `ancestor rather than` sentence, and a positional claim in prose rots the moment a
+    #: row is inserted (r31 F1 caught this one at r29's own head — it was element 6 there
+    #: too). MEASURED: `{0,90}` accept,
     #: `{0,40}` REFUSE that row, and the revert reds this test on `assert not _restored_reds`
     #: (`1 failed, 110 passed`). Before that row existed the revert left the suite GREEN,
     #: so the window was load-bearing with nothing defending it.
@@ -7243,10 +7247,12 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # one, and this is DOCUMENTED rather than guarded because the guard that closed it
     # could not tell the defect from the truth and began refusing truthful sentences
     # (#11191 review r4 → r6: three fix rounds, three false-RED regressions, all on this
-    # one shape). The rows below differ from the TRUTHFUL twin below them in NOTHING
-    # except the figure they state (and, one row, its separator), so settling it needs the
-    # MEASURED count — the arm already has `_census_count_at` — not another regex. Until
-    # that lands, the fail-open is pre-existing (base and `origin/main` accept every shape
+    # one shape). The rows below and the truthful twin beside them differ in their WORDING
+    # as well as in the figure they state — separators, subjects and clause frames all move
+    # between them — and that is the point: no lexical rule separates the alibi from the
+    # truth, only the MEASURED count does (the arm already has `_census_count_at`), so this
+    # is not another regex. Until that lands, the fail-open is pre-existing (base and
+    # `origin/main` accept every shape
     # recorded here). There is no assertion
     # here because refusing this shape is the GOOD direction and must not red the suite.
     # Recorded verbatim:
@@ -7271,9 +7277,11 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     )
     _twin_reds = [s for s in _alibi_truthful_twins if _refuses_before_9548(s)]
     assert not _twin_reds, (
-        "the earlier-clause figure guard refuses a TRUTHFUL reading that differs from the "
-        "alibi only in its figure — a false RED on base and `origin/main`-accepted text, "
-        "which is how a pin gets deleted (#11191 review r6, P1):\n  " + "\n  ".join(_twin_reds)
+        "the earlier-clause figure guard refuses a TRUTHFUL reading that states the measured "
+        "figure where the alibi states a different one — the one difference that decides "
+        "truth here, and not one a lexical rule can see — a false RED on base and "
+        "`origin/main`-accepted text, which is how a pin gets deleted (#11191 review r6, "
+        "P1):\n  " + "\n  ".join(_twin_reds)
     )
     # … and the sentence-wide referent is NOT withdrawn: a figure AFTER the phrase is a
     # measurement OF it, not an alibi beside it.
