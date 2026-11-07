@@ -881,7 +881,7 @@ migrations. No pool exists.~~ ✅ **the mechanism LANDED (#9558/R10, PR #11386).
 BEHIND the private hook `_default_connect` (so the read door reuses it too), the column map is cached
 on a per-file STAT identity — `(name, mtime_ns, size, inode, ctime_ns)`, NOT a content hash (a
 content-preserving stat rewrite inside one inode-clock tick is the one shape it cannot see, and a
-digest was measured at ~31–36 % of the cache's own win and rejected), and the cost was MEASURED before
+digest was measured at ~30–36 % of ONE consult's share of the win and rejected), and the cost was MEASURED before
 and after with one instrument against two trees: **49.72–52.86 → 255.68–261.61 records/s**, per-record
 mean **18.89–20.10 → 3.82–3.91 ms**, `connect` calls per record **1.00 → 0.00**, server-logged
 `connection authorized` **+66 → +2** (`docs/evidence/9558-record-write-cost/`, whose eight committed

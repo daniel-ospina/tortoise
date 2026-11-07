@@ -285,7 +285,9 @@ still invisible. A content digest would close it and was measured and rejected:
 blake2b over the fifteen files (129,355 bytes) costs **0.543–0.592 ms** per pass
 against the stat pass's **0.160–0.169 ms** (`fingerprint-cost.json`), so it ADDS
 0.374–0.432 ms net of the pass it replaces, against a warm-column-map win of
-**1.193–1.256 ms** — i.e. **~31–36 % of the win**, about a third. ⛔ An earlier revision said "most of the ~0.5 ms the cache saves", which
+**1.193–1.256 ms** — i.e. **~30–36 % of the win**, about a third, cross-paired the
+way this bullet pairs its other bands (0.374/1.256 = 29.8 %, 0.432/1.193 = 36.2 %).
+⛔ An earlier revision said "most of the ~0.5 ms the cache saves", which
 compared the digest against one stat pass instead of against the win and got the
 verdict's character wrong; the remaining figures here are the same measurement,
 re-derived. The decision (no digest) is unchanged: ~a third of the win for a residual that
