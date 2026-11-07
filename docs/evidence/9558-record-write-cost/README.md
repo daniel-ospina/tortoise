@@ -196,7 +196,8 @@ calls resolving the base **before** the key is built (`_schema_entry`'s
 `base = migrations_dir or _migrations_dir()`, with `_complete` at `:1497` and
 `_migrations_dir` at `:1502`; the seam is cited by SYMBOL on purpose — a bare line
 number re-stales under exactly the edits this PR makes, and this one moved
-repeatedly inside it), and (ii) one
+`1659 → 1665 → 1667 → 1669 → 1670` inside it — twice of them after the
+sentence that first said "twice" was written), and (ii) one
 `_migrations_fingerprint` pass over the same
 fifteen files (0.160–0.169 ms, `fingerprint-cost.json`). The RESOLUTION half is
 item 6 of the list at the top — taken on one box at `d51c7897d6`, re-takeable by

@@ -130,7 +130,12 @@ def main(argv: list[str] | None = None) -> int:
     #   * `--column-consult` measures the module THIS PROCESS imported, so a
     #     `--tree` there would print one tree's medians under another's name.
     # The probe therefore measures THIS checkout only: run it FROM the tree you mean
-    # to measure, as the artifact's Reproducing section does.
+    # to measure — item 6 of the artifact's exception list says exactly that, and
+    # carries the re-take command (`--column-consult`, print-only).
+    # ⛔ NOT "as the artifact's Reproducing section does": that section invokes the
+    # OTHER probe, and it points it AT a tree with `--tree` rather than running it
+    # from one. A citation that names the wrong section is the same class of defect
+    # as a stale line number, and it was this removal's stated basis.
     base = Path(__file__).resolve().parents[3] / "supabase" / "migrations"
     out = measure(base, args.reps)
     target = Path(__file__).with_name("fingerprint-cost.json")

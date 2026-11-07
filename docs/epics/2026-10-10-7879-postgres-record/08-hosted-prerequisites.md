@@ -885,7 +885,9 @@ digest was measured at ~30–36 % of ONE consult's share of the win and rejected
 and after with one instrument against two trees: **49.72–52.86 → 255.68–261.61 records/s**, per-record
 mean **18.89–20.10 → 3.82–3.91 ms**, `connect` calls per record **1.00 → 0.00**, server-logged
 `connection authorized` **+66 → +2** (`docs/evidence/9558-record-write-cost/`, whose eight committed
-`runs/*.json` every figure is arithmetic on). ⚠️ The BEFORE tree is 164 commits behind the AFTER one's
+`runs/*.json` every PROBE figure is arithmetic on — the `connection authorized` counts are not
+among them: they are a `grep -c` delta on the container's own log, the artifact's exception item 1).
+⚠️ The BEFORE tree is 164 commits behind the AFTER one's
 parent — 7 of them touching the measured files, which makes the delta conservative rather than
 controlled. ⚠️ Two residual
 facts a later lane should not re-derive: the column-map CALL counts are unchanged at 1/record each (the WORK
