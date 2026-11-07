@@ -24,6 +24,7 @@ stop being reported.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import subprocess
 import sys
@@ -759,6 +760,57 @@ def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[long])]))
     assert proc.returncode == cl.EXIT_INVALID
     assert "…" in proc.stderr, proc.stderr
+
+
+def test_the_tool_carries_the_5128_interpreter_guard_first():
+    """The guard must precede EVERY other import.
+
+    Measured on CI: this file was added without it, and shard `a` reded on
+    `tests/test_entry_point_python_guard.py` — while every local suite run was
+    green, because that test enumerates `tools/**/*.py` from a corpus this
+    suite does not cover. Asserting it HERE means the next edit to this tool
+    fails fast, in the same run as everything else about it.
+    """
+    tree = ast.parse(TOOL.read_text(encoding="utf-8"))
+    body = list(tree.body)
+    # Skip the module docstring, the `__future__` import, and `import sys`.
+    i = 0
+    while i < len(body) and isinstance(body[i], ast.Expr):  # docstring
+        i += 1
+    assert i < len(body) and isinstance(body[i], ast.ImportFrom), "no __future__ import"
+    assert body[i].module == "__future__", body[i].module
+    i += 1
+    assert isinstance(body[i], ast.Import), "`import sys` must follow __future__"
+    assert [a.name for a in body[i].names] == ["sys"], body[i].names
+    i += 1
+
+    guard = body[i]
+    assert isinstance(guard, ast.If), (
+        f"the #5128 interpreter guard must be the first statement after the "
+        f"docstring / __future__ import / `import sys`; found {type(guard).__name__} "
+        f"(tests/test_entry_point_python_guard.py reds on this)"
+    )
+    test = guard.test
+    assert isinstance(test, ast.Compare) and isinstance(test.left, ast.Attribute), ast.dump(test)
+    assert test.left.attr == "version_info" and test.left.value.id == "sys"
+    assert len(test.ops) == 1 and isinstance(test.ops[0], ast.Lt)
+    assert isinstance(test.comparators[0], ast.Tuple)
+    assert test.comparators[0].elts[0].value == 3 and test.comparators[0].elts[1].value == 12
+
+    raises = [n for n in guard.body if isinstance(n, ast.Raise)]
+    assert len(raises) == 1, "the guard must raise on an old interpreter"
+    assert isinstance(raises[0].exc, ast.Call)
+    assert raises[0].exc.func.id == "SystemExit"
+    message = raises[0].exc.args[0]
+    rendered = "".join(
+        n.value
+        for n in ast.walk(message)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    )
+    # The message must name the floor, the file, and an invocation that WORKS —
+    # a refusal naming a broken invocation is the same unattributed error again.
+    assert "3.12" in rendered and "capstone_ledger.py" in rendered, rendered
+    assert "uv run python tools/capstone_ledger.py" in rendered, rendered
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────
