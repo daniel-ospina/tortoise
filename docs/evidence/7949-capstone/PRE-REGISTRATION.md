@@ -1113,10 +1113,14 @@ place a machine reads it.
   those three are ancestors of `04deeaacda` and appear nowhere in the measured range — they moved
   the cites in the window *before* it, not inside it. Corrected here rather than silently
   restated, in this section's own idiom (§10.7 likewise records an understated shift instead of
-  quietly fixing it). ⚠️ Also carried, not silently reconciled: the `def` sits one line lower, at
-  `:10398`, in `80c912244f` itself, so §10.8's recorded `:10397` is one line high — measured by
-  CONTENT the first window is +571 and the total +700, which is the same total the +572/+129 split
-  reaches from the recorded value. The symbols are unchanged: the collector
+  quietly fixing it). ⚠️ Also carried, not silently reconciled: §10.8's recorded values are high by
+  a **per-symbol** amount at its own commit `80c912244f` — the `def` and its extent by one line
+  (`:10397`/`:10397-10419` against a measured `:10398`/`:10398-10420`), and the four gate/arm cites
+  by **seven** (`:11849`/`:11998`/`:11862`/`:12009` against a measured
+  `:11856`/`:12005`/`:11869`/`:12016`). Both routes therefore reach the same LINE, `:11098`, at two
+  different deltas: +572 then +129 from the recorded `:10397` is **701**, while +571 then +129 from
+  the measured `:10398` is **700**. Re-deriving the next move must anchor on the measured `:10398`,
+  never on the recorded value plus 700. The symbols are unchanged: the collector
   grew no item and lost none, and both passes are still gated on `if items:`. Each number was
   verified by CONTENT at this head (the `def`, the `return items` that ends it, the two `if items:`
   gates, the two `except` arms), never by adding an offset — the failure this section has already
