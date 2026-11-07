@@ -494,6 +494,81 @@ def test_the_event_journal_replay_drops_the_prose():
         proj.close()
 
 
+def test_the_point_clear_removes_the_prose_and_keeps_the_node():
+    """#11325 — the ONE shipped repair that clears the prose and keeps the entity.
+
+    After `#11325` the reconciler's repair text says the not-projectable class has
+    no route that RESTORES the value, and that on a `:Point` a targeted CLEAR
+    does ship: `update_point(<id>, story_arc=None)` removes the property and
+    KEEPS the node. That is load-bearing operator guidance — it is the difference
+    between "clear the stale copy" and "wipe the graph" — and it was asserted as
+    measured at six prose sites while nothing in the suite exercised the door.
+    `tests/test_10000_narrative_record_home.py` pins the REFUSAL of a non-empty
+    narrative on the same call, which is a different claim.
+
+    The seed goes through the JOURNAL REPLAY fold (`_upsert_point_props`), not
+    through `create_point`: since `#10389` both the create and the update door
+    refuse a NON-EMPTY narrative, so a legacy copy on a `:Point` is exactly what
+    a replayed `PointAdded` (or a pre-guard write) leaves behind.
+
+    Two arms so neither can pass vacuously:
+      (1) the property is GONE while the node and its OTHER props are still there
+          — a clear that deleted the node is `tortoise_delete`, not this door;
+      (2) replaying the same creation record puts the prose BACK, i.e. the clear
+          is LIVE-ONLY (`#10429`'s replay half) and a rebuild is not a second
+          clear. If that flips, the doc's LIVE-ONLY bound is wrong and both it
+          and the clear's honest scope have to be updated.
+    """
+    if not os.environ.get("TORTOISE_DB_URI"):
+        pytest.skip("TORTOISE_DB_URI not set — the clear needs a graph to write")
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(graph_name=f"test_9555_pointclear_{uuid.uuid4().hex[:8]}")
+    try:
+        proj = sdk._get_proj()
+        pid = f"pt-clear-{uuid.uuid4().hex[:8]}"
+        content = "a legacy turn that carried the prose"
+        creation = {"id": pid, "content": content, "is_episodic": True,
+                    "story_arc": NARRATIVE}
+        proj._upsert_point_props(creation)
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.story_arc, n.content",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] == NARRATIVE, (
+            "the seed did not land the prose on the `:Point` — the clear below "
+            f"would prove nothing. Got {rows!r}")
+
+        sdk.update_point(pid, story_arc=None)
+
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.story_arc, n.content",
+            params={"id": pid}).result_set
+        assert rows, (
+            "`update_point(<id>, story_arc=None)` DELETED the node — the shipping "
+            "repair is a CLEAR that keeps the entity (#11325); a node delete is "
+            "`tortoise_delete` and journals the delete that removes its record row")
+        arc, kept = rows[0]
+        assert arc is None, (
+            "the clear left the prose on the node — `SET n += $props` with a "
+            f"`None` value is supposed to REMOVE the key. Got {arc!r}")
+        assert kept == content, (
+            "the clear took the node's OTHER properties with it; it must remove ONE "
+            f"key. Got {kept!r}")
+
+        # (2) LIVE-ONLY: the CREATION record still carries the prose, and its fold
+        # is the replay fold — so a rebuild re-materialises what the clear removed.
+        proj._upsert_point_props(creation)
+        rows = proj.g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.story_arc",
+            params={"id": pid}).result_set
+        assert rows and rows[0][0] == NARRATIVE, (
+            "the `PointAdded` replay fold no longer re-materialises the prose — the "
+            "`#10429` replay half has CLOSED, so `#11325`'s LIVE-ONLY bound and the "
+            "`update_point` clear's scope are stale and must be re-stated")
+    finally:
+        sdk.close()
+
+
 # ── door 2: the RECORD → CACHE restore (#10394) ─────────────────────────────
 #
 # `#10389` closed one write door; this is the exit door it left open, and it is
