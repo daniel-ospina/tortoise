@@ -1,8 +1,11 @@
 # tests/test_redirect_seam.py
 """Unit surface: the class-level URI-aware redirect (epic #1647 Task 1)."""
+import functools
 import os
 import subprocess
 import sys
+import threading
+import types
 
 import pytest
 
@@ -446,6 +449,155 @@ def test_loopback_predicate_single_source():
 # non-exempt case stubs falkordb.FalkorDB).
 
 
+_STAMP_NAME = "_thread_start_inherit_stem"
+
+
+def _is_stamp(fn) -> bool:
+    """True when ``fn`` is a Thread.start test-stem stamp (#1686/#11430).
+
+    Identified by ``__globals__``, NEVER by ``__name__``/``__module__``:
+    ``functools.wraps`` copies those onto a FOREIGN wrapper. ``sentry_sdk``'s
+    ``ThreadingIntegration`` replaces ``Thread.start`` with
+    ``@wraps(old_start) def sentry_start(...)`` — so after any test initialises
+    the real SDK, ``Thread.start`` is a function *named*
+    ``_thread_start_inherit_stem`` *from* ``tortoise.projection`` that is not the
+    module's function object (#11430). A name/module test calls that a double
+    wrap; an identity test does too; both are wrong — the stamp is the inner
+    link and still runs.
+    """
+    g = getattr(fn, "__globals__", None)
+    return (isinstance(g, dict)
+            and g.get("__name__") == "tortoise.projection"
+            and getattr(fn, "__name__", None) == _STAMP_NAME)
+
+
+def _closure_stamp(fn):
+    """The stamp a PLAIN (non-``@wraps``) delegating wrapper closes over.
+
+    ``def plain_wrapper(self, *a, **k): return stamp(self, *a, **k)`` calls our
+    stamp but carries no ``__wrapped__`` (only ``functools.wraps`` copies
+    that), so a ``__wrapped__``-only walk reported it as "never installed" —
+    the FALSE-RED half of #11430's review. A closure cell is what makes the
+    SHAPE visible here, but it is not the only static evidence: bytecode shows
+    whether a wrapper CALLS what it closes over (a caller carries a CALL opcode
+    fed by the cell — ``CALL_FUNCTION_EX`` for the ``*a, **k`` forwarding shape,
+    ``CALL`` for plain positional — where a bare reference carries none). What no static
+    check proves is that the call site is REACHED — so this helper stays a
+    SHAPE test, and the ``@wraps``-that-never-calls shape stays tolerated rather
+    than guessed at (see ``_is_stamp``). Deliberately NOT a globals-dict scan: any function defined
+    in a module that merely HOLDS the stamp would then read as delegating,
+    which is a false GREEN on the "the stamp still runs" property. The residue
+    is stated rather than papered over: a MODULE-SCOPE plain wrapper that
+    reaches the stamp through globals still reads as "never installed". The
+    reason is not that a static check cannot see the call — bytecode can — but
+    that no static check can prove the call site is REACHED (a branch dead at
+    RUNTIME compiles to the same opcodes as a live one — though a literal
+    ``if False:`` elides its call entirely), so a recovered "link" would be a
+    guess.
+    """
+    for cell in getattr(fn, "__closure__", None) or ():
+        try:
+            value = cell.cell_contents
+        except ValueError:  # a not-yet-bound cell
+            continue
+        if _is_stamp(value):
+            return value
+    return None
+
+
+def _delegate_of(fn):
+    """The single frame ``fn`` delegates to, or None.
+
+    ONE successor function, so the walkers below cannot drift apart: our stamp
+    delegates through ``_ORIG_THREAD_START`` (that is what the installer
+    chains); anything else delegates through ``__wrapped__`` (``functools.wraps``
+    / sentry) or, for a plain wrapper, a closed-over stamp. Single-valued on
+    purpose: a wrapper carrying BOTH edges (a foreign ``__wrapped__`` and a
+    closed-over stamp) is followed through ``__wrapped__`` only, so a
+    closure-only delegator behind a foreign ``__wrapped__`` still reads as
+    "never installed" — the documented residue in ``_closure_stamp``. Keeping
+    ONE successor is what makes a revisit in ``_delegation_path`` mean a cycle
+    rather than a diamond.
+    """
+    if _is_stamp(fn):
+        return fn.__globals__.get("_ORIG_THREAD_START")
+    nxt = getattr(fn, "__wrapped__", None)
+    return nxt if nxt is not None else _closure_stamp(fn)
+
+
+def _delegation_path(start) -> list:
+    """Frames from ``start`` along its delegate path, TRUNCATING on a revisit.
+
+    Truncation is hang-safety, not a verdict: the repeated frame is included
+    once so ``_stamp_links`` still sees a self-cycle's stamp, and a stride that
+    comes back on itself cannot loop forever. Truncation is LOAD-BEARING, not
+    merely defensive: ``importlib.reload`` re-executes the module body in the
+    SAME module ``__dict__``, so ``_ORIG_THREAD_START = Thread.start`` rewrites
+    the ALREADY-INSTALLED stamp's delegate pointer to itself — a self-revisit a
+    plain reload reaches, which is exactly the state in which ``Thread.start()``
+    recurses and every chain-length check still passes.
+    """
+    frames, seen, fn = [], set(), start
+    while fn is not None:
+        frames.append(fn)
+        if id(fn) in seen:
+            break
+        seen.add(id(fn))
+        fn = _delegate_of(fn)
+    return frames
+
+
+def _stamp_links(start) -> list:
+    """Every DISTINCT frame reachable from ``start`` that is OUR stamp."""
+    links = []
+    for frame in _delegation_path(start):
+        if _is_stamp(frame) and all(frame is not seen for seen in links):
+            links.append(frame)
+    return links
+
+
+def _stamp_problems(start) -> list[str]:
+    """The install invariant on ``Thread.start``, as a list of violations.
+
+    Two facts, and both are needed because they catch disjoint states:
+
+    1. exactly ONE of our stamps is reachable — zero means the installer never
+       ran; two means one execution of the module stacked its stamp on
+       another's.
+    2. a stamp's ``_ORIG_THREAD_START`` does not reach ANOTHER stamp — the
+       SELF-revisit a plain ``importlib.reload`` creates is the state fact 2
+       alone can see (a two-stamp stack already trips fact 1). This is
+       the genuine double wrap the class marker exists to prevent: after a
+       module reload the reloaded module captures
+       ``_ORIG_THREAD_START = Thread.start`` — the PREVIOUS stamp, either
+       directly or under a vendor ``@wraps`` wrapper — so a re-install wraps a
+       wrapper, or, on a PLAIN reload (no re-install at all), the assignment
+       rewrites the ALREADY-INSTALLED stamp's delegate to itself, because the
+       module body re-executes in the same ``__dict__``. The marker prevents a
+       re-install; it cannot prevent that rewrite. Fact 1 sees the re-install
+       shape (two stamps — measured count 2, path
+       ``[stamp2, old_stamp, old_stamp]``); the PLAIN-RELOAD shape is the one
+       only fact 2 can see (count stays 1, path ``[s, s]``). One-hop fails for
+       both whenever the delegate is a WRAPPER whose inner frame is the previous
+       stamp — which is why fact 2 is checked by REACHABILITY.
+    """
+    links = _stamp_links(start)
+    problems = []
+    if len(links) != 1:
+        problems.append(
+            "expected exactly ONE test-stem stamp on Thread.start, "
+            f"found {len(links)} (0 = never installed; 2+ = a stamp stacked on a stamp)")
+    for link in links:
+        delegate = link.__globals__.get("_ORIG_THREAD_START")
+        if any(_is_stamp(frame) for frame in _delegation_path(delegate)):
+            message = ("a test-stem stamp delegates THROUGH another stamp — a double "
+                       "wrap (a reload rewrote the delegate, and/or a re-install "
+                       "stacked a stamp)")
+            if message not in problems:  # one report, however many stamps stack
+                problems.append(message)
+    return problems
+
+
 def _assert_probe(results: list, expected_stem: str | None, embedded: bool) -> None:
     """Shared probe assertion: exactly one probe result with the expected
     inherited stem + embedded flag + a graph name."""
@@ -719,17 +871,194 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     from tortoise import projection as proj_mod
 
     # (a) clear the conftest hook's main-thread record FIRST (it ran at
-    # setup), then deactivate the session — records must be refused.
+    # setup), then deactivate the session for the parity probe ONLY — scoped,
+    # because (b) needs the installer ARMED. (An unscoped deactivation made
+    # (b) a tautology: `install_thread_stamp` gates on `_TEST_SESSION_ACTIVE`
+    # BEFORE it consults the class marker, so the installer body could never
+    # run and the re-invocation assertion compared a list to itself.)
     proj_mod._record_current_test_stem(None)
-    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", False)
-    proj_mod._record_current_test_stem("test_redirect_seam")  # refused
-    assert proj_mod._inherited_test_stem() is None, \
-        "prod parity broken: record accepted outside an active session"
+    with monkeypatch.context() as scoped:
+        scoped.setattr(proj_mod, "_TEST_SESSION_ACTIVE", False)
+        proj_mod._record_current_test_stem("test_redirect_seam")  # refused
+        assert proj_mod._inherited_test_stem() is None, \
+            "prod parity broken: record accepted outside an active session"
 
     # (b) install idempotence: conftest installed the wrapper at session
     # start (install_thread_stamp called after _TEST_SESSION_ACTIVE=True),
-    # the marker is set, and re-invoking the installer is a no-op. The verdict
-    # is wrapper-AWARE — `Thread.start is _thread_start_inherit_stem` is false
-    # the moment the real Sentry SDK's ThreadingIntegration wraps it (#11354).
-    violations = _thread_start_stamp_violations()
-    assert not violations, "\n".join(violations)
+    # the marker is set, and re-invoking the installer is a no-op. The check is
+    # CHAIN-based, not identity-based: a vendor integration may legitimately
+    # wrap Thread.start on top of our stamp, and `@wraps` copies our name onto
+    # it, so identity (and any name/module test) reports a double wrap that
+    # never happened (#11430).
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
+        "Thread.start stamp not installed in the test session"
+    problems = _stamp_problems(threading.Thread.start)
+    assert problems == [], f"Thread.start stamp invariant broken: {problems}"
+
+    # The probe below is only meaningful with the installer ARMED — the whole
+    # tautology this replaces came from an unscoped `_TEST_SESSION_ACTIVE =
+    # False`, under which the installer body cannot run even with the marker
+    # guard deleted. Assert the arming, so the premise cannot silently vanish.
+    assert proj_mod._TEST_SESSION_ACTIVE is True, \
+        "installer is not armed: the re-invocation probe below would be vacuous"
+    assert os.environ.get("TORTOISE_TEST_MODE") == "1", \
+        "TORTOISE_TEST_MODE is not set: the installer would refuse for the wrong reason"
+
+    # The re-invocation probe is made FALSIFIABLE, not self-comparing: point
+    # the installer's own install target at a distinguishable function, so a
+    # re-run of the installer BODY is observable at all. Under the marker guard
+    # the body cannot run; with the guard deleted the body installs the
+    # sentinel and the assertion below fails.
+    live_stamp = proj_mod._thread_start_inherit_stem
+    sentinel = types.FunctionType(
+        live_stamp.__code__, live_stamp.__globals__, _STAMP_NAME)
+    monkeypatch.setattr(proj_mod, "_thread_start_inherit_stem", sentinel)
+    before_obj = threading.Thread.start
+    # Restore Thread.start if the body DID run: `install_thread_stamp` assigns
+    # the class attribute directly, so a failure here would otherwise leave the
+    # sentinel installed for every later test in the shard.
+    monkeypatch.setattr(threading.Thread, "start", before_obj)
+
+    proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
+    # The falsifier: the installer BODY did not run. Deliberately NOT an
+    # identity assert on Thread.start — a vendor integration may legitimately
+    # repaint stdlib at any moment (sentry's `@wraps` wrapper), and an identity
+    # check would then red for a reason that has nothing to do with the marker.
+    assert threading.Thread.start is not sentinel, \
+        "re-invoked installer installed a fresh stamp — the class marker guard is gone"
+
+
+def test_the_double_wrap_verdict_reads_the_CHAIN_not_the_identity():
+    """#11430: the two states the removed identity assert confused.
+
+    The assert was `threading.Thread.start is proj_mod._thread_start_inherit_stem`,
+    with the message "installer re-ran without the marker guard". It is wrong in
+    both directions:
+
+    (1) FALSE RED — a vendor wrapper over a healthy stamp. Once any test
+        initialises the real ``sentry_sdk``, its ``ThreadingIntegration``
+        replaces ``Thread.start`` with ``@wraps(old_start) def sentry_start(...)``
+        over our stamp. Our installer never re-ran; the stamp still runs first.
+        This is the measured `test (b)` red of the #11368 run (job
+        128410663087), reproduced by running
+        `tests/test_11092_sentry_loop_stall.py tests/test_redirect_seam.py` in
+        ONE pytest process.
+    (2) FALSE GREEN — a genuine double wrap. After a module reload the reloaded
+        module captures ``_ORIG_THREAD_START = Thread.start`` (the PREVIOUS
+        stamp). The reload alone cannot stack anything: it also resets
+        ``_TEST_SESSION_ACTIVE`` and the class marker survives, so the installer
+        is a no-op for two reasons. Clearing the marker AND re-arming the flag
+        (what a test must do to reach it) then installs the reloaded module's
+        stamp ON the old one — ``Thread.start`` is that new function, so
+        identity is TRUE and the check the message promised cannot see it; a
+        chain-length check does. A PLAIN reload with no re-install is worse
+        still — it rewrites the installed stamp's delegate to ITSELF, so the
+        count stays 1, only reachability sees it, and ``Thread.start()``
+        recurses.
+    """
+    links = _stamp_links(threading.Thread.start)
+    assert len(links) == 1, links
+    stamp = links[0]
+
+    # (1) the VENDOR shape: `functools.wraps` copies our name AND module onto the
+    # vendor's function, exactly as sentry_sdk's integration does.
+    @functools.wraps(stamp)
+    def sentry_start(self, *a, **k):  # pragma: no cover - shape, never called
+        return stamp(self, *a, **k)
+
+    assert sentry_start.__name__ == _STAMP_NAME
+    assert sentry_start.__module__ == "tortoise.projection"
+    assert sentry_start is not stamp, "the removed identity assert called this a double wrap"
+    vendor_problems = _stamp_problems(sentry_start)
+    assert vendor_problems == [], \
+        f"a vendor wrapper over a healthy stamp is not a double wrap: {vendor_problems}"
+
+    # (2) the GENUINE double wrap: a stamp whose `_ORIG_THREAD_START` is the
+    # previous stamp — the state a reload + re-install creates.
+    reloaded = types.FunctionType(
+        stamp.__code__,
+        {"__name__": "tortoise.projection", "_ORIG_THREAD_START": stamp},
+        _STAMP_NAME,
+    )
+    assert _is_stamp(reloaded) and reloaded is not stamp
+    problems = _stamp_problems(reloaded)
+    assert problems, "a stamp stacked on a stamp MUST be reported as a double wrap"
+    assert any("double wrap" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("shape", ["plain", "wrapped_delegate", "cycle"])
+def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
+    """#11430 review P1s: the three shapes the one-hop ``__wrapped__`` walk missed.
+
+    ``plain`` — a plain delegating wrapper (no ``@wraps``, so no ``__wrapped__``)
+    that DOES call our stamp: the one-hop walk saw no stamp and reported "never
+    installed", a FALSE RED. It is a legitimate wrapper and must be tolerated.
+
+    ``wrapped_delegate`` — the reload-in-vendor-order state: a stamp whose
+    ``_ORIG_THREAD_START`` is a ``@wraps`` wrapper *over* the previous stamp.
+    The one-hop arm tested only the immediate delegate, found the vendor wrapper
+    (not a stamp) and reported nothing while ``Thread.start()`` recursed. The
+    stamp must be found by REACHABILITY.
+
+    ``cycle`` — a delegate graph that revisits a frame: every length check still
+    passes and ``start()`` never returns, so the cycle itself must be a
+    violation.
+    """
+    links = _stamp_links(threading.Thread.start)
+    assert len(links) == 1, links
+    stamp = links[0]
+
+    if shape == "plain":
+        def plain_wrapper(self, *a, **k):  # pragma: no cover - shape, never called
+            return stamp(self, *a, **k)
+
+        assert _stamp_links(plain_wrapper) == [stamp], \
+            "a plain wrapper that CALLS our stamp must not read as 'never installed'"
+        assert _stamp_problems(plain_wrapper) == [], _stamp_problems(plain_wrapper)
+        return
+
+    if shape == "wrapped_delegate":
+        @functools.wraps(stamp)
+        def vendor_start(self, *a, **k):  # pragma: no cover - shape, never called
+            return stamp(self, *a, **k)
+
+        # The reloaded module captures `Thread.start` — here the vendor wrapper
+        # over the previous stamp — as its delegate, then installs on top.
+        reloaded = types.FunctionType(
+            stamp.__code__,
+            {"__name__": "tortoise.projection", "_ORIG_THREAD_START": vendor_start},
+            _STAMP_NAME,
+        )
+        problems = _stamp_problems(reloaded)
+        assert any("double wrap" in p for p in problems), problems
+        return
+
+    # self-revisit: the state a PLAIN `importlib.reload` creates. The module
+    # body re-executes in the SAME `__dict__`, so `_ORIG_THREAD_START =
+    # Thread.start` rewrites the already-installed stamp's delegate to ITSELF.
+    # This is fact 2's unique domain — the stamp count stays 1, so the length
+    # arm is silent and only reachability can see it.
+    own = {"__name__": "tortoise.projection"}
+    self_revisiting = types.FunctionType(stamp.__code__, own, _STAMP_NAME)
+    own["_ORIG_THREAD_START"] = self_revisiting
+    assert _stamp_links(self_revisiting) == [self_revisiting], \
+        "a self-revisit must still count as ONE stamp"
+    path = _delegation_path(self_revisiting)
+    assert len(path) == 2 and path[0] is path[1], \
+        f"the walk must terminate on the revisit, keeping it once: {path}"
+    problems = _stamp_problems(self_revisiting)
+    assert any("double wrap" in p for p in problems), problems
+
+    # two stamps delegating to each other: the length arm catches it, and the
+    # message is emitted ONCE, not once per stacked stamp.
+    first = types.FunctionType(
+        stamp.__code__, {"__name__": "tortoise.projection"}, _STAMP_NAME)
+    second = types.FunctionType(
+        stamp.__code__,
+        {"__name__": "tortoise.projection", "_ORIG_THREAD_START": first},
+        _STAMP_NAME,
+    )
+    first.__globals__["_ORIG_THREAD_START"] = second
+    two_stack = _stamp_problems(second)
+    assert any("double wrap" in p for p in two_stack), two_stack
+    assert len(two_stack) == len(set(two_stack)), f"duplicate violations: {two_stack}"
