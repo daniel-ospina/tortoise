@@ -5766,15 +5766,20 @@ def test_an_ITEM_whose_own_content_is_a_NESTED_LIST_leaves_NO_paragraph():
             `issue_process_lint.claims()` returned `closing: [100]` — a false PASS in arm 1 of the
             gate this module feeds.
 
-    ⚠️ THE TRADE, measured rather than assumed. Taking the answer for an ITEM too costs a LOST close
-    on the sibling spelling, where the item's own content IS a paragraph:
+    ⛔ THE DISCRIMINATOR IS THE LINE'S OWN CONTENT, NOT THE CONTAINER. Gating the lazy answer on
+    `container is None` was measured first and FALSIFIED: it disables the answer for EVERY item-held
+    paragraph, so a BLANK item — which §5.2 says cannot interrupt a paragraph — stopped being a
+    continuation and the renderer's real close was dropped in ALL FOUR arms:
 
-        `- x` + `  2. -` + `  2.     Closes #100`     renderer ONE `<p>` -> PROSE
+        `- item` + `  1.` + `  2.     Closes #100`     renderer ONE `<p>` -> PROSE
+            `origin/main` `[100]` in every arm; that form blanked it
 
-    `origin/main` loses that one too, so this is a return to main's answer, not a new loss. On a
-    450-body family (10 first lines x 9 bare-marker spellings x 5 tails) the ITEM arm goes from
-    **4 new fail-opens to 0**, and lost closes stay strictly below `origin/main`'s (4 vs 31 lenient,
-    13 vs 31 `strict`). The top-level CONTROL is the neighbouring test's body and must stay `[100]`.
+    33 such bodies on a 3,520-body grid, 10 of them in all four arms. Requiring the line to carry
+    content of its own keeps those lazy (the empty-content rule answers them, as round 40 recorded)
+    while an item whose content IS a marker falls through to the ladder. Measured on a 5,376-body
+    grid, all four arms: **0 new fail-opens and 0 new lost closes against `origin/main`**
+    (`d69faaf38e1`). The top-level CONTROL is the neighbouring test's body and must stay `[100]`;
+    `- item` + `  1.` + the marker is the BLANK-item control and must stay `[100]` in every arm.
     """
     cl = _load_module()
     md = MarkdownIt("commonmark")
@@ -5793,10 +5798,22 @@ def test_an_ITEM_whose_own_content_is_a_NESTED_LIST_leaves_NO_paragraph():
 
     assert ipl.claims(body)["closing"] == [], body
 
-    # CONTROL — the top-level spelling the round-52 fix exists for, unchanged.
+    # CONTROL 1 — the top-level spelling the round-52 fix exists for, unchanged.
     control = "Notes\n2. -\n2.     Closes #100\n"
     assert keyword_types(control) == {"inline"}, control
     assert cl.parse_closing_refs(control) == [100], control
+
+    # CONTROL 2 — a BLANK item cannot interrupt a paragraph (§5.2), so it stays a lazy continuation
+    # and the real close survives. This is the assertion that falsified the `container is None` form
+    # of the fix (round-55 re-review, P1): that form blanked it in all four arms, where `origin/main`
+    # credits it and the renderer says PROSE.
+    for control in ("- item\n  1.\n  2.     Closes #100\n",
+                    "- a\n  2. \n  2.     Closes #100\n"):
+        assert keyword_types(control) == {"inline"}, control
+        assert cl.parse_closing_refs(control) == [100], control
+        assert cl.parse_closing_refs(control, None, strict=True) == [100], control
+        assert "#100" in cl.strip_code(control, indented_code=True), control
+        assert ipl.claims(control)["closing"] == [100], control
 
 
 def test_the_leaf_veto_reads_the_PARAGRAPHS_depth_not_the_last_lines():

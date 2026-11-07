@@ -1341,23 +1341,27 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # The empty-content test fired first and reported "no paragraph open", so the wide-gap marker
     # below opened its own list and the real close was blanked. The round-39 empty-content rule still
     # holds for a BULLET (`- ` + `  2.      Closes #100`), which `_lazy_push` never answers true for.
-    # ⛔ …BUT ONLY FOR A TOP-LEVEL PARAGRAPH (`container is None`). When an ITEM holds the
-    # paragraph, `_is_lazy_marker`'s `line_col >= container.rest_col` arm answers from the OUTER
-    # item's content column, and an item whose own content is itself a LIST has its paragraph one
-    # level DEEPER — so the line is answered lazy where the renderer put a `<pre><code>` (round-55
-    # review, P0 — a FAIL-OPEN in BOTH arms, `strict` included, i.e. a false PASS in
-    # `issue_process_lint`'s arm 1):
+    # ⛔ …BUT NOT WHEN AN ITEM HOLDS THE PARAGRAPH *AND* THE LINE CARRIES ITS OWN CONTENT. The
+    # lazy test's `line_col >= container.rest_col` arm measures against the OUTER item's content
+    # column, so an item whose own content is itself a bare marker answers "continuation" and the
+    # ladder below — the only thing that knows that item holds no paragraph — never runs:
     #     `* - x` + `   2. -` + `  2.     Closes #100`
     #         renderer: the `- x` list is nested INSIDE the `*` item, so its paragraph lives at the
     #         nested content column; the marker line below is a `code_block` -> CODE
     #         `origin/main` `[]` both arms; the round-52 head credited `[100]` in both, and
     #         `issue_process_lint.claims()` returned `closing: [100]` — the arm-1 false PASS
-    # The cost of taking this answer for an ITEM too is a LOST close on the sibling spelling, where
-    # the item's own content IS a paragraph (`- x` + `  2. -` + `  2.     Closes #100`, renderer ONE
-    # `<p>`): `origin/main` loses it too, so this is a return to main's answer, not a new loss —
-    # measured on a 450-body family, the ITEM arm goes 4 new fail-opens -> 0 while lost closes stay
-    # strictly below `origin/main`'s (4 vs 31 lenient, 13 vs 31 `strict`).
-    if lazy_marker and container is None:
+    # ⛔ THE DISCRIMINATOR IS THE LINE'S OWN CONTENT, NOT THE CONTAINER (round-55 review, P1 — the
+    # `container is None` form I measured first was FALSIFIED: it disables the lazy answer for EVERY
+    # item-held paragraph, so a BLANK item — which §5.2 says cannot interrupt a paragraph — stopped
+    # being a continuation and a real close was dropped in ALL FOUR arms, where `origin/main`
+    # credits it and the renderer says PROSE):
+    #     `- item` + `  1.` + `  2.     Closes #100`      renderer ONE `<p>`; `origin/main` `[100]`
+    # 33 such bodies on a 3,520-body grid, 10 of them in all four arms. Gating on "this line has
+    # content of its own" keeps those lazy (the empty-content rule is what answers them, as round 40
+    # recorded) while an item whose content IS a marker falls through to the ladder, which is the
+    # fact the round-51 P0 needed. Measured on the same grid: lost closes vs `origin/main` 206 -> 0,
+    # fail-opens unchanged, and the `* - x` body stays `[]` in every arm.
+    if lazy_marker and (container is None or not body.strip()):
         return False
     # ⛔ §4.4 COMES BEFORE THE LEAF TESTS, NOT AFTER THEM (round 50 — the ordering half of the
     # finding that kept the WIP arm from blanking a paragraph's own text). "An indented code block
