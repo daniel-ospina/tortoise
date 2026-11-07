@@ -5250,7 +5250,13 @@ class Test4051ChargeCoversTheLoopShape:
                            entities=[], provenance_refs=[])
         payload = CommitPayload(**{**raw, "client_commit_id": "0" * 64})
         charge = commit_ingest_charge_bytes(payload)
-        assert charge == declared_commit_write_count(payload) * 1024
+        assert charge == declared_commit_write_count(payload) * 1024, (
+            f"the charge for the `points: []` spend payload is {charge} B, not "
+            f"the node floor "
+            f"{declared_commit_write_count(payload) * 1024} B — this leg's "
+            "PREMISE is that the floor is the whole bound, so if a payload "
+            "term won here the `used == charge` observation below would be "
+            "measuring a different quantity than the one it claims")
 
         # A ONE-BYTE-tight boundary: two charges cannot fit.
         monkeypatch.setattr(
