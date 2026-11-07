@@ -2804,21 +2804,33 @@ undone.
   window and hold deploys to `main` until it merges. The reverse order is not a fix
   either — an entry for a name still on Fly fails the deploy
   (`MITIGATION NOT IN EFFECT`).
-- **A failed run can leave a PENDING stage — detected, but in the bypassable class.**
-  The sync step uses `flyctl secrets set --stage`, so a run that stages a name and then
-  fails before `flyctl deploy` leaves the change pending. **Settled** (the ledger header
-  recorded this as `Unverified`): `flyctl secrets list --json` — the source this gate
-  reads — lists a staged secret as present, with a `Staged` deployment status
-  ([fly secrets list](https://fly.io/docs/flyctl/secrets-list/)), so the gate's
-  presence check SEES it and an entry for that name fails the run with `MITIGATION NOT
-  IN EFFECT`. That red lands before the stage can be applied, because the provenance
-  gate runs ahead of `flyctl deploy` in the same `deploy-api` job, and ahead of the
-  `Set all app secrets on Fly.io` staging step. ⛔ But it is **exit 1**, the `skip-fly-secret-provenance` class: an
-  operator arming that bypass for an unrelated stale declaration applies the pending
-  value silently, and the entry also freezes rotation while it stands. Clear the stage
-  before re-running (`flyctl secrets unset <NAME> -a tortoise-y4mjjq`, then confirm
-  `flyctl secrets list` shows no `Staged` entry for the name) instead of bypassing.
-  Nothing in this repo reads or clears pending staged state.
+- **A failed run can leave a PENDING stage — seen by the NEXT run, not prevented.**
+  The sync step uses `flyctl secrets set --stage`, which writes the vault and defers
+  the Machine update. A run that stages a name and then fails before `flyctl deploy`
+  leaves the change pending — and Fly documents what the stage means, which is *not*
+  "it takes a deploy": *the staged secret will be available only on Machines that are
+  started or updated after the `fly secrets set` command was run*
+  ([fly secrets](https://fly.io/docs/apps/secrets/)), because secrets are read from the
+  vault at boot. This app pins `auto_start_machines = true` (§6.2) as its self-heal
+  path, so a Machine that stops — host failure, crash-loop give-up, an operator stop —
+  starts again on the next request and boots **with** the staged secret. That re-arms
+  the mitigation with **no deploy and no run**, before any gate sees it. **Settled**
+  (the ledger header carried this as the one path it had not closed): `fly secrets
+  list --json` — the source this gate reads — lists a staged secret by name (the
+  `Staged` deployment status is what the CLI's own table shows), so the NEXT run's
+  presence check SEES it
+  and an entry for that name fails the run with `MITIGATION NOT IN EFFECT`, ahead of
+  that run's `flyctl deploy` and ahead of the `Set all app secrets on Fly.io` staging
+  step. ⛔ That red is on the next run, and it is **exit 1**, the
+  `skip-fly-secret-provenance` class: an operator arming that bypass for an unrelated
+  stale declaration applies the pending value silently, and the entry also freezes
+  rotation while it stands. Clear the stage before re-running
+  (`flyctl secrets unset <NAME> --stage -a tortoise-y4mjjq`, then
+  `flyctl secrets deploy -a tortoise-y4mjjq`, and confirm `flyctl secrets list` shows
+  no staged entry for the name) instead of bypassing. ⛔ Clearing it is a secret-set
+  change and restarts the sole Machine — an ~85 s zero-healthy-instance window (§6.2)
+  — so do it deliberately, in a window. Nothing in this repo reads or clears pending
+  staged state.
 - **`reason` is a review note, never the value.** The ledger is tracked and public,
   and the gate prints every entry's `reason` on each deploy.
 - **A lapsed entry KEEPS suppressing on purpose.** Silently re-arming on a date

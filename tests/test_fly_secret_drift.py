@@ -3238,8 +3238,11 @@ class TestTheMitigationLedger:
             + proc.stdout
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        # …and it READ the shipped ledger rather than falling back to something else:
-        # the gate names the file it read and how many entries it acted on.
+        # …and the gate named the shipped file it read and how many entries it acted
+        # on. That pins "the gate read the shipped LEDGER", not "the seam was
+        # honoured": REAL_LEDGER is the same path as the gate's DEFAULT_LEDGER, so this
+        # line reads identically if a seam were ignored. The seam itself is pinned by
+        # `test_the_DEFAULT_ledger_path_is_the_one_production_takes`.
         assert f"{len(ledgered)} mitigated by {REAL_LEDGER.name}" in proc.stdout, proc.stdout
 
         # ── non-vacuity: the same assertion about the SAME real workflow, with only
