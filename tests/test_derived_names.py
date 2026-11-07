@@ -828,7 +828,20 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # `names`. A name computed at RUN time (`getattr(mod, "Falkor"+"DB")`) is not
     # statically closable and is deliberately out of scope, stated rather than
     # silently missed.
-    for m in _FROM_ANY_IMPORT.finditer(masked):
+    #
+    # ⛔ The finditer runs over a CONTINUATION-NORMALISED copy. `[^\n\\]*` stops
+    # at a backslash, so a BACKSLASH-JOINED alias resolved NOTHING — and unlike
+    # `_RAW_CLIENT_IMPORT`, whose unreadable forms gate OPEN, this loop has no
+    # fallback: it just contributes no name. `from tortoise import \\⏎
+    # FalkorDB as C` (and the paren form, where the leading `\\` became
+    # `bits[0]`) left `C(` outside the site pattern while the mention test
+    # passed on the raw `FalkorDB` — so the block read CLEAN (measured:
+    # `sites=0`, `violations=[]`, both shapes). The `\\`+newline pair is replaced
+    # by TWO SPACES, which is length-preserving, so nothing downstream (offsets)
+    # moves; the loop reads only the match's GROUPS. Zero site-count change over
+    # the corpus (measured, both populations).
+    normalised = masked.replace("\\\n", "  ")
+    for m in _FROM_ANY_IMPORT.finditer(normalised):
         group = m.group("paren") if m.group("paren") is not None else m.group("bare")
         for part in (group or "").split(","):
             bits = part.split()
@@ -2245,8 +2258,13 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         # mention test sent the whole file to `return []`. Measured before that
         # fix: `sites=0`, `violations=[]` for a real unowned, un-journaled DETACH.
         # `tortoise/__init__.py` documents this as the public spelling and
-        # `tests/` uses it 28 times. Since round 11 this case is resolved by
-        # `_FROM_ANY_IMPORT`, so it pins THAT loop (see the case below).
+        # `tests/` uses it 28 times. ⛔ It pins NEITHER mechanism alone (#11217
+        # round-13 P3: this comment claimed it pinned `_FROM_ANY_IMPORT`, and a
+        # loopless copy measured it STILL RED): the raw `FalkorDB` mention opens
+        # the gate, and the conventional `FalkorDB` name the site pattern always
+        # adds matches the call — so it stays red with the loop removed AND with
+        # the mention alternative reverted. It is kept as the documented public
+        # spelling, not as a pin; the ALIASED case below is what pins the loop.
         "re-export from tortoise": (
             "from tortoise import FalkorDB\n", "FalkorDB"),
         # ...and the SAME shape under a RENAMED import. Round-11 P2: the plain
@@ -2271,6 +2289,19 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
             "from . import FalkorDB as C\n", "C"),
         "re-export, RELATIVE (dotted), aliased": (
             "from .tortoise import FalkorDB as C\n", "C"),
+        # ...and the BACKSLASH-JOINED spellings of the aliased re-export (#11217
+        # round-13 P2). `[^\n\\]*` stops at the continuation backslash, so the
+        # bare form resolved no name at all, and in the paren form the leading
+        # `\\` became `bits[0]` and the part was skipped — both left `C(`
+        # outside the site pattern while the mention test passed on the raw
+        # `FalkorDB` (measured: `sites=0`, `violations=[]`). The unaliased
+        # backslash forms were already covered by the conventional name; the
+        # aliased ones were not. Both are legal Python and both are real
+        # spellings of an import that black/isort will produce at 88 columns.
+        "re-export, BACKSLASH-joined, aliased": (
+            "from tortoise import \\\n    FalkorDB as C\n", "C"),
+        "re-export, BACKSLASH-joined PARENTHESISED, aliased": (
+            "from tortoise import (\\\n    FalkorDB as C,\n)\n", "C"),
         # ⛔ THE TWO CASES ABOVE PIN `_FROM_ANY_IMPORT`, NOT THE FILE-LEVEL
         # MENTION TEST — because resolving `names` there makes `gated` True, so
         # the mention test is never reached for them (round-12 P2: reverting the
