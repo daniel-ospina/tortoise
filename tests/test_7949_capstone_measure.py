@@ -5105,10 +5105,19 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
     1. §10.9's "New value" quotes all four current numbers, so reverting BOTH live
        §11 sentences stayed GREEN (`1 passed`, measured). `_without_change_history`
        fixes it.
-    2. Even with history stripped, `` `if items:` `` has TWO live carriers — the §7
-       index row (`:757`) and §11.3's prose sentence (`:1145`) — so reverting the
-       prose alone still left the row satisfying the pin. Every live carrier is now
-       bound to both gates, which is why `_live_blocks` exists.
+    2. Even with history stripped, `` `if items:` `` has TWO live carriers — the §9
+       provenance row (`:757`) and §11.1's prose sentence (`:1145`) — so reverting
+       the prose alone still left the row satisfying the pin. Every live carrier is
+       now bound to both gates, which is why `_live_blocks` exists.
+
+       The section labels here were wrong in an earlier round of this PR and are
+       pinned to the document's own headings rather than to a memory of it: `## 9.
+       Provenance of every number in this file` opens at `:744` (so the table row at
+       `:757` is §9, not §7 — §7 ends at `:703`, where `## 8.` opens), and `### 11.1`
+       opens at `:1141` (so `:1145` is §11.1, not §11.3 — §11.3 opens at `:1173`). The
+       other §11.3 reference in this docstring, the fail-open pair at `:1189-1195`,
+       IS §11.3 and is unchanged. A wrong label is not cosmetic here: the whole point
+       of this leg is that a reader can go and LOOK at the carrier.
 
     The fail-open pair needs no per-carrier loop, and that is measured rather than
     assumed: after the strip, `:12921` and `:13068` each occur in exactly ONE live
@@ -5154,7 +5163,7 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             f"`return items`) — a range that runs past the body names the next "
             "function's lines")
         # ⛔ EVERY LIVE CARRIER MUST NAME BOTH GATES, not just one of them anywhere
-        # in the file. With two live carriers (the §7 index row and §11.3's prose)
+        # in the file. With two live carriers (the §9 provenance row and §11.1's prose)
         # a single whole-document check is satisfied by whichever one is correct,
         # so a stale prose cite rode the row's numbers (measured: reverting the
         # prose alone left this leg `1 passed` at `6c7a15f2a5`).
