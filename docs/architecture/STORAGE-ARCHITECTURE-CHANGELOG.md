@@ -1777,12 +1777,12 @@ is the record for:
   and its replay materialises no node — a `PointAdded` there re-created the turn nodes on every
   rebuild, i.e. a rebuild that undid this placement (`#10067`).
 - **The row.** The carrier states its turn rows itself — `_turn_row_statements`
-  (`tortoise/record_projection.py:3901`), one `public.point` row per snapshot at
+  (`tortoise/record_projection.py:5172`), one `public.point` row per snapshot at
   `cache_tier = 'record_only'`, the tier from the record TYPE's declaration and never from a payload.
   Doing it in the PROJECTION rather than at the writer is what keeps `record == replay(journal)`:
   the live write and a record rebuilt from the same journal run the same statement.
 - **The fold.** The carrier's graph fold is nothing (`_NO_PROJECTION_FOLD`,
-  `tortoise/projection/__init__.py:7492`), so neither replay engine can re-create a turn the graph
+  `tortoise/projection/__init__.py:7625`), so neither replay engine can re-create a turn the graph
   deliberately does not hold — the `#3316` RESURRECTION class, refused at the declaration.
 - **The change feed.** The carrier is deliberately NOT in `sdk._GRAPH_EVENT_TYPES`, so an armed
   capture's turns leave `poll_events`: a `:GraphEvent` for a turn the writer deliberately skipped
@@ -1797,8 +1797,8 @@ is the record for:
   refusing the tail would cost the whole journal while recovering nothing. The R1 removal record
   (`EntityMutated` op=delete) stays REFUSED, because a tolerated torn delete is a resurrection.
 - **The tenant.** The store decision asks the tenant the SEAM will file under, not the ambient one:
-  `record_tenant_effective` (`tortoise/record_writer.py:842`) is **carried > scope > env pair**, and
-  `is_usable_tenant` (`tortoise/record_writer.py:875`) is the seam's own admissibility test, so the
+  `record_tenant_effective` (`tortoise/record_writer.py:889`) is **carried > scope > env pair**, and
+  `is_usable_tenant` (`tortoise/record_writer.py:922`) is the seam's own admissibility test, so the
   decision that picks the store and the write that fills it cannot disagree about who the row
   belongs to. A write the record cannot attribute keeps the turns in the graph, and a scratch buffer
   is not a journal.
