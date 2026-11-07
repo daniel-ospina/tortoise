@@ -19037,7 +19037,7 @@ def test_cache_evict_runs_on_a_tools_only_change():
 
 def test_entry_point_guard_census_runs_on_a_tools_only_change():
     # #11320: `tests/test_entry_point_python_guard.py` (registered
-    # `core`) is the census that holds EVERY `tools/` entry point's #5128
+    # `core`) is the census that holds every GUARDED `tools/` entry point's #5128
     # interpreter guard — it EXECs the guard node with `sys.version_info` faked
     # to (3, 9, 6), so a dropped refusal reds it. `tools/` is a flat
     # NON_PYTHON_PREFIXES entry and `tools/test_design_map_check.py` matched no
