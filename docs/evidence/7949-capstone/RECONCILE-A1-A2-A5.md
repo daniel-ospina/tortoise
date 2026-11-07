@@ -68,11 +68,14 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
 `hasPart` (`tortoise/extractor_v2.py:1720`). It does **not** discharge A1: it is **transport only** —
-nothing in the tree consumes `result["relations"]` (`extractor_v2.py:10702`), and materialising them as
-Object→Object edges is **`#11237`** (OPEN). What it *does* change is this record's evidence surface: the
-bare token count of the three edge-creating verbs prints **4** on `origin/main` and **0** at the base,
-because #11205's own explanation names `sdk.create_operator` in four comments
-(`extractor_v2.py:8892/8910/8917/9231`). The **calls** are still absent, so §1's second reason stands
+nothing in the tree consumes `result["relations"]` (`extractor_v2.py:10815`, and
+`git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
+materialising them as Object→Object edges is **`#11237`** (OPEN). What it *does* change is this record's
+evidence surface: the bare token count of the three edge-creating verbs prints **4** on `origin/main`
+and **0** at the base, because #11205's own explanation names `sdk.create_operator` in four comments —
+`git grep -n 'create_operator' -- tortoise/extractor_v2.py` prints exactly four, `:8938`, `:8956`,
+`:8963` and `:9343` at the head this record was last re-pointed at, and none of them is a call. The
+**calls** are still absent, so §1's second reason stands
 unchanged; §1 and §5 therefore now carry the call-shaped command, which a comment cannot satisfy. That
 is §7's lesson one merge later: **a count is only as good as the base it was taken at.**
 
