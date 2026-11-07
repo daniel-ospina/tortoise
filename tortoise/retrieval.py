@@ -815,15 +815,15 @@ def session_key_of(hit: dict) -> str:
     therefore have a group key this stripped key can never equal, so the
     seed would be spent and its group DROPPED (groups are built over
     ``seed_order``: ``session_reinjection.reinjection_merge_order``) — the
-    strip would CAUSE that, not prevent it. What makes it unreachable is the
-    WRITER'S SPELLING, not the index: #9599 indexes the TRIMMED term, so a
-    padded ``:Session`` IS findable by its trimmed spelling — the engine's
-    own record says a padded row had no findability by its own spelling and
-    gains it by the trimmed one. So every writer that names the id TRIMMED
-    wires the ``CONTAINS`` edge onto a padded node, and the fetch then
-    returns the RAW padded key. It is unreachable only while every writer
-    spells the id exactly as stored. #9599's normalise-both-sides decision
-    is therefore not moot, and this strip is no substitute for it.
+    strip would CAUSE that, not prevent it. Reachability turns on BOTH the
+    engine's seek form and the writer's spelling — the two forms answer
+    OPPOSITE seeks (``sdk.py``: index SERVED holds the TRIMMED term, so a
+    padded node is found only by the trimmed spelling; index ABSENT compares
+    STORED bytes, so it is found only by its padded spelling). A group key
+    therefore comes back RAW whenever a writer's spelling MATCHES the node:
+    trimmed while served, or stored-bytes while scanning. Unreachable only
+    when the index is served AND every writer spells the id as stored.
+    #9599's normalise-both-sides decision is not moot, and not a rider here.
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all
@@ -2379,7 +2379,7 @@ def _session_admission_key(
     ``session_diverse_order`` / ``reinjection_merge_order`` only dict-key it,
     and dict-keying is safe only for a HASHABLE non-``str`` (``5``,
     ``True``): a TRUTHY unhashable (``[1]``/``{1: 2}``) raises ``TypeError``
-    there too, measured; a whitespace-only snake id (the
+    there too, measured); a whitespace-only snake id (the
     pool keys it RAW because it is truthy, while this grain DISCARDS it
     rather than stripping); a WIRE id that
     spells the ``idx:`` namespace — ``_SAFE_SESSION_TAG_RE`` permits ``:``,

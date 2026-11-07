@@ -811,8 +811,8 @@ def test_the_agreement_with_the_pool_authority_is_scoped_to_identified_hits():
                "lme_session_index": 3}):
         # ⚠️ This branch mirrors `_session_admission_key`'s OWN index
         # predicate (`isinstance(int)`, not a bool, `>= 0` —
-        # `retrieval.py:2401`), NOT the pool's index leg, which is
-        # `lme_session_index is not None` (`retrieval.py:834-836`, no type
+        # `retrieval.py:2402`), NOT the pool's index leg, which is
+        # `lme_session_index is not None` (`retrieval.py:837-839`, no type
         # check, no bool exclusion, `-1` included). Keeping the two apart is
         # the whole comparison: an `-1`/`"3"`/bool fixture belongs with the
         # DIVERGENCE cases above and would red this else-branch rather than
