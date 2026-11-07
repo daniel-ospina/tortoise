@@ -5804,16 +5804,19 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                     #    `ff6379eb2`."        ACCEPTED here, REFUSED by `1895c94a7`
                     #                            AND by `origin/main`.
                     # Requiring the co-reference to START A SENTENCE distinguishes a full
-                    # stop from `i.e.`/`e.g.`/`cf.` without maintaining a closed list of
-                    # abbreviations (a list would be the same spelling-keyed bet this
-                    # predicate keeps losing). The abbreviation SENTINEL is the primitive
-                    # `_sentence_tail_hard` already uses (`_ABBREVIATION_PERIOD`), so this is
-                    # one definition with two callers, not a second spelling list — and it
-                    # is CASE-INDEPENDENT, which the first cut of this rule was not
-                    # (#11191 review r26, P2/P3 — MEASURED both ways: keying on
-                    # `isupper()` ACCEPTED `…, i.e. The commit for #9601, is `ff6379eb2`.`
-                    # while `origin/main` refuses it, and REFUSED a lower-case sentence
-                    # start that `origin/main` accepts).
+                    # stop from an ABBREVIATION's period. ⛔ A CLOSED LIST **IS** MAINTAINED
+                    # (`_ABBREVIATION_PERIOD`: `i.e.|e.g.|viz.|cf.|vs.`) — the first cut of
+                    # this comment claimed the opposite, and the claim was false as well as
+                    # self-contradicting (#11191 review r27, P2 — MEASURED: an UNLISTED
+                    # abbreviation followed by a lower-case word is read as a sentence
+                    # boundary, so `…, etc. the commit for #9601, is `ff6379eb2`.` and the
+                    # `No.`/`resp.`/`al.`/`fig.` spellings are ACCEPTED here while
+                    # `90dfbb1a8` and `origin/main` both REFUSE them — 60 generated rows,
+                    # recorded as `_unlisted_abbreviation_known_open` below). The list is a
+                    # spelling bet like any other; what makes it defensible here is that it
+                    # is the SAME five-member list the file already used for
+                    # `_sentence_tail_hard`, so this arm adds no NEW spelling surface, and
+                    # the residue is pinned rather than left silent.
                     _opens_clause = bool(
                         not _before.strip()
                         or re.search(
@@ -5834,10 +5837,11 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                         # equivalence restated. Row 1 is accepted by `origin/main` AND by
                         # `1895c94a7` (a regression the last push introduced); row 2 is
                         # accepted by `origin/main` but was REFUSED by `1895c94a7`, i.e. a
-                        # false RED the branch had already carried since r23 — both are
-                        # REFUSED here and are closed by the deletion below (#11191 review
-                        # r26, P3 — this line said BOTH were accepted by `1895c94a7`, which
-                        # the measurement does not support):
+                        # false RED the branch had already carried since r23 — both were
+                        # REFUSED by r24's bound and are CLOSED by its deletion below
+                        # (#11191 review r26, P3 — this line said "are REFUSED here",
+                        # which is present-tense false at this head: the rows are
+                        # ACCEPTED, which is the whole point of deleting the bound):
                         #   "…is false; the tree is `047c91f7a`, and the commit for #9601
                         #    is `ff6379eb2`; the census at `ff6379eb2` returned 5 lines."
                         #   "…is false; the true tree is `047c91f7a`, while the commit for
@@ -7518,7 +7522,8 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
         f"e.g. the #9601 merge, is `{_FALSE_TREE}`.",
         # …and the SAME label spelling behind `i.e.` (#11191 review r26, P2 — MEASURED):
-        # the r25 fix closed `i.e. THE COMMIT FOR #9601` (the subject `_COREF_ASSERTS_FALSE`
+        # the r25 fix closed the lower-case `i.e. the commit for #9601` spelling (the
+        # subject `_COREF_ASSERTS_FALSE`
         # can see); the `the #<n> merge` label is invisible to it whatever the abbreviation,
         # so recording one spelling and not the other would present a partial residue as a
         # complete one. The mechanism is abbreviation-INDEPENDENT, so the row set is too.
@@ -7559,6 +7564,53 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "first clause, this residual has been CLOSED and this characterisation should be "
         "inverted (#11191 review r26, P2):\n  "
         + "\n  ".join(_possessive_relation_now_refused)
+    )
+    # ⚠️ …AND AN UNLISTED ABBREVIATION IS A FIFTH OPEN SHAPE, created by the shape of the
+    # r26 fix itself (#11191 review r27, P2 — MEASURED): `_ends_a_sentence` treats the period
+    # as a BOUNDARY unless the abbreviation is in `_ABBREVIATION_PERIOD`'s five members, so a
+    # sixth member followed by a lower-case word opens the appositive again — ACCEPTED here,
+    # REFUSED by `90dfbb1a8` AND by `origin/main`, in 60 generated rows (5 separators ×
+    # 12 variants). It is recorded rather than closed because closing it means growing a
+    # spelling list, which is the bet this predicate keeps losing: the honest statement is
+    # that this arm shares `_sentence_tail_hard`'s five-member list and inherits its residue.
+    _unlisted_abbreviation_known_open = (
+        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
+        f"etc. the commit for #9601, is `{_FALSE_TREE}`.",
+        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
+        f"resp. the commit for #9601, is `{_FALSE_TREE}`.",
+    )
+    _unlisted_abbreviation_now_refused = [
+        s for s in _unlisted_abbreviation_known_open if _refuses_before_9548(s)
+    ]
+    assert not _unlisted_abbreviation_now_refused, (
+        "an unlisted-abbreviation alibi is now REFUSED — if that refusal is correct this "
+        "residual has been CLOSED and this characterisation should be inverted "
+        "(#11191 review r27, P2):\n  "
+        + "\n  ".join(_unlisted_abbreviation_now_refused)
+    )
+    # ⚠️ …AND A PRE-POSED DENIAL FRAME IS REFUSED, which is a FALSE RED nobody fixed
+    # (#11191 review r25 F2 / r26 — MEASURED at every head of this PR): `origin/main`
+    # ACCEPTS `It is not the case that the tree before #9548 is `ff6379eb2`.` and the
+    # predicate REFUSES it, at `90dfbb1a8`, at `96043c0fc0` and here. Pinned in the
+    # REFUSED direction — a characterisation of today's behaviour, not a claim of
+    # correctness — because the obvious fix is a MEASURED blank cheque: a frame-keyed
+    # exemption also exempts
+    #   "It is not the case that the census is 5; the tree before #9548 is `ff6379eb2`."
+    # which `origin/main` ACCEPTS and which must be refused; the frame denies a DIFFERENT
+    # proposition there. Closing this class needs proposition binding, not another spelling
+    # set. Recorded on #11301 with the rest.
+    _preposed_denial_known_refused = (
+        f"It is not the case that the tree before #9548 is `{_FALSE_TREE}`.",
+        f"It is not true that the tree before #9548 is `{_FALSE_TREE}`.",
+    )
+    _preposed_denial_now_accepted = [
+        s for s in _preposed_denial_known_refused if not _refuses_before_9548(s)
+    ]
+    assert not _preposed_denial_now_accepted, (
+        "a pre-posed denial is now ACCEPTED — if that acceptance is correct this residual "
+        "has been CLOSED and this characterisation should be inverted (#11191 review r27, "
+        "P3):\n  "
+        + "\n  ".join(_preposed_denial_now_accepted)
     )
     # ⛔ …AND THE ARM READS THE OCCURRENCE, NOT THE SENTENCE (#11191 review r21 P3 / r22 P3
     # — MEASURED). r21 measured that reverting `_REFUTED_INVERTED.search(own)` to
