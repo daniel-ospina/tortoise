@@ -38,7 +38,7 @@ n      60 timed records after 5 warmup, per run
 `fingerprint-cost.json` carries the two costs quoted without a probe field: one
 `_migrations_fingerprint` pass and the rejected blake2b digest
 (`fingerprint_cost.py` re-takes both). The rest is re-runnable by a named command:
-the BEFORE-tree paragraph's three counts are `git` (`rev-list --count`,
+the BEFORE-tree paragraph's counts are `git` (`rev-list --count`,
 `--shortstat`), and §"Falsifiers" censuses eight mutations and sixteen
 `FALSIFIER:` blocks over the file the tests name. Re-derive instead of trusting
 the prose.
