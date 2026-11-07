@@ -2130,7 +2130,7 @@ REFUSED as server-managed on BOTH anchors — `_SOURCE_SERVER_MANAGED_PROPS` / `
 with the stored value untouched) and **false on a
 `:Point`**, which has a non-destructive in-place one: `update_point(<id>, story_arc=None)` clears the property and KEEPS
 the node (measured — the `None` passes `sdk._refuse_unpaired_narrative`, whose refusal is on a NON-EMPTY narrative, and
-`update_point`'s `SET n += $props` removes a `None`-valued key). ⚠️ Its durability is JOURNAL-bound only: the journal
+`update_point`'s `SET n += $props` removes a `None`-valued key). ⚠️ Its durability is JOURNAL-bound only — ⚠️ and that bound has a REACH: a `rebuild_all` asks the SAME L2 name guard as the restore (`_assert_test_graph`, refused PRE-WIPE on every production name), so on a production server graph the replay is REFUSED and the `:Point` clear IS durable there; it is defeated only on a graph a rebuild can reach (a `test_`/`tortoise_test` server name, or an embedded `path=` DB): the journal
 records the `None`, but the `PointRevised` fold has no `story_arc` clause and the creation fold's open-set passthrough
 (`projection.entities._persist_extra_props`) SKIPS a `None` value, so a `rebuild_all` over a journal whose creation
 record carried the prose re-materialises it — that replay half is `#10429`'s. ⚠️ The RECORD→CACHE rebuild is the other
