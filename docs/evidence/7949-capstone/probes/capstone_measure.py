@@ -487,6 +487,13 @@ DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
                   # insensitive to the shell without moving a number.
                   ("TORTOISE_IDENTIFIER_TOKENS", "1"))
 
+#: Every key a complete read-back carries — the pinned-off set plus the
+#: pinned-to set. A ``door_header``/``door_record`` handed an INCOMPLETE dict is
+#: treated as NOT MEASURED, because every pinned-off target state is ``<unset>``:
+#: rendering a partial dict would print ``KEY=<unset> … read back from os.environ``
+#: about keys nobody read (#10983 review round 11).
+DOOR_KEYS = frozenset(DOOR_PINNED_OFF) | frozenset(k for k, _ in DOOR_PINNED_ON)
+
 #: The v4 seam ledger AT THE HEAD THIS RUN MEASURED (#10983, C2's Target 3).
 #:
 #: ``(env var, module.resolver, default, is a behaviour seam)``. The DEFAULT
@@ -687,13 +694,18 @@ def door_header(observed: dict[str, str | None]) -> str:
     loud, on the same rule the ``arm:`` line already follows for a flag it did
     not measure.
     """
-    if not observed:
-        return ("NOT MEASURED — this render carries NO measured_arm() read-back, "
-                "so no lane and no pinned switch is attested. Render the log from "
-                "a run that entered ``measured_arm()`` (``main`` does) before "
-                "citing the door")
+    if not _door_measured(observed):
+        return ("NOT MEASURED — this render carries NO COMPLETE measured_arm() "
+                "read-back, so no lane and no pinned switch is attested. Render "
+                "the log from a run that entered ``measured_arm()`` (``main`` "
+                "does) before citing the door")
     lane = observed.get(DOOR_LANE_ENV)
-    lane_word = lane if lane not in (None, "") else "<unset>"
+    # The HEADLINE is the read-back, never the module constant: a read-back that
+    # disagrees with the pin must not be summarised as the pin (#10983 review).
+    # ``main`` never reaches here in that state (measured_arm refuses first), so
+    # this is the path a re-render tool or a fixture would take.
+    lane_pinned = lane in (None, "")
+    lane_word = DOOR_LANE if lane_pinned else lane
     pins = [f"{key}=<unset>" if observed.get(key) in (None, "")
             else f"{key}={observed.get(key)}"
             for key in DOOR_PINNED_OFF]
@@ -702,24 +714,36 @@ def door_header(observed: dict[str, str | None]) -> str:
              for key, _ in DOOR_PINNED_ON]
     seams = ", ".join(f"{env}={default}" for env, _where, default, _seam
                       in SEAM_LEDGER)
-    return (f"{DOOR_LANE} lane (sdk.capture_session -> sdk._extract_session_v2 "
+    return (f"{lane_word} lane (sdk.capture_session -> sdk._extract_session_v2 "
             f"-> extractor_v2.extract_session_v2; hosted_api._capture_lane() "
-            f"mirrors the same predicate) | {DOOR_LANE_ENV}={lane_word} "
+            f"mirrors the same predicate) | {DOOR_LANE_ENV}="
+            f"{'<unset>' if lane_pinned else lane} "
+            f"{'PINNED' if lane_pinned else 'LEAKED — NOT THE PINNED LANE'} "
             f"({' '.join(pins)} read back from os.environ) | seam defaults at "
             f"this head: {seams}")
+
+
+def _door_measured(observed: dict[str, str | None]) -> bool:
+    """Does this read-back carry EVERY pinned key? A partial one is not a pin."""
+    return bool(observed) and DOOR_KEYS <= set(observed)
 
 
 def door_record(observed: dict[str, str | None]) -> dict:
     """The machine half of the door: lane, pins, and the six-seam ledger.
 
-    An empty read-back records ``measured: false`` and NO pin block, rather than
-    borrowing the measured record's ``source`` sentence — a machine record that
-    says "os.environ read-back after measured_arm() forced the door" about a
-    render that never ran one is the same false claim as the log line (#10983
-    review). ``measured`` is stated in BOTH directions so a consumer can key on
-    it instead of inferring it from an absent key.
+    An empty (or PARTIAL) read-back records ``measured: false`` and NO pin block,
+    rather than borrowing the measured record's ``source`` sentence — a machine
+    record that says "os.environ read-back after measured_arm() forced the door"
+    about a render that never ran one is the same false claim as the log line
+    (#10983 review). ``measured`` is stated in BOTH directions so a consumer can
+    key on it instead of inferring it from an absent key.
+
+    ``lane`` follows the READ-BACK, not the module constant: a record that
+    printed ``lane: v2`` beside ``lane_read_back: m2`` would let a consumer key
+    on the wrong field (#10983 review round 11). ``lane_pinned`` says whether the
+    read-back matched the pin.
     """
-    if not observed:
+    if not _door_measured(observed):
         return {
             "measured": False,
             "lane": DOOR_LANE,
@@ -732,9 +756,10 @@ def door_record(observed: dict[str, str | None]) -> dict:
         }
     return {
         "measured": True,
-        "lane": DOOR_LANE,
+        "lane": observed.get(DOOR_LANE_ENV) or DOOR_LANE,
         "lane_env": DOOR_LANE_ENV,
         "lane_read_back": observed.get(DOOR_LANE_ENV),
+        "lane_pinned": observed.get(DOOR_LANE_ENV) in (None, ""),
         "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
                         "extractor_v2.extract_session_v2"),
         "hosted_selector": "hosted_api._capture_lane",
@@ -745,6 +770,62 @@ def door_record(observed: dict[str, str | None]) -> dict:
                   for env, where, default, seam in SEAM_LEDGER],
         "source": "os.environ read-back after measured_arm() forced the door",
     }
+
+
+#: The ``extraction_mode`` values that mean a capture REACHED the door. ``sdk``
+#: reports ``llm:<route>`` for every lane that actually extracted; ``empty``,
+#: ``no-provider``, ``replayed`` and ``error`` all mean the capture returned
+#: BEFORE the lane dispatch (#3892 keyless, #1727 replay).
+DOOR_ENTERED_PREFIX = "llm:"
+
+
+def door_witness(runs) -> dict:
+    """How many captures actually ENTERED the door — derived from the receipts.
+
+    ⛔ Found in the #10983 review (round 11). The door was pinned and read back as
+    an ENVIRONMENT fact and nothing checked that the path was TAKEN, so a run
+    that never reached ``_extract_session_v2`` still produced a table whose
+    ``door:`` line asserted the v2 lane and whose record said ``measured: true``,
+    exit 0. Both exits are real and both return ``ok=True``:
+
+    * ``no_provider`` (``sdk.capture_session``) — no provider key resolves, so
+      the turns are stored and NOTHING is extracted (#3892);
+    * the ``#1727`` REPLAY — ``session_existed``, which a re-run against an
+      existing graph (``--graph``) reaches for all seven sessions at zero cost.
+
+    The pinned lane cannot catch either, because neither is a different lane: it
+    is no lane. ``backend_ready()``'s provider-key check narrows the first, but
+    it is a different predicate from ``_build_session_llm_extractor() is None``
+    (five provider keys vs ``DEEPSEEK_API_KEY``), so it is not the contract.
+    """
+    runs = list(runs or [])
+    entered = [run for run in runs
+               if str(run.get("extraction_mode") or "").startswith(
+                   DOOR_ENTERED_PREFIX)]
+    bypassed = [str(run.get("session_id")) for run in runs
+                if run not in entered]
+    return {"entered": len(entered), "sessions": len(runs),
+            "bypassed": bypassed}
+
+
+def require_door_entered(runs) -> dict:
+    """REFUSE a run in which any capture returned before the door.
+
+    A table measured on a graph this run did not write through the door is not a
+    measurement of the door, so the pass writes no table — the same posture
+    ``measured_arm`` takes for a leaked switch.
+    """
+    witness = door_witness(runs)
+    if witness["bypassed"]:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(witness['bypassed'])} of "
+            f"{witness['sessions']} capture(s) returned BEFORE "
+            f"sdk._extract_session_v2 ({witness['bypassed']}), so this pass did "
+            f"not take the door it would declare: a keyless capture extracts "
+            f"nothing (#3892) and a re-capture of an existing session REPLAYS "
+            f"(#1727) — both report ok=True, and a table measured on a graph "
+            f"they did not write is a measurement of another run (#10983)")
+    return witness
 
 
 # ── pure helpers (pinned by tests/test_7949_capstone_measure.py) ───────────
@@ -3336,7 +3417,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             "probe": "docs/evidence/7949-capstone/probes/capstone_measure.py",
             "graph": graph,
             "arm": arm_record(arm or {}),
-            "door": door_record(door or {}),
+            "door": {**door_record(door or {}),
+                     "captures": door_witness(runs)},
             # #10215: V5 reads the step split from THESE two fields. A log that
             # omits them is read as the pre-#10215 "all eight required" shape,
             # which is why emitting them is the whole point of the accounting.
@@ -3497,6 +3579,11 @@ def main(argv: list[str] | None = None) -> int:
     with measured_arm() as arm:
         print(f"capstone-measure: arm {arm_header(arm)}", flush=True)
         runs = run_corpus(graph, sessions)
+    # The door is a PATH, not only an environment fact (#10983 review round 11):
+    # a capture that returned before the lane dispatch — keyless (#3892) or a
+    # re-capture of an existing session (#1727 replay) — reports ok=True, so the
+    # failed-list below cannot see it and the table would be written anyway.
+    require_door_entered(runs)
     failed = [run["session_id"] for run in runs if not run["ok"]]
     census_data = census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
     observed, unobserved = observe_steps(runs, census_data)
