@@ -1194,3 +1194,1017 @@ def test_a_slot_only_hold_survives_the_union_pass():
     assert [m["surface"] for m in twice["mentions"]] == ["it"]
     payload = execute_embed(copy.deepcopy(twice), {}, session_id="slot-union")["payload"]
     assert "it" not in _entity_names(payload)
+
+
+# ── the mention-only response: the gate must not sit behind `entities[]` ──
+
+def test_a_mention_only_response_cannot_smuggle_a_rule_that_never_ran():
+    """⛔ `route_mentions` returned early whenever `entities` was not a list, so a
+    section the parsed output OMITS (`_validate_output_shape`: `if section not in
+    parsed: continue`) skipped the cue re-verification entirely — and
+    `_mentions_for_claim` then copied the model's `rule_id` verbatim, storing
+    `referentiality.pronoun` as a cue attribution on a surface `judge()` calls a
+    REFERENT (review at `591906397`, P2). Reachable in ONE model output: the armed
+    prompt asks for `mentions[]`, and a model that believes the session has no
+    entities can emit the channel without `entities[]`.
+
+    Proven at the MINT boundary, which is where the record is actually stored."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{"surface": "the admin-merge rail",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "the admin-merge rail",
+                       "rule_id": ref.RULE_PRONOUN}]
+    del el["entities"]                     # the mention-only response
+    payload, _ = _mint(el)
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        "the mention-only response dropped the record it was asked for")
+    assert records[0]["rule_id"] == ref.RULE_CHANNEL, (
+        "a cue rule that never ran on this surface was stored as evidence")
+
+
+def test_a_mention_only_response_keeps_a_rule_the_cue_AGREES_with():
+    """POSITIVE CONTROL for the row above: the clamp must not flatten every
+    `rule_id` to `referentiality.channel` — a cue rule the cue re-derives for the
+    same surface is the one value the record exists to carry."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{"surface": "it",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "it",
+                       "rule_id": ref.RULE_PRONOUN}]
+    del el["entities"]
+    payload, _ = _mint(el)
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["it"]
+    assert records[0]["rule_id"] == ref.RULE_PRONOUN
+
+
+# ── the record's boundary: it is payload-only, and the tree says so ───────
+
+def test_the_mention_record_is_payload_only_and_says_so():
+    """⛔ THE DECLARED DEFERRAL, PINNED (review at `591906397`, Issue 1). DM1
+    names the claim Point as the record's home and `Point.mentions` exists, but
+    BOTH declared write doors drop it — `hosted_api.create_point` enumerates its
+    props and the SDK capture whitelist is `#2949`'s response-parity surface. So
+    an armed run's `mentions_recorded` counts records the write discards, and a
+    reader of the graph sees the claim and no mention on it.
+
+    Persisting it is `#11239`, deliberately not this slice. This row exists so the
+    boundary cannot become a silent claim: adding `mentions` to the whitelist (or
+    removing the disclosure) REDs here and forces the docstring, the PR body and
+    `#11239` to be updated together."""
+    import inspect
+
+    from tortoise import hosted_api
+    from tortoise.commit_schema import Mention
+    from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS
+
+    # the record EXISTS at the payload — "payload-only" is not "nothing"
+    payload, _ = _mint(_embed_list("it"))
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"]
+
+    # …and NEITHER declared write door takes it, which is the whole deferral.
+    # ⛔ BOTH doors, because the docstring names both and the REST door is the one
+    # most likely to grow a field: pinning only the SDK whitelist let
+    # `CreatePointRequest.mentions` be added with all rows green (review at
+    # `11039b1bd8`, P3).
+    assert "mentions" not in _CAPTURE_PASSTHROUGH_PROPS, (
+        "the capture whitelist now carries mentions: the payload-only deferral "
+        "is over — update Mention's docstring and #11239, and turn this row into "
+        "a persistence assertion")
+    assert "mentions" not in hosted_api.CreatePointRequest.model_fields, (
+        "CreatePointRequest now accepts `mentions`: the REST write door takes a "
+        "record that has no store-side home yet — update Mention's docstring and "
+        "#11239, and turn this row into a persistence assertion")
+    assert "mentions" not in inspect.getsource(hosted_api.create_point), (
+        "create_point now writes `mentions`, so the payload-only deferral is "
+        "over — see #11239 and turn this row into a persistence assertion")
+    # ⛔ THE DOOR THE v2 PAYLOAD ACTUALLY USES. `extract_session_v2` POSTs its
+    # payload to /v1/sessions/commit, which writes points through
+    # `hosted_api._execute_commit_writes` → `sdk.create_point(...)`, NOT through
+    # the single-point route pinned above. Measured (review at `5da3575b7a`, P3):
+    # adding `mentions=` to that call left every row green, and the docstring
+    # cannot see the boundary move on the payload's own path.
+    assert "mentions" not in inspect.getsource(hosted_api._execute_commit_writes), (
+        "the commit route now writes `mentions`: the payload-only deferral is "
+        "over — see #11239 and turn this row into a persistence assertion")
+    # ⛔ THE SELF-HOST MIRROR IS ITS OWN DOOR. `#4032` frames
+    # `hosted_api.CreatePointRequest`/`create_point` and
+    # `selfhost_api.CreatePointRequest`/`create_point` as parity mirrors, so a
+    # mention field added on the hosted side alone re-opens the divergence — and
+    # pinning only the hosted pair left this door asserting nothing (review at
+    # `40a0a81e6`, P3; the docstring said "three" doors while the tree had four).
+    from tortoise import selfhost_api
+
+    assert "mentions" not in selfhost_api.CreatePointRequest.model_fields, (
+        "the self-host REST door now accepts `mentions`: the payload-only "
+        "deferral is over on the mirror too — update Mention's docstring and "
+        "#11239")
+    assert "mentions" not in inspect.getsource(selfhost_api.create_point), (
+        "selfhost_api.create_point now writes `mentions`, so the payload-only "
+        "deferral is over on the self-host mirror — see #11239")
+    # …and the docstring's enumeration NAMES that door, because a count a reader
+    # cannot check is how "three" survived beside four real doors. ⛔ BOTH
+    # docstrings: the reviewer's own file had already been corrected while
+    # `route_mentions`' still said THREE, so one reader got "four" and the next
+    # got "three" in the same round (review at `0c15ad04d`, P3).
+    from tortoise.extractor_v2 import route_mentions
+
+    for doc in (Mention.__doc__ or "", route_mentions.__doc__ or ""):
+        assert "selfhost_api.CreatePointRequest" in doc, (
+            "a mention docstring does not name the self-host write door, so its "
+            "enumeration of the doors that DROP `mentions` is incomplete (the "
+            "tree has four; `#4032`'s parity mirror is the one most likely to be "
+            f"missed): {doc[:200]!r}")
+    assert "11239" in (Mention.__doc__ or ""), (
+        "Mention's docstring no longer names the slice that owns persistence, so "
+        "the model reads as graph state")
+
+
+# ── the channel-only response must reach the LAST BUILDER, not just the door ──
+# The `rule_id` clamp lives in `_mentions_for_claim` and runs on every record, so
+# it kept the row above green even when `route_mentions` still returned early —
+# which meant the OTHER half (`_mention_record`: span verification, dedupe, the
+# quote clamp) was pinned by nothing. These two rows pin that half: they red only
+# when a channel-only response bypasses the builder.
+
+def test_a_mention_only_response_is_verified_by_the_last_builder():
+    """⛔ The security half of the channel-only fix is `_mentions_for_claim`'s
+    `rule_id` re-verification, which is the LAST DOOR every record passes. The
+    other half — `route_mentions` processing the channel through `_mention_record`
+    — is what VERIFIES a declared span against the haystack. Without it a
+    mention-only response ships `span_source: "quote"` on offsets nothing supports:
+    the exact provenance forgery `de036f2e` closed for the `entities[]` path.
+
+    ⚠️ WHAT THIS ROW ACTUALLY PINS (corrected at `5da3575b7a`, P3): the LAST DOOR,
+    not `route_mentions`' span half. `_clamped_mention` verifies the span too, so
+    reverting the `route_mentions` early-return fix leaves THIS row green — measured
+    (mutant A: 2 failed / 85 passed, and neither red is this row). Its sibling
+    `test_a_mention_only_response_is_deduped_like_any_other` is what reds for that
+    half. `route_mentions`' container half is pinned by
+    `test_a_mention_only_response_is_HELD_at_the_predicate_and_stripped`."""
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{
+        "surface": "the admin-merge rail",
+        "claim_ref": el["points"][0]["content"],
+        "quote": "a totally unrelated sentence with no rail in it",
+        "span_source": "quote",          # a claim that must be CHECKED
+        "span_start": 0,
+        "span_end": 5,
+        "rule_id": ref.RULE_CHANNEL,
+    }]
+    del el["entities"]
+    payload, _ = _mint(el)
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        "the channel-only response dropped the record it was asked for")
+    assert records[0]["span_source"] == "model", (
+        "a `quote`-declared span shipped UNVERIFIED on a channel-only response — "
+        f"`route_mentions` handed the model's raw entry to the payload instead of "
+        f"running `_mention_record`: {records[0]!r}")
+
+
+def test_a_mention_only_response_is_deduped_like_any_other():
+    """The second thing only `_mention_record`/`_dedupe_mentions` do. A duplicated
+    channel entry would otherwise be stored twice — one hold, two records, and a
+    `mentions_recorded` count that double-counts the evidence plan R1's arming gate
+    reads."""
+    el = _embed_list("config/ci-surfaces.yml")
+    entry = {
+        "surface": "the admin-merge rail",
+        "claim_ref": el["points"][0]["content"],
+        "quote": "the admin-merge rail",
+        "rule_id": ref.RULE_CHANNEL,
+    }
+    el["mentions"] = [dict(entry), dict(entry)]
+    del el["entities"]
+    payload, _ = _mint(el)
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        f"a duplicated channel entry was stored twice: {records!r}")
+
+
+def test_a_response_that_omits_entities_cannot_resurrect_a_carried_hold():
+    """The OTHER reachable shape of an omitted `entities[]`: a re-emitted response
+    that carries `mention_held` and no entities. Returning early there discarded
+    the decision, so a surface pass 1 held came back as a MINT on the next render —
+    the phantom `#11021` exists to delete, reached without the model doing anything
+    wrong (`_validate_output_shape` accepts a section the parsed output omits).
+
+    An earlier `entities[]` that is not a list is a legitimate state; a *lost
+    decision* is not, which is why the early return is now conditional on there
+    being nothing at all to process."""
+    el = _embed_list("it")
+    el["mention_held"] = [{"surface": "it", "rule_id": ref.RULE_PRONOUN}]
+    del el["entities"]
+    held = route_mentions(copy.deepcopy(el), "")
+    payload, _ = _mint(el)
+    assert held["points"][0]["about_entities"] == [], (
+        "a carried hold was dropped because the response omitted `entities[]`, "
+        "so the held surface is still named by the claim and will MINT")
+    assert _entity_names(payload) == set(), (
+        f"the carried hold was resurrected as an entity: {_entity_names(payload)!r}")
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"], (
+        f"the hold lost its record: {_mentions_of(payload)!r}")
+
+
+def test_the_last_door_clamps_a_rule_when_the_selection_FAILED_OPEN(monkeypatch):
+    """⛔ `_mentions_for_claim` is the last door, and the fail-open path is the one
+    place it stands alone: `execute_embed` catches ANY `route_mentions` exception
+    and keeps the model's RAW `mentions[]` (`vet_warnings: "candidates kept
+    (fail-open)"`). Nothing has verified those entries — so the attach step must
+    re-derive `rule_id` itself, or a crashed selection ships the model's cue
+    attribution verbatim on the evidence surface plan R1's arming gate reads.
+
+    Measured before this row existed: removing the `rule_id` branch from
+    `_mentions_for_claim` left the suite GREEN (84 passed), because every other
+    row's record is sanitised earlier by `_mention_record`. The defence in depth
+    was therefore a claim, not a behaviour."""
+    import tortoise.extractor_v2 as ex
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("selection exploded — the fail-open path")
+
+    monkeypatch.setattr(ex, "route_mentions", _boom)
+    el = _embed_list("config/ci-surfaces.yml")
+    el["mentions"] = [{
+        "surface": "the admin-merge rail",       # judge() calls this a REFERENT
+        "claim_ref": el["points"][0]["content"],
+        "quote": "the admin-merge rail",
+        "rule_id": ref.RULE_PRONOUN,             # a rule that never ran on it
+    }]
+    payload = ex.execute_embed(copy.deepcopy(el), {}, session_id="fail-open-last-door")["payload"]
+    records = _mentions_of(payload)
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        "the fail-open path dropped the record")
+    assert records[0]["rule_id"] == ref.RULE_CHANNEL, (
+        "the fail-open path shipped the model's unverified cue rule as evidence: "
+        f"{records[0]!r}")
+
+
+# ── the EVIDENCE SURFACE, not just the payload ─────────────────────────────
+# `result["mentions"]["records"]` is built from the merged embed list, not from
+# `_mentions_for_claim`, so every clamp the last door performs had to be applied
+# twice or the run's own evidence surface kept the model's raw claim. Driven
+# through `extract_session_v2` (the only place that block is assembled) on the
+# FAIL-OPEN path, where the raw channel is all `execute_embed` ever sees.
+
+def _fail_open_session(monkeypatch, mentions: list[dict]) -> dict:
+    """One session whose `route_mentions` RAISES, with `mentions` as the model's
+    raw channel. The fail-open handler keeps the list unchanged, so nothing has
+    verified the entries — which is exactly the state the last door defends."""
+    from tortoise.extractor_v2 import extract_session_v2
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("selection exploded — the fail-open path")
+
+    monkeypatch.setattr("tortoise.extractor_v2.route_mentions", _boom)
+    payload_json = json.dumps({
+        "entities": [], "events": [], "operators": [],
+        "points": [{"content": "the budget is 40k", "pointKind": "statement"}],
+        "chain_notes": [], "link_before_create": [], "mentions": mentions,
+    })
+
+    class _M:
+        last_finish_reason = None
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.last_finish_reason = "stop"
+            if "STORY SUMMARIZER" in system:
+                return "A narrative."
+            if "GAP REVIEWER" in system:
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [], "chain_notes": [], '
+                        '"link_before_create": []}')
+            return payload_json
+
+    return extract_session_v2(_M(), [{"role": "user", "content": "the budget is 40k"}],
+                              session_id="fail-open-evidence")
+
+
+def test_the_evidence_surface_does_not_carry_an_unverified_cue_rule(monkeypatch):
+    """⛔ `result["mentions"]["records"]` is the surface a lane reads to count
+    what the run held (plan R1's arming evidence). It was built straight from the
+    merged `mentions[]`, so on the fail-open path — `execute_embed` catches ANY
+    `route_mentions` exception and keeps the model's raw channel — it published
+    `referentiality.pronoun` for a surface `judge()` calls a REFERENT, while the
+    payload (clamped by the last door) said `referentiality.channel`. One run,
+    two answers, and the unverified one was the one being read."""
+    out = _fail_open_session(monkeypatch, [{
+        "surface": "the admin-merge rail",
+        "claim_ref": "the budget is 40k",
+        "quote": "the admin-merge rail",
+        "rule_id": ref.RULE_PRONOUN,      # a rule that never ran on this surface
+    }])
+    records = out["mentions"]["records"]
+    assert [m["surface"] for m in records] == ["the admin-merge rail"], (
+        f"the fail-open evidence surface dropped the record: {records!r}")
+    assert records[0]["rule_id"] == ref.RULE_CHANNEL, (
+        "the evidence surface published a cue rule that never ran, on the one "
+        f"path where nothing verified it: {records[0]!r}")
+
+
+def test_the_evidence_surface_does_not_carry_an_unverified_span(monkeypatch):
+    """The same door, the neighbouring field: a `quote`-declared span is a claim
+    that the offsets index THE QUOTE. Allow-listing the value is not verification
+    — `span_source` is in `_MENTION_SPAN_SOURCES` either way — so an unverified
+    declaration has to be demoted to the space that actually holds it (`model`,
+    i.e. "the model asserted these bytes")."""
+    out = _fail_open_session(monkeypatch, [{
+        "surface": "the admin-merge rail",
+        "claim_ref": "the budget is 40k",
+        "quote": "a totally unrelated sentence with no rail in it",
+        "span_source": "quote",
+        "span_start": 0,
+        "span_end": 5,
+        "rule_id": ref.RULE_CHANNEL,
+    }])
+    records = out["mentions"]["records"]
+    assert records, "the fail-open evidence surface dropped the record"
+    assert records[0]["span_source"] == "model", (
+        "the evidence surface shipped an address whose declared provenance names "
+        f"a text it does not index: {records[0]!r}")
+
+
+# ── the channel's decision has to be ENACTED, not just written ─────────────
+# The three rows above prove the RECORD is clamped. None of them proves the
+# surface is HELD: `hold` is a decision, and every consumer of it
+# (`_strip_reference_sets`, the operator prune, `by_rule`, `mention_held`, the
+# record loop) keys on `held_surfaces`. Arming `hold` without adding to
+# `held_surfaces` is a decision nothing reads — measured: deleting that arm left
+# this whole file GREEN (87 passed), because the clamp lives downstream at the
+# last door and the channel record loop.
+
+def test_a_mention_only_response_is_HELD_at_the_predicate_and_stripped():
+    """⛔ The PREDICATE, not a downstream filter: the model said "this phrase is
+    not a node", the cue was re-run on that surface and AGREED, so the hold is
+    the selection's own decision. If it is only written to `hold`, the surface
+    stays in `about_entities` (`validate_payload_dict`: "about_entities reference
+    unknown entities" — Layer-1 rejects the session), no `mention_held` reaches
+    the union pass, and `held_surfaces` reports 0 while a record names the cue.
+
+    Mutating the arm to `pass` reddens this row and nothing else in the file."""
+    el = _embed_list("it")
+    el["mentions"] = [{"surface": "it",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "it", "rule_id": ref.RULE_PRONOUN}]
+    del el["entities"]                      # the mention-only response
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 1, (
+        "the channel decided a hold and reported none held: "
+        f"{held['mention_stats']!r}")
+    assert held["points"][0]["about_entities"] == [], (
+        "the held surface is still named by the claim — Layer-1 rejects that")
+    assert held["mention_held"] == [{"surface": "it",
+                                     "rule_id": ref.RULE_PRONOUN}], (
+        f"the decision was not carried to the union pass: {held.get('mention_held')!r}")
+
+    payload, _ = _mint(el)
+    verdict, _parsed = validate_payload_dict(payload)
+    assert verdict.ok is True, (
+        f"the channel-only payload broke Layer-1: {verdict.errors}")
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"]
+
+    # …and the carry is what stops pass 2 minting it once an entity reappears
+    back = copy.deepcopy(held)
+    back["entities"] = [{"name": "it", "kind": "core:other"}]
+    twice = route_mentions(back, "")
+    assert "it" not in {e.get("name") for e in twice["entities"]}, (
+        "the carried channel hold did not survive the union pass: the phantom "
+        "node #11021 exists to delete came back")
+
+
+# ── the clamp must not manufacture a label it cannot check ────────────────
+
+def test_a_narrative_address_is_not_demoted_when_no_haystack_was_supplied():
+    """⛔ NO HAYSTACK is not a FAILED verification (review at `5da3575b7a`, P2).
+    `execute_embed`'s `story_arc` defaults to `""`, so any caller that omits it —
+    every test, and any seam — passed an empty haystack, `_mention_span` returned
+    `None`, and a genuinely cue-derived `narrative` address was relabelled
+    `"model"`: a consumer that resolves the span per `span_source` was told the
+    model invented offsets the cue had derived. Measured: the same held list
+    through `execute_embed(..., story_arc=story)` said `narrative`, without it
+    `model`."""
+    from tortoise.extractor_v2 import _clamped_mention
+
+    entry = {"surface": "it", "claim_ref": "c", "quote": "no pronoun here",
+             "span_source": "narrative", "span_start": 6, "span_end": 8}
+    assert _clamped_mention(dict(entry), narrative="")["span_source"] == "narrative", (
+        "an absent haystack demoted a cue-derived address to `model`")
+    # …and the guard is not a blanket amnesty: a haystack that DISAGREES still
+    # demotes, which is the whole point of the verification.
+    assert _clamped_mention(dict(entry), narrative="alpha it beta")["span_source"] == "narrative"
+    assert _clamped_mention(dict(entry), narrative="no pronoun here or there")["span_source"] == "model"
+
+
+def test_the_narrative_amnesty_does_not_extend_to_an_absent_QUOTE():
+    """⛔ An absent NARRATIVE is an unknowable haystack; an absent QUOTE is a
+    definite mismatch (`"quote": null` is IN the output contract and
+    `Mention.quote` defaults to `""`). The first cut of the guard above exempted
+    both, so a record declaring `span_source: "quote"` with no quote shipped its
+    offsets VERIFIED-LABELLED — a consumer resolving `quote[start:end]` reads
+    bytes that do not exist (review at `1a7072e22`, P2)."""
+    from tortoise.extractor_v2 import _clamped_mention
+
+    for quote in (None, ""):
+        entry = {"surface": "it", "claim_ref": "c", "quote": quote,
+                 "span_source": "quote", "span_start": 0, "span_end": 2}
+        got = _clamped_mention(entry, narrative="whatever")
+        assert got["span_source"] == "model", (
+            f"a quote-space address with quote={quote!r} shipped as verified: {got!r}")
+    # …and a quote that DOES contain the surface at the declared offsets keeps it
+    ok = {"surface": "it", "claim_ref": "c", "quote": "x it y",
+          "span_source": "quote", "span_start": 2, "span_end": 4}
+    assert _clamped_mention(ok, narrative="")["span_source"] == "quote"
+
+
+# ── the hold may not wait for the model to echo an internal rule id ────────
+# `_MENTION_CONTRACT_LINE` asks for `{surface, claim_ref, quote, kind_guess}` —
+# NO `rule_id` — and `merge_embed_lists` says the same of S4's contract-shaped
+# entry ("it carries NO rule_id and NO span"). Requiring the model's string to
+# equal the cue's was therefore a gate on an input the prompt never requests.
+
+def test_a_mention_only_response_is_held_at_the_CONTRACT_shape():
+    """⛔ The arm required `verdict[0] == recorded_rule`, so it was INERT for the
+    only shape the prompt asks the model to emit: measured at `d785f3da8`,
+    `{surface: "the thing", claim_ref: <a live claim>}` produced
+    `held_surfaces: 0`, the surface stayed in `about_entities`, and Layer-1
+    rejected the whole session ("about_entities reference unknown entities") —
+    the exact failure the channel-only fix exists to close, still open for a
+    model that follows the contract.
+
+    The CUE decides. `judge()` returning a verdict IS the cue's decision to hold;
+    the model's `rule_id` string cannot add or remove it (`verdict is None` still
+    never holds — the row below — which is the cycle-3 P1 protection)."""
+    el = _embed_list("it")
+    el["mentions"] = [{"surface": "it",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": "it"}]          # the prompt shape: no rule_id
+    del el["entities"]
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 1, held["mention_stats"]
+    assert held["points"][0]["about_entities"] == [], (
+        "the held surface is still named by the claim — Layer-1 rejects that")
+    assert held["mention_held"] == [{"surface": "it",
+                                     "rule_id": ref.RULE_PRONOUN}], (
+        "a model-supplied surface with no rule string carried no cue rule: "
+        f"{held.get('mention_held')!r}")
+
+    payload, _ = _mint(el)
+    verdict, _parsed = validate_payload_dict(payload)
+    assert verdict.ok is True, (
+        f"the contract-shaped mention-only payload broke Layer-1: {verdict.errors}")
+
+
+def test_the_contract_shape_still_cannot_hold_a_REFERENT():
+    """The negative control for the row above: the relaxation is the CUE's, not
+    the model's. An entry with NO `rule_id` naming a must-keep referent is still
+    not held, so a model cannot delete a 70-reference surface by omitting a
+    field (`the admin-merge rail` is this repo's measured must-keep)."""
+    el = _embed_list("the admin-merge rail")
+    el["mentions"] = [{"surface": "the admin-merge rail",
+                       "claim_ref": el["points"][0]["content"],
+                       "quote": None}]
+    del el["entities"]
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 0, held["mention_stats"]
+    assert held["points"][0]["about_entities"] == ["the admin-merge rail"]
+
+
+def test_a_mention_only_response_is_REFUSED_without_a_carrier():
+    """POSITIVE CONTROL for the counter above: a channel entry that no claim names
+    and whose `claim_ref` resolves to nothing is still REFUSED, counted, and named —
+    the gate above must not be a blanket silence. (The hold gate refuses it because
+    `_claims_naming` is empty; the record loop then has no claim and no carrier.)"""
+    el = _embed_list("the admin-merge rail", point_about=[])
+    el["mentions"] = [{"surface": "it", "claim_ref": "a claim this run never emits"}]
+    del el["entities"]
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 0, held["mention_stats"]
+    assert held["mention_stats"]["channel_refused_no_claim"] == 1, held["mention_stats"]
+    assert held["mention_stats"].get("channel_refused_surfaces") == ["it"]
+    assert held["mentions"] == []
+
+
+def test_a_mention_the_model_cannot_TIE_to_a_claim_is_still_held():
+    """⛔ The hold is a fact about the PAYLOAD, not about the model's
+    `claim_ref` string — which the prompt allows to be `null`
+    (`_MENTION_CONTRACT_LINE`: `str|null`) and which a model routinely
+    paraphrases. A first cut also required that string to resolve
+    `claims_by_ref`, so a surface a claim DID carry was not held, stayed in
+    `about_entities`, and Layer-1 rejected the session — the 422 this whole fix
+    exists to close, on an input the contract explicitly permits (review at
+    `40a0a81e6`, P1). The record loop is CARRIER-driven, so the record is written
+    against the carrier either way; only the HOLD was at stake."""
+    for claim_ref in (None, "a paraphrase of the claim",
+                      "a claim this run never emits"):
+        el = _embed_list("it")
+        el["mentions"] = [{"surface": "it", "claim_ref": claim_ref}]
+        del el["entities"]
+        held = route_mentions(copy.deepcopy(el), "")
+        assert held["mention_stats"]["held_surfaces"] == 1, (
+            claim_ref, held["mention_stats"])
+        assert held["points"][0]["about_entities"] == [], claim_ref
+        # ⛔ NOT a refusal: the hold is real and the carrier-driven loop wrote the
+        # record, so counting the unresolvable ref here made ONE run report "held"
+        # and "lost for lack of a claim" at once, naming that same surface (review
+        # at `ea790070d`, P3). The refusal still fires when nothing can carry the
+        # entry — covered by `test_a_mention_only_response_is_REFUSED_without_a_carrier`.
+        assert held["mention_stats"]["channel_refused_no_claim"] == 0, claim_ref
+        assert not held["mention_stats"].get("channel_refused_surfaces"), claim_ref
+        assert [m["surface"] for m in held["mentions"]] == ["it"], claim_ref
+        payload, _ = _mint(el)
+        verdict, _parsed = validate_payload_dict(payload)
+        assert verdict.ok is True, (claim_ref, verdict.errors)
+
+
+# ── the clamp may not publish HALF an address ─────────────────────────────
+
+def test_the_clamp_never_publishes_half_an_address():
+    """⛔ A space label and its offset pair are ONE address. `_mention_record`
+    can emit neither half alone (its label exists only inside the valid-pair
+    branch, and an undeclared pair becomes `"model"`); `_clamped_mention` — which
+    the evidence surface now goes through, so this is what
+    `result["mentions"]["records"]` publishes — produced both halves (review at
+    `d785f3da8`, P2), and `Mention._span_is_an_address` only checks
+    completeness/order/range, so Layer-1 accepts either."""
+    from tortoise.extractor_v2 import _clamped_mention
+
+    # (a) the pair survived and nothing declared its space → the honest label
+    undeclared = _clamped_mention({"surface": "it", "claim_ref": "c", "quote": "it",
+                                   "span_start": 0, "span_end": 2}, narrative="")
+    assert undeclared["span_source"] == "model", (
+        f"a bare offset shipped with no space label: {undeclared!r}")
+
+    # (b) a declared space whose offsets did NOT survive → the label goes with it
+    for bad in ({"span_source": "quote", "span_start": 5},          # half a pair
+                {"span_source": "quote", "span_start": 5, "span_end": 2},  # inverted
+                {"span_source": "quote", "span_start": True, "span_end": 2}):  # bool
+        half = _clamped_mention({"surface": "it", "claim_ref": "c", "quote": "it",
+                                 **bad}, narrative="")
+        assert "span_start" not in half and "span_end" not in half, half
+        assert "span_source" not in half, (
+            f"a space label outlived the address it describes: {half!r}")
+
+
+# ── a surface needs a name, and the fail-open path counts one hold once ──────
+# `_clamped_mention` is the ONLY verifier on the fail-open path: `execute_embed`
+# catches any `route_mentions` exception and keeps the model's raw `mentions[]`,
+# and both publishing surfaces (the payload and `result["mentions"]["records"]`)
+# are built from it. Two shapes it still answered wrongly, plus the count.
+
+def test_a_whitespace_surface_is_not_a_surface():
+    """⛔ `Mention.surface` is `min_length=1`, so `"   "` passed validation and
+    became a record with no name to resolve, and `" it "` matched nothing.
+    `_dedupe_mentions` drops the whitespace-only shape on the normal path
+    (`_norm` strips), which is why only the fail-open path and the direct clamps
+    could see it. The strip must come BEFORE the 200-character cap, the order
+    `_mention_record` uses: capping first collapsed a padded 202-character
+    surface to the one-character `"i"` here while the sibling builder kept
+    `"itx"` (review at `d785f3da8`, P3)."""
+    from tortoise.extractor_v2 import _clamped_mention, _mention_record
+
+    assert _clamped_mention({"surface": "   ", "claim_ref": "c"}) is None, (
+        "a whitespace-only surface became a record")
+    padded = _clamped_mention({"surface": " it ", "claim_ref": "c",
+                               "quote": "x it y", "span_source": "quote",
+                               "span_start": 2, "span_end": 4})
+    assert padded["surface"] == "it", f"the surface was not stripped: {padded!r}"
+    assert padded["span_source"] == "quote", (
+        "stripping the surface must keep its verified address")
+
+    long_padded = " " * 199 + "itx"
+    assert _clamped_mention({"surface": long_padded, "claim_ref": "c"})["surface"] == "itx", (
+        "a padded surface past the cap was truncated before it was stripped")
+    assert _mention_record(surface=long_padded, claim={"content": "c"},
+                           kind_guess=None, rule_id=ref.RULE_CHANNEL,
+                           reason="t", narrative="", quote="")["surface"] == "itx"
+
+    # …and a PADDED declared space is the same declaration (`_mention_record`
+    # strips it, so leaving it raw demoted a verifiable address on one builder
+    # only). It must be written back stripped, or the payload 422s.
+    from tortoise.commit_schema import Mention
+    padded_space = _clamped_mention({"surface": "it", "claim_ref": "c",
+                                     "quote": "x it y", "span_source": " quote ",
+                                     "span_start": 2, "span_end": 4})
+    assert padded_space["span_source"] == "quote", (
+        f"a padded declared space was demoted: {padded_space!r}")
+    assert Mention(**padded_space).span_source == "quote"
+
+
+def test_the_fail_open_path_dedupes_BOTH_publishing_surfaces(monkeypatch):
+    """⛔ `_dedupe_mentions` runs INSIDE `route_mentions` — the call that may have
+    raised. On the fail-open path nothing deduped, so one hold was counted twice
+    on BOTH published lists AND in the accounting. The accounting matters most:
+    `_records` is read straight from `embed_list`, so deduping only the published
+    lists left `stats["mentions_recorded"] == 2` for one hold — the number plan
+    R1's arming gate reads — while `records` said 1, i.e. the run disagreed with
+    itself, and the "did not emit" warning counted two records while naming one
+    surface (review at `d785f3da8`, P2)."""
+    from tortoise.extractor_v2 import _mentions_for_claim
+
+    entry = {"surface": "the admin-merge rail", "claim_ref": "the budget is 40k",
+             "quote": "the admin-merge rail", "rule_id": ref.RULE_CHANNEL}
+    direct = _mentions_for_claim({"mentions": [dict(entry), dict(entry)]},
+                                 "the budget is 40k", armed=True, narrative="")
+    assert [m["surface"] for m in direct] == ["the admin-merge rail"], (
+        f"the payload clamp forwarded one hold twice: {direct!r}")
+
+    out = _fail_open_session(monkeypatch, [dict(entry), dict(entry)])
+    evidence = [m["surface"] for m in out["mentions"]["records"]]
+    assert evidence == ["the admin-merge rail"], (
+        f"the evidence surface double-counted one hold: {evidence!r}")
+    payload = [m["surface"] for m in _mentions_of(out["payload"])]
+    assert payload == ["the admin-merge rail"], (
+        f"the fail-open payload double-counted one hold: {payload!r}")
+    stats = out["stats"]
+    assert stats["mentions_recorded"] == 1, (
+        f"one hold was counted {stats['mentions_recorded']} times by the arming "
+        f"number: {stats!r}")
+    assert stats["mentions_unresolved"] == 0, (
+        f"the emitted claim was reported unresolved: {stats!r}")
+    assert not [w for w in out.get("warnings") or [] if "did not emit" in w], (
+        f"the fail-open warning counted a hold twice: {out.get('warnings')!r}")
+
+
+# ── ONE RUN, ONE ANSWER: the record may not credit the MODEL for the CUE's hold ──
+# The rows below close the two-answers class at its last two sources. A run
+# publishes the same hold on `stats["by_rule"]`, `mention_held[]` and the
+# `mentions[]` records; plan R1's arming measurement reads the RECORDS, so a
+# record that names a different rule is not a cosmetic mismatch — it counts a cue
+# hold as a model assertion. Both were reported at `40a0a81e6` and re-verified at
+# `0c15ad04d` (a peer lane's CLEAN verdict did not cover them).
+
+def test_a_cue_held_mention_records_the_CUE_rule_not_the_model_silence():
+    """⛔ The model-channel record loop stamped `entry.rule_id or RULE_CHANNEL`,
+    ignoring the `(rule_id, reason)` the CHANNEL had just written into `hold` for
+    that same surface. On the shape the armed prompt actually asks for — a mention
+    whose claim does not also NAME it in `about_entities` — no hold-driven record
+    exists, so the only record the run publishes said `referentiality.channel`
+    ("the model said so") while `by_rule` and `mention_held` said
+    `referentiality.pronoun`. One run, two answers to "what did this hold", on the
+    surface plan R1's arming gate READS (review at `40a0a81e6`, P2; still present
+    at `0c15ad04d`).
+
+    Mutant: restoring `rule_id=str(entry.get("rule_id") or RULE_CHANNEL)` reddens
+    this row and its payload half, and nothing else."""
+    el = _embed_list("the admin-merge rail", point_about=[])
+    el["mentions"] = [{
+        "surface": "it",
+        "claim_ref": el["points"][0]["content"],
+        "quote": "it",
+    }]
+    del el["entities"]                      # the mention-only response
+
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["by_rule"] == {ref.RULE_PRONOUN: 1}, (
+        f"the cue did not hold the surface: {held['mention_stats']!r}")
+    assert held["mention_held"] == [{"surface": "it",
+                                     "rule_id": ref.RULE_PRONOUN}], (
+        f"the carried decision disagrees: {held.get('mention_held')!r}")
+
+    records = held["mentions"]
+    assert [m["surface"] for m in records] == ["it"], (
+        f"the mention-only response dropped its record: {records!r}")
+    assert records[0]["rule_id"] == ref.RULE_PRONOUN, (
+        "the record credits the MODEL for a hold the CUE decided — the same run "
+        f"reports by_rule={held['mention_stats']['by_rule']!r} but the record "
+        f"plan R1 reads says {records[0]['rule_id']!r}: {records[0]!r}")
+
+    # …and the payload's copy of the same record says the same thing.
+    payload, _ = _mint(el)
+    stored = _mentions_of(payload)
+    assert [m["surface"] for m in stored] == ["it"], (
+        f"the payload dropped its record: {stored!r}")
+    assert stored[0]["rule_id"] == ref.RULE_PRONOUN, (
+        f"the payload copy disagrees with the evidence copy: {stored[0]!r}")
+
+
+def test_the_clamp_always_publishes_a_RULE_for_a_record():
+    """⛔ `_clamped_mention`'s field loop SKIPS empty values before the `rule_id`
+    branch, so an entry that OMITS the key shipped with no `rule_id` at all and
+    `Mention.rule_id` defaulted to `""` — a value outside `referentiality.RULES`,
+    i.e. the "no silent hold" field saying nothing. Reachable on the one path that
+    matters: `_MENTION_CONTRACT_LINE` does not ask the model for a `rule_id`, and
+    the fail-open path (the only route into this clamp that never passes
+    `_mention_record`) is precisely where such an entry arrives (review at
+    `40a0a81e6`, P2; still present at `0c15ad04d`).
+
+    The value an ABSENT rule must become is `referentiality.channel` — "the model
+    asserted it", nothing verified — NOT a cue rule: on the fail-open path the
+    selection raised, so no cue verdict was reached for this record."""
+    from tortoise.commit_schema import Mention
+    from tortoise.extractor_v2 import _clamped_mention
+
+    rec = _clamped_mention({"surface": "it", "claim_ref": "c"}, narrative="")
+    assert rec is not None
+    assert rec.get("rule_id") == ref.RULE_CHANNEL, (
+        "an entry that omits `rule_id` — the shape the prompt asks for — was "
+        f"published with rule_id={rec.get('rule_id')!r}, which is outside "
+        f"{sorted(ref.RULES)}: {rec!r}")
+    assert Mention(**rec).rule_id in ref.RULES, (
+        "the record reaches the model with a rule the vocabulary does not hold")
+
+    # …and the unconditional write is not a flattening: a cue rule the cue AGREES
+    # with still survives, which is the whole point of the field.
+    cue = _clamped_mention({"surface": "it", "claim_ref": "c",
+                            "rule_id": ref.RULE_PRONOUN}, narrative="")
+    assert cue.get("rule_id") == ref.RULE_PRONOUN, (
+        f"the clamp flattened a cue rule it could verify: {cue!r}")
+
+
+def test_the_record_builder_agrees_with_the_clamp_on_an_ABSENT_narrative():
+    """⛔ TWO BUILDERS, ONE RECORD. `_clamped_mention` states — and pins — that an
+    absent `narrative` is an UNKNOWABLE haystack, so a declared `narrative` space
+    stands unchecked. `_mention_record` still ran `_mention_span("")` and demoted
+    the same declaration to `"model"`, so the record published on
+    `result["mentions"]["records"]` and the record published on the payload
+    disagreed about WHICH TEXT the offsets address — for the same hold, in the same
+    run (review at `40a0a81e6`, P2; still present at `0c15ad04d`). The clamp's rule
+    is the correct side: relabelling to `model` asserts the model invented offsets
+    the cue derived."""
+    from tortoise.extractor_v2 import _mention_record
+
+    span = {"span_start": 6, "span_end": 8, "span_source": "narrative"}
+    absent = _mention_record(surface="it", claim={"content": "c"}, kind_guess=None,
+                             rule_id=ref.RULE_PRONOUN, reason="r", narrative="",
+                             quote="", span=dict(span))
+    assert absent["span_source"] == "narrative", (
+        "the record builder demoted a declared space on an ABSENT haystack, which "
+        f"`_clamped_mention` keeps: {absent!r}")
+
+    # …and the guard is not a blanket amnesty: a supplied haystack that DISAGREES
+    # still demotes, exactly as the clamp does.
+    disagree = _mention_record(surface="it", claim={"content": "c"},
+                              kind_guess=None, rule_id=ref.RULE_PRONOUN,
+                              reason="r", narrative="no pronoun here or there",
+                              quote="", span=dict(span))
+    assert disagree["span_source"] == "model", (
+        f"an unverifiable declaration shipped as verified: {disagree!r}")
+    agree = _mention_record(surface="it", claim={"content": "c"}, kind_guess=None,
+                            rule_id=ref.RULE_PRONOUN, reason="r",
+                            narrative="alpha it beta", quote="", span=dict(span))
+    assert agree["span_source"] == "narrative", (
+        f"a verifiable declaration was demoted: {agree!r}")
+
+
+def test_the_fail_open_path_keys_a_record_to_the_claim_the_write_KEEPS(monkeypatch):
+    """⛔ `_clamped_mention` re-derives "every model CLAIM" — except the one that
+    decides ATTACHMENT. A `claim_ref` copied raw keys apart from its own point for
+    any claim over `_MAX_CONTENT` (the write stores `_write_span(stripped, 1000)`),
+    so the mention never attached and the run reported a claim it HAD emitted as
+    folded away by a NOOP/duplicate/MERGE that never happened — the defect
+    `_mention_record` fixed at its own call site (review cycle 4, P1-c), left open
+    at the last door on the fail-open path (review at `b791a3eb2`, P2). Both sides
+    of the match must use the same window, so the clamp cuts the ref AND
+    `_mentions_for_claim` keys on the cut."""
+    import tortoise.extractor_v2 as ex
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("selection exploded — the fail-open path")
+
+    monkeypatch.setattr(ex, "route_mentions", _boom)
+    long_claim = ("the budget is 40k and " * 90).strip()
+    assert len(long_claim) > ex._MAX_CONTENT
+    el = _embed_list("it")
+    el["points"][0]["content"] = long_claim
+    el["mentions"] = [{"surface": "it", "claim_ref": long_claim,
+                       "quote": "it", "rule_id": ref.RULE_PRONOUN}]
+    res = ex.execute_embed(copy.deepcopy(el), {}, session_id="fail-open-long-claim")
+    payload = res["payload"]
+    attached = [m for p in payload["points"] for m in (p.get("mentions") or [])]
+    assert [m["surface"] for m in attached] == ["it"], (
+        "the mention did not attach to the claim the write kept: "
+        f"{attached!r}")
+    ref_len = len(attached[0]["claim_ref"])
+    assert ref_len <= ex._MAX_CONTENT, (
+        f"the record's claim_ref is longer than the write's window: {ref_len}")
+    assert res["stats"]["mentions_attached"] == 1, (
+        f"an attached record was not counted: {res['stats']!r}")
+    assert res["stats"]["mentions_unresolved"] == 0, (
+        f"a claim the run DID emit was reported unresolved: {res['stats']!r}")
+
+
+def test_the_accounting_counts_what_the_run_PUBLISHED(monkeypatch):
+    """⛔ Two raw entries whose surfaces agree only AFTER the 200-character cap were
+    counted twice by `stats["mentions_recorded"]` while both published lists said
+    one — the raw dedupe keys on the untruncated surface. That number is what plan
+    R1's arming gate reads, so it has to be the records the run actually published
+    (review at `b791a3eb2`, P3)."""
+    long_a = "a" * 201 + "X"
+    long_b = "a" * 201 + "Y"
+    out = _fail_open_session(monkeypatch, [
+        {"surface": long_a, "claim_ref": "the budget is 40k", "rule_id": ref.RULE_CHANNEL},
+        {"surface": long_b, "claim_ref": "the budget is 40k", "rule_id": ref.RULE_CHANNEL},
+    ])
+    published = len(out["mentions"]["records"])
+    assert out["stats"]["mentions_recorded"] == published, (
+        "the arming number disagrees with the surface it describes: "
+        f"{out['stats']['mentions_recorded']} recorded vs {published} published")
+    assert published == 1, (
+        f"two entries that converge after the cap were published twice: {published}")
+
+
+def test_a_deduped_pair_keeps_the_entry_that_carries_the_ADDRESS():
+    """⛔ `_dedupe_mentions` kept the FIRST entry, so a spanless duplicate listed
+    first replaced a VERIFIED address listed second — the shipped record had no
+    address while one was available, and the address is the record's whole point
+    (review at `b791a3eb2`, P3)."""
+    from tortoise.extractor_v2 import _clamped_mention, _dedupe_mentions
+
+    account = "the budget is 40k"
+    spanless = _clamped_mention({"surface": "it", "claim_ref": account})
+    verified = _clamped_mention({"surface": "it", "claim_ref": account,
+                                 "quote": "x it y", "span_source": "quote",
+                                 "span_start": 2, "span_end": 4})
+    assert "span_start" not in spanless and verified.get("span_start") == 2
+    kept = _dedupe_mentions([spanless, verified])
+    assert len(kept) == 1
+    assert kept[0].get("span_start") == 2, (
+        f"the spanless duplicate won the dedupe: {kept!r}")
+    # …and the preference does not reorder anything else: the first entry still
+    # wins when neither (or both) carry a pair.
+    assert _dedupe_mentions([spanless, dict(spanless)]) == [spanless]
+
+    # ⛔ THE SHAPE THAT WAS ACTUALLY BROKEN: `_mention_record` ALWAYS emits both
+    # keys (`None` when it could not locate the surface) while `_clamped_mention`
+    # POPS them, so a presence test was inert on the builder the defect was
+    # observed on — the row above used only `_clamped_mention` products and was
+    # green over a no-op rule (review at `9561959ed7`, P2). And the ADDRESS is
+    # merged into the first record, not swapped with it: the cue's `rule_id` must
+    # survive taking the duplicate's address.
+    from tortoise.extractor_v2 import _mention_record
+
+    cue = _mention_record(surface="it", claim={"content": account},
+                          kind_guess=None, rule_id=ref.RULE_PRONOUN,
+                          reason="cue derived", narrative="", quote="")
+    assert cue.get("span_start") is None and "span_start" in cue
+    addr = _mention_record(surface="it", claim={"content": account},
+                           kind_guess=None, rule_id=ref.RULE_CHANNEL,
+                           reason="carried", narrative="", quote="x it y",
+                           span={"span_start": 2, "span_end": 4,
+                                 "span_source": "quote"})
+    assert addr["span_start"] == 2
+    merged = _dedupe_mentions([cue, addr])
+    assert len(merged) == 1
+    assert merged[0]["span_start"] == 2 and merged[0]["span_source"] == "quote", (
+        f"the address was dropped on a `_mention_record` pair: {merged!r}")
+    assert merged[0]["rule_id"] == ref.RULE_PRONOUN and merged[0]["reason"] == "cue derived", (
+        f"the cue's provenance was replaced by the duplicate's: {merged!r}")
+
+    # ⛔ THE ADDRESS TRAVELS WITH ITS QUOTE. The pair was verified against the
+    # DUPLICATE's quote, so filling the quote only "when absent" shipped
+    # `span_source: "quote"` beside the survivor's different quote — offsets that
+    # index bytes the record does not name, i.e. the forgery the clamp exists to
+    # refuse, and no later clamp can catch it because every published surface
+    # clamps BEFORE deduping (review at `2a1153519`, P2).
+    survivor = _mention_record(surface="it", claim={"content": account},
+                               kind_guess=None, rule_id=ref.RULE_PRONOUN,
+                               reason="cue derived", narrative="",
+                               # ⛔ no whole-word `it` here, or the survivor gets its
+                               # OWN quote span and the merge never runs (first cut of
+                               # this row used "nobody mentioned it here", measured green
+                               # over the broken rule: `_mention_span` found `it` at 17)
+                               quote="nobody mentioned that here")
+    with_addr = _mention_record(surface="it", claim={"content": account},
+                                kind_guess=None, rule_id=ref.RULE_CHANNEL,
+                                reason="carried", narrative="", quote="he said it loudly",
+                                span={"span_start": 8, "span_end": 10,
+                                      "span_source": "quote"})
+    assert with_addr["quote"][8:10] == "it"
+    merged2 = _dedupe_mentions([survivor, with_addr])
+    assert len(merged2) == 1
+    rec = merged2[0]
+    assert rec["span_source"] == "quote" and rec["quote"][rec["span_start"]:rec["span_end"]] == "it", (
+        "the adopted quote-space address indexes the SURVIVOR's quote, not the "
+        f"text it was verified against: {rec!r}")
+
+
+def test_an_over_cap_claim_is_not_reported_as_CLAIMLESS():
+    """⛔ `claims_by_ref` is keyed on the CUT identity (`_mention_ref`), but the
+    channel loop compared the model's RAW `claim_ref` against it, so an entry whose
+    claim is present over `_MAX_CONTENT` was counted `channel_refused_no_claim` and
+    named in `channel_refused_surfaces` — an evidence surface whose own comment
+    reads "a mention with no resolvable claim is not a record" — while the run held
+    it, recorded it and attached it. The same window must be used on every lookup
+    (review at `9561959ed7`, P3)."""
+    long_claim = ("the budget is 40k and " * 90).strip()
+    el = {"entities": [], "events": [],
+          # ⛔ NO carrier names the surface: the claim link is the ONLY thing that can
+          # hold it, so this row sees the claim window itself. With a carrier the
+          # `_claims_naming` fallback masks a raw-vs-cut mismatch (measured: the
+          # gate mutant stays green with one).
+          "points": [{"content": long_claim, "pointKind": "statement"}],
+          "operators": [],
+          "mentions": [{"surface": "it", "claim_ref": long_claim,
+                        "quote": "it", "rule_id": ref.RULE_PRONOUN}]}
+    held = route_mentions(copy.deepcopy(el), "")
+    assert held["mention_stats"]["held_surfaces"] == 1, (
+        f"the mention-only shape was not held: {held['mention_stats']!r}")
+    assert held["mention_stats"].get("channel_refused_no_claim", 0) == 0, (
+        "a claim the run HELD and recorded was reported claimless: "
+        f"{held['mention_stats']!r}")
+    assert not held["mention_stats"].get("channel_refused_surfaces"), (
+        f"a held surface was named refused: {held['mention_stats']!r}")
+    payload, _ = _mint(copy.deepcopy(el))
+    assert [m["surface"] for m in _mentions_of(payload)] == ["it"], (
+        f"the record was lost: {_mentions_of(payload)!r}")
+
+
+def test_a_deduped_pair_does_not_lend_its_address_to_a_DIFFERENT_SPELLING():
+    """⛔ The dedupe key folds case and whitespace runs (`_norm`), but
+    `_mention_span` is case-SENSITIVE — so a `quote`-space pair verified for `it`
+    was adopted by a survivor named `It`, shipping offsets that index a VARIANT of
+    the surface the record names. The published surfaces then demoted it to
+    `"model"` (losing cue provenance) while the producer channel kept `"quote"`:
+    the two-answers class, on the surface axis (review at `1bc5847b4`, P3)."""
+    from tortoise.extractor_v2 import _dedupe_mentions, _mention_record
+
+    account = "the server was down and it broke"
+    upper = _mention_record(surface="It", claim={"content": account},
+                            kind_guess=None, rule_id=ref.RULE_PRONOUN,
+                            reason="cue derived", narrative="",
+                            quote="nobody mentioned that here")
+    lower = _mention_record(surface="it", claim={"content": account},
+                            kind_guess=None, rule_id=ref.RULE_CHANNEL,
+                            reason="carried", narrative="", quote="he said it loudly",
+                            span={"span_start": 8, "span_end": 10,
+                                  "span_source": "quote"})
+    assert upper.get("span_start") is None and lower["span_start"] == 8
+    merged = _dedupe_mentions([upper, lower])
+    assert len(merged) == 1, f"case variants were not deduped: {merged!r}"
+    rec = merged[0]
+    assert rec["surface"] == "It", f"the survivor's spelling was replaced: {rec!r}"
+    assert rec.get("span_start") is None, (
+        "an address verified for `it` was adopted by a record named `It`: "
+        f"{rec!r}")
+
+
+def test_a_deduped_address_must_INDEX_the_text_the_record_carries():
+    """⛔ ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX. The merge that made
+    a verified address win the dedupe copied `span_start`/`span_end`/
+    `span_source` from the winner while keeping the FIRST record's `quote` — unless
+    that quote was EMPTY. So for two duplicates carrying DIFFERENT non-empty
+    quotes, the record shipped a `"quote"`-labelled address into text it does not
+    index: `quote[start:end]` reads bytes the surface never occupied, and
+    `Mention._span_is_an_address` cannot see it (it checks completeness, order and
+    range only). Measured on the fail-open path, where the clamp runs BEFORE the
+    dedupe: `{'quote': 'the budget is 40k', 'span_start': 2, 'span_end': 4,
+    'span_source': 'quote'}` → `quote[2:4] == 'e '` for surface `it` (review at
+    `d59000f10`, P2 — the fabricated-address class #5007 and this PR's own
+    `test_a_mention_only_response_is_verified_by_the_last_builder` exist to close).
+
+    The invariant, asserted as a property so any variant is caught: a shipped
+    `"quote"` address MUST index its own surface in its OWN quote. The positive
+    half below proves the fix is not "stop merging": an address that DOES verify
+    against the kept quote is still adopted."""
+    from tortoise.extractor_v2 import _mentions_for_claim
+
+    claim = "the budget is 40k"
+    spanless = {"surface": "it", "claim_ref": claim, "quote": claim}
+    carrying = {"surface": "it", "claim_ref": claim, "quote": "x it y",
+                "span_source": "quote", "span_start": 2, "span_end": 4}
+
+    for armed_entries in ([spanless, carrying], [carrying, spanless]):
+        out = _mentions_for_claim({"mentions": [dict(e) for e in armed_entries]},
+                                  claim, armed=True, narrative="")
+        assert len(out) == 1, f"the pair was not deduped: {out!r}"
+        rec = out[0]
+        if rec.get("span_source") == "quote" and rec.get("span_start") is not None:
+            q = str(rec.get("quote") or "")
+            got = q[rec["span_start"]:rec["span_end"]]
+            assert got == rec["surface"], (
+                "a `quote`-labelled address does not index the text the record "
+                f"carries: quote[{rec['span_start']}:{rec['span_end']}] == {got!r} "
+                f"for surface {rec['surface']!r} — {rec!r}")
+
+    # ⛔ AND THE ADDRESS MUST NAME THIS SURFACE, character for character. The dedupe
+    # key is `_norm(surface)` (case-folded), so two entries for one claim can differ
+    # in spelling; adopting the duplicate's pair then shipped offsets landing on the
+    # right bytes of a DIFFERENT spelling than the record's own `surface` (review at
+    # `ea790070d`, P3).
+    mixed = _mentions_for_claim(
+        {"mentions": [{"surface": "The Thing", "claim_ref": claim},
+                      {"surface": "the thing", "claim_ref": claim,
+                       "quote": "the thing is late", "span_source": "quote",
+                       "span_start": 0, "span_end": 9}]},
+        claim, armed=True, narrative="")
+    assert len(mixed) == 1, mixed
+    rec = mixed[0]
+    if rec.get("span_start") is not None and rec.get("span_source") == "quote":
+        q = str(rec.get("quote") or "")
+        assert q[rec["span_start"]:rec["span_end"]] == rec["surface"], (
+            "a `quote` address indexes a different SPELLING than the record's own "
+            f"surface: {q[rec['span_start']:rec['span_end']]!r} vs "
+            f"{rec['surface']!r} — {rec!r}")
+
+    # POSITIVE CONTROL: the same duplicate, but the address verifies against the
+    # KEPT record's quote — the address must still be adopted (the dedupe's job).
+    ok = {"surface": "it", "claim_ref": claim, "quote": "x it y",
+          "span_source": "quote", "span_start": 2, "span_end": 4}
+    kept_ok = {"surface": "it", "claim_ref": claim, "quote": "x it y"}
+    out = _mentions_for_claim({"mentions": [dict(kept_ok), dict(ok)]}, claim,
+                              armed=True, narrative="")
+    assert len(out) == 1
+    assert out[0].get("span_start") == 2 and out[0].get("span_source") == "quote", (
+        f"a VERIFIED address was dropped by the dedupe: {out[0]!r}")
