@@ -19,12 +19,14 @@ leaves ``tests/test_evidence_assembly.py`` (30 passed) and
 ``tests/longmem_eval/test_slice_a_flood_bound.py`` (22 passed) fully GREEN, while
 the eval lane silently measures OFF-vs-OFF: ``evidence_assembly_stats`` is still
 computed (``applied: True``, ``collapsed_duplicates: N``) on the outcome the seam
-RETURNS — the runner's per-outcome whitelist (``run.py:5261-5480``) and its Layer-1
-projection (``:6145+``) carry every sibling arm and not this one, so nothing the
-run persists shows the arm state (``#11467``) — and the run would report "Slice A
-changed nothing". That is a false null on the very arm
-the affected-set gate (#8486's ruling, 2026-11-07, comment 6710955512) lists
-#2683 for — the wasted eval the owner forbade.
+RETURNS — the runner's per-outcome whitelist (the ``outcome = {`` dict in the
+run loop) and its Layer-1 projection (the ``"outcomes"`` block inside
+``run.py``'s ``outcomes_to_report``) carry four sibling arm-stat keys and not
+this one (the ``tr_session`` ``_stats`` halves are dropped too — see the census
+comment below), so nothing the run persists shows the arm state (``#11467``) —
+and the run would report "Slice A changed nothing". That is a false null on the
+very arm the affected-set gate (#8486's ruling, 2026-11-07, comment 6710955512)
+lists #2683 for — the wasted eval the owner forbade.
 
 LAYER
 -----
@@ -96,9 +98,6 @@ CHUNK_ID = "p2683chunk"
 DUP_ID = "p2683dupe"
 OTHER_ID = "p2683other"
 QUESTION_DATE = "2026-09-25"
-
-#: The DISTILLED statements the package must end up as anchors of.
-_STATEMENT_IDS = {POINT_ID, DUP_ID, OTHER_ID}
 
 
 @pytest.fixture(autouse=True)
@@ -284,22 +283,29 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     assert on["evidence_assembly"] is True
     stats = on["evidence_assembly_stats"]
     # THE WHOLE CENSUS, not a sample of it: this dict IS the arm's record in the
-    # ONLY place the run has one — `retrieve_for_question`'s own return
-    # (`retrieve.py:3324-3326`). ⛔ MEASURED, so the next reader does not assume
-    # it travels: it does NOT reach the run's artifacts. `run.py` contains no
-    # `evidence_assembly` reference at all (`rg -n evidence_assembly
-    # tools/longmem_eval/run.py` → 0 hits), so the outcome whitelist that
-    # mirrors four sibling arm-stat keys (`run.py:5348` temporal_leg_stats,
-    # `:5392` coverage_loop_stats, `:5403` session_reinjection_stats,
-    # `time_aware_stats`) omits this one, and the Layer-1 projection
-    # (`run.py:6145`+) omits it too. The arm state is recorded NOWHERE the eval
-    # lane can read it — not the checkpoint, not the Layer-1 report, and not the
-    # fingerprint (the `tr_session_admission` / `tr_session_completion` CONFIG
-    # FLAGS ride the fingerprint and `r5_knobs` instead, `run.py:1922-1925` /
-    # `:5983-5991`; this arm has neither). `run.py` drops the tr_session `_stats`
-    # halves too, but the temporal-admission driver persists those in its own
-    # rows (`temporal_admission_arms.py:217-218`) — a route this arm has no
+    # ONLY place the run has one — `retrieve_for_question`'s own return.
+    # ⛔ MEASURED, so the next reader does not assume it travels: it does NOT
+    # reach the run's artifacts. `run.py` contains no `evidence_assembly`
+    # reference at all (`rg -n evidence_assembly tools/longmem_eval/run.py` → 0
+    # hits), so the per-outcome dict that mirrors four sibling arm-stat keys
+    # (`temporal_leg_stats`, `time_aware_stats`, `coverage_loop_stats`,
+    # `session_reinjection_stats`) omits this one, and the Layer-1 projection in
+    # `outcomes_to_report` omits it too. The arm state is recorded NOWHERE the
+    # eval lane can read it — not the checkpoint, not the Layer-1 report, and not
+    # the fingerprint (the `tr_session_admission` / `tr_session_completion`
+    # CONFIG FLAGS ride the fingerprint and `r5_knobs` instead; this arm has
+    # neither). `run.py` drops the tr_session `_stats` halves too, but the
+    # temporal-admission driver persists those in its own rows
+    # (`temporal_admission_arms.py:217-218`) — a route this arm has no
     # equivalent of, which is the gap #11467 records.
+    # ⛔ CITED by SYMBOL (`e1ba0974e`'s rule for code citations): the numbers
+    # that once stood here had drifted out from under them. The numbers below
+    # are a READING at `29d67f9cc`, not a citation — re-derive them from the
+    # symbol when you need them current. At that commit the four keys sit at
+    # `run.py:5396/5431/5440/5451` and its knobs at `:6048-6071` (the two
+    # `tr_session_*` CONFIG-FLAG entries at `:1956-1959` in `run.py`, whose
+    # block runs on to `:1975` with the four completion budgets). A key name
+    # survives a rebase; a line number does not.
     # Hence this pin is the only guard the census has: a key that grows or
     # disappears is otherwise shipped unseen.
     assert set(stats) == {
