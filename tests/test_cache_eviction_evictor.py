@@ -84,22 +84,11 @@ class _Record:
 
 @pytest.fixture()
 def lane():
-    """A dedicated graph on the live lane container, dropped afterwards.
+    """A dedicated graph on the live lane container, dropped afterwards."""
+    import os
 
-    Epic #1647 (cycle-6 P1-3 / cycle-8 P2-2): a raw client bypasses
-    `_assert_test_graph` AND the per-test wipe scope, so the handle must be
-    per-test UNIQUE **and** journaled — `os.urandom` makes it unique, and
-    `_journal_append` is the record that tells a live PEER's `scope=None` sweep
-    this graph is in use (#3074/#3214). The `finally` below covers only this
-    lane's own teardown, so a run killed before it would leave the graph UNOWNED
-    without the journal. Pinned by
-    `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
-    — the census that reddened on this site (PR #11354, `test (b)`).
-    """
     import redis
     from falkordb import FalkorDB
-
-    from tests._embedded import _journal_append
 
     host = _live_utils.service_host()
     port = _live_utils.docker_port()
@@ -110,6 +99,20 @@ def lane():
     )
     db = FalkorDB(host=host, port=port, password=password)
     graph_name = f"test_evict_{os.urandom(6).hex()}"
+    # #5128-class hygiene (cycle-6 P1-3 / cycle-8 P2-2): the raw client bypasses
+    # `_assert_test_graph` AND the per-test wipe scope, so a per-test-unique name
+    # alone still leaks one empty graph per run. Journaling the name is the
+    # ownership contract the session-end sweep reads — without it the graph is
+    # UNOWNED and the sweep can never drop it.
+    #
+    # The `test_` prefix is LOAD-BEARING, not decoration: the sweep's name gate
+    # (`tests/_embedded.py::owns_by_ownership_record`) admits only
+    # `_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")`,
+    # so a journal entry named `evict_…` is PRESERVED rather than dropped —
+    # journaling it would look like the fix while leaking the graph anyway, and
+    # it would additionally be reported as a "preserved" name, the signal that
+    # means "a test drove PRODUCT code at a shared path".
+    from tests._embedded import _journal_append
     _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
