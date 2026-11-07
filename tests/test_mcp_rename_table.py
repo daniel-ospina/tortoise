@@ -1129,16 +1129,24 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
         # one that checks out at `fetch-depth: 0` (#5086 review P1-1). Listed
         # here, not exempted: the exactness of this assertion is the point.
         "python3 tools/substrate_map_check.py --check\n"
+        # #11084 / #2820: two more doc↔tree guards join the same step for the
+        # same `#4454` reason — a docs-only edit of either map selects no
+        # surface, and `docs` is the required, `paths:`-free context. `#2820`'s
+        # needs HISTORY for its anchor-ancestry claim for the same reason its
+        # #5086 sibling above does.
+        "python3 tools/problem_map_check.py --check\n"
         # #11084: the surface map's guard, BOTH arms — the check, and the
         # self-test that proves the check still catches a consistent shrink.
+        # `test_design_map_check.py` takes no `--check` flag (it is verify-only
+        # with no other mode), so its invocation is listed without one.
         "python3 tools/test_design_map_check.py\n"
         "python3 tools/test_design_map_check.py --self-test"
     )
     assert _code(str(step.get("run", ""))).strip() == expected, (
-        "the drift step must invoke EXACTLY the installer, the four `--check` "
-        "commands and the map guard's two arms — no shell operator, no wrapper, "
-        f"no `echo` decoy, no trailing anything, or a real failure reports green "
-        f"(#2656); got "
+        "the drift step must invoke EXACTLY the installer, the five `--check` "
+        "commands and the map guard's two arms — no shell operator, no "
+        "`echo` decoy, no wrapper, no "
+        f"trailing anything, or a real failure reports green (#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
     )
     assert not docs_job.get("continue-on-error"), (

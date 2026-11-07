@@ -216,6 +216,14 @@ def test_docs_scanning_gates_stay_in_tier1():
     )
 
 
+    assert "test_problem_map_2820.py" in tier1, (
+        "#2820: the problem map's drift guard must be in tier1 — the map IS a "
+        "document (`docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`), and "
+        "`docs/` is in NON_PYTHON_PREFIXES and the map matches no "
+        "SOURCE_PATTERNS entry, so the docs-only edit that can falsify 26 "
+        "status rows selects no surface and runs tier1 ONLY"
+    )
+
     assert "test_substrate_map.py" in tier1, (
         "#5086 review (P1-2): the substrate map's drift guard must be in tier1 — "
         "the map IS a document (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`), "
@@ -449,6 +457,56 @@ def test_substrate_map_guard_runs_on_the_diffs_it_guards():
     symbol_move = _sel(["tortoise/projection/edges.py"])
     assert "core" in symbol_move["surfaces"], symbol_move["surfaces"]
     assert "test_substrate_map.py" in symbol_move["test_files"]
+
+
+def test_problem_map_guard_runs_on_the_diffs_it_guards():
+    """#2820 review (P3): pin the SELECTION of the problem-map guard on all arms.
+
+    `tests/test_problem_map_2820.py` re-measures
+    `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md` against the tree, and four
+    distinct diffs can make it wrong. This mirrors
+    `test_substrate_map_guard_runs_on_the_diffs_it_guards` — the #5086 lane's own
+    recorded lesson, which this guard's registration inherited but did not pin:
+    with no ``assert "test_problem_map_2820.py" in tier1`` a later re-cut could
+    drop the row and every registered check would stay green while the map's own
+    controls stopped running on the one change class that can falsify it.
+
+    Measured at this head: a docs-only edit of the map gives ``surfaces == []``
+    with the pin present (the ``tier1`` row is the whole fix for that arm, and it
+    is the arm that matters — the map IS a document); a tool-only edit resolves
+    through ``CORE_ALSO`` (the entry beside its `substrate_map_check.py` sibling,
+    added in review round 11 — before it, that arm reached the pin only through
+    ``tier1``, which is thinner than the sentence above implies); and an
+    index-only edit is ``core`` for the same reason.
+    """
+    docs = _sel(["docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md"])
+    assert docs["full"] is False
+    assert docs["surfaces"] == [], docs["surfaces"]
+    assert "test_problem_map_2820.py" in docs["test_files"], (
+        "a docs-only edit of the problem map must run the guard that re-measures "
+        "it — this is the change class that can make 26 status claims wrong with "
+        "every matrix gate green"
+    )
+
+    tool = _sel(["tools/problem_map_check.py"])
+    assert tool["full"] is False
+    # ⛔ THE ARM ITSELF, not just the pin. Without this line the `CORE_ALSO`
+    # entry added in review round 11 was pinned by NOTHING: the pin arrives
+    # through `tier1` whether the entry is there or not, `--integrity` does not
+    # read `CORE_ALSO` (`tools/ci_selection.py:1479`), so deleting the entry
+    # dropped this arm from `surfaces: ['core']` (779 tests) to `[]` (80) with
+    # every gate green — the silent-drop class the entry exists to close, found by
+    # round 12 reading the test against its own comment (#1349/#3332/#3616).
+    assert tool["surfaces"] == ["core"], tool["surfaces"]
+    assert "test_problem_map_2820.py" in tool["test_files"], (
+        "a tool-only edit must run the tool's own negative controls — `tools/` is "
+        "swallowed by NON_PYTHON_PREFIXES, so CORE_ALSO is the only thing that "
+        "keeps this out of the docs-only early return"
+    )
+
+    index = _sel(["docs/00_index.md"])
+    assert index["surfaces"] == ["core"], index["surfaces"]
+    assert "test_problem_map_2820.py" in index["test_files"]
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():

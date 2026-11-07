@@ -2810,6 +2810,18 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by tests/test_ci_selection.py::
              # test_substrate_map_guard_runs_on_the_diffs_it_guards.
              "tools/substrate_map_check.py",
+             # #2820 review round 11 (P3): the memory-substrate map's drift guard
+             # has the SAME two arms, and the same hole — `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches the
+             # tool, so a `tools/problem_map_check.py`-only diff came back
+             # `changed == []`, took the docs-only early return and reached its
+             # test only through the curated `tier1` list. The DOC half stays
+             # unclaimed here for the same reason as its sibling (a docs-only diff
+             # must stay on the tier-1 path); this entry closes the TOOL half, so
+             # the arm now resolves `surfaces=['core']` and not an empty set.
+             # Pinned by tests/test_ci_selection.py::
+             # test_problem_map_guard_runs_on_the_diffs_it_guards.
+             "tools/problem_map_check.py",
              # #10131 review P1: tools/ci_catch_history.py owns
              # tests/test_ci_catch_history.py — registered `core` (the registration this
              # PR adds) — but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
