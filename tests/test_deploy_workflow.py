@@ -5719,7 +5719,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             return norm[start:pos]
 
         def _sentence_before_phrase(norm: str, pos: int) -> str:
-            """The part of the phrase's OWN SENTENCE that sits BEFORE it.
+            r"""The part of the phrase's OWN SENTENCE that sits BEFORE it.
 
             ⛔ ONE BOUNDARY SET, AND IT IS COARSER THAN THE CLAUSE'S ON PURPOSE (#11191
             review r7, P1 — MEASURED fail-open). `_REVERSING_FRAME` is read over THIS
@@ -5740,20 +5740,46 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 never says the tree immediately before #9548 was wrong." is a truthful
                 denial of the conjunction and stays admitted here (measured).
 
-            `;` and the dashes ARE boundaries: `_CLAUSE_DELIM` already treats them as
-            clause breaks, and a reversal across one is a different proposition. The full
-            stop is abbreviation-protected with the same sentinel `_sentence_tail_hard`
-            uses — the substitution is LENGTH PRESERVING, so offsets stay valid.
+            ⛔ EVERY BOUNDARY SPELLING, NOT THE DECORATIVE SUBSET (#11191 review r8, P2 —
+            MEASURED fail-open, 3/3 ASCII spellings). The first cut listed `;` `.` and the
+            UNICODE dashes only, so the same distractor reversal walked straight through an
+            ASCII `--` / ` - ` / `:` — ADMITTED here while `origin/main` REFUSES:
+              "It is not true that the census is 5 lines -- the note never says the tree
+               immediately before #9548 was wrong."            -> was ADMITTED, main REFUSES
+              …the same with ` - ` and with `:`                        -> was ADMITTED
+            `_CLAUSE_DELIM` was widened to `\s-{1,2}\s` for exactly this reason ("a verdict
+            keyed on a spelling is the pattern this predicate keeps closing"), and this
+            window now uses the same spellings.
+
+            ⛔ AND EVERY FULL STOP IS ONE, ABBREVIATIONS INCLUDED (#11191 review r8, P3 —
+            MEASURED). The first cut protected `i.e.`/`e.g.` with a sentinel and, measured,
+            the protection was BOTH inert (reverting it reds nothing) and HALF-EFFECTIVE
+            (``_ABBREVIATION_PERIOD` re-emitted `group(1)`, which still contains the interior
+            period, so the cut landed inside `i.e.` anyway). The sentinel is gone: one rule,
+            no exceptions. Cost, MEASURED and DISCLOSED: a reversal written before an
+            abbreviation's period no longer reaches the frame —
+              "It is not true that the census is 5 lines, i.e. the note never says the tree
+               immediately before #9548 was wrong."             -> REFUSED here, main REFUSES
+            which is `origin/main`'s verdict too, and the sentence is genuinely ambiguous
+            between a denial of the conjunction and a reported refutation.
+
+            ⚠️ DISCLOSED, NOT CLOSED (#11191 review r8, P3 — MEASURED): because coordination
+            is deliberately NOT a boundary, this window cannot tell a GOVERNED continuation
+            from an UNGOVERNED assertion, and the defect reading is admitted:
+              "It is not true that the row is a census, but the note never says the tree
+               immediately before #9548 was wrong."             -> ADMITTED here, main REFUSES
+            (same for `and`/`so`/`because` without the complementiser `that`). Cutting at
+            coordination would refuse the truthful `, and that the note never says …` row
+            above — the two readings are the same surface, so closing this needs the
+            structural claim (#11301), not another arm here. Recorded on #11304.
             """
-            sentinel = "\ue000"
-            src = _ABBREVIATION_PERIOD.sub(lambda _m: _m.group(1) + sentinel, norm)
             start = 0
-            for _delim in re.finditer(r"[.;\u2014\u2013]", src):
+            for _delim in re.finditer(r"[.;:\u2014\u2013]|\s-{1,2}\s", norm):
                 if _delim.end() <= pos:
                     start = _delim.end()
                 elif _delim.start() >= pos:
                     break
-            return src[start:pos].replace(sentinel, ".")
+            return norm[start:pos]
 
         _ABBREVIATION_PERIOD = re.compile(r"\b(i\.e|e\.g|viz|cf|vs)\.", re.I)
 
@@ -9881,6 +9907,24 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "before #9548 was wrong.",
         "It is not true that the census is 5 lines; the note never says the tree immediately "
         "before #9548 was wrong.",
+        # ⛔ …AND EVERY BOUNDARY SPELLING, NOT THE DECORATIVE SUBSET (#11191 review r8, P2 —
+        # MEASURED fail-open, 3/3 ASCII spellings). `_CLAUSE_DELIM` was widened to
+        # `\s-{1,2}\s` in r13 ("a verdict keyed on a spelling …"), and the r7 window listed
+        # only `;` `.` and the UNICODE dashes, so an ASCII `--`, an ASCII ` - ` and a `:`
+        # each walked a distractor reversal straight through: all three ADMITTED at
+        # `be09daf2d4f` and REFUSED by `origin/main`.
+        "It is not true that the census is 5 lines -- the note never says the tree "
+        "immediately before #9548 was wrong.",
+        "It is not true that the census is 5 lines - the note never says the tree "
+        "immediately before #9548 was wrong.",
+        "It is not true that the census is 5 lines: the note never says the tree "
+        "immediately before #9548 was wrong.",
+        # ⛔ …AND AN ABBREVIATION'S FULL STOP IS A FULL STOP (#11191 review r8, P3 —
+        # MEASURED; `origin/main` REFUSES it too, and the sentence is ambiguous between a
+        # denial of the conjunction and a reported refutation). The sentinel that was meant
+        # to protect `i.e.` was inert AND half-effective; the rule is now one rule.
+        "It is not true that the census is 5 lines, i.e. the note never says the tree "
+        "immediately before #9548 was wrong.",
         # ⚠️ DISCLOSED, NOT CLOSED (#11191 review r6, P2; SCOPE CORRECTED by review r7, P2 —
         # the r6 text claimed the surviving class was ONE shape, `and`-coordinated, "a clause,
         # not an aside". Measured, that is false, so the disclosure is stated as it is: the
@@ -9898,11 +9942,11 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         # The last one has NO coordinated clause at all: the `;` is INSIDE the aside, and
         # `_clause_before_phrase` cuts at `;` regardless of paren depth, so the aside's own
         # interior ends the reporting frame. Closing the class needs clause cutting to be
-        # paren-depth aware — a change to the primitive every arm in this predicate reads
-        # (27 call sites), which is not made blind here. Filed with its measurement on
-        # #11304, which owns the surviving-prose-families list; #11301 owns the structural
-        # fix. Widening this veto without that measurement is how the next round gets a
-        # truth-RED.
+        # paren-depth aware — a change to the primitive whose readers are measured at this
+        # head as four direct `.finditer` uses and five helper call sites, which is not made
+        # blind here. Filed with its measurement on #11304, which owns the
+        # surviving-prose-families list; #11301 owns the structural fix. Widening this veto
+        # without that measurement is how the next round gets a truth-RED.
         # ⛔ THE CONTRACTION FAMILY (#11191 review r33-R3, P2 — MEASURED inert leg). The
         # first cut listed `n't` inside a `\b(?:…|n't)\b` alternation, which CANNOT match:
         # a word boundary cannot sit between `n` and `'` inside a contraction, so all three
