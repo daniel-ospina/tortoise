@@ -170,7 +170,7 @@ comparables now say what that measurement will probably show, and how to run it:
 
 ## Extractor-v4 alignment — the check this brief originally omitted (2026-11-05; corrected 2026-11-06)
 
-**Why this section exists.** The first version of this brief never read `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (the design of record for the write path, home `#4894`). That was a Research-stage omission, and it matters because the epic's rule lives **inside** that write path. Reading it produced one genuine gap in what the epic asked for, and two corrections to this brief's own first draft — one where the draft was right at its `Head` pin and went stale, and one where it repeated a design-document note the code has since outgrown.
+**Why this section exists.** The first version of this brief never read `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (the design of record for the write path, home `#4894`). That was a Research-stage omission, and it matters because the epic's rule lives **inside** that write path. Reading it produced one genuine gap in what the epic asked for, and three corrections to this brief's own first draft — one where the draft was right at its `Head` pin and went stale, one where it repeated a design-document note the code has since outgrown, and one where it asserted an ordering no source records at all.
 
 ### ⛔ v4 ALREADY RECORDS THE GAP, as G2
 
@@ -202,7 +202,7 @@ This section first repeated v4's wiring note as an open defect. At the branch he
 - `apply_vet`'s Rule 1 is *"Only an explicit `DISCARD` removes anything"* (`tortoise/vet_gate.py`);
 - `vet_s2_pool` carries the S2 pass's removals forward: an **operator** the live `S4` gap-filler re-added against an `S2.2`-discarded item is **not** re-minted by `execute_embed`, and an entity it started referencing does not 422 the session (`S4` here is the code's second extraction pass, which is not the design's removed *"S4 — granularity review"*). Item removal itself is driven by the union pass's own `DISCARD` decisions, not by the pool.
 
-⇒ `DISCARD` already removes from the candidate set before it is classified or committed. (`classify_consolidation` is a per-point dedup API, not the pruning site — citing it for this was wrong twice over.) Candidate items are removed by the union pass's own `DISCARD` decisions (`discarded_ids`); the pool additionally participates in the **operator** prune, which is why its two roles are stated separately here. v4's wiring note still **reads** as outstanding because its citations belong to the `c79ba1cf2` pin; that passage is stale at the branch head, and re-asserting it here is how the stale claim would have propagated.
+⇒ `DISCARD` already removes from the candidate set **before the resolve/embed tail on every arm** — the unconditional guarantee is *"a discarded candidate is never resolved or embedded"*. ⚠️ **The never-classified half is narrower than it looks**: VET runs before the classify pass only under `TORTOISE_CLASSIFY_LATER=1`, and with that flag off (the default) kinds are emitted inline by `S2.1`/`S4`, so a candidate can reach VET already labelled — `tortoise/vet_gate.py`'s own ordering note states exactly this split. (`classify_consolidation` is a per-point dedup API, not the pruning site — citing it for this was wrong twice over.) Candidate items are removed by the union pass's own `DISCARD` decisions (`discarded_ids`); the pool additionally participates in the **operator** prune, which is why its two roles are stated separately here. v4's wiring note still **reads** as outstanding because its citations belong to the `c79ba1cf2` pin; that passage is stale at the branch head, and re-asserting it here is how the stale claim would have propagated.
 
 ### The ordering (v4 §4.2, §S2.2)
 
@@ -214,7 +214,7 @@ This section first repeated v4's wiring note as an open defect. At the branch he
 
 ⛔ **And there is no EMBED row to add to that table — its absence IS G2.** v4 §4.2's "resulting order" block has no EMBED entry at all, which is exactly what G2 records as missing. The code applies the gate at `encode_for_row`, called from the graph writers **when the payload `execute_embed` returns is committed** — `execute_embed` performs no write (it returns a `payload` dict), and the SDK's `create_point` performs the commit and calls `encode_for_row` — so the gate is neither "before `execute_embed`" nor a step of its own. Stating it as an ordering constraint would invent the placement the design says is absent.
 
-(`DISCARD` already precedes the classify/commit pass — see above.)
+(`DISCARD` already precedes the resolve/embed tail on every arm — see above; the classify half is flag-dependent.)
 
 ### Two v4 passages that CONFIRM the epic's sequencing
 
@@ -224,7 +224,7 @@ This section first repeated v4's wiring note as an open defect. At the branch he
 ### What this changes for the epic
 
 - **S1 / #11086** — arms `TORTOISE_EMBED_GATE` (the second enforcement point) and gives the EMBED decision a home in the step list (**G2**). It does **not** need `TORTOISE_VALUE_GATE` set: that is already ON by default since `#10996` (`03-scope.md`, S1).
-- **S3 / #11088** — states that it removes **vectors**, never rows, and cites the 48%-precision measurement as the reason that distinction is not negotiable (`03-scope.md`, S3; the issue body carries the same).
+- **S3 / #11088** — states that it removes **vectors**, never rows, and cites the 48%-precision measurement as the reason that distinction is not negotiable (`03-scope.md`, S3; the issue body carries the same). ⚠️ `#11088` is **CLOSED** and no successor carries the removal/surface-approval call, so that acceptance item has no tracking surface today — see below.
 - **V1 stays out of scope** and unaffected: v4 is silent on where the index lives, and §14.3 remains the decision's home.
 
 ### ⚠️ The stale premises have already propagated into the child issues
