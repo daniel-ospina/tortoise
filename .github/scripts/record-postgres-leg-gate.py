@@ -81,6 +81,16 @@ REQUIRED_CASES = {
 CAPSTONE_TEST_FILE = (Path(__file__).resolve().parents[2]
                       / "tests" / "test_9567_record_capstone.py")
 
+#: ⛔ A REQUIRED LEG MUST COME FROM THE CAPSTONE'S OWN MODULE (#11429 cycle 6).
+#: Matching on the case NAME alone let a same-named stub in ANY module the job
+#: runs satisfy the requirement: measured, moving the single `test_D8_…` case to
+#: `classname="tests.test_other"` and deselecting the capstone CERTIFIED (exit 0).
+#: pytest allows the same function name in several modules, so nothing else
+#: objects — the gate has to say where the leg must live. `_leg_module` is the
+#: same reduction the armed-leg rule uses, so a `file=`/`classname=` shape resolves
+#: identically here.
+CAPSTONE_LEG_MODULE = CAPSTONE_TEST_FILE.stem
+
 #: ⛔ THE STATIC HALF OF THE REQUIRED SET (#11429 review cycle 5). Deriving the
 #: required legs ONLY from the capstone's source is circular: the rule exists to
 #: stop a DoD leg vanishing, and deleting the `def test_D10_…` line deletes the
@@ -220,7 +230,11 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
     # no real skip, and CERTIFIED (exit 0) a run in which the record's only restore
     # drill never produced a verdict: the exact fail-open this rule exists to close,
     # one line away. No `REQUIRED_CASES` entry has a legitimate xfail.
-    present = {case.get("name", "") for case in root.iter("testcase")
+    # ⛔ (NAME, MODULE), not name alone — see `CAPSTONE_LEG_MODULE`. A case that did
+    # not run carries a `<skipped>` child, so it is not present (a skip is not a
+    # verdict, and an `xfail` is a `<skipped type="pytest.xfail">`).
+    present = {(case.get("name", ""), _leg_module(case))
+               for case in root.iter("testcase")
                if case.find("skipped") is None}
     # UNIONED: the explicit rationales plus every DoD leg the capstone DEFINES.
     # A `-k "not D<k>"` deselects exactly one name and records no skip, so only a
@@ -244,9 +258,14 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
             f"({exc}) — nothing was certified (#11429)")
         required = dict(REQUIRED_CASES)
     for required_leg, why in sorted(required.items()):
-        if required_leg not in present:
+        if (required_leg, CAPSTONE_LEG_MODULE) not in present:
+            elsewhere = any(
+                name == required_leg for name, _module in present)
             problems.append(
-                f"required leg {required_leg} did not run — {why} (#11429)")
+                f"required leg {required_leg} did not run in {CAPSTONE_LEG_MODULE}"
+                + (" (a case of that NAME ran in another module — a required leg "
+                   "must be the capstone's own)" if elsewhere else "")
+                + f" — {why} (#11429)")
     return stats, problems
 
 

@@ -3825,10 +3825,14 @@ def test_ci_arms_the_record_against_a_real_postgres():
     provisions = [s for s in steps if _uses(s, "postgres-provision")]
     teardowns = [s for s in steps if _uses(s, "postgres-teardown")]
 
-    def _labels(batch):
-        return sorted(
-            (s.get("with") or {})["label_var"]
-            for s in batch if (s.get("with") or {}).get("label_var"))
+    #: The action's own DEFAULT names (`provision.sh`): a step that omits the input
+    #: resolves to these, so a comparison over EXPLICIT inputs only cannot tell a
+    #: distinct pair from two steps that both name the default (#11429 cycle 6).
+    DEFAULT_LABEL_VAR = "TORTOISE_CI_POSTGRES_LABEL"
+    DEFAULT_DSN_VAR = "TEST_RECORD_DB_URI"
+
+    def _resolved(batch, key, default):
+        return [(s.get("with") or {}).get(key) or default for s in batch]
 
     assert len(provisions) == len(teardowns), (
         f"{name} provisions {len(provisions)} Postgres instance(s) but tears "
@@ -3849,15 +3853,33 @@ def test_ci_arms_the_record_against_a_real_postgres():
                 "instances would share the default name, so one teardown removes "
                 "whichever container the other labelled last and the remaining "
                 "one leaks (#9567 D8)")
-    assert len(set(_labels(provisions))) == len(provisions) - 1, (
-        f"{name}'s labelled provisions are {_labels(provisions)}, which do not "
-        "name one DISTINCT label per extra instance — two provisions sharing a "
-        "label make the teardowns ambiguous (#9567 D8)")
-    assert _labels(provisions) == _labels(teardowns), (
-        f"{name}'s provision/teardown `label_var` sets do not pair "
-        f"(provision {_labels(provisions)}, teardown {_labels(teardowns)}): a "
-        "teardown selected by a different label than its provision removes the "
-        "WRONG container — or none — and nothing reds")
+    # ⛔ THE INVARIANT IS ON RESOLVED NAMES, NOT ON THE EXPLICIT SUBSET. Two
+    # spellings are behaviourally identical to the leak rule and must both pass:
+    #   (a) the first pair omits its inputs (the default), or
+    #   (b) the first pair names the default explicitly.
+    # While this compared only explicit values with `len(...) - 1`, (b) REDDENED a
+    # correct workflow, and naming the DEFAULT label on the second pair PASSED —
+    # with `$GITHUB_ENV` last-one-wins both teardowns would then read the scratch
+    # label, removing the scratch container twice and never the record's
+    # (#11429 review cycle 6, both measured).
+    provision_labels = _resolved(provisions, "label_var", DEFAULT_LABEL_VAR)
+    teardown_labels = _resolved(teardowns, "label_var", DEFAULT_LABEL_VAR)
+    assert len(set(provision_labels)) == len(provision_labels), (
+        f"{name}'s provisions resolve to labels {provision_labels}, which are not "
+        "pairwise DISTINCT — two provisions sharing a label make the paired "
+        "teardowns ambiguous, and `$GITHUB_ENV` is last-one-wins, so the record's "
+        "container would never be removed (#9567 D8)")
+    assert sorted(provision_labels) == sorted(teardown_labels), (
+        f"{name}'s provision/teardown labels do not pair "
+        f"(resolved provision {sorted(provision_labels)}, teardown "
+        f"{sorted(teardown_labels)}): a teardown selected by a different label "
+        "than its provision removes the WRONG container — or none — and nothing "
+        "reds")
+    assert DEFAULT_LABEL_VAR not in provision_labels[1:], (
+        f"{name}'s instance #2+ resolves to the DEFAULT label "
+        f"({DEFAULT_LABEL_VAR}): the second instance must name its own, or the "
+        "first instance's teardown removes whichever container was labelled last "
+        "(#9567 D8)")
     for teardown in teardowns:
         if (teardown.get("with") or {}).get("label_var"):
             assert str(teardown.get("if")) == "always()", (
@@ -3874,14 +3896,16 @@ def test_ci_arms_the_record_against_a_real_postgres():
     assert scratch_match is not None, (
         f"{CAPSTONE_FILE} no longer declares SCRATCH_DB_ENV — re-anchor this pin")
     scratch_env = scratch_match.group(1)
-    dsn_vars = sorted(
-        (s.get("with") or {})["dsn_var"]
-        for s in provisions if (s.get("with") or {}).get("dsn_var"))
-    assert dsn_vars == [scratch_env], (
-        f"{name}'s second provision exports {dsn_vars}, but the drill reads "
-        f"{scratch_env}: the second container would answer to a name nothing "
-        f"reads, D8 would skip, and the zero-skip gate would blame the record "
-        f"database for it (#9567 D8)")
+    dsn_vars = _resolved(provisions, "dsn_var", DEFAULT_DSN_VAR)
+    assert sorted(dsn_vars) == sorted([RECORD_DB_ENV, scratch_env]), (
+        f"{name}'s provisions resolve to dsn_var {dsn_vars}, but the pair must be "
+        f"{{{RECORD_DB_ENV}, {scratch_env}}} (the drill reads {scratch_env}): if "
+        "the second container answers to a name nothing reads, D8 skips and the "
+        "zero-skip gate blames the record database for it (#9567 D8)")
+    assert dsn_vars[0] != dsn_vars[1], (
+        f"{name}'s two provisions export the SAME dsn_var ({dsn_vars[0]}): with "
+        "`$GITHUB_ENV` last-one-wins the first DSN is overwritten and D8 would "
+        "refuse its own target as `refuse_same_database` (#9567 D8)")
     assert scratch_env != RECORD_DB_ENV, (
         f"the drill's scratch env is {RECORD_DB_ENV}, the record's own name: the "
         "second provision would overwrite the first and D8 would refuse its own "
@@ -4179,6 +4203,19 @@ _JUNIT_D10_DESELECTED = _fill_d_legs(
 </testsuite></testsuites>""",
     omit=(_D10_NAME,))
 
+#: ⛔ A REQUIRED LEG'S NAME IN A FOREIGN MODULE (#11429 review cycle 6): every DoD
+#: leg is green EXCEPT that D8's case lives in another module — the shape
+#: `--deselect tests/test_9567_record_capstone.py::test_D8_…` plus a same-named stub
+#: elsewhere produces. pytest allows the name in both modules, so only the module
+#: check can see it.
+_JUNIT_D8_IN_FOREIGN_MODULE = re.sub(
+    r'classname="tests\.test_9567_record_capstone"(\s+)name="'
+    + re.escape(_D8_NAME) + r'"/>',
+    r'classname="tests.test_9999_elsewhere"\1name="' + _D8_NAME + r'"/>',
+    _JUNIT_GREEN, count=1)
+assert _JUNIT_D8_IN_FOREIGN_MODULE != _JUNIT_GREEN, (
+    "the D8 stub was not found in _JUNIT_GREEN — re-anchor this fixture")
+
 
 def _run_leg_gate(tmp_path, xml: str, script: Path | None = None):
     """Run the arm gate as a PROCESS over one fixture XML."""
@@ -4326,6 +4363,29 @@ def test_the_arm_gate_reds_when_a_dod_leg_is_DELETED_from_the_capstone(tmp_path)
         f"expected the deleted leg to be named: {errors}")
 
 
+def test_the_arm_gate_requires_the_leg_from_the_capstone_MODULE(tmp_path):
+    """⛔ A same-named case in another module must not satisfy a required leg.
+
+    The gate was module-aware for ARMED legs but matched a required DoD leg on its
+    NAME alone, so `--deselect tests/test_9567_record_capstone.py::test_D8_…` plus
+    a same-named stub in any other file the job runs CERTIFIED (measured, exit 0).
+    pytest permits the same function name in several modules, so nothing else
+    objects — the gate has to say WHERE the leg must live (#11429 review cycle 6).
+
+    Mutation: revert `present` to name-only -> RED here.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_D8_IN_FOREIGN_MODULE)
+
+    assert result.returncode == 1, (
+        "a required leg was satisfied by a case in the WRONG module:"
+        f"\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any(_D8_NAME in line and "did not run in test_9567_record_capstone" in line
+               for line in errors), errors
+    assert any("another module" in line for line in errors), (
+        f"the message should name the decoy, so the reader is not sent hunting: {errors}")
+
+
 def test_the_arm_gate_passes_a_green_armed_run(tmp_path):
     """The other direction: a certified run must not be red (a gate that cannot
     pass is indistinguishable from a broken job)."""
@@ -4433,9 +4493,6 @@ def test_deleting_the_skip_clause_reds_the_arm_gate(tmp_path):
     assert start != -1 and end > start, (
         "the skip clause moved — re-point this mutation test at it instead of "
         "deleting the proof that the pin discriminates")
-    mutated = tmp_path / "record-postgres-leg-gate.py"
-    mutated.write_text(source[:start] + source[end:], encoding="utf-8")
-
     # ⛔ THE COPY MUST KEEP THE SCRIPT'S OWN LAYOUT. The gate resolves the
     # capstone by `Path(__file__).resolve().parents[2] / "tests" / …`, and fails
     # CLOSED when it cannot read it — correct, but it means a bare copy in
