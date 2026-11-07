@@ -14839,12 +14839,14 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # the counter note above exists to eliminate. Destructive, so it is out of
     # this change's scope and belongs to §9.1's residual (a) — a graph-side
     # removal no instrument ships today. ⛔ NOT `#10017`'s purge, though these
-    # ARE turn-shaped `:Point`s: the purge reaches one only where
-    # `t.is_episodic = true` (this seeder never set it), and even a stamped copy
-    # is not a session turn NODE at all — `epi_turn<N>` carries no `_t<digits>`
-    # suffix, so `tools/turn_parity_census.py` places it in no session, calls it
-    # an `outside_population` anomaly, and the purge then refuses
-    # `census-not-clean` rather than purging anything (#11325).
+    # are `pointKind='event'` `:Point`s wired to the demo session: turn SHAPE
+    # is `is_episodic` + `pointKind='event'` + a `<sid>_t<digits>` id
+    # (`tools/turn_parity_census.py`), and these fail two of those three —
+    # `t.is_episodic = true` is never set (this seeder never did), and
+    # `epi_turn<N>` carries no `_t<digits>` suffix, so the census places them
+    # in no session and calls them an `outside_population` anomaly, and the
+    # purge then refuses `census-not-clean` rather than purging anything
+    # (#11325).
     # Blast radius: opt-in sample content that
     # `org.point_count` excludes — but the demo `:Session` is still returned by
     # the session reads, so the pre-existing nodes stay reachable there and in

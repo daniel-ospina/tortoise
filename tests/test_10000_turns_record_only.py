@@ -3278,7 +3278,8 @@ def test_the_repair_note_names_BOTH_halves_of_a_legacy_demo_graph():
         "zero rows, which the read refuses (503 on an armed deployment, "
         "`{\"turns\": 3, \"turn_points\": []}` on an unarmed one), so it "
         f"instructs a lane to re-create the defect: {instruction!r}")
-    assert "#10017" in note and "no instrument ships" in note, (
+    assert ("no instrument ships" in note
+            and "NOT `#10017`'s purge" in note), (
         "the note describes a destructive graph-side repair without saying that "
         "no instrument ships it and that `#10017`'s purge is NOT the lane "
         f"(§9.1 residual (a); #11325): {note}")

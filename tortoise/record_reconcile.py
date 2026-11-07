@@ -160,13 +160,16 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
   and ``update_point``'s ``SET n += $props`` REMOVES a property set to ``None``;
   the journal records the ``None``, and the same live door is bound by the MCP
-  tool ``tortoise_update_point``) — ⚠️ **but that clear is LIVE-ONLY, and that is
-  the honest bound**: ``story_arc`` has no clause in the ``PointRevised`` fold
-  (``_revise_point``'s SET list is a closed set and the one open-set passthrough,
-  ``_persist_extra_props``, skips a ``None`` by design), so a journal rebuild of a
-  legacy copy whose CREATION record carried the prose RESTORES it — the live node
-  is clean and the replayed node is not, which is ``#10429``'s replay half. Do not
-  read the clear as a durable repair until that lands. And on NO label is
+  tool ``tortoise_update_point``). ⚠️ **Its durability is FOLD-DEPENDENT, and the
+  bound is the JOURNAL one**: ``_revise_point``'s SET list is a closed set that
+  names no ``story_arc`` clause, and the creation fold's open-set passthrough
+  (``_persist_extra_props``, which ``_revise_point`` never calls) skips a ``None``
+  by design — so a ``rebuild_all`` over a journal whose CREATION record carried
+  the prose RESTORES it, and that is ``#10429``'s replay half. The RECORD→CACHE
+  lane does the opposite (the ``PointRevised`` patch stores
+  ``props.story_arc = null``, ``_props_from_row`` returns it, and
+  ``node_statement`` renders ``SET n += $props``, where a null REMOVES the key),
+  so a record-sourced rebuild keeps it clear. And on NO label is
   there a repair that RESTORES the value. ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
@@ -179,7 +182,9 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   (``tools/purge_legacy_turns.py``) is the precedent on a DIFFERENT population
   (legacy episodic turn ``:Point``s — a ``DETACH DELETE``) and names no
   ``story_arc`` at all, so citing it as the purger *for this class* sends an
-  operator to a tool that leaves the divergence in place. That is WHERE IT
+  operator to a tool that leaves the divergence in place on either ANCHOR —
+  it DOES clear a turn-shaped legacy ``:Point`` copy carrying the prose, by
+  deleting the node. That is WHERE IT
   DIFFERS from the declined pair, which does have one, shipped:
   ``session_source_prose_migration.reconcile_session_source_prose`` (#11070, via
   ``#11152``) repairs or clears the pair IN PLACE from the record, no wipe, the
@@ -665,8 +670,8 @@ def reconcile_record_and_cache(
     for those ``:Point`` copies (its journaled turn removals stop a replay
     resurrecting them), not the clearing of this class. Never a destructive one
     for the ``:Point`` half — it has a non-destructive route — which is one sense
-    in which the class differs from the declined pair, and the ``:Point`` clear
-    is the other. Nothing here performs either. ⚠️ **What the exclusion CAN and
+    in which the class differs from the declined pair. Nothing here performs
+    either. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
     divergence in a caller-supplied ``props``-tail property. ⚠️ For `summary`,
@@ -831,12 +836,12 @@ def log_result(result: RecordReconcileResult,
         # production SERVER graph name, #2944 L2 — or a graph-side
         # REMOVE n.story_arc that no instrument ships today; ⚠️ on a `:Point` the
         # clear is `update_point(<id>, story_arc=None)`, which keeps the node and
-        # needs no wipe (LIVE only — a journal rebuild re-materialises it,
-        # #10429); #10017's
-        # purge is
-        # a DIFFERENT population — legacy episodic turn :Points — and names no
-        # story_arc). Calling them all "owned" sends the operator to the
-        # wrong repair.
+        # needs no wipe — though it is JOURNAL-durable only: a `rebuild_all` over a
+        # journal whose creation record carried the prose restores it (#10429),
+        # while the RECORD→CACHE rebuild replays the stored null and keeps it
+        # clear); #10017's purge is a DIFFERENT population — legacy episodic turn
+        # :Points — and names no story_arc). Calling them all "owned" sends the
+        # operator to the wrong repair.
         line += (f" [graph_only={result.graph_only_total} cache-held "
                  f"property occurrence(s) not compared ({names}{more})]")
     verdict = result.verdict()
