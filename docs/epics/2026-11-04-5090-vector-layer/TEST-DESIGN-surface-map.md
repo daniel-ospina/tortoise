@@ -124,7 +124,7 @@ Completeness check in the other direction: **every seam the plan names has a row
 | §6.2 | the register's contract; **no MCP/SDK surface** | **SF4**, **SF13** | `class` never `bypass`; an unclassified writer is a refusal at export |
 | §6.3 | versioning / error responses (register raises on duplicates, census exits non-zero) | **SF4**, **SF11** | no API version change, no new error codes |
 | §6.4 | the surface statement — S3's removal is the one thing that could change it | **SF13** | carries the approval request; **SF13 is the row a capstone must not skip** |
-| §7 | D1–D13, each already naming its layer | **SF1**, **SF2**, **SF3**, **SF4**, **SF6**, **SF8**, **SF9**, **SF10**, **SF11**, **SF12**, **SF15** | D1/D2→SF1–SF3 · D3/D4→SF4+SF6 · D5–D8→SF10/SF9/SF8 · D9–D11→SF11 · D12→SF15 · D13→SF12 (=`scan_fallback` pin). The cell lists the surfaces rather than saying "distributed": R5 now refuses a crosswalk row whose surface cell names nothing (`:428`), because a prose-only linkage is the one thing the gate cannot check — this row was the live false RED that arm was debugged against, and `§7` is now in `PLAN_SEAMS` so deleting the row is refused too (`:120`) |
+| §7 | D1–D13, each already naming its layer | **SF1**, **SF2**, **SF3**, **SF4**, **SF6**, **SF8**, **SF9**, **SF10**, **SF11**, **SF12**, **SF15** | D1/D2→SF1–SF3 · D3/D4→SF4+SF6 · D5–D8→SF10/SF9/SF8 · D9–D11→SF11 · D12→SF15 · D13→SF12 (=`scan_fallback` pin). The cell lists the surfaces rather than saying "distributed": R5 now refuses a crosswalk row whose surface cell names nothing (the `R5 <label>: names no surface` violation), because a prose-only linkage is the one thing the gate cannot check — this row was the live false RED that arm was debugged against, and `§7` is now in `PLAN_SEAMS` so deleting the row is refused too (it is in `PLAN_SEAMS`) |
 
 ---
 
@@ -272,9 +272,13 @@ check arm every time (`VIOLATION R1 SF<n>: surface is not in the pinned populati
 exit 1, measured for SF1/SF2/SF5/SF10/SF12/SF15). ⚠️ The range it prints is the SURVIVING pin, not a
 constant: an interior drop reads `SF1..SF15`, while dropping SF1 reads `SF2..SF15` and dropping SF15
 reads `SF1..SF14` (measured) — grep the `SF<n>` that moved, not the range. Dropping SF13 from the pin **and** building the consistent
-shrink reds the self-test too, because emptying §6.4's surface cell now trips `R5 §6.4: names no
-surface` — before that arm existed the same edit was the one case the arm reported as `NOT caught`
-(measured: `1/12` before, `16/16 refused` after). The pin is silent only when the shrink edits it
+shrink is refused by BOTH arms, but only the check arm changed behaviour: before `R5`'s "names
+nothing" arm existed that edit graded **CLEAN** (exit 0, measured at `1381578fd^`), and it now
+reds `R5 §6.4: names no surface` (exit 1, measured). The self-test arm refuses the same edit in
+BOTH states, and never by "not caught": two of its cases lose their mutation target, so it reports
+`2/12 case(s) UNTESTABLE` before the arm and `2/16 case(s) UNTESTABLE` after it (each exit 1) — it
+names a moved target instead of accusing the checker, which is a different statement from a rule
+that fails to fire. The pin is silent only when the shrink edits it
 **consistently with the row** *and* the row it empties is not a crosswalk row R5 reads — the
 three-place edit the last bullet measures. The two arms therefore cover different surfaces, and the
 honest limit is:
@@ -297,7 +301,7 @@ honest limit is:
 - **SF15 reds one step earlier too, on the CHECK arm** — it is the one surface a child names and
   nothing else (`| **C1** | **#11084** | **SF15** |`). Deleting SF15's row and every mention of it
   leaves C1 touching no surface, so `R4 #11084: touches no surface` fires (exit 1) before the pin or
-  any case is involved — which is why the silent class is nine, not ten.
+  any case is involved — SF15 is why the silent class is nine rather than ten.
 - **The floor is what stops the green being bought back.** Also deleting the cases that name the surface
   (SF13 has three: two delete-row cases and the `#11088` child-row case) leaves `13 mutation(s)
   registered, at least 16 required`, exit 1 — so a shrink is red once it touches a named surface, but
