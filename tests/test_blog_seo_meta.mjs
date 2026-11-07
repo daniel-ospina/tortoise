@@ -1964,6 +1964,18 @@ console.log("the blog's link preview and icon");
 
   // The type is declared for the authored card and NOT for a post cover — the same
   // rule as the dimensions, for the same reason: a cover's format is the author's.
+  // ⛔ THE VALUE, NOT THE CONSTANT AGAINST ITSELF. `headHtml` interpolates
+  // `DEFAULT_OG_IMAGE_TYPE` into the tag, so comparing the tag to that same constant
+  // pins PRESENCE and nothing more: patch the constant to `image/png` over a JPEG on
+  // disk and the self-referential form is still green. The card's magic bytes are the
+  // only independent statement about its format, so the constant is held to them and
+  // the emitted tag to the constant — a wrong declared format now reds.
+  const TYPE_BY_MAGIC = { ffd8: "image/jpeg", "8950": "image/png" };
+  const typeFromBytes = TYPE_BY_MAGIC[card.subarray(0, 2).toString("hex")] ?? null;
+  assertEq(typeFromBytes, "image/jpeg",
+    "the card on disk is a JPEG — its magic bytes say so, independently of any constant");
+  assertEq(DEFAULT_OG_IMAGE_TYPE, typeFromBytes,
+    "the default card's declared type agrees with the bytes on disk (not merely with itself)");
   assertEq(attr(index, "property", "og:image:type"), DEFAULT_OG_IMAGE_TYPE,
     "the fallback card declares its real format");
   assertEq(attr(withCover, "property", "og:image:type"), null,

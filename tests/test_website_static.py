@@ -4151,13 +4151,46 @@ class TestSiteIconAndSocialPreviewContract:
         return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
                 + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
+    @staticmethod
+    def _two_colour_png(size: int = 256, band: int = 20) -> bytes:
+        """A two-colour, hard-edged mark — the artwork the colour floor must NOT red.
+
+        ⛔ WHY THIS FIXTURE EXISTS. The floor beside it started at 8 distinct colours,
+        and its own comment claimed "a two-colour logo would still pass at 8" — it
+        could not, 2 < 8, so a `crispEdges`/pixel-art mark (no antialiasing, exactly
+        the art a designer might choose) reded with "that is a flat rectangle, not a
+        mark". Lowering the floor to 2 fixed that, but nothing MEASURED the fix: the
+        only icons in the tree decode to ~200+ colours, so pushing the floor back to
+        8 left every assertion green. With this fixture it reds.
+
+        20 rows of accent over 256 is 7.8% of the canvas, i.e. dominant 92.2% — under
+        `ICON_MAX_DOMINANT` on purpose, so the fixture isolates the COLOUR-COUNT floor
+        from the dominant one.
+        """
+        ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)  # 8-bit RGBA
+        accent, background = (0x06, 0xB6, 0xD4, 0xFF), (0x06, 0x0B, 0x14, 0xFF)
+        raw = b"".join(
+            b"\x00" + (bytes(accent) if y < band else bytes(background)) * size
+            for y in range(size))
+
+        def chunk(kind: bytes, body: bytes) -> bytes:
+            return (struct.pack(">I", len(body)) + kind + body
+                    + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
     @classmethod
     def _icon_mark_violations(cls, name: str, data: bytes) -> list[str]:
         """Every reason a decoded icon is not a mark; empty means it carries art.
 
         Split out of the guard so the SAME predicate can be run against a blank
-        fixture (see `test_the_content_guards_reject_a_blank_image_and_keep_their_measured_floors`). A check whose
-        failure path is never executed cannot be told apart from a no-op.
+        fixture (see `test_the_content_guards_reject_a_blank_image_and_keep_their_
+        measured_floors`). A check whose failure path is never executed cannot be
+        told apart from a no-op.
+
+        `name` is a BARE name: the `website/` prefix is added here, so a caller that
+        passes one produces `website/website/…` in the only message that matters.
         """
         counts = cls._png_palette(data)
         pixels = sum(counts.values())
@@ -4346,10 +4379,22 @@ class TestSiteIconAndSocialPreviewContract:
         the directory (ICO), which is what the tab will actually draw.
         """
         png_w, png_h = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        apple_w, _apple_h = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
         ico_sizes = {
             i["declared"][0]
             for i in self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())
         }
+
+        def ref(href: str) -> str:
+            """The PATH an icon href names — the query is not part of what is served.
+
+            `?v=2` on a favicon href is standard cache-busting, changes no file and is
+            honoured by every browser, so comparing raw hrefs reports "declares no
+            rel=icon" about a page that is correct. That is the same false red
+            `_og_asset_path` exists to avoid for `og:image`, applied to the other
+            surface that links a static file.
+            """
+            return urlsplit(href).path
 
         def declared_sizes(token: str) -> set[int]:
             assert token, "the tag declares no sizes= — a renderer then guesses"
@@ -4362,24 +4407,41 @@ class TestSiteIconAndSocialPreviewContract:
         for page in self._pages():
             links = self._links(self._head(page.read_text()))
             for href in (f"/{self.ICON_ICO}", f"/{self.ICON_PNG}"):
-                assert any(ln.get("href") == href and "icon" in ln.get("rel", "").split()
-                           for ln in links), (
+                assert any(ref(ln.get("href", "")) == href
+                           and "icon" in ln.get("rel", "").split() for ln in links), (
                     f"{page.name} does not declare {href} as a rel=icon — a page with no "
                     "icon shows a blank tab and, on a share, no avatar")
             for ln in links:
-                if "icon" not in ln.get("rel", "").split():
-                    continue
-                if ln.get("href") == f"/{self.ICON_PNG}":
+                # ⛔ DISPATCH ON THE `rel`, and on `apple-touch-icon` BY NAME. A
+                # `"icon" in rel.split()` filter reaches neither branch for the apple
+                # link (`"apple-touch-icon".split()` is `["apple-touch-icon"]`), so an
+                # earlier cut silently skipped it — a page could declare any `sizes`
+                # for the apple icon and nothing reded.
+                rels = ln.get("rel", "").split()
+                if "icon" in rels and ref(ln.get("href", "")) == f"/{self.ICON_PNG}":
                     assert declared_sizes(ln.get("sizes", "")) == {png_w}, (
                         f"{page.name} declares sizes={ln.get('sizes')!r} for "
                         f"{self.ICON_PNG}, whose IHDR is {png_w}x{png_h} — the tag and "
                         "the bytes must agree, or the tab reserves the wrong box")
-                elif ln.get("href") == f"/{self.ICON_ICO}":
+                elif "icon" in rels and ref(ln.get("href", "")) == f"/{self.ICON_ICO}":
                     assert declared_sizes(ln.get("sizes", "")) == ico_sizes, (
                         f"{page.name} declares sizes={ln.get('sizes')!r} for "
                         f"{self.ICON_ICO}, whose directory holds {sorted(ico_sizes)} — "
                         "the tag and the container must agree")
-            assert any(ln.get("href") == f"/{self.ICON_APPLE}"
+                elif ("apple-touch-icon" in rels
+                      and ref(ln.get("href", "")) == f"/{self.ICON_APPLE}"
+                      # `sizes` is OPTIONAL on this link — the href alone is what iOS
+                      # needs — so absent is not a defect. But when it IS declared it is
+                      # a promise like the others (MDN's own example is
+                      # `rel="apple-touch-icon" sizes="114x114"`), and this guard knows
+                      # the file's real geometry, so a wrong one must not pass silently
+                      # the way it did while this branch did not exist.
+                      and ln.get("sizes")):
+                    assert declared_sizes(ln["sizes"]) == {apple_w}, (
+                        f"{page.name} declares sizes={ln['sizes']!r} for "
+                        f"{self.ICON_APPLE}, whose IHDR is {apple_w}x{_apple_h} — "
+                        "the tag and the bytes must agree")
+            assert any(ref(ln.get("href", "")) == f"/{self.ICON_APPLE}"
                        and ln.get("rel") == "apple-touch-icon" for ln in links), (
                 f"{page.name} does not declare {self.ICON_APPLE} as rel=apple-touch-icon; "
                 "iOS then renders a screenshot of the page instead of the mark")
@@ -4434,11 +4496,11 @@ class TestSiteIconAndSocialPreviewContract:
         # would pass at 8. It could not, and a guard that cries wolf at honest
         # artwork is a guard the next person weakens instead of fixes.
         drawn: list[tuple[str, bytes]] = [
-            (f"website/{n}", (self.WEB / n).read_bytes())
+            (n, (self.WEB / n).read_bytes())
             for n in (self.ICON_PNG, self.ICON_APPLE)
         ]
         drawn += [
-            (f"website/{self.ICON_ICO} entry {n} ({i['declared'][0]}x{i['declared'][1]})",
+            (f"{self.ICON_ICO} entry {n} ({i['declared'][0]}x{i['declared'][1]})",
              i["payload"])
             for n, i in enumerate(icons) if i["is_png"]
         ]
@@ -4719,6 +4781,25 @@ class TestSiteIconAndSocialPreviewContract:
         assert len(problems) == 2, (
             "a blank icon must trip BOTH content floors (distinct colours and dominant "
             f"colour); it tripped {len(problems)}: {problems}")
+
+        # ...and the OTHER direction, which nothing measured: a legitimate TWO-COLOUR
+        # mark must not red. Without this fixture `ICON_MIN_COLOURS` can go back to 8 —
+        # the review-1 defect, red on a `crispEdges`/pixel-art mark — and every test in
+        # this class stays green, because the only icons in the tree decode to 200+
+        # colours. A floor is only pinned when both of its edges are.
+        mark = self._two_colour_png()
+        mark_counts = self._png_palette(mark)
+        assert len(mark_counts) == 2, (
+            f"the two-colour fixture decoded to {len(mark_counts)} colours, so it isolates "
+            "nothing")
+        assert max(mark_counts.values()) / sum(mark_counts.values()) < self.ICON_MAX_DOMINANT, (
+            "the fixture's accent covers too little of the canvas to isolate the "
+            "colour-count floor from the dominant-colour one")
+        assert self._icon_mark_violations("two-colour.png", mark) == [], (
+            "a hard-edged two-colour mark reded "
+            f"({self._icon_mark_violations('two-colour.png', mark)}) — ICON_MIN_COLOURS "
+            f"is {self.ICON_MIN_COLOURS}, and a mark without antialiasing is art the "
+            "next person might choose, not a blank rectangle")
 
         assert self.FLAT_CARD_BYTES < self.CARD_MIN_BYTES, (
             f"the card floor ({self.CARD_MIN_BYTES} B) is not above the flat 1200x630 "
