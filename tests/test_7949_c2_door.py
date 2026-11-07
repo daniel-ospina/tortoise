@@ -221,11 +221,26 @@ def test_the_v2_arm_calls_the_sdk_extractor_entry():
         f"the hosted capture no longer CALLS sdk._extract_session_llm for the "
         f"m2 arm — it hands {targets} to the worker, so 'm2' would route to a "
         f"lane nobody dispatches to (#10983)")
-    sdk_body = _body(SDK, "_extract_session_v2")
-    assert re.search(r"out = extract_session_v2\(", sdk_body), (
+    # ⛔ Resolve the CALL, not the text. `_body()` strips the docstring but NOT
+    # COMMENTS, so `# out = extract_session_v2(...)` satisfied a regex over the
+    # segment and left this GREEN with the real hop deleted (MEASURED at the
+    # #10983 review, cycle 7 — the same defect the CONNECT pin had, one sibling
+    # assertion over). The `out = …` shape is kept: the hop assigns the
+    # extractor's return to the caller's variable.
+    hop = [node for node in ast.walk(_funcs(SDK)["_extract_session_v2"])
+           if isinstance(node, ast.Assign)
+           and isinstance(node.value, ast.Call)
+           and ast.unparse(node.value.func) == "extract_session_v2"]
+    assert hop, (
         f"sdk._extract_session_v2 at {_cite(SDK, '_extract_session_v2')} no "
-        "longer CALLS extractor_v2.extract_session_v2 (its docstring and its "
-        "import both name the function, so only the call form proves the hop)")
+        "longer CALLS extractor_v2.extract_session_v2 — its docstring, its "
+        "import and a bare COMMENT all name the function, so only a resolved "
+        "call proves the hop (#10983)")
+    assert any(any(kw.arg == "sdk" for kw in node.value.keywords)
+               for node in hop), (
+        "sdk._extract_session_v2 calls extractor_v2.extract_session_v2 WITHOUT "
+        "passing `sdk=` — the extractor would run without the SDK surface the "
+        "door's record names (#10983)")
     # §1.6.1 also names the OTHER lane's module and class in prose, and the
     # sentence above promises the suite resolves every citation. Resolve them:
     # relocating tortoise/extractor.py (move + fix the import) left all 18 tests
@@ -237,9 +252,15 @@ def test_the_v2_arm_calls_the_sdk_extractor_entry():
     assert "LLMExtractor" in classes, (
         f"tortoise/extractor.py no longer defines LLMExtractor — §1.6.1 and "
         f"door.not_the_door cite it as the m2 lane's extractor (#10983)")
-    assert "_build_session_llm_extractor(" in (_body(SDK, "_extract_session_llm")), (
-        "sdk._extract_session_llm no longer builds the m2 extractor — the "
-        "non-default lane has no reachable implementation (#10983)")
+    # …resolved as a CALL for the same reason: a comment naming the builder
+    # satisfied the substring form (MEASURED, #10983 review cycle 7).
+    built = [node for node in ast.walk(_funcs(SDK)["_extract_session_llm"])
+             if isinstance(node, ast.Call)
+             and ast.unparse(node.func).endswith("_build_session_llm_extractor")]
+    assert built, (
+        "sdk._extract_session_llm no longer CALLS _build_session_llm_extractor — "
+        "the non-default lane has no reachable implementation (#10983); prose "
+        "or a comment naming the builder cannot satisfy this")
 
     assert "extract_session_v2" in _funcs(EXTRACTOR), (
         f"extractor_v2.extract_session_v2 is GONE from "
@@ -265,6 +286,31 @@ def _sdk_lane_branch() -> ast.If | None:
         if any(_calls_llm(c) for stmt in node.body for c in ast.walk(stmt)):
             return node
     return None
+
+
+def _lane_dispatch_ifs(func: ast.AST) -> list[ast.If]:
+    """Every ``if`` in ``capture_session`` whose BODY dispatches an SDK lane.
+
+    ⛔ Prefix-matched on ``self._extract`` rather than
+    ``endswith("_extract_session_llm")``: the arm that made this necessary called
+    ``self._extract_session_llm_variant``, which the narrower match cannot see.
+
+    Why the SET and not just the resolved arm (``_sdk_lane_branch``): that helper
+    returns the FIRST If whose body calls the m2 extractor — the INNERMOST arm —
+    so an ``elif`` added ABOVE it becomes a PARENT If and every arm-level
+    assertion in the dispatch test stays green while the door widens. MEASURED
+    at the #10983 review, cycle 7: ``elif os.environ.get("TORTOISE_MUTANT_ARM")
+    == "1": extracted, meta = self._extract_session_llm_variant(...)`` inserted
+    above the m2 arm left BOTH door tests passing.
+    """
+    def _dispatches(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Call)
+                and ast.unparse(node.func).startswith("self._extract"))
+
+    return [node for node in ast.walk(func)
+            if isinstance(node, ast.If)
+            and any(_dispatches(call) for stmt in node.body
+                    for call in ast.walk(stmt))]
 
 
 def _env_reads(path: Path) -> set[str]:
@@ -377,6 +423,24 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
         "guarded branch — the SDK has one lane, so the hosted mirror's two-lane "
         "predicate no longer describes it (#10983)")
     sdk_test = ast.unparse(sdk_branch.test)
+    # ⛔ Pin the CHAIN, not the arm it resolves to. `_sdk_lane_branch()` finds the
+    # first If whose body calls the m2 extractor — the innermost arm — so an arm
+    # added ABOVE it is a PARENT If that no assertion below can see. MEASURED at
+    # the #10983 review (cycle 7): an `elif` above the m2 arm dispatching a
+    # behaviourally-identical variant rerouted every capture by ambient env while
+    # both door tests stayed green. The door is the CHAIN, so require that
+    # exactly one branch in capture_session dispatches an SDK extractor at all.
+    capture_ifs = _lane_dispatch_ifs(_funcs(SDK)["capture_session"])
+    assert len(capture_ifs) == 1, (
+        "sdk.capture_session dispatches an SDK extractor from "
+        f"{len(capture_ifs)} branches — a third arm is a second door, and the "
+        "acceptance pins exactly two lanes (#10983): "
+        f"{[ast.unparse(node.test) for node in capture_ifs]}")
+    assert ast.unparse(capture_ifs[0].test) == sdk_test, (
+        "the only lane-dispatching branch in sdk.capture_session tests "
+        f"{ast.unparse(capture_ifs[0].test)!r}, not the m2 selector "
+        f"{sdk_test!r} — an arm ABOVE the door reroutes captures the record "
+        "still declares v2 (#10983)")
     assert "TORTOISE_SESSION_EXTRACTOR" in sdk_test, (
         f"the SDK's m2 branch is no longer guarded by the extraction lane "
         f"variable (#10983): {sdk_test!r}")
@@ -1024,6 +1088,25 @@ def test_the_registration_records_the_door_and_the_corpus_attribution():
         f"E4's lane is {rows['E4'].get('lane')!r}; the receipt select_e4_receipt "
         f"picks on the frozen corpus_hash records extract_session_v2 (#10983 "
         f"review): {rows['E4']}")
+    # …and BIND that lane to the ARTIFACT it describes. The assertion above is a
+    # literal compared to a literal, so a later on-pin receipt from another lane
+    # would become E4's scored artifact while both published copies still said
+    # `v2` and nothing reddened (MEASURED at the #10983 review, cycle 7). Resolve
+    # the receipt the probe itself SELECTS and read its own `extractor.qualname`.
+    selected_rel, selected = probe.select_e4_receipt(
+        frozen_pin=record["corpus"]["fixtures_hash"])
+    selected_qualname = (selected.get("extractor") or {}).get("qualname")
+    lane_of_qualname = {"extract_session_v2": "v2",
+                        "extract_session_llm": "m2"}
+    assert selected_qualname in lane_of_qualname, (
+        f"the receipt E4 is scored from ({selected_rel}) records extractor "
+        f"qualname {selected_qualname!r}, which is neither lane this door "
+        f"pins — the row's number would be published under a lane that did not "
+        f"measure it (#10983)")
+    assert rows["E4"]["lane"] == lane_of_qualname[selected_qualname], (
+        f"E4's registered lane is {rows['E4'].get('lane')!r} but the receipt "
+        f"select_e4_receipt picks ({selected_rel}) records "
+        f"{selected_qualname!r} — the row and its artifact disagree (#10983)")
     assert rows["E1b"]["lane"] == "m2", (
         f"E1b's lane is {rows['E1b'].get('lane')!r}; it is the m2 anti-gaming "
         f"control (#10983)")

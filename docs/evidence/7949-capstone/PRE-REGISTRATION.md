@@ -244,9 +244,10 @@ shipped 1500/16000 stage defaults) and `TORTOISE_EXTRACTOR_ESCALATION_TOKENS` (t
 length-truncation retry budget), `TORTOISE_REFERENTIALITY` (the S2.2 mention arm, reached
 through `referentiality.ENV_FLAG`), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
 `TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split) — all pinned **unset**. The set
-is CLOSED over the **measurement modules the path renders with** (`extractor_v2.py` and
-`referentiality.py` — the latter reached one call down from the S2 prompt/mention path), and
-`tests/test_7949_c2_door.py` derives that closure from the code (structurally, not a grep) rather
+is CLOSED over the **measurement modules the path renders with** — and which modules those
+are is DERIVED rather than enumerated here, because a hand-kept list in this paragraph is the one
+that rots: the derivation sentence below is the record — and `tests/test_7949_c2_door.py` derives
+that closure from the code (structurally, not a grep) rather
 than asserting the prose. The same call chain also reads *infrastructure* variables (record DSN,
 packs dir, embedding gates, store connection): those are inputs a run needs in order to happen, not
 settings that move the measured population, and they are deliberately outside the door's partition —
