@@ -1732,12 +1732,22 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     # artifacts' `caveats[0]` were hand-edited after the runs) stayed green at
     # 511 passed. The disclosure is the only record that the committed artifacts
     # were edited at all, so its ABSENCE has to red something.
-    _readme_flat = " ".join((_EVID / "README.md").read_text().split())
-    assert "A second artifact field was corrected after the runs" in _readme_flat, (
+    # ⛔ …and its SUBSTANCE, not only its existence (#11385 review P2): with the
+    # three assertions below alone, relaxing "`caveats[0]` in BOTH artifacts" to
+    # "ONE artifact" stayed 37/37 GREEN, i.e. the pin passed while the document
+    # understated the hand-edit to a single artifact. The count is part of the
+    # fact, so it is pinned in both directions below.
+    # (`_readme` is this function's flattened README, computed once above —
+    # re-reading and re-flattening it here as `_readme_flat` was a duplicate.)
+    assert "`caveats[0]` in BOTH artifacts" in _readme, (
+        "the disclosure must say BOTH artifacts were edited, not one")
+    assert " in ONE artifact" not in _readme, (
+        "the disclosure must not understate the hand-edit to one artifact")
+    assert "A second artifact field was corrected after the runs" in _readme, (
         "the README must disclose that BOTH artifacts' caveats[0] were edited")
-    assert "the prompt inputs are identical across arms" in _readme_flat, (
+    assert "the prompt inputs are identical across arms" in _readme, (
         "the README must quote the refuted sentence it records the correction of")
-    assert f"+{_per_c} tokens in every session" in _readme_flat, (
+    assert f"+{_per_c} tokens in every session" in _readme, (
         "the disclosure must carry the derived input cost, not just the claim")
 
 
