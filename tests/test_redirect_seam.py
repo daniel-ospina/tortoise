@@ -527,6 +527,130 @@ def test_worker_thread_non_exempt_redirects(monkeypatch):
     assert graph_name.startswith("test_seam_worker_b_"), graph_name
 
 
+def _thread_start_stamp_violations(proj=None) -> list[str]:
+    """The install contract for the Thread.start stamp, as a VERDICT.
+
+    Extracted so a fixture can make it fire in a chosen process state: inline in
+    the test it only ever ran in the one state the session happened to be in, so
+    the identity form below could not be shown to be the WRONG question — and it
+    was measured wrong in CI (PR #11354, `test (b)`, run 42362934147):
+
+        AssertionError: Thread.start was double-wrapped (installer re-ran
+        without the marker guard)
+
+    `threading.Thread.start is _thread_start_inherit_stem` holds only until the
+    REAL `sentry_sdk` is initialised: `sentry_sdk.integrations.threading`
+    installs `sentry_start` on top of whatever `Thread.start` already is, with
+    `@functools.wraps(old_start)` — so the outermost function is Sentry's (and
+    its `__qualname__` is even `_thread_start_inherit_stem`, copied by `wraps`),
+    and a HEALTHY process read as double-wrapped. Measured: the wrapper's
+    `__globals__` is `sentry_sdk.integrations.threading`'s dict while
+    `tortoise.projection._thread_start_inherit_stem` is untouched in its own.
+
+    The properties that are actually invariant, and are what the marker pin is
+    for:
+
+    (1) the marker is set (conftest's installer ran — never module-body, so a
+        leaked TEST_MODE env cannot patch stdlib);
+    (2) OUR wrapper is INSTALLED — reachable from `threading.Thread.start`
+        through the `__wrapped__` links `functools.wraps` records, at any depth
+        of third-party layers above it;
+    (3) re-invoking the installer changes nothing (idempotence — a non-idempotent
+        installer installs a NEW function object and the identity MOVES).
+
+    ⛔ WHAT THIS CANNOT SEE, stated so nobody reads it as more: our wrapper is a
+    plain `def` and publishes no `__wrapped__`, so the chain walk STOPS at it —
+    a stale copy left by a re-executed `tortoise.projection` (same name, same
+    `__module__`/`__qualname__` that `wraps` copies, different `__globals__`) is
+    indistinguishable here from a third-party layer. This census pins that the
+    install CANNOT be what broke the stamp, not that no wrapper exists above it.
+    """
+    import threading
+
+    from tortoise import projection as proj_mod
+
+    proj = proj or proj_mod
+    violations: list[str] = []
+    if getattr(threading.Thread, "_tortoise_stamp_installed", False) is not True:
+        violations.append(
+            "Thread.start stamp not installed in the test session "
+            "(install_thread_stamp must run from conftest, never module-body)")
+    # Bounded walk (a seen-set, so a cycle cannot hang the census).
+    chain, seen, fn = [], set(), threading.Thread.start
+    while fn is not None and id(fn) not in seen:
+        chain.append(fn)
+        seen.add(id(fn))
+        fn = getattr(fn, "__wrapped__", None)
+    if proj._thread_start_inherit_stem not in chain:
+        violations.append(
+            "the Thread.start stamp wrapper is not reachable from "
+            f"threading.Thread.start ({threading.Thread.start!r}) — the installed "
+            "wrapper is not ours (marker guard bypassed, or a stale module copy)")
+    before = threading.Thread.start
+    proj.install_thread_stamp()  # re-invocation → no-op (marker)
+    if threading.Thread.start is not before:
+        violations.append(
+            "re-invoked installer re-wrapped Thread.start (the class-attribute "
+            "marker did not make it idempotent)")
+    return violations
+
+
+def test_a_third_party_wrapper_on_thread_start_is_not_a_double_wrap(monkeypatch):
+    """#11354: the stamp census must survive a wrapper it does not own, and must
+    still report the two failures it does claim to catch.
+
+    The first arm is the CI failure itself, reproduced: `test (b)`'s run
+    42362934147 initialised the REAL Sentry SDK (tests/test_11092_sentry_loop_stall.py's
+    `live_sentry_client`), whose `ThreadingIntegration` puts a `@functools.wraps`
+    layer on `Thread.start`, and the old identity assertion read that healthy
+    state as "double-wrapped". The other two arms are the verdict's TEETH — an
+    absent stamp, and an installer that is not idempotent — so arm 1 cannot pass
+    by being blind.
+    """
+    import functools
+    import threading
+
+    from tortoise import projection as proj_mod
+
+    assert not _thread_start_stamp_violations(), "the session state is already broken"
+
+    installed = threading.Thread.start
+
+    @functools.wraps(installed)  # exactly sentry_sdk.integrations.threading's shape
+    def _sentry_style_start(self, *a, **k):
+        return installed(self, *a, **k)
+
+    monkeypatch.setattr(threading.Thread, "start", _sentry_style_start)
+    assert threading.Thread.start is not proj_mod._thread_start_inherit_stem, (
+        "the outer wrapper did not take effect — this arm would prove nothing")
+    assert not _thread_start_stamp_violations(), (
+        "a third-party @functools.wraps layer on Thread.start was read as a "
+        "double-wrap of OUR installer (#11354)")
+
+    # TEETH 1: the stamp GONE (installer never ran, or a reload/restore wiped it)
+    # must be reported, not silently accepted as "some wrapper is installed".
+    monkeypatch.setattr(threading.Thread, "start", proj_mod._ORIG_THREAD_START)
+    assert any("not reachable" in v for v in _thread_start_stamp_violations()), (
+        "an ABSENT stamp passed the census")
+
+    # TEETH 2: an installer that re-wraps on every call must be reported — this
+    # is the idempotence half, and it is the shape the marker guard exists for.
+    def _non_idempotent_install():
+        current = threading.Thread.start
+
+        @functools.wraps(current)
+        def _again(self, *a, **k):
+            return current(self, *a, **k)
+
+        threading.Thread.start = _again
+
+    monkeypatch.setattr(proj_mod, "install_thread_stamp", _non_idempotent_install)
+    monkeypatch.setattr(threading.Thread, "start", _sentry_style_start)
+    assert any("re-wrapped" in v for v in _thread_start_stamp_violations()), (
+        "a non-idempotent installer passed the census — the idempotence "
+        "assertion is vacuous")
+
+
 def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     """#1686 prod parity + install idempotence: (a) outside an active
     session the registry REFUSES records (no inheritance → None, the frame
@@ -536,8 +660,6 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     cannot patch stdlib; the class-attribute marker makes the installer
     idempotent, so it cannot double-wrap even if re-invoked after a
     reload)."""
-    import threading
-
     from tortoise import projection as proj_mod
 
     # (a) clear the conftest hook's main-thread record FIRST (it ran at
@@ -550,11 +672,8 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
 
     # (b) install idempotence: conftest installed the wrapper at session
     # start (install_thread_stamp called after _TEST_SESSION_ACTIVE=True),
-    # the marker is set, and re-invoking the installer is a no-op.
-    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
-        "Thread.start stamp not installed in the test session"
-    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
-        "Thread.start was double-wrapped (installer re-ran without the marker guard)"
-    proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
-    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
-        "re-invoked installer double-wrapped Thread.start"
+    # the marker is set, and re-invoking the installer is a no-op. The verdict
+    # is wrapper-AWARE — `Thread.start is _thread_start_inherit_stem` is false
+    # the moment the real Sentry SDK's ThreadingIntegration wraps it (#11354).
+    violations = _thread_start_stamp_violations()
+    assert not violations, "\n".join(violations)
