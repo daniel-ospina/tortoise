@@ -200,7 +200,7 @@ test-design-map-check: CLEAN — every rule holds
   ok   blank the §7 surface cell AND split it off with a bare separator (a row in an ungradeable block) → violation (R5 §7: names no surface)
   ok   retype §6.4's surface cell as the bare token `surface` (a row impersonating the header) → violation (R5 §6.4: names no surface)
   ok   delete the §6.4 surface cell outright (a crosswalk row one column short) → refusal (§6.4 crosswalk row has 3 column(s); the table needs exactly 4 (plan § · seam / interface · surface(s) · note) — a DELETED cell shifts the note into the surface column, where its own words satisfy the arm below)
-  ok   append an ordinary §5 table with a `surface` column (must stay CLEAN) → clean (no rule fired)
+  ok   append an ordinary §5 table with a `surface` column (must stay CLEAN) → clean (verdict unchanged — 0 violation(s) before and after)
   ok   splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   splice a `\\|` into SF2's contract cell (escaped backslash + REAL delimiter) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   append a duplicate `## 1.` section carrying a clean copy (a decoy that hides a shrink) → refusal (section `## 1.` appears twice — two sections cannot share a number, and grading the last one would hide whatever the first one lost)
@@ -236,7 +236,8 @@ The `--self-test` arm exists because a checker that passes on everything is wors
 layer as a mechanism, retype a crosswalk surface as one that has no row, **splice a raw `|` into a cell**,
 **splice a `\\|` into a cell**, drop a child, drop a capability, forget a seam, destroy the section
 structure, **append a duplicate section-number decoy**) to an in-memory
-copy and **requires each to be caught**. That is the same discipline the epic applies to its own probe
+copy and **requires each mutation's stated outcome** — nineteen must be caught, and one, a
+**NEGATIVE control**, must leave the verdict UNCHANGED. That is the same discipline the epic applies to its own probe
 — *an instrument that cannot fail is not an instrument.* "Every mention of it" is meant literally: the
 case deletes the mentions, because the first version of the case **renamed** them to `SF1` and so
 never built the consistent shrink its own label claimed.
@@ -249,7 +250,7 @@ refusal cases report it. ⚠️ State the mechanism rather than overclaiming it:
 that a `|`-splitting relaxation **reds the arm**, not that the exact-7 refusal is the only rule that
 could notice. ⚠️ The floor is why re-opening the false PASS is no longer a one-place edit: at the
 shipped floor, deleting the width case alone exits 1
-`2/12 case(s) UNTESTABLE` before the arm and `3/20 case(s) UNTESTABLE` after it (each exit 1) — it
+`2/12 case(s) UNTESTABLE` before the arm and `2/20 case(s) UNTESTABLE` after it (each exit 1) — it
 rule's `!= 7` to `< 7`**, *and* lowering the floor to the population that is left still exits 1, because
 the parity case beside it catches the same relaxation. ⚠️ Name all three edits: deleting the case and
 lowering the floor alone leaves the **rule** intact, so the parity case is still refused by the rule it
@@ -277,14 +278,31 @@ an appended `| area | kind | surface |` table, exit 2, `CLEAN` before the per-bl
 landed). Requiring both cells AND the four-column width closes it: appended `surface` /
 `surfaces` / `note` / 4-column tables and a `| plan § | note |` table all stay `CLEAN` again, while a
 second, validly-headed crosswalk table is still graded (its 3-cell row refuses, its blank cell
-violates) and a deleted header still fails CLOSED.
+violates) and a deleted header still fails CLOSED. ⚠️ **The header is a hint, never the authority.**
+A reworded FIRST header cell left the real crosswalk unheaded while a DECOY headed table elsewhere in
+§5 kept the headed set non-empty, so the fail-closed fallback never fired and blanking AND deleting
+§6.4's surface cell both graded `CLEAN` (measured). The pinned seam tokens are the crosswalk's actual
+signature: the crosswalk's WIDTH is now measured from the block that carries the seam tokens, not from
+a shape-matching header, and an unheaded §5 is graded in full rather than exempted block by block. With
+the first cell reworded to `seam` / `Plan §` / `plan`, the blanked cell reds (`R5 §6.4: names no
+surface`) and the deleted one REFUSES — and the untouched map now reds too (`R5 seam: names no
+surface`, measured), because a reworded header row is itself graded as a crosswalk row once it stops
+matching. That is the fail-closed direction stated above, and it is the price of the impersonation arm:
+the same content test that would let a reworded header through untouched also lets a DATA row whose
+surface cell reads the bare token `surface` be skipped when it sits above an alignment row (measured —
+that is the case below, so the two cannot both be relaxed).
 
 The false-RED direction has its own self-test case, `append an ordinary §5 table with a
 surface column (must stay CLEAN)`, and it is a **NEGATIVE control**: the one case whose expected
-outcome is `clean`, which is why the summary line counts `N/N mutation(s) behaved as designed`
-rather than "refused". It is load-bearing in the measured direction — restoring content-only header
-matching makes it FAIL (`expected clean, got refusal`, exit 1) — so the shape requirement cannot
-silently relax back to a content hint.
+outcome is that the verdict is UNCHANGED, which is why the summary line counts `N/N mutation(s)
+behaved as designed` rather than "refused". It is compared against the verdict the SHIPPED map already
+earns, not against an absolute "clean" — an absolute comparison failed the control on any map carrying
+a single unrelated violation and accused the checker (`1/20 NOT caught`) of the document's fault
+(measured). It is load-bearing in the measured direction: restoring header matching that ignores the seam tokens makes
+it FAIL (`expected clean, got refusal`, exit 1). ⚠️ Like the width rule it is a ONE-place guarantee,
+not a three-place one — reverting the shape test, deleting the case and lowering the floor to 16 leaves
+the arm green with the false RED back (measured: self-test exit 0, the `surface`-column table exit 2),
+while deleting the case alone is already red (`19 mutation(s) registered, at least 20 required`).
 
 **The parity case is the one this review added, because the rule that had no case was the parity
 rule.** `cells()` splits on backslash **parity** — a pipe delimits only after an **even** run of
@@ -328,7 +346,7 @@ shrink is refused by BOTH arms, but only the check arm changed behaviour: before
 nothing" arm existed that edit graded **CLEAN** (exit 0, measured at `1381578fd^`), and it now
 reds `R5 §6.4: names no surface` (exit 1, measured). The self-test arm refuses the same edit in
 BOTH states, and never by "not caught": two of its cases lose their mutation target, so it reports
-`2/12 case(s) UNTESTABLE` before the arm and `3/20 case(s) UNTESTABLE` after it (each exit 1) — it
+`2/12 case(s) UNTESTABLE` before the arm and `2/20 case(s) UNTESTABLE` after it (each exit 1) — it
 names a moved target instead of accusing the checker, which is a different statement from a rule
 that fails to fire. The pin is silent only when the shrink edits it
 **consistently with the row** *and* the row it empties is not a crosswalk row R5 reads — the
@@ -349,12 +367,11 @@ honest limit is:
 - **For SF2, SF10 or SF13 — the three surfaces a mutation targets — the SELF-TEST arm also reds, one
   step EARLIER than a deleted case would**, and it reds as `UNTESTABLE` rather than as "not caught":
   delete the row those cases target and the cases lose their mutation target (measured: SF13
-  `3/20 case(s) UNTESTABLE`, SF2 `5/20`, SF10 `2/20` — each exit 1, and the summary line names a moved
-  mutation target instead of accusing the checker), before any case is deleted. The numbers are one
-  higher than the lost targets because the map also carries a **must-stay-clean** control case, which is
-  reported `UNTESTABLE` on a map that is not clean rather than FAILED — a dirty input cannot measure a
-  green expectation, and calling that "the checker is a rubber stamp" would misdiagnose a correct
-  checker (measured before that guard: `1/20 NOT caught` on the SF13 shrink). It is an ADDITION, not a
+  `2/20 case(s) UNTESTABLE`, SF2 `4/20`, SF10 `1/20` — each exit 1, and the summary line names a moved
+  mutation target instead of accusing the checker), before any case is deleted. The negative control
+  does not add to these counts: it asserts the verdict is UNCHANGED rather than globally clean, so a
+  shrink leaves it passing instead of making it accuse the checker (`1/20 NOT caught` was exactly that
+  false diagnosis before the control went verdict-relative). It is an ADDITION, not a
   substitute: SF2's `§5 row 2` cell and §13's `§6.4` cell each name one surface, so the check arm reds on
   the same edit (`R5 §5 row 2: names no surface`, `R5 §6.4: names no surface`, measured).
 - **SF15 reds one step earlier too, on the CHECK arm** — it is the one surface a child names and

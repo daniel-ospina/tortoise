@@ -439,17 +439,48 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
             None,
         )
 
-    header_line = next((line for line in crosswalk.splitlines() if _is_crosswalk_header(line)), None)
-    crosswalk_width = len(cells(header_line)) if header_line is not None else 0
+    # The crosswalk's WIDTH is measured from the table that actually carries the pinned
+    # seam tokens, NOT from a shape-matching header: a reworded first cell makes the
+    # header stop matching, and anchoring on it made every block "differently shaped"
+    # — i.e. exempt — so the real crosswalk went ungraded (measured through the merge:
+    # a reworded first cell plus a decoy graded a deleted §6.4 cell CLEAN). The seam
+    # token is the crosswalk's actual signature; the header is only a hint.
+    seam_block = next(
+        (
+            block
+            for block in blocks
+            if any(
+                re.match(r"^\|\s*" + re.escape(seam), line) for line in block for seam in PLAN_SEAMS
+            )
+        ),
+        None,
+    )
+    measured_from = seam_block if seam_block is not None else None
+    if measured_from is None:
+        shape_header = next(
+            (line for line in crosswalk.splitlines() if _is_crosswalk_header(line)), None
+        )
+        crosswalk_width = len(cells(shape_header)) if shape_header is not None else 0
+    else:
+        separator = _separator(measured_from)
+        sample = measured_from[separator] if separator is not None else measured_from[0]
+        crosswalk_width = len(cells(sample))
 
     def _is_foreign_table(block: list[str]) -> bool:
+    # NOTE (merge): the pre-merge selection needed a "the header is a HINT, never the
+    # authority" guard, because a DECOY headed block kept the headed set non-empty and
+    # the fail-closed fallback never fired (measured: a reworded first header cell plus
+    # a decoy left §6.4's blanked AND deleted cells CLEAN). There is no headed/default
+    # decision left to decoy here — every `|` line is graded — so that guard's premise
+    # is gone. The decoy it described is now a 4-wide FOREIGN table, which is not
+    # exempt, so its rows are graded (fail-closed).
         separator = _separator(block)
         if separator is None or separator == 0:
             return False
         header = block[separator - 1]
         return not _is_crosswalk_header(header) and len(cells(header)) != crosswalk_width
 
-    graded_blocks = [block for block in blocks if not _is_foreign_table(block)]
+    graded_blocks = blocks if not crosswalk_width else [block for block in blocks if not _is_foreign_table(block)]
     rows: list[str] = [
         line
         for block in graded_blocks
@@ -960,27 +991,18 @@ def self_test(text: str) -> int:
         return 1
     failures = 0
     untestable = 0
-    # A `clean` case can only be MEASURED on a map that starts clean. When the input
-    # carries a violation of its own, every edit "fails" for a reason that has
-    # nothing to do with the arm under test, and reporting that as "the checker is a
-    # rubber stamp" is exactly the misdiagnosis the UNTESTABLE arm exists to prevent
-    # (measured: deleting SF13's row made the negative control report `expected clean,
-    # got violation (R1 SF13: pinned surface is missing …)`, so a correct checker
-    # accused itself). Reported as UNTESTABLE instead, which is a different statement.
+    # The verdict the SHIPPED document already earns. A "clean"-expected case is a
+    # NEGATIVE control — it asserts the mutation does not CHANGE that verdict — so the
+    # baseline is what it is compared against. Compared against an ABSOLUTE "clean",
+    # every unrelated violation in the map made the control FAIL and the summary accuse
+    # the checker of being a rubber stamp on a map that merely carried a violation
+    # (measured: one `R2 SF10` violation produced `1/17 NOT caught`), which is the false
+    # diagnosis this arm exists to avoid.
     try:
-        pristine_violations, _ = check(text)
-        pristine_clean = not pristine_violations
+        baseline_violations: list[str] = check(text)[0]
     except Refusal:
-        pristine_clean = False
+        baseline_violations = []
     for name, mutate, expected in SELF_TEST_MUTATIONS:
-        if expected == "clean" and not pristine_clean:
-            print(
-                f"  UNTESTABLE {name}: the input map is not clean, so a "
-                "must-stay-clean case cannot be measured on it",
-                file=sys.stderr,
-            )
-            untestable += 1
-            continue
         try:
             mutated = mutate(text)  # type: ignore[operator]
         except AssertionError as exc:
@@ -991,13 +1013,25 @@ def self_test(text: str) -> int:
             print(f"  UNTESTABLE {name}: {exc}", file=sys.stderr)
             untestable += 1
             continue
+        violations: list[str] | None = None
         try:
             violations, _stats = check(mutated)
             actual = "violation" if violations else "clean"
             detail = violations[0] if violations else "no rule fired"
         except Refusal as exc:
             actual, detail = "refusal", str(exc)
-        if actual == expected:
+        if expected == "clean":
+            # NEGATIVE control: the verdict must be UNCHANGED, not globally clean.
+            ok = violations is not None and violations == baseline_violations
+            if ok:
+                detail = (
+                    f"verdict unchanged — {len(violations or [])} violation(s) before and after"
+                )
+            else:
+                detail = f"the mutation changed the verdict — {detail}"
+        else:
+            ok = actual == expected
+        if ok:
             print(f"  ok   {name} → {actual} ({detail})")
         else:
             print(
