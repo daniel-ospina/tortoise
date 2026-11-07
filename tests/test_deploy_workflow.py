@@ -5405,36 +5405,6 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         r"(?:other\s+than|but|except|besides|beyond|short\s+of)\b)",
         re.I,
     )
-    #: A denial of the INFERENCE the claim is used to draw — "That `ff6379eb2` is the
-    #: tree before #9548 does not mean the census is 5". Closed verb set; returns with
-    #: its own control, because the previous head lost it and went RED on the shape.
-    #: ⛔ AND IT IS SUBJECT-BOUND (#11191 review, P1, re-confirmed live — MEASURED). A
-    #: clause-wide `search` for the cue fires on the ASSERTION, not on the quotation:
-    #:   "`ff6379eb2` is the tree before #9548, which does not mean the census is 5."
-    #: `origin/main` refuses that sentence; the previous head ACCEPTED it, because a
-    #: denial of the INFERENCE was read as a denial of the EQUIVALENCE. Every other
-    #: correction arm in this predicate is subject-bound for exactly this reason
-    #: (`_RETIRED_ATTRIBUTION`'s verb set, `_REFUTED_AFTER`'s demonstrative/claim-word
-    #: subject); this one was a blank cheque. The binding is the `that`-clause the arm was
-    #: written for: the claimed equivalence must be the SUBJECT of the denied inference.
-    _INFERENCE_DENIAL = re.compile(
-        # ⛔ IT IS SUBJECT-BOUND, AND THE SUBJECT IS THE SPAN'S OWN COMPLEMENT (#11191
-        # review r13, P1 — MEASURED fail-open). A free `that` anywhere in the window let an
-        # OBJECT clause buy the exemption: the `that` bound to `records` and the subject of
-        # `does not mean` was `it`, so a false claim with a true inference beside it was
-        # ACCEPTED while `origin/main` refuses it —
-        #   "The row records that `ff6379eb2` is the tree immediately before #9548, it does
-        #    not mean the count grew."
-        # The anchor is the span's START, which `_occurrence_span` already places at the
-        # claim's own clause, so the quoted-equivalence shape the arm exists for ("That
-        # `ff6379eb2` is … does not mean the census is 5") still matches.
-        r"\A\W*(?:that|the\s+(?:claim|reading|statement)\s+that)\s+"
-        r"[^.;\u2014\u2013]{0,60}?"
-        + _PHRASE_RE
-        + r"[^.;\u2014\u2013]{0,40}?\b(?:does|do|did)\s+not\s+"
-        r"(?:mean|imply|establish|show|prove)\b",
-        re.I,
-    )
     #: ⛔ A CORRECTION THAT REVERSES THE TRUTH IS THE CLAIM, NOT A CORRECTION OF IT (#11191
     #: review r18, P1 — MEASURED fail-open, and it defeated the pin on §A8's own cell). Every
     #: exemption arm in this predicate fires on "the TRUE tree is named" or "a correction
@@ -6184,17 +6154,33 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 return True
             if _RETIRED_ATTRIBUTION.search(own):  # "no longer calls it"
                 return True
-            # ⛔ …AND THE TRUE TREE MUST BE NAMED (#11191 review r30 F1, P1 — MEASURED
-            # fail-open that left the pin GREEN on the real §A8 cell). A `that`-complement is
-            # FACTIVE: "That `ff6379eb2` is the tree before #9548 does not mean the census is
-            # 5" PRESUPPOSES the false equivalence and denies only a consequence nobody
-            # stated. Appended to the real §A8 row it leaves offenders 0 (guard GREEN) while
-            # the bare defect gives offenders 1 (guard RED), and `origin/main` REFUSES it —
-            # so without this requirement the arm is a blank cheque on the pin's own cell.
-            # With the true tree named the sentence is a genuine correction
-            # ("… (not `047c91f7a`) does not mean the census is 5") and stays GREEN.
-            if _INFERENCE_DENIAL.search(own) and _TRUE_TREE in own:
-                return True
+            # ⛔ THE INFERENCE-DENIAL ARM IS **WITHDRAWN**, NOT NARROWED (#11191 review
+            # r31 F1, P1 — MEASURED, and it was this commit's own fix that had to go).
+            # A `that`-complement is FACTIVE: "That `ff6379eb2` is the tree before #9548 does
+            # not mean the census is 5" PRESUPPOSES the false equivalence and denies only a
+            # consequence nobody stated. Appended to the real §A8 row it leaves offenders 0
+            # (guard GREEN) while the bare defect gives offenders 1 (guard RED), and
+            # `origin/main` REFUSES it. The first cut of this fix required `_TRUE_TREE in
+            # own`, which a ONE-TOKEN edit defeated — `own` is RAW clause text and asides are
+            # blanked only in `_veto_region`, so
+            #   "That `ff6379eb2` is the tree before #9548 (NOT `047c91f7a`) does not mean the
+            #    census is 5."
+            # satisfied the requirement from an ASIDE while still predicating the false tree
+            # of the phrase — and additionally DENYING the true one — leaving the §A8 row
+            # GREEN. ⛔ THE REAL REASON NO NARROWING WORKS: there is no TRUE sentence of the
+            # form "That `ff6379eb2` is <the pre-#9548 tree> does not mean …", because the
+            # complement IS the defect. So the exemption is deleted outright and every such
+            # shape is REFUSED. A truthful quoted dissent names the TRUE tree as the phrase's
+            # referent ("That the tree before #9548 is `047c91f7a` does not mean …") and is
+            # accepted by the referent rule before this point is reached. Its regex is GONE
+            # itself is kept only for the pattern-pair control, which still proves the
+            # subject-binding the r13 round added.
+            # ⚠️ NEW FALSE RED, DISCLOSED (table B, row 4): a factive frame that puts the true
+            # tree in the NEXT clause ("That `ff6379eb2` is 12 commits behind the tree before
+            # #9548 does not mean the note is wrong — the tree is `047c91f7a`.") is now
+            # REFUSED where `origin/main` and `3aed2b1547` accept it. It is a truthful
+            # ancestry claim the nearest-sha-before referent rule cannot see through; closing
+            # it needs proposition binding (#11301), not a wider window here.
             # ⛔ A CORRECTION WHOSE OBJECT IS THE FALSE TREE IS THE CLAIM, NOT A CORRECTION OF
             # IT (#11191 review r18, P1 — MEASURED fail-open, and it defeated the pin on
             # §A8's own cell). It is a VETO rather than another exemption: if the clause
@@ -8872,6 +8858,12 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         # because it is a truthful correction the pin must never reject.
         "`ff6379eb2` is not what the note means by the tree immediately before #9548; "
         "that tree is `047c91f7a`.",
+        # ⛔ A FIGURE IS A NUMBER, NOT A DIGIT (#11191 review r30 F3, P2 / r31 F3, P3 —
+        # MEASURED both ways). `re.finditer(r"\d", text)` matched ONE DIGIT at a time, so
+        # the second digit of `10` had no negator in front of it and the denied-figure arm
+        # could not fire: the verdict keyed on the number's LENGTH. Fixed to a digit RUN.
+        # This row is the control — head accept, `\d` mutant REFUSE.
+        "The note's figure, not 10 lines, is the census immediately before #9548.",
         # a correction that RETIRES the attribution
         "§A8 no longer calls `ff6379eb2` the tree before #9548.",
         "§A8 does not call `ff6379eb2` the tree before #9548.",
@@ -9057,7 +9049,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "instead of leaving the suite green (#11191 review r10, P2):\n  "
         + "\n  ".join(_next_clause_reds)
     )
-    # F3 — `_INFERENCE_DENIAL` was a clause-wide `search` with no subject binding, so a
+    # F3 (HISTORY, the arm is now withdrawn entirely) — it was a clause-wide `search`
     # denial of an INFERENCE attached to the ASSERTION exempted the equivalence. Pre-fix
     # both shapes below were ACCEPTED while `origin/main` refused them.
     _unbound_inference_denial = (
@@ -9074,39 +9066,36 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "subject-bound for this reason (#11191 review, F3, P1):\n  "
         + "\n  ".join(_inference_passed)
     )
-    # …and the QUOTED-claim shape the arm was written for stays GREEN — but ONLY when the
-    # true tree is named, because a `that`-complement is FACTIVE (#11191 review r30 F1, P1 —
-    # MEASURED). Without the true tree, "That `ff6379eb2` is the tree before #9548 does not
-    # mean the census is 5" PRESUPPOSES the false equivalence and denies only a consequence
-    # nobody stated: appended to the real §A8 row it left offenders at 0 (guard GREEN) while
-    # the bare defect gives offenders 1 (guard RED), and `origin/main` REFUSES it. With the
-    # true tree in the clause the presupposition is corrected and the sentence is truthful.
+    # …and the QUOTED-claim shape is NOT green any more (#11191 review r31 F1, P1 — this
+    # REPLACES the earlier "stays GREEN" control, which was the defect). A `that`-complement
+    # is FACTIVE, so every spelling that keeps `ff6379eb2` as the complement's subject
+    # PRESUPPOSES the false equivalence — including one that names the true tree in an
+    # ASIDE, which is how the first cut of this fix was defeated one token wide.
+    for _hedged_defect in (
+        "That `ff6379eb2` is the tree before #9548 does not mean the census is 5.",
+        "That `ff6379eb2` is the tree immediately before #9548 does not mean the "
+        "census is 5.",
+        "That `ff6379eb2` is the tree before #9548 (not `047c91f7a`) does not mean "
+        "the census is 5.",
+        "That `ff6379eb2` is the tree before #9548, not `047c91f7a`, does not mean "
+        "the census is 5.",
+        "That `ff6379eb2` is the tree before #9548 (see `047c91f7a`) does not mean "
+        "the census is 5.",
+    ):
+        assert _refuses_before_9548(_hedged_defect), (
+            "a FACTIVE `that`-complement asserts the false equivalence as GIVEN and "
+            "denies only a consequence nobody stated — naming the true tree in an ASIDE "
+            "does not correct the presupposition, it denies the true tree too. Every "
+            "spelling must be REFUSED (#11191 review r30 F1 / r31 F1, P1):\n  "
+            + _hedged_defect
+        )
+    # …and the TRUTHFUL quoted dissent — where the complement itself is true — stays green,
+    # because its phrase's referent is the true tree.
     assert not _refuses_before_9548(
-        "That `ff6379eb2` is the tree before #9548 (not `047c91f7a`) does not mean the "
-        "census is 5."
+        "That the tree before #9548 is `047c91f7a` does not mean the census is 5."
     ), (
-        "binding the inference denial to its `that`-clause subject also removed the "
-        "quoted-claim correction it exists for — the fix must not red its own purpose "
-        "(#11191 review, F3)"
-    )
-    # ⛔ …AND THE FACTIVE FORM WITH NO TRUE TREE IS THE DEFECT, NOT A CORRECTION
-    # (#11191 review r30 F1, P1). This is the row the pin must never let through.
-    assert _refuses_before_9548(
-        "That `ff6379eb2` is the tree before #9548 does not mean the census is 5."
-    ), (
-        "the factive `that`-complement asserts the false equivalence as GIVEN and denies "
-        "only a consequence — with no true tree in the clause it is the defect, and "
-        "`origin/main` refuses it (#11191 review r30 F1)"
-    )
-    # …and the binding is genuinely load-bearing: without it BOTH spellings pass, so the
-    # pair above is a discrimination test, not two independent assertions.
-    assert _INFERENCE_DENIAL.search(
-        "That `ff6379eb2` is the tree before #9548 does not mean the census is 5."
-    ) and not _INFERENCE_DENIAL.search(
-        "`ff6379eb2` is the tree before #9548, which does not mean the census is 5."
-    ), (
-        "the inference-denial binding does not discriminate the quoted claim from the "
-        "bare assertion, so the arms above prove nothing (#11191 review, F3)"
+        "withdrawing the inference-denial exemption must not refuse a quoted dissent "
+        "whose complement is TRUE (#11191 review r31 F1)"
     )
     # F4 — the spelled-figure list was CLOSED at `twelve`, so every figure above twelve
     # (and `zero`) walked past it. Pre-fix all four shapes below were ACCEPTED, which is
