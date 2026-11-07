@@ -671,6 +671,34 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
                       "corrected_by_s4", "verbatim_reemissions"):
                 assert s["composition"][arm][k] == sum(
                     a[arm].get(k) or 0 for a in measured_arms), (path.name, arm, k)
+        # ⛔ `_capped`'s OWN contract, per list: `count` is the CENSUS number,
+        # `recorded` is len(items), and the two deficits must add up. Without
+        # this a list whose `count` drifted from `added_by_s4` stays green.
+        for a in d["arms"]:
+            for arm in ("legacy", "delta"):
+                r = a[arm]
+                if r.get("out_tokens") is None:
+                    continue
+                added = r.get("added_items") or {}
+                if added:
+                    assert added["count"] == r.get("added_by_s4"), (
+                        path.name, a["session"], arm, "added count")
+                    assert added["recorded"] == len(added["items"])
+                    assert added["cap_dropped"] == max(
+                        0, added["candidates"] - added["recorded"])
+                    assert added["unclassified"] == max(
+                        0, added["count"] - added["candidates"])
+                corr = r.get("corrected_items") or {}
+                if corr:
+                    assert corr["count"] == max(
+                        0, (r.get("corrected_by_s4") or 0)
+                        - (r.get("verbatim_reemissions") or 0)), (
+                        path.name, a["session"], arm, "corrected count")
+                    assert corr["recorded"] == len(corr["items"])
+                    assert corr["cap_dropped"] == max(
+                        0, corr["candidates"] - corr["recorded"])
+                    assert corr["unclassified"] == max(
+                        0, corr["count"] - corr["candidates"])
         # ⛔ EVERY capped list on EVERY arm of EVERY pair, not one list per arm:
         # the README states the cap never fired, so an unpinned list would let
         # it become false silently (#11385 P2).
@@ -757,7 +785,7 @@ def _thousands(n: int) -> str:
 def _partition(art: dict) -> dict:
     """The Task-10-Step-5 buckets, over one artifact's recorded pairs."""
     pairs = [i for a in art["arms"]
-             for i in a["legacy"]["corrected_items"]["items"]]
+             for i in (a["legacy"].get("corrected_items") or {}).get("items") or []]
     buckets = {"content": 0, "lifecycle": 0, "slots": 0, "supersedes": 0}
     for i in pairs:
         if {"content", "name"} & set(i["changed_fields"]):
@@ -790,8 +818,21 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
     exactly the corruption this bundle exists to be auditable against. So a
     regeneration legitimately reds here, and the fix is to update the document."""
     readme = (_EVID / "README.md").read_text()
+    flat_all = " ".join(readme.split())
     pri = json.loads(_PRIMARY.read_text())
     rer = json.loads(_RERUN.read_text())
+
+    # ⛔ ANCHOR the two headline sets to their own runs: a presence check stays
+    # green when the primary and re-run figures are swapped, which is exactly a
+    # transcription slip (#11385 review P2).
+    ps, prs = pri["summary"], rer["summary"]
+    assert (f"{_thousands(ps['sum_legacy_out_tokens'])} → "
+            f"{_thousands(ps['sum_delta_out_tokens'])} output tokens over 7 "
+            "sessions") in flat_all
+    assert (f"Re-run (`ab-20261107T024226Z`): "
+            f"{_thousands(prs['sum_legacy_out_tokens'])} → "
+            f"{_thousands(prs['sum_delta_out_tokens'])} tokens, **−"
+            f"{prs['token_weighted_reduction'] * 100:.2f} %**") in flat_all
 
     for art in (pri, rer):
         s, comp = art["summary"], art["summary"]["composition"]
@@ -857,7 +898,8 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
                         assert lst["cap_dropped"] == 0
         # the partition the residual rests on: 62 / 1 / 1, no content change —
         # asserted of the ARTIFACT here and of the README's bucket table below
-        pairs = [i for a in art["arms"] for i in a["legacy"]["corrected_items"]["items"]]
+        pairs = [i for a in art["arms"]
+                 for i in (a["legacy"].get("corrected_items") or {}).get("items") or []]
         n_lifecycle = sum(i["changed_fields"] == ["lifecycle"] for i in pairs)
         n_slots = sum(i["changed_fields"] == ["slots"] for i in pairs)
         n_super = sum(i["changed_fields"] == ["supersedes"] for i in pairs)
@@ -879,8 +921,27 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
                         buckets[key] = (_num(cells[0]), _num(cells[1]))
         assert buckets == {k: (want[k], want_rer[k]) for k in want}, (
             buckets, want, want_rer)
+        # ⛔ the operator-gap figure the residual states: `added_items` records
+        # an operator's identity only inside its `key`, so the count is worth
+        # stating — and worth pinning, since nothing else reads `section`.
+        gaps = [i for a in art["arms"]
+                for arm in ("legacy", "delta")
+                for i in (a[arm].get("added_items") or {}).get("items") or []
+                if i["section"] == "operators"]
+        ops_legacy = sum(1 for a in art["arms"]
+                         for i in (a["legacy"].get("added_items") or {}).get("items") or []
+                         if i["section"] == "operators")
+        ops_delta = sum(1 for a in art["arms"]
+                        for i in (a["delta"].get("added_items") or {}).get("items") or []
+                        if i["section"] == "operators")
+        flat_doc = " ".join(readme.split())
+        assert (f"In the primary run {ops_legacy} of {lg['added_by_s4']} legacy gaps "
+                f"and {ops_delta} of {dl['added_by_s4']} delta gaps are operators"
+                ) in flat_doc, (ops_legacy, ops_delta)
+        assert gaps is not None
         # the delta arm's honest limitation, not a hidden one
-        assert sum(a["delta"]["s4_delta_empty"] is False for a in art["arms"]) == 7
+        assert sum(a["delta"].get("s4_delta_empty") is False
+                   for a in art["arms"]) == 7
     assert f"{pri['summary']['median_session_reduction'] * 100:.1f}" in readme
     assert f"{rer['summary']['median_session_reduction'] * 100:.2f}" in readme
 

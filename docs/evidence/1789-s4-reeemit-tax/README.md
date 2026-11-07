@@ -14,11 +14,17 @@ aboutObjects: "#1789, PR #8041, #4917, #2408, plan docs/plans/2026-08-27-1789-s4
 **Measured on:** 2026-11-07, `feat/1789-s4-reeemit-tax-measurement` (base
 `origin/main` @ `23d227c53`), model **requested** `deepseek-v4-flash` via the
 direct DeepSeek adapter, 7 real recorded sessions, **2 recorded runs, both
-produced by the committed instrument**: `ab-20261107T023958Z` (primary) and
+produced by this instrument as it stood when they ran** (fields added to it
+afterwards — `calls`, `sessions_failed`, `partial`, `classify_later`,
+`templates` — are named below, and are absent from the artifacts for that
+reason): `ab-20261107T023958Z` (primary) and
 `ab-20261107T024226Z` (re-run, same code, same inputs). ⚠️ One field of BOTH artifacts was
 corrected AFTER the runs: `caveats[2]` still carried the refuted "S2 has already been
-written, so S4 sees it" reading, so that one string was replaced with the instrument's
-current caveat (#11385 review). **No measured field was touched** — every token count,
+written, so S4 sees it" reading, so that one string was replaced — with the
+**intermediate** caveat, which still ends "…so the measured saving is a CEILING and the
+delta arm's `added_by_s4` / `s4_items` read as a floor." That one-sided wording is itself
+superseded by *What this does not measure* below (it is a caveat, never a measurement, and
+no measured field was touched); the instrument at this head emits a corrected string. **No measured field was touched** — every token count,
 composition channel and reduction is byte-identical to what the runs emitted; re-running
 needs a paid key and would move the numbers for reasons unrelated to the correction. The
 filenames are each
@@ -42,7 +48,7 @@ Task 10 (fresh 50-question E2E) was never run, so the delta contract's
 
 | issue target | measured | verdict |
 |---|---|---|
-| **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 787 → 2 038 output tokens over 7 sessions); median **−96.9 %**, worst session **−85.16 %**, best **−98.3 %** | **MET**, 2.3× the threshold; each of the 7 sessions clears 40 % on its own. ⛔ **Read this as a CEILING, not as production's saving** — see *What this does not measure*: the reconstructed S3 block tells the delta arm that the session's own items already exist, which is the input under which a delta contract has the least to emit, so the real saving can only be smaller |
+| **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 787 → 2 038 output tokens over 7 sessions); median **−96.9 %**, worst session **−85.16 %**, best **−98.3 %** | **MET**, 2.3× the threshold; each of the 7 sessions clears 40 % on its own. ⚠️ **This is not production's saving, and its DIRECTION is not established by this artifact** — see *What this does not measure*: the reconstructed S3 block offers the delta arm all 266 S2 items as already existing, which is the **maximum** correction opportunity (the arm took none: 0 collisions) while it is the **minimum** for gaps — so one channel is measured at its most favourable input and the other at its least, and the aggregate could be either |
 | truncation rate → near 0 | `truncated=False` on **14/14** arm calls, `attempts=1` | ⚠️ **NOT EVIDENCED.** The largest output either arm produced (7 814 tokens) is **under half** the 16 000-token default (`_S2_S4_MAX_TOKENS`), so this geometry has no plausible route to truncation and a null here is an artefact of the harness, not a measurement of the rate. ⚠️ The effective cap is `_stage_cap(_S2_S4_MAX_TOKENS)`, which is env-overridable (`TORTOISE_EXTRACTOR_MAX_TOKENS`) and is **not recorded in the artifact** — so the margin is stated against the DEFAULT, and a box with the override set would need its own reading. What the artifact does record is the outcome (`truncated: false` on every call). That target needs the eval lane's geometry. |
 | accuracy ≥ 0.826 / chunk@20 ≥ 0.738 | **not measured here** — the eval lane's gates | see *What this does not measure* |
 
@@ -208,14 +214,44 @@ artifact.
   production S4 sees.** `extract_session_v2` runs S3 (`search_graph`) *before*
   S4 and writes the session's items only afterwards (`execute_embed`), so
   production S4 reads **previous-graph** hits — bounded at `max_queries=15` ×
-  `limit=3`, with the capture's own turn echoes dropped. Relabelling the
-  session's own list as "already in the graph" supplies the input under which a
-  delta contract has the *least* to emit, so the delta arm's `added_by_s4` /
-  `s4_items` read as a **floor**, and "the contract suppressed gap-finding" is a
-  live alternative explanation this instrument cannot separate from "the input
-  left it nothing to find". Both arms see the same block, so the A/B stays
-  single-variable — but the magnitude is the contract's effect **under a
-  gap-suppressing input**, not production's effect.
+  `limit=3`, with the capture's own turn echoes dropped. That matters in BOTH
+  directions, and they point opposite ways:
+
+  - the **correction** channel is measured at its *production maximum*:
+    `S4_TMPL_DELTA` emits a correction only where the search shows the item
+    already exists, and the reconstruction says all 266 S2 items exist — the
+    delta arm nevertheless emitted **0** corrections in all 7 sessions of both
+    runs. Production can only offer fewer, so this channel cannot be better there.
+  - the **gap** channel is measured at its *minimum*: an input that says
+    everything already exists leaves a "emit only what is missing" contract
+    nothing to find, which is consistent with the delta arm's narrower gap
+    channel (6 vs 12/9) — and equally consistent with the contract itself
+    suppressing gap-finding, which this artifact cannot separate.
+
+  So the aggregate's direction is **not** established, and it does not reduce to
+  one sign: the measured −93.8 % is the contract's effect under ONE fixed input.
+  The correction channel can only *shrink* the real saving from here — it is
+  measured at its production maximum and already contributes nothing (0 emitted),
+  so production cannot add to it. The gap channel can go either way: if the input
+  is what suppressed gap emission, production leaves more to find, the delta arm
+  emits more, and the saving is **smaller**; if the contract itself suppresses
+  gap-finding (a defect, not a win), production behaves like this run and the
+  saving barely moves. Settling it needs a production-geometry run.
+
+  ⚠️ **What the committed artifacts actually say.** Their `caveats[2]` ends
+  "…Relabelling the session's own list as already-in-the-graph is the maximally
+  gap-SUPPRESSING input for a delta contract, so the measured saving is a CEILING
+  and the delta arm's `added_by_s4` / `s4_items` read as a floor." That is the
+  one-sided reading this section refutes: it names only the gap channel and
+  concludes a ceiling, when the same input makes the correction channel
+  *maximally* exercisable. The string stands as the **disclosed hand-correction**
+  left it — word-for-word the instrument's own caveat from `10b8d52cb` until this
+  change — and it is left alone now for the same reason it was corrected then:
+  it is a caveat, never a measurement. Editing it again to match this section
+  would be the third hand-write of a provenance field, and a reader is better
+  served by an artifact that keeps its history visible than by one that silently
+  agrees with the latest argument. The instrument at this head emits the
+  corrected wording, so the next run carries it.
 
 ## Reproduce
 

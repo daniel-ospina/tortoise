@@ -170,8 +170,12 @@ graph, so S4's search results are the S2 items themselves").
     keeps the A/B single-variable (an empty block would be the "degraded
     search" condition the plan excludes from compliance reads, and it would
     change both arms' behaviour) — but the reconstruction is the MAXIMALLY
-    gap-SUPPRESSING input for a delta contract, so the measured saving is a
-    CEILING, not production's saving.
+    gap-SUPPRESSING input for a delta contract while being the MAXIMALLY
+    correction-FRIENDLY one (it says every S2 item already exists, and a delta
+    correction is emitted only where the search shows that), so the two value
+    channels are measured at opposite extremes and the aggregate's DIRECTION is
+    not established: neither a ceiling nor a floor, just the effect under this
+    input.
 
     ⛔ THE IDS ARE SYNTHETIC (`s2-ent-0`, `s2-pt-1`, …): the receipts record no
     graph ids. Production would offer real node ids (or none), so any output
@@ -629,7 +633,10 @@ def compare(pairs: list[dict]) -> dict:
         "sessions_attempted": len(rows),
         "sessions_failed": failed,
         # a partial run is visible in ONE field, so no reader has to subtract
-        "partial": 0 < len(usable) < len(rows),
+        # ⛔ `0 < … < len(rows)` read False on a run that measured NOTHING, so
+        # the one field that exists to make incompleteness visible said
+        # "complete" exactly when it was empty (#11385 review P2).
+        "partial": len(usable) < len(rows),
         "sum_legacy_out_tokens": sum_lg,
         "sum_delta_out_tokens": sum_dl,
         # THE number the issue asks for:
@@ -729,8 +736,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             "PREVIOUS-graph hits (max_queries=15 x limit=3, the capture's own "
             "turn echoes dropped). Relabelling the session's own list as "
             "already-in-the-graph is the maximally gap-SUPPRESSING input for a "
-            "delta contract, so the measured saving is a CEILING and the "
-            "delta arm's added_by_s4 / s4_items read as a floor.",
+            "delta contract AND the maximally correction-FRIENDLY one (a "
+            "correction is emitted only where the search shows the item exists), "
+            "so the two value channels are measured at opposite extremes and the "
+            "aggregate's direction is not established — neither a ceiling nor a "
+            "floor.",
             "model_id is the model REQUESTED; the served id is not recorded here.",
             "Accuracy / chunk@20 are the eval lane's gates and are NOT measured here.",
         ],
