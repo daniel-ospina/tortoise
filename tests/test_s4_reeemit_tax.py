@@ -1117,8 +1117,8 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         assert ops == 35, ops
         assert f"so the {ops} `operators` items are never offered" in flat_all, ops
         assert f"the {ops} `operators`" in flat_all
-        assert f"(the {ops} `operators` are never rendered, in production too" \
-            in flat_all, ops
+        assert (f"the {ops} `operators` are never rendered, in production too"
+                in flat_all), ops
         # ⛔ the FOURTH copy (the caveat-provenance paragraph) was still
         # unguarded: 35 -> 36 there stayed green (#11385 review P3).
         assert f"the {ops} never-offered `operators`" in flat_all, ops
@@ -1170,7 +1170,19 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
                 in flat_all), _census
         assert "the delta RESPONSES that carried tax-surface items" in flat_all
         assert "upper bound on the DELTA ARM's tax-surface component" in flat_all
+        assert "an EXACT total for" in flat_all, (
+            "1 498 IS those responses' total — calling it a floor on that total"
+            " contradicts the neighbouring clause (#11385 review P3)")
         assert "it bounds production" in flat_all
+        # ⛔ "production maximum" was the overreach the count fix removed, surviving in
+        # a HEADER: a block that can offer MORE items as existing cannot bound the
+        # correction channel from above (#11385 review P2).
+        assert "measured under a MAXIMALLY CORRECTION-FRIENDLY" in flat_all
+        assert "the FLOOR, not a maximum" in flat_all
+        assert "cannot go BELOW it" in flat_all
+        assert "measured at its *production maximum*" not in flat_all
+        assert "it is measured at its production maximum" not in flat_all
+        assert "no room to add to it" not in flat_all
         # ⛔ and the RE-RUN's half of the same sentence was a TYPED literal with no
         # assertion at all: a regeneration or a digit edit stating a false partition
         # stayed green (#11385 review P3). Derived from the re-run artifact.

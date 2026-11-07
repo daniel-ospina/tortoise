@@ -230,7 +230,10 @@ artifact.
   `limit=3`, with the capture's own turn echoes dropped. That matters in BOTH
   directions, and they point opposite ways:
 
-  - the **correction** channel is measured at its *production maximum*:
+  - the **correction** channel is measured under a MAXIMALLY CORRECTION-FRIENDLY
+    input — every one of the 231 offered items is labelled already-existing, so the
+    channel has more to correct here than it will usually find in production. The
+    bound that survives is the FLOOR, not a maximum:
     `S4_TMPL_DELTA` emits a correction only where the search shows the item
     already exists, and the reconstruction offers 231 of the 266 items as
     existing (the block renders entities/points/events only — the 35 `operators`
@@ -252,19 +255,20 @@ artifact.
   So the aggregate's direction is **not** established, and it does not reduce to
   one sign: the measured −93.8 % is the contract's effect under ONE fixed input.
   Take the two arms separately, because the two channels do not share a sign.
-  Inside the **delta** arm the correction channel cannot *shrink its output* —
-  it is measured at its production maximum **for the 231 items the block can
-  offer** (the 35 `operators` are never rendered, in production too, so this
-  channel is structurally zero for them)
-  and already emits nothing (0), so production has no room to add to it — while
+  Inside the **delta** arm the correction channel cannot *shrink its output* below
+  its floor — it already emits nothing (0), which is the minimum a correction
+  channel can emit, so production cannot go BELOW it (it can carry more to correct:
+  that channel is measured on a maximally correction-friendly input for the 231
+  items the block can offer — the 35 `operators` are never rendered, in production
+  too, so that part is structurally zero in both) — while
   its gap channel can only *grow it*, since that channel is measured at its
   **minimum**. So production cannot emit LESS of the two channels this section names than
   the delta arm did: the delta RESPONSES that carried tax-surface items cost **1 498**
   (primary) / **1 480** (re-run) in whole-output terms. ⚠️ Whole-output terms is all this
   artifact can offer — `out_tokens` is the provider's `completion_tokens` for the whole
   response and the artifact records item COUNTS, never a per-section token split. So that
-  figure is an upper bound on the DELTA ARM's tax-surface component — it bounds production
-  from neither side — and a floor only on those responses' total; the residual is visible
+  figure is an upper bound on the DELTA ARM's tax-surface component and an EXACT total for
+  those responses' whole output — it bounds production from neither side; the residual is visible
   in the data the artifact does keep: wp05 and wp07 emitted the same channel COUNTS (3
   gap items, 0 corrections each) and cost 968 vs 530 (958 vs 522 in the re-run), and the
   other **540** / **567** tokens
