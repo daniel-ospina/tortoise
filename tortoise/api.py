@@ -379,9 +379,25 @@ class EventAPI:
         # payload: a foreign vector is carried (so it is restored verbatim), but
         # with NO attestation, because its origin is not ours to vouch for.
         #
-        # (The SDK surface refuses caller-supplied `embedding` outright — see
-        # `TortoiseSDK._sanitize_props` — so this path is reachable only from a
-        # direct `EventAPI` caller, which never gets an MCP/SDK guarantee.)
+        # (The SDK surface does NOT refuse a caller-supplied `embedding`: `create_point`
+        # and `update_point` store one VERBATIM by a recorded decision (PR #3018 review
+        # P2 — see `tortoise.sdk::_sanitize_props`, which rejects the embedding IDENTITY
+        # props but deliberately not `embedding` itself). ⚠️ But a vector cannot arrive
+        # HERE from those tools: their journal half lives in `tortoise.sdk`
+        # (`_journal_snapshot_from_create_map` → `_emit_event`'s
+        # `clean.setdefault("embedding", None)` for `create_point`, and the
+        # `PointRevised` record's `emit_props` for `update_point`). This branch guards
+        # the vector a DIRECT `EventAPI` caller hands to `add_point(fields=…)`. ⚠️ The
+        # cited test pins the CARRY, not this branch: it runs under an unimportable
+        # seam, where the branch body reduces to an assignment `p.update(fields)` has
+        # already made — so it stays green if this block is deleted, as its own
+        # docstring says ("This pins the GUARD, not the ASSIGNMENT ORDER"). What the
+        # block buys when the seam IS importable is the re-normalisation below: the
+        # caller's vector must not ride the SERVER's identity/text-hash attestation.
+        # Two guards — not one — keep a foreign vector from minting a claim it
+        # has not earned: the carry-with-no-attestation below (it cannot carry OUR
+        # attestation) and the `_forged` refusal a few lines down (the identity/marker
+        # keys that would let it FORGE one are rejected outright).)
         if "embedding" in fields:
             # The key stays PRESENT in both branches: an explicit None is the
             # journal saying "this id has no vector", which the replay must

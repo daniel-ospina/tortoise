@@ -3791,8 +3791,12 @@ def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
     broken["carve_shards"] = None
     carve_case = (broken, "carve_shards is explicitly null")
 
-    # `duplicate_entries`: a same-surface repeat — what `merge=union` emits when
-    # two lanes append the same registration (#5373).
+    # `duplicate_entries`: a same-surface repeat (#5373). A duplicate is not
+    # EVIDENCE that a `merge=union` driver ran — union never dedupes, which is
+    # precisely how it can itself leave two copies: a conflicting hunk whose two
+    # sides differ (the same entry plus a differing trailing comment) keeps both.
+    # It also appears with no conflict at all, when the same row is appended at a
+    # different anchor (see `duplicate_entries`).
     dup = yaml.safe_load(real)
     surface = next(iter(dup["surfaces"]))
     entry = dup["surfaces"][surface][0]
