@@ -81,10 +81,10 @@ and **0** at the base, because #11205's own explanation names `sdk.create_operat
 call — but ⚠️ **those four line numbers are `origin/main`'s, not this record's base's**: they are `:8938`,
 `:8956`, `:8963` and `:9343` at `origin/main` (`62248db88`; `#11361`, `7491da3fe`, moved them), while the
 same grep prints **0** at this record's base `80c912244`, and four at `:8892`, `:8910`, `:8917` and
-`:9231` at `de72cfd45` (the last commit to touch THIS record, `#11326`). The conclusion — four mentions,
-zero calls — is base-independent; the numbers are not, which is this section's own lesson. The
-**calls** are still absent, so §1's second reason stands
-unchanged; §1 and §5 therefore now carry the call-shaped command, which a comment cannot satisfy. That
+`:9231` at `de72cfd45` (the last commit to touch THIS record, `#11326`). The conclusion that matters —
+**zero calls** — holds at every one of those bases (the call-shaped grep prints nothing at all three); the
+mention count and its line numbers do not, which is this section's own lesson. §1's second reason therefore
+stands unchanged, and both §1 and §5 carry the call-shaped command, which a comment cannot satisfy. That
 is §7's lesson one merge later: **a count is only as good as the base it was taken at.**
 
 ⚠️ **`#11211` did not close `#11021`** — `gh pr view 11211 --json closingIssuesReferences` is empty
