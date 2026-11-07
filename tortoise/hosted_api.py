@@ -14840,8 +14840,9 @@ def _seed_demo_graph(org_id: str, sdk=None) -> dict:
     # this change's scope and belongs to §9.1's residual (a) — a graph-side
     # removal no instrument ships today. ⛔ NOT `#10017`'s purge, though these
     # are `pointKind='event'` `:Point`s wired to the demo session: turn SHAPE
-    # is `is_episodic` + `pointKind='event'` + a `<sid>_t<digits>` id
-    # (`tools/turn_parity_census.py`), and these fail two of those three —
+    # is `is_episodic` + `pointKind='event'` + `is_operator=false` + a single-session
+    # `<sid>_t<digits>` id
+    # (`tools/turn_parity_census.py`), and these fail two of those four —
     # `t.is_episodic = true` is never set (this seeder never did), and
     # `epi_turn<N>` carries no `_t<digits>` suffix. ⚠️ The census's graph leg
     # READS `WHERE t.is_episodic = true` (`turn_parity_census.py`), so a node

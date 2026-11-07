@@ -188,10 +188,10 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``node_statement`` renders ``SET n += $props``, where a null REMOVES the key),
   so a record-sourced rebuild keeps it clear. ⚠️ So where a ``:Point``'s record
   ``props`` tail still CARRIES the prose, ``record-restore`` IS a repair that
-  RESTORES the value — and ``_partition_cache_owned``'s ``keep |=
-  set(record_props)`` makes that population COMPARED rather than bucketed, so it
-  is not a ``graph_only`` occurrence at all. What has no repair that RESTORES the
-  value is the two ANCHORS, not "no label". ⛔ The obstacle on those anchors is the
+  RESTORES the value — and ``_partition_cache_owned``'s
+  ``keep |= set(record_props)`` makes that population COMPARED rather than
+  bucketed, so it is not a ``graph_only`` occurrence at all. What has no repair
+  that RESTORES the value is the two ANCHORS, not "no label". ⛔ The obstacle on those anchors is the
   PROHIBITION, not a hole in the schema: ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
   forbids the RECORD→CACHE projection from writing the column there. ⚠️ **Whether a
   SOURCE actually holds the value is a PER-ROW fact, not a per-class one — key it
