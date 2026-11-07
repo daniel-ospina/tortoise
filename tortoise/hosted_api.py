@@ -6818,9 +6818,12 @@ _LIVENESS_SERVED_LOCK = threading.Lock()
 #: Requests to `/liveness` this PROCESS has answered. Monotonic, never reset
 #: (a restart starting again at 1 is itself the evidence of a restart).
 _LIVENESS_SERVED_COUNT = 0
-#: ``time.monotonic()`` of the last COMPLETED ``/liveness`` request, or None
-#: before the first one — "no sample" must be distinguishable from "a fast one".
-_LIVENESS_LAST_COMPLETED_AT: float | None = None
+#: ``time.monotonic()`` stamped when this process last STARTED a ``/liveness``
+#: handler, or None before the first one — "no sample" must be distinguishable
+#: from "a fast one". Deliberately stamped on ENTRY, not on delivery (see the
+#: handler's ``_served_age_ms`` note): a request this process served but never
+#: delivered still ran the loop, which is the thing being evidenced.
+_LIVENESS_LAST_SERVED_AT: float | None = None
 
 
 @app.get("/liveness")
@@ -6834,13 +6837,19 @@ async def liveness(response: Response):
       genuinely-blocked process look like a WEDGED one at the transport layer
       too, and the prober already distinguishes "answered 5xx" (DOWN) from
       "answered nothing" (DOWN, different `failure=` class).
-    * ``served`` — this process's count of COMPLETED requests to this path,
-      incremented for THIS request before the response is built. A consumer can
-      therefore tell a fresh answer from a replayed/cached one: two probes must
-      never see the same number.
-    * ``last_completed_age_ms`` — wall age of the PREVIOUS completed request, or
-      ``null`` before the first. This is the "how long since the loop last ran
-      this" datum, computed here rather than stored by a background writer.
+    * ``served`` — this process's count of requests to this path that REACHED
+      this handler, incremented for THIS request before the response is built. A
+      consumer can therefore tell a fresh answer from a replayed/cached one: two
+      probes must never see the same number.
+    * ``last_served_age_ms`` — age of the PREVIOUS request that entered this
+      handler, or ``null`` before the first. This is the "how long since the loop
+      last ran this" datum, computed here rather than stored by a background
+      writer. ⚠️ It is stamped when the handler RUNS, not when the response is
+      delivered (a delivery-time stamp would need a background writer, which is
+      the state-read pattern this endpoint exists to avoid), so the honest
+      reading is "the loop last ran this request", not "a client last received
+      an answer" — for the prober the two are the same event, since a response
+      that never arrives is the DOWN verdict.
 
     ⛔ The one thing this handler must never become: a reader of
     ``loop_heartbeat_info()`` / ``_HEALTH_PROBE.snapshot()``. Those are written
@@ -6858,7 +6867,7 @@ async def liveness(response: Response):
     header. Same value the file already uses on its other non-cacheable
     surfaces.
     """
-    global _LIVENESS_SERVED_COUNT, _LIVENESS_LAST_COMPLETED_AT
+    global _LIVENESS_SERVED_COUNT, _LIVENESS_LAST_SERVED_AT
     # One real trip through the loop's ready queue: this coroutine suspends and
     # resumes only when the loop RUNS, so the answer below cannot be produced by
     # anything but a served request. `sleep(0)` is a bare yield to the loop's
@@ -6866,13 +6875,13 @@ async def liveness(response: Response):
     await asyncio.sleep(0)
     now = time.monotonic()
     with _LIVENESS_SERVED_LOCK:
-        previous = _LIVENESS_LAST_COMPLETED_AT
+        previous = _LIVENESS_LAST_SERVED_AT
         _LIVENESS_SERVED_COUNT += 1
         served = _LIVENESS_SERVED_COUNT
-        _LIVENESS_LAST_COMPLETED_AT = now
+        _LIVENESS_LAST_SERVED_AT = now
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return {"status": "ok", "served": served,
-            "last_completed_age_ms": None if previous is None
+            "last_served_age_ms": None if previous is None
             else round((now - previous) * 1000.0, 1)}
 
 

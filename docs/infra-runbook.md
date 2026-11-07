@@ -1705,7 +1705,11 @@ Two halves close that, and neither is a health *reading*:
    in the script's production set (an unrecognised URL is a **DRILL**: no page)
    and deliberately NOT restartable — the primary API probe owns restarting the
    machine, and a second restart arm would spend `MAX_RESTARTS_PER_HOUR` twice.
-   Pinned by case 97 of `.github/scripts/availability-watchdog.test.sh`.
+   Pinned in BOTH directions by cases 99 (the step, its label, its production-set
+   membership and its 5 s bound), 88b (`000` → `PROD DOWN` + the machine-backed
+   prose) and 100 (`200` → UP, exit 0, no incident) of
+   `.github/scripts/availability-watchdog.test.sh`; case 101 covers the
+   `404` → `PROD DEGRADED` arm.
 
 **Blind spots, stated rather than implied.** It detects a loop that cannot
 serve — and, because `curl --max-time 5` turns any answer later than the bound
@@ -1717,11 +1721,20 @@ and it is not a substitute for the TCP check that catches a dead process. Do
 **not** replace it with `loop_stale_ms`: reading the loop's own tick to decide
 the loop is fine is the exact circularity that let this outage run unattended.
 
+⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
+`control_ok()` runs only on the restartable path (`availability-watchdog.sh:2507`,
+inside `if [ "$restart_mode" = "DOWN" ]`), because the disruptive action it
+guards — a machine restart — cannot happen on a hard-disarmed arm. So a TOTAL
+runner-side egress failure pages `PROD DOWN` from THIS step instead of
+`INCONCLUSIVE`, even though nothing is wrong with the machine. See §7.8 (the
+INCONCLUSIVE bullet there is scoped to the restartable target) and #11401, which
+tracks consulting the control probe for every production arm.
+
 Operator check, one line, from anywhere:
 
 ```bash
 curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
-# {"status":"ok","served":<N>,"last_completed_age_ms":<ms|null>}   # N must GROW
+# {"status":"ok","served":<N>,"last_served_age_ms":<ms|null>}   # N must GROW
 ```
 
 ### 6.5 Cost reference (what "one machine warm" actually costs)
@@ -2565,7 +2578,16 @@ tracked as **#5798**.
   than a merged, unattributable alert. The same reasoning is stated beside the
   step in `.github/workflows/availability-watchdog.yml`.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
-  `CONTROL_URL` check). Alerting still fires; no restart is issued. The
+  `CONTROL_URL` check) — **on the restartable Fly API target only.** The control
+  probe is consulted inside the restart decision
+  (`availability-watchdog.sh:2507`), so the TWO hard-disarmed arms — the Pages
+  auth surface and the served-request liveness surface — never reach it: a total
+  runner-side egress failure pages them as `PROD DOWN`/`PROD DEGRADED` (a TRUE
+  alert about the runner, not the app), and the case is disambiguated by the
+  primary probe's OWN verdict and by the run being RED. The control probe is not
+  run there because the action it guards (a machine restart) cannot happen on a
+  disarmed arm; #11401 tracks consulting it for every production arm. Alerting
+  still fires; no restart is issued. The
   INCONCLUSIVE page is throttled to at most once per `CAP_RENOTIFY_MINUTES`,
   measured from its own **attempt** stamp — so an *undelivered* inconclusive
   page also consumes the window (pre-existing; #4575) — and the per-run record is

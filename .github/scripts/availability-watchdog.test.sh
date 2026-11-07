@@ -1987,10 +1987,10 @@ assert_eq "$(restartable_unit "https://staging.example.test/v1/organizations")" 
 # the `is_machine_backed_url` branches) silently restored "no Fly machine … check
 # the Pages deploy" for a WEDGED MACHINE with every other assertion green — a
 # false PASS over exactly the misdiagnosis this arm exists to prevent. These
-# lines, plus the end-to-end case 88b, are that pin.
+# lines, plus the end-to-end cases 88b/100/101, are that pin.
 #
-# The URL is read from the SCRIPT (not from the workflow step, which case 97
-# cross-checks against it), so this block does not depend on a variable case 97
+# The URL is read from the SCRIPT (not from the workflow step, which case 99
+# cross-checks against it), so this block does not depend on a variable case 99
 # defines further down.
 LIVENESS_URL_UNDER_TEST="$(sed -n 's|^LIVENESS_PROBE_URL="\(https://[^"]*\)".*|\1|p' "$WATCHDOG" | head -1)"
 assert_not_empty "$LIVENESS_URL_UNDER_TEST" \
@@ -2148,6 +2148,27 @@ assert_contains "$OUT" "restart decision: disarmed:no_machine" "auth: the run lo
 assert_contains "$OUT" "production surface with no Fly machine" "auth: the run log names the Pages surface (the non-machine arm of the split)"
 assert_contains "$(patched_body)" "NO Fly machine" "auth: the incident body explains why nothing was restarted"
 
+# ── 100: a HEALTHY /liveness answer is UP — the arm's ALIVE direction ──────
+# Case 88b proves this arm ALERTS (`000` → PROD DOWN). Nothing proved it does
+# NOT alert when the target is healthy: case 93 pins the allow-list MECHANISM
+# (with `302` as the listed code, and `200` only as an *unlisted* code), but no
+# case ever ran THIS target with a `200`. The two halves were pinned
+# separately, and the JOIN — "the expectation list this step sets matches the
+# code this endpoint returns" — was pinned nowhere, so a knob that stopped
+# matching the endpoint's healthy code would page on a healthy origin with the
+# whole suite green. That is the false-positive direction of #10892, and the
+# mirror of 88b is the only thing that pins it.
+reset_case
+export PROBE_URL="$LIVENESS_URL_UNDER_TEST"
+export PROBE_HOST_LABEL="api.premiselabs.co (served request)"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="200"
+run_watchdog
+assert_eq "$RC" "0" "liveness: 200 → exit 0 (the served request answered)"
+assert_eq "$(created_json)" "{}" "liveness: 200 → NO incident is filed (a healthy origin must never page)"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "0" "liveness: 200 → no issue CREATE at all"
+assert_eq "$(count_calls 'FLYCTL')" "0" "liveness: 200 → flyctl was never called"
+
 # ── 88b: a DOWN on the MACHINE-BACKED liveness target names the MACHINE ────
 # Same arm as case 88 (`disarmed:no_machine`), OPPOSITE remediation: this
 # surface IS the Fly machine. The round-3 fix corrected the incident BODY; the
@@ -2174,6 +2195,39 @@ assert_not_contains "$(patched_body)" "NO Fly machine" \
   "liveness: the incident body must not claim there is no Fly machine"
 assert_contains "$(patched_body)" "machine-backed" \
   "liveness: the incident body names the machine-backed surface"
+
+# ── 101: a DEGRADED on that same target is a DEPLOY, not a Pages fault ─────
+# The round-3 prose split has TWO arms and only the DOWN one was pinned (case
+# 88b). Measured by mutation at head 2cb81b7: deleting the mirroring
+# `elif is_machine_backed_url` branch from the `disarmed:unexpected` arm left
+# the whole suite GREEN — so a `/liveness` 404 (the expected shape between merge
+# and the deploy that carries the route) would silently go back to telling the
+# on-call to "check the Pages deployment and the route" while the Fly machine
+# was the surface, i.e. exactly the wrong-subsystem misdirection this PR exists
+# to end. This is that pin: the run log and the body must say DEPLOY, not Pages.
+reset_case
+export PROBE_URL="$LIVENESS_URL_UNDER_TEST"
+export PROBE_HOST_LABEL="api.premiselabs.co (served request)"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="404"
+export FLY_API_TOKEN="fly-token"     # present on purpose: the token must NOT be enough
+run_watchdog
+assert_eq "$RC" "1" "liveness: 404 → exit 1 (the route did not answer as contracted)"
+assert_contains "$(created_json)" "PROD DEGRADED" \
+  "liveness: 404 → PROD DEGRADED (answered-but-wrong, not an outage)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "liveness: 404 → flyctl was NEVER called (a deploy is not a restart)"
+assert_contains "$OUT" "restart decision: disarmed:unexpected" "liveness: the disarm class is the unexpected-answer arm"
+# The remediation prose lives in the incident BODY (the DEGRADED arm writes no
+# separate run-log heal note — the DOWN arm's `disarmed:no_machine` log line is a
+# different site), so the pin is on the body: deleting the machine-backed branch
+# drops it into the `else` arm, which says "a Cloudflare Pages surface with no
+# Fly machine behind it … check the Pages deployment".
+assert_not_contains "$(patched_body)" "Cloudflare Pages surface" \
+  "liveness: the incident body must not describe the machine-backed route as a Pages surface"
+assert_not_contains "$(patched_body)" "check the Pages deployment" \
+  "liveness: the incident body must not send the on-call to a Pages deploy"
+assert_contains "$(patched_body)" "deployed revision" \
+  "liveness: the incident body names the deploy, not a Pages binding"
 
 # ── 89: sustained 60 min + a Fly token is STILL a hard no-restart ──────────
 # The strongest possible case for a restart and it must still not happen.
@@ -2401,7 +2455,7 @@ assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly toke
 assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
 assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"
 
-# ── 97: the workflow drives the SERVED-REQUEST liveness surface (#10892) ───
+# ── 99: the workflow drives the SERVED-REQUEST liveness surface (#10892) ───
 # #10892's finding: `api.premiselabs.co` was unusable for ~2 h while BOTH Fly
 # checks read `passing`, because both are liveness-shaped — one is a kernel TCP
 # handshake, the other reads state the loop last wrote from another thread. The

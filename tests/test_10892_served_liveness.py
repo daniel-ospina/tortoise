@@ -39,7 +39,8 @@ one alone is a false PASS:
    9–12 s to `000` from outside (and 45 s to the eventual 504), so a 5 s bound
    alarms within one cycle and a 25 s status-only probe does not exist for this
    shape at all. The workflow half is pinned in
-   `.github/scripts/availability-watchdog.test.sh` (case 97), not here — the
+   `.github/scripts/availability-watchdog.test.sh` (cases 88b/99/100/101), not
+   here — the
    harness already owns "the step, its label and the script's production-set
    membership must move together".
 
@@ -185,7 +186,7 @@ def test_served_liveness_reports_a_counter_only_a_served_request_can_produce(mon
     import tortoise.hosted_api as ha
 
     monkeypatch.setattr(ha, "_LIVENESS_SERVED_COUNT", 0)
-    monkeypatch.setattr(ha, "_LIVENESS_LAST_COMPLETED_AT", None)
+    monkeypatch.setattr(ha, "_LIVENESS_LAST_SERVED_AT", None)
 
     with _live_hosted_service(monkeypatch) as captured:
         base = captured["base_url"]
@@ -209,17 +210,17 @@ def test_served_liveness_reports_a_counter_only_a_served_request_can_produce(mon
     assert body["served"] == 1, (
         f"the first request carried served={body['served']!r}; the counter is "
         "incremented FOR THE REQUEST, so the first one must read 1")
-    assert body["last_completed_age_ms"] is None, (
+    assert body["last_served_age_ms"] is None, (
         "the first request reported an age for a request that never happened "
-        f"({body['last_completed_age_ms']!r}) — null is the 'no sample' value")
+        f"({body['last_served_age_ms']!r}) — null is the 'no sample' value")
 
     body2 = second.json()
     assert body2["served"] == 2, (
         f"the second request carried served={body2['served']!r}, expected 2 — a "
         "counter that does not move is a value cached, not served")
-    age = body2["last_completed_age_ms"]
+    age = body2["last_served_age_ms"]
     assert isinstance(age, (int, float)) and age >= 0, (
-        f"last_completed_age_ms={age!r} is not a non-negative number")
+        f"last_served_age_ms={age!r} is not a non-negative number")
     assert first_elapsed < PROBE_BUDGET_S and second_elapsed < PROBE_BUDGET_S, (
         f"/liveness took {first_elapsed:.2f}s/{second_elapsed:.2f}s — the prober "
         f"bounds this at {PROBE_BUDGET_S:.0f}s")
@@ -324,7 +325,14 @@ def test_handler_yields_to_the_loop_and_reads_no_cached_state():
         "produced by a synchronous handler, so 'served' would be an assertion "
         "rather than a property (#10892)")
 
-    forbidden = {"loop_heartbeat_info", "_HEALTH_PROBE", "snapshot", "info"}
+    # The three state readers this pin forbids — and ONLY those. A bare `info`
+    # used to be in this set, which matched any `.info` attribute, so a benign
+    # `_logger.info(…)` inside the handler RED with a message asserting it "reads
+    # cached state" — a false red whose cheapest repair is to weaken the set,
+    # which is the property that would then be lost. `loop_heartbeat_info` is
+    # already matched both as a bare name and as an attribute, so nothing is
+    # given up by dropping it.
+    forbidden = {"loop_heartbeat_info", "_HEALTH_PROBE", "snapshot"}
     offenders = []
     for node in body:
         if isinstance(node, ast.Name) and node.id in forbidden:
