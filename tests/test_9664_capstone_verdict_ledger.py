@@ -552,6 +552,46 @@ def test_an_unresolvable_evidence_entry_is_invalid_not_a_traceback(tmp_path):
         assert "CAPSTONE-LEDGER: INVALID" in proc.stderr, proc.stderr
 
 
+def test_a_cmd_entry_naming_an_absolute_path_outside_the_tree_is_invalid(tmp_path):
+    """T5 in the `cmd:` arm, which had NO pin.
+
+    The suite's only absolute-path case is a bare `"/etc/hostname"`, so it pins the
+    PATH arm and never `_names_artifact`. MEASURED: deleting `_names_artifact`'s
+    `resolved.is_relative_to(root)` accepted `cmd:sh <abs path outside>` as
+    `verified` — exit 0, `UNCOVERED LIST: empty — the only clean exit` — while all
+    103 tests stayed green.
+
+    The target is built in `tmp_path` (which is outside this checkout on every box),
+    not `/etc/hostname`, so the pin cannot go vacuous on a host that lacks it.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("x", encoding="utf-8")
+
+    for entry in (f"cmd:sh {outside / 'secret.md'}", f"cmd:uv run python {outside / 'secret.md'}"):
+        data = _ledger([_row("A", evidence=[entry])])
+        with pytest.raises(cl.InvalidLedger) as excinfo:
+            cl.validate(data, repo_root=REPO_ROOT)
+        assert "`cmd:` evidence" in str(excinfo.value)
+
+
+def test_a_glob_whose_matches_are_all_directories_names_no_artifact(tmp_path):
+    """T6 in the GLOB arm, which had NO pin: `is_file()` is the only clause
+    refusing a glob whose in-tree matches are all DIRECTORIES.
+
+    MEASURED: deleting `resolved_match.is_file()` accepted `cmd:sh .github/w*`
+    (-> `.github/workflows`) as `verified` with an EMPTY uncovered list, and all
+    103 tests stayed green — the over-long/NUL entries and the symlink test never
+    produce a directory-only match.
+    """
+    tree = tmp_path / "tree"
+    (tree / "docs" / "only-a-directory").mkdir(parents=True)
+    data = _ledger([_row("A", evidence=["cmd:sh docs/*"])])
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(data, repo_root=tree)
+    assert "no file of this tree matches" in str(excinfo.value)
+
+
 def test_a_glob_whose_only_match_resolves_outside_the_tree_is_invalid(tmp_path):
     """T6's last member, and the one declared class member that had NO pin.
 
