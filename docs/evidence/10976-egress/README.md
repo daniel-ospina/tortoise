@@ -1,3 +1,14 @@
+---
+title: "#10976 — cache EGRESS: the measurement"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-11-06
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph, FalkorDB cache
+aboutObjects: "#10976, tortoise/cache_evictor.py, tortoise/cache_eviction.py, STORAGE-ARCHITECTURE.md §17, docs/evidence/7950-capstone"
+---
+
 # #10976 — cache EGRESS: the measurement
 
 The issue's mandate is *"code that bounds the cache + a red-first test + the measurement
