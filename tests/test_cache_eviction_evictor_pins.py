@@ -1154,8 +1154,13 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
             probe_body.append(node)
     probe_module = ast.Module(body=probe_body, type_ignores=[])
 
-    minted: list[str] = []
-    journalled: list[str] = []
+    # ONE ORDERED LOG, not two sets: the property is that the ownership record exists
+    # BEFORE the graph does. Reading two collections after `gen.close()` cannot tell
+    # "journalled in setup" from "journalled in the teardown" (measured: moving the call
+    # into `finally:` left the earlier draft GREEN), and it cannot see a MINT that
+    # precedes the journal — either way an interrupted run leaves a graph with no
+    # ownership record, which is #11373 P1 exactly.
+    events: list[tuple[str, str]] = []
 
     class _Graph:
         def query(self, *a, **k):
@@ -1163,7 +1168,7 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
 
     class _FalkorDB:
         def _record(self, name):
-            minted.append(name)
+            events.append(("mint", name))
             return _Graph()
 
         select_graph = _record
@@ -1184,40 +1189,52 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
 
     monkeypatch.setitem(sys.modules, "redis", redis_stub)
     monkeypatch.setitem(sys.modules, "falkordb", falkordb_stub)
-    monkeypatch.setattr(embedded, "_journal_append", journalled.append)
+    monkeypatch.setattr(embedded, "_journal_append",
+                        lambda name: events.append(("journal", name)))
+
+    # ⛔ `compile()` picks up the CALLING module's future flags, so the probe must carry
+    # `annotations` itself rather than inherit it from this file's own `from __future__`
+    # (measured: without it, the exec'd fixture's `candidate: Candidate` annotations are
+    # evaluated eagerly and the probe dies with a bare NameError).
+    future = ast.parse("from __future__ import annotations").body[0]
+    probe_module = ast.Module(body=[future, *probe_body], type_ignores=[])
 
     namespace = {"_live_utils": live_utils_stub}
     exec(compile(probe_module, "<lane fixture>", "exec"), namespace)
     # (`exec` here runs this repo's own committed fixture, not third-party input)
 
     def _run_lane():
-        """Drive the fixture to its `yield` and close it, so `finally` also runs."""
-        del minted[:], journalled[:]
+        """Drive the fixture to its `yield`; return the log AS OF that point."""
+        del events[:]
         try:
             gen = namespace["lane"]()
             next(gen)
-        except NameError as exc:  # pragma: no cover - only on an unanticipated refactor
+            at_yield = list(events)
+            gen.close()
+        except (NameError, TypeError, AttributeError, StopIteration) as exc:
             raise AssertionError(
-                f"this probe's stub namespace no longer covers what `lane` references "
-                f"({exc}) — extend the stubs above, do not drop the probe") from exc
-        gen.close()
+                f"this probe no longer reaches `lane`'s yield ({exc!r}) — extend the "
+                "stubs/probe above, do not drop the pin") from exc
+        assert events == at_yield, (
+            "`lane`'s TEARDOWN minted or journalled: the ownership record must be "
+            "written in the setup path, because `finally:` does not run on an "
+            f"interrupted run — the teardown added {events[len(at_yield):]}")
+        return at_yield
 
-    _run_lane()
-    assert len(minted) == 1 and len(journalled) == 1, (
-        "`lane` no longer mints exactly one graph and journals it once (minted="
-        f"{minted}, journalled={journalled}) — this probe needs that shape to relate the "
-        "two, and the ownership contract needs it to hold (#11373 P1)")
-    assert journalled == minted, (
-        f"`lane` JOURNALS {journalled} but MINTS {minted} — the journal must name the "
-        "graph that is actually created, or the sweep reclaims a graph that does not "
-        "exist while the real one is preserved and leaks (#11373 P1)")
-    assert owns_by_ownership_record(minted[0]), (
-        f"`lane` mints {minted[0]!r}, which is OUTSIDE the ownership vocabulary "
+    first_run = _run_lane()
+    assert [kind for kind, _ in first_run] == ["journal", "mint"], (
+        "`lane` must JOURNAL the graph name BEFORE it MINTS the graph — an interrupted "
+        f"run must still leave the ownership record the sweep reads: measured {first_run}")
+    (_, journalled_name), (_, minted_name) = first_run
+    assert journalled_name == minted_name, (
+        f"`lane` JOURNALS {journalled_name!r} but MINTS {minted_name!r} — the journal "
+        "must name the graph that is actually created, or the sweep reclaims a graph "
+        "that does not exist while the real one is preserved and leaks (#11373 P1)")
+    assert owns_by_ownership_record(minted_name), (
+        f"`lane` mints {minted_name!r}, which is OUTSIDE the ownership vocabulary "
         f"{_SWEEP_OWNED_PREFIXES} — `_sweep_drop` preserves it and consumes the journal "
         "anyway, so an interrupted run leaks it permanently (#11373 P1)")
 
-    first = minted[0]
-    _run_lane()
-    assert minted and minted[0] != first, (
-        f"`lane` minted {first!r} twice — the name is FIXED, not per-run, so two "
-        "concurrent sessions DETACH each other's live writes (#11373 P1)")
+    assert _run_lane()[0][1] != journalled_name, (
+        f"`lane` minted {journalled_name!r} twice — the name is FIXED, not per-run, so "
+        "two concurrent sessions DETACH each other's live writes (#11373 P1)")
