@@ -371,15 +371,40 @@ def check_rows(rows: list[Row]) -> list[str]:
     return errors
 
 
+def _path_state(path: Path, report: Report | None, label: str) -> str:
+    """`missing` | `file` | `not-file` | `unreadable` — never raises.
+
+    `Path.exists()` and `Path.is_file()` answer by STATTING, and a stat through an
+    UNREADABLE parent directory raises `PermissionError`: they swallow only the
+    ENOENT family. Unguarded, that escapes `run()` into python's traceback exit
+    (**1**) — the code this module defines as DRIFT, "the document and the tree
+    disagree", about a path nothing ever measured. `chmod 000 tests/eval` and
+    `chmod 000 docs` both did exactly that (#11384 review round 14), one call
+    earlier than the guarded reads the same round closed.
+    """
+    try:
+        if not path.exists():
+            return "missing"
+        return "file" if path.is_file() else "not-file"
+    except OSError as exc:
+        message = f"{label} could not be examined ({exc}) — nothing was measured"
+        if report is not None:
+            report.state_errors.append(message)
+        return "unreadable"
+
+
 def check_pins(repo: Path, rows: list[Row], report: Report) -> list[str]:
     errors: list[str] = []
     for row in rows:
         for pin in row.pins:
             path = repo / pin
-            if not path.exists():
+            state = _path_state(path, report, f"#{row.issue}: pin {pin!r}")
+            if state == "unreadable":
+                continue
+            if state == "missing":
                 errors.append(f"#{row.issue}: pin {pin!r} does not exist at this head")
                 continue
-            if not path.is_file():
+            if state == "not-file":
                 # A DIRECTORY satisfies `exists()` and pins nothing: no assertion
                 # lives in it, so a row could be VERIFIED-FIXED against it and
                 # never fail. Silent `continue` here until PR #11384's review round 5 found it.
@@ -506,7 +531,7 @@ def check_registration(
     caught it; this check is that catch, mechanised.
     """
     index = repo / INDEX_REL
-    if not index.exists():
+    if _path_state(index, report, INDEX_REL) == "missing":
         return [f"{INDEX_REL} does not exist — cannot check registration"]
     try:
         body = index.read_text(encoding="utf-8", errors="replace")
@@ -515,11 +540,15 @@ def check_registration(
         # document read: an index that cannot be READ is not an index that
         # disagrees. `docs/00_index.md` replaced by a directory raises
         # `IsADirectoryError` here and pre-fix exited **1** with a traceback.
+        message = f"{INDEX_REL} could not be read ({exc}) — nothing was measured"
         if report is not None:
-            report.state_errors.append(
-                f"{INDEX_REL} could not be read ({exc}) — nothing was measured"
-            )
-        return []
+            report.state_errors.append(message)
+            return []
+        # A caller with no `report` to record into must NOT read this as
+        # agreement: an empty list is byte-identical to "registered, counts
+        # agree", so a read FAILURE would have been a silent PASS (#11384
+        # review round 14).
+        return [message]
     if doc.name not in body:
         return [
             f"{DOC_REL} is not listed in {INDEX_REL} — a committed page nobody can "
@@ -527,19 +556,25 @@ def check_registration(
         ]
     errors: list[str] = []
     if text is None:
-        if not doc.exists():
+        # This branch defends DIRECT callers of `check_registration` only: `run()`
+        # always passes `text`, so it never arrives here — an earlier revision of
+        # this comment claimed the opposite (that an explicit `--doc` skips
+        # `run()`'s guard and made this second read load-bearing), which is false:
+        # `main()` hands `--doc` straight to `run()`, whose own guard reads it.
+        state = _path_state(doc, report, str(doc))
+        if state == "unreadable":
+            return errors
+        if state in ("missing", "not-file"):
             text = ""
         else:
             try:
                 text = doc.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError) as exc:
-                # An explicit `--doc` skips `run()`'s guard (which reads the default
-                # document only), so the second read of the same file needs its own.
+                message = f"{doc} could not be read ({exc}) — nothing was measured"
                 if report is not None:
-                    report.state_errors.append(
-                        f"{doc} could not be read ({exc}) — nothing was measured"
-                    )
-                return errors
+                    report.state_errors.append(message)
+                    return errors
+                return [message]
     summary = parse_summary(text)
     if not summary:
         return errors  # `check_summary` owns the missing-summary complaint
@@ -590,6 +625,8 @@ def check_registration(
 
 def run(repo: Path, doc: Path) -> Report:
     report = Report()
+    if _path_state(doc, report, str(doc)) == "unreadable":
+        return report
     if not doc.exists():
         # A state error, not drift: the document was not read, so nothing about it
         # has been measured. Reported as DRIFT, a renamed page reads as "the map
@@ -662,14 +699,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  NO ANSWER {err}")
         for note in report.unverified:
             print(f"  UNVERIFIED {note}")
+        # Branch on the CODE first, then on why. Ordering the state-error arm
+        # before the drift arm made a run holding BOTH print "NO ANSWER" while
+        # returning 1 (the DRIFT code) — the printed verdict contradicting the
+        # exit status a caller reads, which is the one thing this block exists to
+        # keep in sync (#11384 review round 14).
         if report.code == 0:
             print("VERDICT: CLEAN — the map and the tree agree")
+        elif report.code == 1:
+            print(f"VERDICT: DRIFT — {len(report.errors)} disagreement(s)")
         elif report.state_errors:
             print("VERDICT: NO ANSWER — the run could not read what it measures")
-        elif report.code == 2:
-            print("VERDICT: UNVERIFIED — no drift found, but history could not answer")
         else:
-            print(f"VERDICT: DRIFT — {len(report.errors)} disagreement(s)")
+            print("VERDICT: UNVERIFIED — no drift found, but history could not answer")
     return report.code
 
 

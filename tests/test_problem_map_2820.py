@@ -780,6 +780,39 @@ def _refuse_read_of(monkeypatch, target: Path) -> None:
     monkeypatch.setattr(Path, "read_text", guarded)
 
 
+def _refuse_stat_of(monkeypatch, target: Path) -> None:
+    """Make `Path.exists()` raise for ONE path's PARENT, and answer normally elsewhere.
+
+    `exists()`/`is_file()` swallow only the ENOENT family: a STAT through an
+    unreadable parent raises `PermissionError`. Guarding the read but not the
+    stat that precedes it left the same traceback exit 1 one call earlier
+    (#11384 review round 14). Scoped by parent so every other pin still answers.
+    """
+    real = Path.exists
+    want = target.resolve().parent
+
+    def guarded(self, *args, **kwargs):
+        if Path(self).resolve().parent == want:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", guarded)
+
+
+def test_an_unreadable_parent_directory_is_a_state_error_not_drift(monkeypatch):
+    """The STAT that precedes the guarded reads was bare: `chmod 000` on a pin's
+    directory raised out of `check_pins` → `run()` → traceback exit **1**, the
+    code the module defines as DRIFT. Measured on head before the fix: `chmod 000
+    tests/eval` → `PermissionError` out of `check_pins`, EXIT=1."""
+    pin = REPO / "tests/eval/write_path/test_value_span_census_2684.py"
+    assert pin.is_file(), "control must name a live pin or it passes vacuously"
+    _refuse_stat_of(monkeypatch, pin)
+    report = pmc.run(REPO, DOC)
+    assert report.errors == [], report.errors
+    assert any("could not be examined" in e for e in report.state_errors), report.state_errors
+    assert report.code == 2
+
+
 def test_an_unreadable_INDEX_is_a_state_error_not_drift(monkeypatch):
     """`check_registration`'s index read was the SECOND unguarded read of the run.
 

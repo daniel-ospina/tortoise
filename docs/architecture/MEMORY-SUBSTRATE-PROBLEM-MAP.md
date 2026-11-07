@@ -327,10 +327,13 @@ The checker re-measures, offline and without network access:
    module actually contains a `def test_` (a pin whose file survives but whose
    assertions were deleted pins nothing). A pin outside that shape — a JS test
    module, a shipped symbol, a document — is checked for existence, NOT content.
-   A pin that exists but cannot be **read** — `chmod 000`, or a directory dropped
-   in its place — is reported as UNVERIFIED (exit 2), never as drift: the guard
-   has not measured it, so "the map disagrees with the tree" would be the wrong
-   diagnosis on the code a reader is told means the document is wrong.
+   A pin that exists as a **file** but cannot be **read** — `chmod 000`, or an
+   unreadable parent directory — is reported as UNVERIFIED (exit 2), never as
+   drift: the guard has not measured it, so "the map disagrees with the tree"
+   would be the wrong diagnosis on the code a reader is told means the document
+   is wrong. A **directory** at a pin path is the opposite case and stays DRIFT
+   (the case above): it pins nothing, and the guard CAN tell — calling that
+   unreadable would excuse a row that fails no assertion.
 5. **Summary counts** — the numbers in §2 equal the rows that follow. A summary
    that drifts from its own table is the same defect class as the missing
    `content_hash` this map's Pattern 1 names.
