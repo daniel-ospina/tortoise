@@ -627,7 +627,8 @@ DERIVATION_ANCHOR_QUERY = (
 #:     `#8501` failure mode one label over: an anchor a later regression could
 #:     drop without moving any number.
 #:   * an IDENTITY/MENTION link is written for `Object` with NO property at all
-#:     (`edges.py:2015` — "this writer sets no property on them at all"), so
+#:     (`projection/edges.py::link_source_to_entity`'s docstring — "this writer
+#:     sets no property on them at all"), so
 #:     counting one as a failed anchor is a FALSE RED on an edge the model
 #:     deliberately leaves bare (`entities.py` writes
 #:     `(Source)-[:references]->(:Object)` on the connector path).

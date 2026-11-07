@@ -4533,9 +4533,9 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("13032", "if vet_enabled and complete_list:"),
             ("13033", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its three lines of keys (10587-10589) close on
-        # line 10590 — DERIVED by content, not by arithmetic: `result["vet"] = {`
-        # opens at 10586 and the block's `}` is 10590. ⚠️ The base head's number
+        # the VET block's start; its three lines of keys (13257-13259) close on
+        # line 13260 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 13256 and the block's `}` is 13260. ⚠️ The base head's number
         # was 9446, which pointed at an unrelated comment about
         # `_value_verbatim_span`, so a mechanical +1101 lands on `try:`; a COMMENT
         # is not an asserted number and nothing reds on it, which is why the two
