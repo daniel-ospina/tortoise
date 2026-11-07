@@ -39,12 +39,15 @@ n      60 timed records after 5 warmup, per run
 `_migrations_fingerprint` pass and the rejected blake2b digest
 (`fingerprint_cost.py` re-takes both). Re-derive instead of trusting the prose.
 
-The TWO items that are neither: the server-logged `connection authorized` counts
+The ONE item that is neither: the server-logged `connection authorized` counts
 (a `grep -c` delta on the container's log, taken beside each run and recorded in
-the table below) and the sweep-completion figure. Earlier revisions quoted a run
-set whose JSON was not kept, which made its numbers unfalsifiable — that is what
-`runs/` and `fingerprint-cost.json` fix, and `fingerprint_cost.py` exists because
-the first fix covered only the probe.
+the table below). Earlier revisions quoted a run set whose JSON was not kept,
+which made its numbers unfalsifiable — that is what `runs/` and
+`fingerprint-cost.json` fix, and `fingerprint_cost.py` exists because the first
+fix covered only the probe. ⛔ The same rule is why the re-measurement paragraph
+under "Review cycle 2" carries NO numbers: its four runs' JSON was not kept
+either, so it states the observation and nothing a reader would have to take on
+trust.
 
 ⚠️ **The BEFORE tree is 164 commits behind the AFTER tree's parent**
 (`1730570510` is 2026-11-03; this branch's base is `23d227c534`, 2026-11-06), and
@@ -97,18 +100,17 @@ server's own log across one run, recorded beside the JSON.
 
 ## Reading the numbers honestly
 
-**(a) The connection half is ~92-94 % of the win, and it is now a REUSE, not a
+**(a) The connection half is ~92 % of the win, and it is now a REUSE, not a
 claim.** The saving is 18.889–20.102 → 3.819–3.908 ms (means), i.e. 14.98–16.28 ms.
 The column-map half is **~1.2 ms** of that — and on the MEDIAN, because the warm
 cost is what the per-record path pays: the probe's 20-sample loop runs before the
 first write, so its single cache-miss sample sits in the mean (AFTER mean
 0.460–0.583 vs median 0.332–0.353; the BEFORE pair is 1.582–1.651 vs 1.546–1.588,
 a 1.5 % gap that shows the miss is an AFTER-tree artifact). 1.546–1.588 →
-0.332–0.353 ms = **1.193–1.256 ms**. The connection half is therefore the rest,
-~13.8–15.1 ms, i.e. **~92 %** of the win. ⛔ An earlier revision said "~80-85 %"
-(that is the connection half as a share of the BEFORE TOTAL, not of the win) and
-used the mean-based ~1.0–1.1 ms for the column half, whose upper end did not close
-against the win it was subtracted from. `_default_connect` returns an idle handle when it has one, so the live
+0.332–0.353 ms = **1.193–1.256 ms**. The connection half is therefore the rest —
+**13.7–15.1 ms**, pairing the win's lower end with the column half's UPPER end and
+its upper end with the column half's lower end — i.e. **91.6–92.7 %**, ~92 % of the
+win. `_default_connect` returns an idle handle when it has one, so the live
 door's per-record "open, commit, close" became "borrow, commit, return". The
 remaining 3.82–3.91 ms/record is one transaction boundary (prologue + plan + COMMIT)
 plus plan materialisation — **plus, and this was under-stated in the first
@@ -116,15 +118,19 @@ revision, 0.32–0.34 ms of stat overhead**: `replay_plan` drives BOTH cached
 readers, and each recomputes the fifteen-file fingerprint (0.160–0.169 ms per
 pass, `fingerprint-cost.json`), so the cache is consulted twice per record. The
 known fix — compute the fingerprint once per plan build — therefore saves ONE
-pass, **0.160–0.169 ms**,
-and is filed as #11388 rather than hidden in "the work the record is for".
-⛔ An earlier revision of this bullet said "≈0.9–1.0 ms of pure stat", which is
-2 x the WHOLE cached call (stat + the per-call dict copy), not 2 x the stat pass;
-the fix was consequently overstated **2.7–3.7× against the residual it described
-(0.9–1.0 vs 0.27–0.33 ms), or 5.4–7.4× against the one pass #11388 actually saves
-(0.9–1.0 vs 0.160–0.169 ms)** — whichever denominator the reader picks, it was
-wrong, and the denominator is named here now. Corrected here and in the three
-places that had copied it.
+pass, **0.160–0.169 ms**, and is filed as #11388 rather than hidden in "the work
+the record is for".
+
+⛔ **Three earlier revisions of this bullet, and why each was wrong.** It said
+"~80-85 % of the win" (that is the connection half as a share of the BEFORE TOTAL,
+not of the win). It said "~92-94 %" (94 % only falls out of the superseded ~0.9–1.0
+ms column-half estimate the same bullet replaced). And it said "≈0.9–1.0 ms of pure
+stat" for the residual — which is 2 x the WHOLE cached call (stat + the per-call
+dict copy), not 2 x the stat pass, so the #11388 fix was overstated **2.6–3.1×
+against the residual it described (0.9–1.0 vs 0.32–0.34 ms), or 5.3–6.3× against
+the one pass #11388 actually saves (0.9–1.0 vs 0.160–0.169 ms)**. Whichever
+denominator the reader picks, it was wrong, and the denominator is named here now.
+The third was corrected here and in the three places that had copied it.
 
 **(b) The column-map half is real but smaller than the issue's "~4 ms" note
 suggests.** At this head `table_columns()` costs ~1.7 ms uncached and ~0.47 ms
@@ -204,14 +210,15 @@ site that was correct before), and a handle parked in `autocommit` mode is
 normalised first — a transaction-local `set_config` sets NOTHING there, so the
 tenant GUC would have failed every later record with an error naming the DSN.
 
-**Re-measured after these fixes** (4 runs, same instrument, a box now carrying
-other work — so this is a *load-sensitivity* datum, not a better number):
-`records/s` 178.78 / 277.76 / 246.30 / 200.17; mean **5.59 / 3.60 / 4.06 / 4.99**
-ms; (`1000/rate` reconciles each pair — 5.59, 3.60, 4.06, 5.00 — which is how the
-transposition in the previous revision of this line was caught);
-`connect` per record **0 in every run**. The mechanism claim — no handshake, no
-re-parse — is what the change is; the wall-clock headline above is the quiet-box
-measurement and stays labelled as such.
+**Re-measured after these fixes — an observation, deliberately without numbers.**
+Four runs on the same instrument, on a box now carrying other work, showed the
+per-record cost varying materially run-to-run with load while `connect` per
+record stayed **0 in every run**. ⛔ Those four runs' JSON was not kept, so their
+numbers are not quoted here: an unkept run set is exactly what the provenance
+note at the top of this document refuses, and this paragraph is worth less than
+that rule. The mechanism claim — no handshake, no re-parse — is what the change
+is; the wall-clock headline above is the quiet-box measurement and stays labelled
+as such.
 
 ## Reproducing
 
