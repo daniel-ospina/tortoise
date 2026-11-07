@@ -1068,8 +1068,9 @@ def _tr_complete_sessions(
         # argument, which is why ``last_index`` below is gated by
         # ``_is_real_session_id`` (#10540 R10/R11): a stored ``:Session``
         # whose id literally starts with ``idx:`` (``_SAFE_SESSION_TAG_RE``
-        # permits ``:``, and ``ids.session_id_refusal`` only refuses a BLANK
-        # id, so such a session is writer-producible) makes a REAL group key
+        # permits ``:``, and ``ids.session_id_refusal`` refuses BLANK and
+        # non-``str`` ids while refusing nothing about ``idx:3``, so such a
+        # session is writer-producible) makes a REAL group key
         # that a POOL hit's ``idx:<n>`` bucket can equal, so unguarded one
         # session's chunks land inside an unrelated index-<n> hit's block and
         # ``report["sessions"]`` counts a splice the seed never admitted. The

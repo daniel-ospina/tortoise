@@ -617,7 +617,8 @@ def test_tr_complete_sessions_never_splices_an_idx_bucket_onto_a_phantom_hit(mon
 
     The fused POOL is the shape no in-repo lane produces: the ``idx:``-named
     session itself IS writer-producible (``ids.session_id_refusal`` refuses
-    only a BLANK id, and ``_SAFE_SESSION_TAG_RE`` admits ``:``), but the
+    BLANK and non-``str`` ids while refusing nothing about ``idx:3``, and
+    ``_SAFE_SESSION_TAG_RE`` admits ``:``), but the
     colliding bucket requires an eval-stamped ``lme_session_index``. So this
     pins DEFENCE — the two halves must agree on the one key class that
     separates a session from a bucket — not a measured live defect.
@@ -778,6 +779,21 @@ def test_the_agreement_with_the_pool_authority_is_scoped_to_identified_hits():
     assert session_key_of(padded) == " sessA "
     assert _session_admission_key(padded) == ("session", "sessA")
 
+    # a BOOL index is the other type seam, and it diverges too — but NOT the
+    # way the sentinel does: the pool's leg is `is not None`, so `True` keys
+    # `idx:True` and OUTRANKS the wire id, while the admission grain excludes
+    # bool, skips the index leg, and therefore NAMES the session. Pinned here
+    # (where divergence is allowed) because the identified-hits branch above
+    # legitimately branches on the bool exclusion and no other fixture
+    # reaches it: a loosened predicate (`isinstance(idx, int)` alone) would
+    # answer `('index', True)` in both assertions below.
+    bool_idx = {"id": "B_t0", "sessionId": "sessB",
+                "lme_session_index": True}
+    assert session_key_of(bool_idx) == "idx:True"
+    assert _session_admission_key(bool_idx) == ("session", "sessB")
+    assert _session_admission_key(
+        {"id": "B_t1", "lme_session_index": True})[0] == "hit"
+
     # and the C5 cap's delta, measured: a camel-only RAW-CHUNK pool now caps
     # per session, where N per-hit phantoms left the cap unable to bind
     # (`is_raw_chunk` is the only population the cap touches at all)
@@ -792,10 +808,15 @@ def test_the_agreement_with_the_pool_authority_is_scoped_to_identified_hits():
               {"id": "I_t1", "sessionId": "sessA"},
               {"id": "I_t2", "sessionId": "sessA",
                "lme_session_index": 3}):
-        # the branch tests the POOL's own index leg (`isinstance(int)`, not a
-        # bool, `>= 0`), not key PRESENCE — so a fixture carrying -1 or "3"
-        # exercises the leg it actually reaches rather than the one it looks
-        # like it reaches.
+        # ⚠️ This branch mirrors `_session_admission_key`'s OWN index
+        # predicate (`isinstance(int)`, not a bool, `>= 0` —
+        # `retrieval.py:2367`), NOT the pool's index leg, which is
+        # `lme_session_index is not None` (`retrieval.py:819`, no type
+        # check, no bool exclusion, `-1` included). Keeping the two apart is
+        # the whole comparison: an `-1`/`"3"`/bool fixture belongs with the
+        # DIVERGENCE cases above and would red this else-branch rather than
+        # exercise it (measured: `-1` → pool `idx:-1`, admission
+        # `('hit', …)`; `"3"` → `idx:3` vs `('hit', …)`).
         idx = h.get("lme_session_index")
         if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
             # the index outranks the wire id in BOTH grains; each names the
