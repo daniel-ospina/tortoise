@@ -794,21 +794,12 @@ _RE_WH_LOOKUP = re.compile(r"\b(?:what|which|who|whom|whose|where|when)\b",
                            re.IGNORECASE)
 
 
-#: The recency-selecting `latest` at the START of an interval anchor's own
-#: noun phrase ("my latest exam", "the latest concert", "Sarah's latest exam",
-#: "the very latest exam", bare "latest"). That is a REFERENT the arms must
-#: resolve, not narrative text — #8775 leaves main's reject in place for it (see
-#: ``_latest_selects_an_interval_anchor``).
-#:
-#: Expressed as a bounded PREFIX of at most TWO tokens: that is what separates
-#: the selecting forms (determiner + optional intensifier: `the very latest`,
-#: `my own latest`, a possessive noun `Sarah's latest`) from the narrative ones
-#: the issue is about — `the day I saw the latest Marvel film` (4 tokens before
-#: `latest`), `I read the latest novel …` (3), and the census row's anchor
-#: (~30). A fixed determiner list was the round-1 shape of this pattern and it
-#: leaked every possessive/intensified spelling; the token bound is what the
-#: distinction actually is, so it needs no vocabulary to stay complete.
-_RE_LATEST_ANCHOR_HEAD = re.compile(r"^\W*(?:\S+\W+){0,2}latest\b", re.IGNORECASE)
+#: A RELATIVE / SUBORDINATE clause opener. #8775's defect is named in its own
+#: title — a "narrative relative clause" — and this is that clause's marker:
+#: "…the book reading event at the local library, **where** the author of 'The
+#: Silent Patient' is discussing her latest thriller novel".
+_RE_RELATIVE_CLAUSE = re.compile(r"\b(?:where|which|who|whom|whose)\b",
+                                 re.IGNORECASE)
 
 
 def recency_narrative_latest_enabled() -> bool:
@@ -834,23 +825,37 @@ def _interval_template_owns(question: str):
             or _RE_INTERVAL_BETWEEN_LEAD.match(question))
 
 
-def _latest_selects_an_interval_anchor(match) -> bool:
-    """Does a captured interval anchor BEGIN with the recency-selecting `latest`?
+def _latest_sits_in_a_relative_clause(match) -> bool:
+    """Is EVERY captured `latest` inside a relative/subordinate clause?
 
-    "How many days passed between **my latest exam** and my graduation?" is an
-    interval question whose anchor is *selected* by recency: the arms then have
-    to resolve WHICH exam, and they cannot (the name-FTS leg is an OR-union, so
-    it matches any object containing "exam"). That is main's reject, and it
-    still applies — the #8775 exemption covers only `latest` sitting in an
-    anchor's narrative extension ("…where the author is discussing her latest
-    thriller novel"), never one heading the anchor's own noun phrase.
+    #8775's exemption is STRUCTURAL — the issue's own diagnosis is a "narrative
+    relative clause" — and it is stated as such because two positional proxies
+    were tried and both leaked: a fixed determiner list let possessives and
+    intensifiers through ("Sarah's latest exam", "the very latest exam"), and a
+    two-token prefix let a selecting `latest` through the moment the anchor
+    carried a verb ("since I passed my latest exam when I moved"). Position was
+    never the property; the clause was.
+
+    A `latest` that is NOT preceded by a relative opener inside its anchor is a
+    REFERENT the anchor's own noun phrase selects — "my latest exam", "the day
+    of my latest exam", "my very own latest exam" — and the arms cannot resolve
+    WHICH one (the name-FTS leg is an OR-union, so it matches any object
+    containing "exam"). Main abstained on all of those and still does; the arms
+    never re-read an anchor's narrative extension, so text there is harmless.
     """
     if match is None:
         return False
-    for anchor in (match.groupdict().get("a"), match.groupdict().get("b")):
-        if anchor and _RE_LATEST_ANCHOR_HEAD.match(anchor):
-            return True
-    return False
+    groups = match.groupdict()
+    seen = False
+    for anchor in (groups.get("a"), groups.get("b")):
+        if not anchor:
+            continue
+        for m in _RE_RECENCY_LATEST.finditer(anchor):
+            seen = True
+            if not _RE_RELATIVE_CLAUSE.search(anchor[:m.start()]):
+                # a selecting `latest` — main's reject applies
+                return False
+    return seen
 
 
 def _recency_vetoes(question: str, *, owns=...) -> bool:
@@ -859,10 +864,10 @@ def _recency_vetoes(question: str, *, owns=...) -> bool:
     * ``most recent`` / ``the last one`` / bare `latest` as an ORDERING BOUND
       (``_RE_RECENCY``) ALWAYS veto — main's reject, unchanged;
     * any OTHER bare `latest` vetoes too, UNLESS an interval template owns the
-      question AND the `latest` is not SELECTING one of that template's own
-      anchors (#8775). In that case both anchors are the template's capture and
-      the adjective sits in an anchor's narrative extension, which no arm
-      re-reads;
+      question AND every `latest` it carries sits in a relative/subordinate
+      clause of that template's own anchor (#8775 — the issue's "narrative
+      relative clause"). A selecting `latest` ("my latest exam", "the day of my
+      latest exam") still vetoes, exactly as main did;
     * off-switch off -> main's bare-token guard is the whole predicate.
 
     ONE predicate for both guard sites (the anchor-stripped residual in
@@ -882,7 +887,7 @@ def _recency_vetoes(question: str, *, owns=...) -> bool:
     owner = _interval_template_owns(question) if owns is ... else owns
     if owner is None or not owner:
         return True
-    return _latest_selects_an_interval_anchor(owner)
+    return not _latest_sits_in_a_relative_clause(owner)
 
 
 def _strip_anchor_spans(question: str, spans) -> str:

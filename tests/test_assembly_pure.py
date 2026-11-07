@@ -765,11 +765,15 @@ def test_recency_narrative_latest_is_not_an_ordering_instruction():
     assert terms[1].startswith(
         "I attended the book reading event at the local library")
 
-    # the same defect in the OTHER interval arm: an attributive `latest` inside
-    # a "between A and B" question is narrative text too
+    # the exemption is STRUCTURAL, so the same defect in another interval arm
+    # needs the same marker: a relative clause fires, a bare anchor does not.
+    assert classify_question(
+        "How many days had passed since I finished the book when I attended "
+        "the fair, where the author discussed her latest thriller?"
+    ) is AssemblyShape.INTERVAL
     assert classify_question(
         "How many days passed between the day I saw the latest Marvel film "
-        "and my birthday?") is AssemblyShape.INTERVAL
+        "and my birthday?") is None
 
 
 def test_recency_ordering_bounds_still_reject():
@@ -913,44 +917,58 @@ def test_recency_guard_flag_defaults_on_and_is_tristate(monkeypatch):
     assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL
 
 
-def test_recency_latest_heading_an_interval_anchor_still_rejects():
-    """#8775 review round 1: the exemption is for an adjective in an anchor's
-    narrative EXTENSION, not for one that SELECTS the anchor's referent.
+def test_recency_latest_selecting_an_interval_anchor_still_rejects():
+    """#8775 (reviews 1–3): the exemption is STRUCTURAL — a `latest` inside a
+    relative/subordinate clause — never a positional or vocabulary proxy.
 
-    "How many days passed between my latest exam and my graduation?" IS an
-    interval question — and firing it is wrong, because the arm must then
-    resolve WHICH exam and cannot: the name leg is an OR-union, so "my latest
-    exam" matches any object containing "exam" and the block pairs the wrong
-    exam with the graduation. Main abstains; so does this. Only the anchor's
-    LEADING noun phrase triggers this, which is why the narrative row
-    (``latest`` ~30 tokens into anchor b) is unaffected.
+    A `latest` that heads an interval anchor's own noun phrase SELECTS the
+    referent, and firing the shape is wrong because the arm must then resolve
+    WHICH one and cannot: the name leg is an OR-union, so "my latest exam"
+    matches any object containing "exam" and the block pairs the wrong exam with
+    the other anchor. Main abstains; so does this, at ANY position in the anchor
+    and in every spelling.
+
+    The list is the exact set three review rounds found leaking from weaker
+    rules — a fixed determiner list (possessives/intensifiers escaped) and a
+    two-token prefix (any anchor with a verb escaped) — so a future rewrite of
+    the predicate is held to all three attack classes.
     """
     for q in [
+        # the anchor's leading noun phrase (round 1)
         "How many days passed between my latest exam and my graduation?",
         "How many days passed between the latest concert and my birthday?",
         "How many days passed between latest and my birthday?",
         "How many days had passed since my latest review when I moved house?",
-        # the same select-then-resolve form on the since arm
         "How many weeks had passed since the latest book launch when I moved?",
-        # #8775 review round 2: a POSSESSIVE noun and an INTENSIFIED determiner
-        # are the same selecting form — round 1's fixed determiner list leaked
-        # every one of these (they fired INTERVAL on the unresolvable referent)
+        # possessive / intensified determiners (round 2)
         "How many days passed between Sarah's latest exam and my graduation?",
         "How many days passed between the team's latest exam and my graduation?",
         "How many days passed between my sister's latest exam and my graduation?",
         "How many days passed between the very latest exam and my graduation?",
         "How many days passed between my own latest exam and my graduation?",
         "How many days had passed since Maria's latest review when I moved house?",
+        # …and ≥3 tokens in, i.e. NOT at the anchor's head (round 3)
+        "How many days passed between my very own latest exam and my graduation?",
+        "How many days passed between the team's very latest exam and my "
+        "graduation?",
+        "How many days passed between the museum and gallery's latest "
+        "exhibition and my birthday?",
+        "How many days had passed since I passed my latest exam when I moved?",
+        "How many days passed between my graduation and the day of my latest "
+        "exam?",
+        # narrative but NOT in a relative clause — still main's abstain
+        "How many days passed between the day I saw the latest Marvel film "
+        "and my birthday?",
     ]:
         assert classify_question(q) is None, q
-    # …and the narrative form still fires, so the rule is not "any anchor":
-    # its `latest` sits 5 tokens into the anchor, and the census row's ~30.
+    # …while the issue's row fires: its `latest` sits inside the anchor's
+    # RELATIVE CLAUSE (", where the author … is discussing her latest …"), the
+    # one structural place the arms never re-read.
+    assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL
     assert classify_question(
-        "How many days passed between the day I saw the latest Marvel film "
-        "and my birthday?") is AssemblyShape.INTERVAL
-    assert classify_question(
-        "How many weeks had passed since I bought my car when I read the "
-        "latest novel by my favourite author?") is AssemblyShape.INTERVAL
+        "How many days had passed since I finished the book when I attended "
+        "the fair, where the author discussed her latest thriller?"
+    ) is AssemblyShape.INTERVAL
 
 
 def test_recency_residual_guard_site_takes_ownership_from_the_question():
