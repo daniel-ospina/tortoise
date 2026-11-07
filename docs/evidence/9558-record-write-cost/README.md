@@ -244,7 +244,7 @@ said "~91.6–92.7 %" — the revision before `72df8168b2` — which charged ONE
 column consult while the per-record path pays TWO (both cached readers, above), so
 the column half is 2.386–2.512 ms under the artifact's convention (2.14–2.25 ms if
 the second reader is 0.79× as dear, item 7) and the connection share 83.2–86.9 %,
-not 1.193–1.256 ms and 92 %. It said "≈0.9–1.0 ms of pure
+not 1.193–1.256 ms and 92 %. `6c3b95206` said "≈0.9–1.0 ms of pure
 stat" for the residual — which is 2 x the WHOLE cached call (stat + the per-call
 dict copy), not 2 x the stat pass. `873aec1812` then said "0.32–0.34 ms of stat
 overhead" (via `6ab6848b8b`'s 0.27–0.33 ms), which is the whole warm call attributed to the
