@@ -84,11 +84,22 @@ class _Record:
 
 @pytest.fixture()
 def lane():
-    """A dedicated graph on the live lane container, dropped afterwards."""
-    import uuid
+    """A dedicated graph on the live lane container, dropped afterwards.
 
+    Epic #1647 (cycle-6 P1-3 / cycle-8 P2-2): a raw client bypasses
+    `_assert_test_graph` AND the per-test wipe scope, so the handle must be
+    per-test UNIQUE **and** journaled — `os.urandom` makes it unique, and
+    `_journal_append` is the record that tells a live PEER's `scope=None` sweep
+    this graph is in use (#3074/#3214). The `finally` below covers only this
+    lane's own teardown, so a run killed before it would leave the graph UNOWNED
+    without the journal. Pinned by
+    `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
+    — the census that reddened on this site (PR #11354, `test (b)`).
+    """
     import redis
     from falkordb import FalkorDB
+
+    from tests._embedded import _journal_append
 
     host = _live_utils.service_host()
     port = _live_utils.docker_port()
@@ -98,7 +109,8 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    graph_name = f"evict_{uuid.uuid4().hex[:12]}"
+    graph_name = f"test_evict_{os.urandom(6).hex()}"
+    _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
     try:
