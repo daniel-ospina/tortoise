@@ -139,13 +139,14 @@ ANOTHER door too, and they are INSTANCES, not the population: `tortoise.sdk::_se
 and `tortoise.sdk::_embedding_repair_attempt` hold the `**{**…, "embedding": …}` spelling and are in
 the discovered map as `unresolved_write` because their bodies ALSO call `set_embedding_clause(`, so
 their membership is not evidence the literal was seen — exactly the distinction the
-`sdk::_journal_event_raw_write` bullet below draws. The same blind class is spelled
-`params={…, "embedding": …}` in `tortoise.projection.entities::_event_plain_merge`
-(`unresolved_write` off its own `set_embedding_clause(` call) and in the `gated`-by-CALL
-`projection.entities::_upsert_point_props`, `_upsert_subject`, `_upsert_object` and
-`_upsert_document` — the fifth of that family, `_upsert_event`, holds NO literal: it computes the
-vector and hands it to `_event_plain_merge`, which builds the dict — and a reader must not take two
-as the complete set — the SHAPE, not the instance list, is what this paragraph names. The authority
+`sdk::_journal_event_raw_write` bullet below draws. The same blind class also travels as a
+PARAMS dict literal carrying a constant `"embedding"` key — built inline (`params={…}`) in
+`tortoise.projection.entities::_event_plain_merge`, `_upsert_subject`, `_upsert_object` and
+`_upsert_document`, and built into a local then handed on by name (`params = {…}` → `params=params`)
+in `_upsert_point_props`; the fifth of that family, `_upsert_event`, holds NO such literal — it
+computes the vector and hands it to `_event_plain_merge`, which builds the dict — and a reader must
+not take two as the complete set, nor take any quoted spelling as a literal to grep: the SHAPE is
+what this paragraph names, not an instance list and not a search string. The authority
 for SHAPES is
 `tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which holds both the shapes neither pass can
 spell AND the SCOPES the walk never enters: a count written

@@ -686,12 +686,12 @@ INVISIBLE_SHAPES = {
     # discovered map as `unresolved_write` for a DIFFERENT reason (their bodies also call
     # `set_embedding_clause(`), which is exactly the "visible for another door" case the register
     # draws for `sdk::_journal_event_raw_write`. They are NAMED INSTANCES, not the population: the
-    # same blind class is spelled `params={…, "embedding": …}` in
-    # `projection.entities::_event_plain_merge` (also `unresolved_write` off its own
-    # `set_embedding_clause(` call) and in the `gated`-by-CALL
-    # `projection.entities::_upsert_point_props`, `_upsert_subject`, `_upsert_object` and
-    # `_upsert_document` — the fifth of that family, `_upsert_event`, holds no literal (it computes
-    # the vector and hands it to `_event_plain_merge`) — so a reader must not take two as the
+    # same blind class also travels as a PARAMS dict literal carrying a constant `"embedding"` key —
+    # inline (`params={…}`) in `projection.entities::_event_plain_merge`, `_upsert_subject`,
+    # `_upsert_object` and `_upsert_document`, and built into a local then handed on by name
+    # (`params = {…}` → `params=params`) in `_upsert_point_props`; the fifth of that family,
+    # `_upsert_event`, holds no such literal (it computes the vector and hands it to
+    # `_event_plain_merge`) — so a reader must not take two as the
     # complete set.
     "dict_literal_embedding_key": (
         'def w(rec, props, v):\n'
