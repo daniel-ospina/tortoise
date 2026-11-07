@@ -526,7 +526,11 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: The register, frozen. `module::symbol` → :class:`WriterClass`; the same key the instrument uses.
 #: ⚠️ Its population is **the population the instrument MEASURES**, not "every writer whose vector
 #: the gate does not see": the ``unresolved_write`` set PLUS the ``ungated`` write path
-#: (`tortoise.session_indexer::main`). A ``gated`` writer needs no declaration: the gate decides it.
+#: (`tortoise.session_indexer::main`). A ``gated`` writer needs no declaration — the gate decides the
+#: write it GATES. ⛔ That is not the same sentence as "the gate decides every vector this writer
+#: stores": the module docstring's caveat refutes the wider one for `create_point`/`update_point`,
+#: whose caller-supplied vector is stored verbatim (`tortoise/sdk.py` skips the derive when
+#: `"embedding" in props`, so `encode_for_row` — the gate — is not even called).
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
 #: docstring: the census's discovery is a source-text regex PLUS the AST pass that decides the
 #: LITERAL container key (`rec["embedding"] = …`), and writers neither can spell (a map-merge, a

@@ -497,8 +497,9 @@ INVISIBLE_SHAPES = {
     "computed_key": 'def w(rec, key, v):\n    rec[key] = v\n',
     # A clause held in a module CONSTANT (round-10 review): the regex reads the `query(...)` argument,
     # which is a bare `Name` here, and the AST pass only inspects subscript targets — so the shape is
-    # absent with neither detector firing. It was NAMED in the register's docstring and in this
-    # file's live-guard docstring while nothing pinned it, which is the class this dict exists to make
+    # absent with neither detector firing. It was NAMED in the `#:` comment above
+    # `EMBED_WRITER_CLASSES` (not in `register.__doc__`, which does not name it) and in this file's
+    # live-guard docstring, while nothing pinned it — which is the class this dict exists to make
     # impossible.
     "module_constant_clause": (
         '_CLAUSE = "SET n.embedding = $e"\n'
