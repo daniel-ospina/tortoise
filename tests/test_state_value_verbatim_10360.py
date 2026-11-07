@@ -2793,10 +2793,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
         "A `>=` at the current length costs nothing on growth and refuses any "
         "shrinkage; raise it in the same commit that adds proofs.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 38, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 40, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (38), i.e. ZERO SLACK, the same rule the ledger and the "
+        "CURRENT LENGTH (40), i.e. ZERO SLACK, the same rule the ledger and the "
         "mutation list carry: it was `>= 30` against a 33-entry list, so three "
         "honest closures were deletable with both tests GREEN (the stale "
         "\"within two of the current length\" note is why it read as tight; "
