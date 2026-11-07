@@ -5029,3 +5029,255 @@ def test_the_hoisted_carry_keeps_the_gate_faults_MAPPED_on_this_lane(
     detail = str(r.json()["detail"])
     assert detail.startswith("Quota check failed:"), detail
     assert "allowance gate could not be loaded" in detail, detail
+
+
+class Test4051ChargeCoversTheLoopShape:
+    """#4051 §3.1 — the ingest charge is never cheaper than the write, on the
+    two shapes the issue's own reproduction uses.
+
+    **Why this class exists.** For a `points: []` payload the only org-level
+    bound that can bind is the per-org ingest window
+    (`quota.commit_ingest_admit`, 10 MiB / rolling 60 s) — the lane's
+    `max_points` gate (`_check_org_limit(org, "points", sdk=sdk)`,
+    `hosted_api.py` `_commit_region`) never sees the nodes this shape mints.
+    The window's charge is ``max(payload bytes, declared nodes × 1024)``
+    (`commit_schema.commit_ingest_charge_bytes`), so for a small body the **node
+    floor** IS the whole bound — and the floor is only an upper bound on the
+    write if `declared_commit_write_count` keeps up with what
+    `_execute_commit_writes` actually mints.
+
+    That invariant is pinned by `TestCommitOrgIngestBound::
+    test_the_charge_is_never_cheaper_than_the_write` and `::
+    test_a_mitigates_operator_is_charged_for_its_second_event` for the
+    `points[]` and `operators[]` lanes. It was **not** pinned for the two shapes
+    #4051's own repro uses, and `supersessions[]` is still pinned only against
+    the formula (`TestDeclaredCommitWriteCount::
+    test_each_collection_entry_is_charged_once`) rather than against the graph:
+
+    * the **`points: []` shape** — nothing but the fixed chain (`:CommitRecord`,
+      `:Session`, transcript `:Source`, AgentSession `:Event`), which is the
+      cheapest iteration of the loop the issue names; and
+    * the **flat collection lanes** (`_COMMIT_FLAT_NODE_LANES` — ``entities[]``,
+      ``events[]``, ``sources[]``), charged one node per entry. All three are
+      measured here.
+
+    All of them are measured against the GRAPH, not against the formula that produced
+    the figure: `declared_commit_write_count`'s own docstring says a payload
+    that mints more than it declares *is a defect*.
+
+    ⛔ **This class does not bound the lane's TOTAL growth.** That is §4: a
+    `points: []` commit mints nodes `quota._count_resource("points")` does not
+    match, so the points gate cannot trip on this shape and the throttle bounds
+    a RATE. The third leg measures that residual as a number so it does not have
+    to be re-derived; it does not close it. Closing it needs a widened
+    `max_points` (a meaning change for every existing tenant, needing a
+    migration) or an armed byte ceiling whose figure the owner deferred on
+    2026-10-25 — and whose two storage dimensions are declared BLOCKED in
+    `tortoise/allowance_gate.py` pending instruments, not pending a lane.
+    """
+
+    @staticmethod
+    def _node_total() -> int:
+        return int(_team_sdk()._get_proj().g.query(
+            "MATCH (n) RETURN count(n)").result_set[0][0])
+
+    @staticmethod
+    def _points_count() -> int:
+        """The COUNT the commit lane's points gate reads — the real predicate.
+
+        Called through `quota._count_resource` rather than re-written here,
+        because a copy of the predicate is a test that can agree with the defect.
+        """
+        from tortoise.quota import _count_resource
+
+        return _count_resource(TEST_ORG_ID, "points")
+
+    @classmethod
+    def _measure(cls, client, raw: dict) -> tuple[int, int, int]:
+        """(declared nodes, minted nodes on the graph, charged bytes)."""
+        from tortoise.commit_schema import (
+            CommitPayload,
+            commit_ingest_charge_bytes,
+            declared_commit_write_count,
+        )
+        payload = CommitPayload(**{**raw, "client_commit_id": "0" * 64})
+        declared = declared_commit_write_count(payload)
+        charge = commit_ingest_charge_bytes(payload)
+        before = cls._node_total()
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        return declared, cls._node_total() - before, charge
+
+    def test_the_points_empty_loop_shape_is_charged_for_every_node_it_mints(
+            self, client):
+        """`points: []` — the cheapest iteration of the loop #4051 names.
+
+        Its body is ~1 KB, so the payload term never wins and the declared count
+        is the WHOLE bound. Measured here: the fixed chain is 4 nodes, declared
+        4, charged 4 × 1024 B.
+
+        Mutation this REDs: drop `_COMMIT_FIXED_NODES` below the chain's real
+        size (measured: 4 → 3 reds this and both other legs), or add a node to
+        `_execute_commit_writes`'s per-session chain without moving that
+        constant — either makes the throttle cheaper than the write, the
+        fail-OPEN direction (#4051 §3.1).
+        """
+        # The first write to a graph also creates the store's one-time
+        # singletons (`:GraphEventMeta`, `:EpMeta`, `:Meta`). They are per-GRAPH
+        # constants, not per-request growth — the loop #4051 describes repeats
+        # the steady-state shape, so absorb them.
+        assert _commit(client, _raw_payload(
+            0, session_id="s4051ChargeWarm", points=[], entities=[],
+            provenance_refs=[])).status_code == 200
+
+        declared, minted, charge = self._measure(client, _raw_payload(
+            0, session_id="s4051ChargeEmpty", points=[], entities=[],
+            provenance_refs=[]))
+
+        assert minted == 4, (
+            f"the `points: []` commit minted {minted} nodes, not the 4 the "
+            "fixed chain declares — this leg is measuring a different shape "
+            "than the one #4051's loop uses")
+        assert declared == minted, (
+            f"the cheapest loop iteration declared {declared} nodes but minted "
+            f"{minted}: the node floor ({declared * 1024} B) would be cheaper "
+            "than the write, so a caller could mint nodes faster than the "
+            "ingest window charges for them (#4051)")
+        assert charge == declared * 1024, (
+            f"the charge for the cheapest loop iteration is {charge} B, not "
+            f"the node floor {declared * 1024} B — the payload term must never "
+            "let a small body under-charge the nodes it mints")
+
+    def test_a_flat_collection_lane_is_charged_for_every_node_it_mints(
+            self, client):
+        """`entities[]` / `events[]` are charged 1 node per entry — measured.
+
+        `declared_commit_write_count` charges `_COMMIT_FLAT_NODE_LANES` one node
+        per entry, an assumption no test covered: the existing invariant legs
+        measure `points[]`, `operators[]` and `supersessions[]` only. An entry
+        that minted a node AND a durability `:GraphEvent` would make that rate a
+        2× fail-open — the same defect review cycles 2 and 3 found on the points
+        and operator lanes, one lane over. Measured: declared 7 / minted 7 for
+        three entries on each lane (4 chain nodes + one per entry).
+
+        Mutation this REDs: empty `_COMMIT_FLAT_NODE_LANES` (measured: reds this
+        leg and ONLY this leg), or let an entry start minting a second node
+        without raising the rate.
+        """
+        assert _commit(client, _raw_payload(
+            0, session_id="s4051FlatWarm", points=[], entities=[],
+            provenance_refs=[])).status_code == 200
+
+        entities = [{"name": f"FlatProbe{i}", "kind": "Project",
+                     "passes_frequency_gate": True} for i in range(3)]
+        declared, minted, _charge = self._measure(client, _raw_payload(
+            0, session_id="s4051ChargeEntities", points=[], entities=entities,
+            provenance_refs=[]))
+        assert minted == 4 + 3, (
+            f"3 entities minted {minted} nodes, not the 4 chain nodes plus one "
+            f"`:Object` per entry — the flat rate is not measuring the lane it "
+            "claims to")
+        assert declared >= minted, (
+            f"`entities[]` declared {declared} nodes for {minted} minted — a "
+            "flat lane that mints more than it declares is the fail-open "
+            "direction (#4051)")
+
+        events = [{"id": f"ev_4051_{i:056d}", "eventKind": "occurrence",
+                   "content": f"flat probe event {i}",
+                   "source_ref": f"https://example.test/4051/{i}"}
+                  for i in range(3)]
+        declared, minted, _charge = self._measure(client, _raw_payload(
+            0, session_id="s4051ChargeEvents", points=[], entities=[],
+            provenance_refs=[], events=events))
+        assert minted > 4, (
+            f"3 events minted {minted} nodes — the `:Event` lane wrote nothing, "
+            "so this leg pins nothing")
+        assert declared >= minted, (
+            f"`events[]` declared {declared} nodes for {minted} minted — a "
+            "flat lane that mints more than it declares is the fail-open "
+            "direction (#4051)")
+
+        # `sources[]` — the third flat lane, and the one whose entries could
+        # plausibly mint a second node (an external `:Source` plus a bridge).
+        # Measured: 1 node per new entry, exactly as charged.
+        sources = [{"sourceKind": "document",
+                    "url": f"https://example.test/4051/src/{i}",
+                    "credibilityTier": "T1",
+                    "contentHash": "c" * 64} for i in range(3)]
+        declared, minted, _charge = self._measure(client, _raw_payload(
+            0, session_id="s4051ChargeSources", points=[], entities=[],
+            provenance_refs=[], sources=sources))
+        assert minted == 4 + 3, (
+            f"3 sources minted {minted} nodes, not the 4 chain nodes plus one "
+            "`:Source` per entry — the flat rate is not measuring the lane it "
+            "claims to")
+        assert declared >= minted, (
+            f"`sources[]` declared {declared} nodes for {minted} minted — a "
+            "flat lane that mints more than it declares is the fail-open "
+            "direction (#4051)")
+
+    def test_the_throttles_residual_reach_is_a_number_not_an_adjective(
+            self, client, monkeypatch):
+        """#4051 §4's residual, measured from the SHIPPED constant + real charge.
+
+        The issue record has carried this figure loosely ("unbounded"), which
+        understates it, and it has been re-derived three times across the
+        issue's comments. It is finite and it is arithmetic: a `points: []`
+        commit is charged the node floor, the allowance is
+        `MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG`, so the window admits
+        `allowance // charge` of them and each mints `minted` nodes.
+
+        ⛔ This asserts the DERIVATION, not a policy. Both operands are read from
+        the shipped code plus a measured commit, so a retune of the documented
+        default or a change to the chain REDS these literals — the red is the
+        point (it forces the issue record to be updated), which is why the
+        ambient env knob is pinned out rather than read. It does not claim the
+        total is bounded — it is not, and that is §4.
+        """
+        import tortoise.quota as quota_mod
+
+        assert _commit(client, _raw_payload(
+            0, session_id="s4051ResidWarm", points=[], entities=[],
+            provenance_refs=[])).status_code == 200
+        declared, minted, charge = self._measure(client, _raw_payload(
+            0, session_id="s4051ChargeResid", points=[], entities=[],
+            provenance_refs=[]))
+
+        # Pin the SHIPPED figure, not the RESOLVED one: `quota.py` reads
+        # ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` at import and
+        # `docs/INGEST_CONTRACT.md` §9 advertises that knob, so an operator
+        # shell or CI job that exports it must not red a test asserting the
+        # default it never changed (the review-cycle-3 rule this file already
+        # records at `test_default_allowance_admits_a_normal_commit`). The
+        # endpoint side is opted onto the same figure for the same reason.
+        assert quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN == 10 * 1024 * 1024
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG",
+            quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN)
+
+        commits_per_window = (
+            quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN // charge)
+        nodes_per_window = commits_per_window * minted
+
+        assert charge == declared * 1024
+        assert commits_per_window == 2560, (
+            f"the 60 s window admits {commits_per_window} `points: []` commits "
+            f"({charge} B each against the shipped "
+            f"{quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN} B default) — "
+            "#4051's record states 2,560; update the record if it moved")
+        assert nodes_per_window == 10240, (
+            f"the window admits {nodes_per_window} nodes/org/min, not the "
+            "10,240 #4051's record states")
+
+        # Why this is a RATE and not a bound, re-measured rather than asserted:
+        # the nodes the window admits are invisible to the count the commit
+        # lane's points gate reads.
+        before = self._points_count()
+        for i in range(2):
+            assert _commit(client, _raw_payload(
+                0, session_id=f"s4051ResidLoop{i}", points=[], entities=[],
+                provenance_refs=[])).status_code == 200
+        assert self._points_count() == before, (
+            "the points count moved for a `points: []` commit — if this is a "
+            "real widening of the counted category, §4 of #4051 has been "
+            "decided (candidate 2) and this leg must be replaced, not relaxed")
