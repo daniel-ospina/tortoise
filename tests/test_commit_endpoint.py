@@ -5267,11 +5267,22 @@ class Test4051ChargeCoversTheLoopShape:
             f"says (got {r.status_code})")
         # A bare 429 proves *a* refusal, not the one this leg exists for: the
         # docstring claims the ingest WINDOW refused it. The endpoint names the
-        # charge that spent the window (`commit_ingest_bytes`), and the class
-        # above already asserts on it (`detail["resource"]`) for the same
-        # reason — a 429 from any other limiter would otherwise satisfy this
-        # leg while the node floor went unspent.
-        assert r.json()["detail"]["resource"] == "commit_ingest_bytes", (
+        # CHARGE that refused this request (`detail["resource"]`,
+        # `hosted_api._ingest_rate_limited`), which distinguishes the ingest
+        # window from any other limiter — it does NOT name which lane SPENT the
+        # window (one window per org, and the spender is deliberately unnamed:
+        # `test_the_window_is_shared_with_the_commit_lane` is the leg showing a
+        # capture-spent window reporting `commit_ingest_bytes` here). The class
+        # above asserts on the same field for the same reason.
+        #
+        # `.get` all the way down, deliberately NOT `["detail"]["resource"]`:
+        # every OTHER limiter in this module returns a STRING `detail`
+        # (`RateLimitMiddleware`: "Rate limit exceeded. …"), so subscripting
+        # would raise `TypeError` before this message could print — and "some
+        # other limiter refused" is precisely the case this assertion exists to
+        # report legibly.
+        assert (r.json().get("detail") or {}).get("resource") == (
+            "commit_ingest_bytes"), (
             f"the refusal does not name the ingest window: "
             f"{r.json().get('detail')!r}")
 
