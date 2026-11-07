@@ -392,47 +392,69 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     #   exit 1). One inserted line was the difference between the arm firing and the
     #   arm blind, which makes it a bypass rather than a nuance.
     #
-    # Two earlier shapes stay closed under the content rule:
-    # 1. A one-shot positional header skip left the first DATA row ungraded once the
-    #    header was deleted (measured: header deleted + §5 row 1's cell blanked ->
-    #    CLEAN). Skipping by CONTENT cannot do that: a deleted header leaves every
-    #    row graded, and a data row sitting where the header used to be is still read.
-    # 2. Grading only the FIRST table left a second crosswalk table unread (measured:
+    # 1. A positional header skip was one-shot for the whole section, so deleting
+    #    the header made the first DATA row the "header" and left it ungraded
+    #    (measured: header deleted + §5 row 1's cell blanked -> CLEAN).
+    # 2. Breaking at the first non-`|` line graded only the FIRST table, so a
+    #    second validly-headed crosswalk table's rows were never read (measured:
     #    §5 split into two headed tables, one cell blanked in the second -> CLEAN).
-    #    Every line is read now, so a split in either direction is read.
+    # 3. Selecting by header SHAPE (not position) is what makes both directions
+    #    right: an ordinary `| area | kind | surface |` table is not the crosswalk
+    #    wherever it sits, so its rows are not graded as crosswalk rows (measured:
+    #    content-only matching refused them as "one column short" — a false RED).
     #
-    # ⚠️ The cost, accepted in this file's own stated direction ("a false RED costs a
-    # re-run, never a gate that reports green over an ungraded row"): an ordinary,
-    # non-crosswalk table placed INSIDE §5 is graded as if it were the crosswalk, so
-    # its rows red `R5 <label>: names no surface` (measured: a 2-column decorative
-    # table appended to §5 produced three such violations on an otherwise clean map).
-    # The remedy is to put a second table in its own section, which is where §6's
-    # checklist table already lives — trading that false RED for a one-line bypass is
-    # the trade this arm is supposed to make. Rewording the crosswalk HEADER reds for
-    # the same reason (measured: `| plan section | seam / interface | surface names |
-    # note |` -> `R5 plan section: names no surface`), because the exemption below
-    # recognises the header by its two identifying strings, not by position.
+    # ⚠️ Grading only BLOCKS the selection recognised was itself a bypass, and that
+    # is why the lines below are filtered rather than the blocks: a block counted as
+    # the crosswalk only when its separator was FOLLOWED by a header, so a bare
+    # `|---|---|---|---|` inserted above `| §7 | … |` started a block with a separator
+    # and NO header — excluded from grading, leaving every row beneath it unread.
+    # Measured on one document: blank §7's surface cell -> exit 1; blank it AND insert
+    # that separator -> CLEAN, exit 0 (false PASS), and exit 1 here.
     #
-    # The header exemption is TWO conditions, and both are load-bearing. Content alone
-    # was not enough: `_is_crosswalk_header` accepts either of two signals, so as a
-    # per-LINE exemption it also swallowed a DATA row whose surface cell had been
-    # rewritten to the bare token `surface` — that row then escaped BOTH R5 arms
-    # (measured: `| §6.4 … | surface |  |` graded CLEAN, exit 0, while the same cell
-    # blanked red). Position alone was not enough either — that is the bypass above.
-    # So a line is exempt only when it content-matches a header AND the next `|` line
-    # is an alignment row, which is what a table header IS.
-    pipe_lines = [line for line in crosswalk.splitlines() if line.startswith("|")]
-    header_indexes = {
-        index
-        for index, line in enumerate(pipe_lines)
-        if _is_crosswalk_header(line)
-        and index + 1 < len(pipe_lines)
-        and _is_separator_line(pipe_lines[index + 1])
-    }
+    # So: EVERY `|` line in §5 is graded, minus two classes — an alignment row, and a
+    # line that IS the crosswalk header by shape. The one remaining exemption is a
+    # WELL-FORMED table whose own header is a DIFFERENT width from the crosswalk's
+    # (the map's §6 checklist table is 3-wide): it is genuinely another table, and
+    # grading it would refuse a docs-only edit that improves the map (a false RED).
+    # A 4-wide decoy gets no such exemption — that is the shape an impersonating row
+    # or a split-off tail would take.
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in crosswalk.splitlines():
+        if line.startswith("|"):
+            current.append(line)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+
+    def _separator(block: list[str]) -> int | None:
+        return next(
+            (
+                index
+                for index, line in enumerate(block)
+                if all(set(cell) <= {"-", ":", ""} for cell in cells(line))
+            ),
+            None,
+        )
+
+    header_line = next((line for line in crosswalk.splitlines() if _is_crosswalk_header(line)), None)
+    crosswalk_width = len(cells(header_line)) if header_line is not None else 0
+
+    def _is_foreign_table(block: list[str]) -> bool:
+        separator = _separator(block)
+        if separator is None or separator == 0:
+            return False
+        header = block[separator - 1]
+        return not _is_crosswalk_header(header) and len(cells(header)) != crosswalk_width
+
+    graded_blocks = [block for block in blocks if not _is_foreign_table(block)]
     rows: list[str] = [
         line
-        for index, line in enumerate(pipe_lines)
-        if not _is_separator_line(line) and index not in header_indexes
+        for block in graded_blocks
+        for line in block
+        if not _is_separator_line(line) and not _is_crosswalk_header(line)
     ]
 
     for line in rows:
@@ -457,6 +479,24 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
         # measured CLEAN — renaming `| §7 |` to `| 7 |` and blanking its cell, and
         # deleting the `§7` row outright. `§7` is now in PLAN_SEAMS so its existence is
         # pinned too.
+        #
+        # The row must be the WIDTH the parser can read, exactly as a §1 row must be
+        # 7 cells: a crosswalk row one cell SHORT keeps `row[2]` pointing at the NOTE,
+        # and a note that names surfaces ("… **SF13 is the row a capstone must not
+        # skip**") then satisfies the arm below. Measured on the live map: deleting
+        # §6.4's surface cell outright — not blanking it, deleting it — graded CLEAN,
+        # exit 0, on the REQUIRED `docs` job, and the same deletion on §7 did too.
+        # Blanking was covered (the case above); deleting was the hole beside it.
+        # Re-measured at `a4f055a96`, after the per-table-block selection rewrite:
+        # the hole survived it (both deletes still CLEAN), so the arm belongs inside
+        # this loop rather than keyed to how the table was found.
+        if len(row) != 4:
+            raise Refusal(
+                f"{label} crosswalk row has {len(row)} column(s); the table needs "
+                f"exactly 4 (plan § · seam / interface · surface(s) · note) — a DELETED "
+                f"cell shifts the note into the surface column, where its own words "
+                f"satisfy the arm below"
+            )
         surface_cell = row[2] if len(row) > 2 else ""
         if not surface_tokens(surface_cell):
             violations.append(f"R5 {label}: names no surface")
@@ -523,20 +563,34 @@ def _rewrite_row(text: str, sf: str, column: int, value: str) -> str:
 #: row ungraded.
 _HEADER_SURFACE_CELLS = frozenset({"surface(s)", "surfaces", "surface"})
 
+#: The crosswalk header's FIRST cell. The crosswalk maps `04-plan.md`'s seams, so
+#: its first column is the plan section — the one cell that tells it apart from an
+#: ordinary table that happens to have a `surface` column.
+_HEADER_PLAN_CELL = "plan §"
+
 
 def _is_crosswalk_header(line: str) -> bool:
-    """True when this `|` line is the crosswalk's header row, judged by CONTENT.
+    """True when this `|` line is the crosswalk's header row, judged by SHAPE.
 
-    BOTH identifying strings must survive, because this predicate is also asked of
-    DATA rows (the row selection exempts a header from grading): accepting either
-    signal let a crosswalk row whose surface cell reads the bare token `surface`
-    impersonate the header and escape both R5 arms (measured: CLEAN, exit 0). A real
-    crosswalk row's label column holds a seam (`§5 row 1`, `§6.4`, `§7`), never
-    `plan §`, so requiring the label as well costs nothing a correct map can produce.
+    Four cells, a first cell naming the plan section, and a third cell naming
+    surfaces — all three, not any one of them. A content hint alone made an
+    ORDINARY §5 table classify as the crosswalk: in a document that IS a surface
+    map, `| area | kind | surface |` is a natural edit, and grading its rows as
+    crosswalk rows refused them as "one column short" — a FALSE RED on the
+    REQUIRED, path-filter-free `docs` job, blaming a deleted cell nobody deleted
+    (measured at `3b642c7ca`: exit 2; the same map graded `CLEAN` before the
+    per-block selection landed). The `plan §` cell is the crosswalk's defining
+    property, so requiring it costs nothing that a reworded `surface(s)` cell
+    still gets: renaming THAT cell keeps the block headed.
+
+    A reworded FIRST cell does drop the block into the fail-closed fallback below
+    (every §5 block graded), which is that fallback's documented direction — a
+    re-run, never a gate that reports green over an ungraded row.
     """
     row = cells(line)
-    surface_cell = row[2].strip().lower() if len(row) > 2 else ""
-    return row[0].strip() == "plan §" and surface_cell in _HEADER_SURFACE_CELLS
+    if len(row) != 4:
+        return False
+    return row[0].strip() == _HEADER_PLAN_CELL and row[2].strip().lower() in _HEADER_SURFACE_CELLS
 
 
 def _is_separator_line(line: str) -> bool:
@@ -573,6 +627,33 @@ def _rewrite_crosswalk_row(text: str, seam: str, value: str) -> str:
     for line in text.splitlines(keepends=True):
         if line.startswith(f"| {seam}"):
             line = _rewrite_cell(line, 2, value, seam)
+            hit = True
+        out.append(line)
+    if not hit:
+        raise AssertionError(f"self-test mutation target {seam!r} not found")
+    return "".join(out)
+
+
+def _delete_crosswalk_cell(text: str, seam: str, column: int) -> str:
+    """Delete one cell from one crosswalk row — the width primitive.
+
+    Blanking a cell keeps the table's width; DELETING it does not, and the row that
+    loses its `surface(s)` cell is graded by whatever moved into that position. This
+    is the edit the width arm exists for, so the mutation must perform it the way an
+    editor would (`| a | b | c |` → `| a | c |`), not as an empty cell.
+    """
+    out: list[str] = []
+    hit = False
+    for line in text.splitlines(keepends=True):
+        if not hit and line.startswith(f"| {seam}"):
+            row = cells(line)
+            if column >= len(row):
+                raise AssertionError(
+                    f"self-test mutation target {seam!r} has {len(row)} cell(s); "
+                    f"column {column} does not exist"
+                )
+            row.pop(column)
+            line = "| " + " | ".join(row) + " |\n"
             hit = True
         out.append(line)
     if not hit:
@@ -714,7 +795,10 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         # The DELETE is the point: `.replace("SF13", "SF1")` — what this case
         # did first — RENAMES the remaining mentions instead of removing them,
         # so the document it built was not the consistent shrink its own label
-        # (and the map's §8 record) claims. Measured: 13 mentions renamed.
+        # (and the map's §8 record) claims. Measured at `2cb1f35c2` (the commit that
+        # shipped the rename form): 13 mentions renamed. The map has grown since, so
+        # the CURRENT number is 18 at `3b642c7ca` — re-measure, do not quote 13 as if
+        # it were this head's count.
         "delete the SF13 row AND every mention of it (a consistent shrink)",
         lambda t: re.sub(r"\bSF13\b", "", _drop_line(t, "| **SF13**")),
         "violation",
@@ -772,15 +856,38 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
     ),
     (
         # A crosswalk row must not be able to impersonate the header. The header is
-        # matched by CONTENT (so a deleted header cannot make the first data row the
-        # header), and while that content test accepted EITHER of its two identifying
-        # signals, a row whose surface cell read the bare token `surface` was exempted
-        # from grading along with the header — both R5 arms skipped it (measured:
-        # CLEAN, exit 0). This case fails if the exemption ever goes back to a
-        # content-only test.
+        # matched by SHAPE (four cells, `plan §`, a surface-naming third cell), and a
+        # row whose surface cell was rewritten to the bare token `surface` must still
+        # be graded — it holds a seam label, not `plan §`, so it is not the header.
         "retype §6.4's surface cell as the bare token `surface` (a row impersonating the header)",
         lambda t: _rewrite_crosswalk_row(t, "§6.4", "surface"),
         "violation",
+    ),
+    (
+        # The DELETE, not the blank: an editor that removes the `surface(s)` cell
+        # leaves a 3-cell row whose note lands in the surface column, so the arm
+        # below reads §6.4's own "**SF13 is the row a capstone must not skip**" and
+        # scores the row against a surface it never assigned. Measured before the
+        # width arm existed: CLEAN, exit 0, on the REQUIRED `docs` job — the same
+        # false PASS class as an 8-cell §1 row, one edit over from the blank case.
+        "delete the §6.4 surface cell outright (a crosswalk row one column short)",
+        lambda t: _delete_crosswalk_cell(t, "§6.4", 2),
+        "refusal",
+    ),
+    (
+        # A NEGATIVE control, and the one this round added: not every mutation must
+        # red. This one must stay CLEAN. An ordinary table appended to §5 whose third
+        # column is literally `surface` is a natural docs-only edit in a document that
+        # IS a surface map, and grading it as the crosswalk refused its rows as "one
+        # column short" — a false RED on the required check blaming a deleted cell
+        # nobody deleted (measured at `3b642c7ca`, exit 2; the crosswalk is now
+        # selected by header SHAPE). Without this case, content-only header matching
+        # could come back with every other case still green.
+        "append an ordinary §5 table with a `surface` column (must stay CLEAN)",
+        lambda t: _insert_before(
+            t, "## 6. Integration", "| area | kind | surface |\n|---|---|---|\n| a | b | c |\n\n"
+        ),
+        "clean",
     ),
     (
         # The width rule must be covered by the arm that is supposed to catch a
@@ -788,9 +895,11 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         # `< 7` floor left --self-test green at 10/10 — the false PASS this rule
         # closes, re-opened with the REQUIRED `docs` job fully green. Since
         # MIN_SELF_TEST_MUTATIONS exists, re-opening it costs TWO edits: at the
-        # shipped floor, deleting this case alone is red ("12 mutation(s)
-        # registered, at least 13 required", exit 1) before the relaxed rule is
-        # ever exercised.
+        # shipped floor, deleting this case alone is red — `self-test: N mutation(s)
+        # registered, at least <floor> required`, exit 1 — before the relaxed rule is
+        # ever exercised. (The counts are deliberately not written out here: they
+        # drifts every time a case is added, and this comment quoted a population
+        # three cases out of date.)
         "splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns)",
         lambda t: _rewrite_row(t, "SF2", 5, "live-docker | unit"),
         "refusal",
@@ -833,11 +942,11 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 
 #: The population `--self-test` must carry. A floor, not a count-only print:
 #: emptying `SELF_TEST_MUTATIONS` is a ONE-place edit and used to print
-#: "self-test: 0/0 mutation(s) refused — the checker is not a rubber stamp" and
+#: "self-test: 0/0 mutation(s) behaved as designed — the checker is not a rubber stamp" and
 #: exit 0 (measured), which is the false PASS this arm exists to prevent. The
 #: map's own residual covers a THREE-place edit (row + pin + case together), so
 #: the shrink that is two places short of that must still be loud.
-MIN_SELF_TEST_MUTATIONS = 18
+MIN_SELF_TEST_MUTATIONS = 20
 
 
 def self_test(text: str) -> int:
@@ -851,7 +960,27 @@ def self_test(text: str) -> int:
         return 1
     failures = 0
     untestable = 0
+    # A `clean` case can only be MEASURED on a map that starts clean. When the input
+    # carries a violation of its own, every edit "fails" for a reason that has
+    # nothing to do with the arm under test, and reporting that as "the checker is a
+    # rubber stamp" is exactly the misdiagnosis the UNTESTABLE arm exists to prevent
+    # (measured: deleting SF13's row made the negative control report `expected clean,
+    # got violation (R1 SF13: pinned surface is missing …)`, so a correct checker
+    # accused itself). Reported as UNTESTABLE instead, which is a different statement.
+    try:
+        pristine_violations, _ = check(text)
+        pristine_clean = not pristine_violations
+    except Refusal:
+        pristine_clean = False
     for name, mutate, expected in SELF_TEST_MUTATIONS:
+        if expected == "clean" and not pristine_clean:
+            print(
+                f"  UNTESTABLE {name}: the input map is not clean, so a "
+                "must-stay-clean case cannot be measured on it",
+                file=sys.stderr,
+            )
+            untestable += 1
+            continue
         try:
             mutated = mutate(text)  # type: ignore[operator]
         except AssertionError as exc:
@@ -887,7 +1016,7 @@ def self_test(text: str) -> int:
         )
     if failures or untestable:
         return 1
-    print(f"self-test: {total}/{total} mutation(s) refused — the checker is not a rubber stamp")
+    print(f"self-test: {total}/{total} mutation(s) behaved as designed — the checker is not a rubber stamp")
     return 0
 
 
