@@ -2051,9 +2051,11 @@ def _journal_sites(source: str) -> list[tuple[int, int, str]]:
         #     1,432).
         #   * PARSED: **9**. The other 1,178 (1,187 − 9) short-circuit on the
         #     substring test above, so "the census parses 1,187 files" is false — and self-refuting, since
-        #     it would make this fast path pointless. Measured at 45a1404cd8:
-        #     walked=1187, parsed=9, 9 calls in 5 files (steady shape; the split
-        #     above is arithmetic on this head, not a re-instrumentation).
+        #     it would make this fast path pointless. The SHAPE was measured at
+        #     `45a1404cd8` as walked=1183, parsed=9, 9 calls in 5 files; both
+        #     numbers are re-derived for this head as walked=1,187 and the
+        #     split above (1,178 = 1,187 − 9), NOT re-instrumented — the sha is
+        #     named for the shape, not as the source of these figures.
         #   * COST: parsing ALL 1,187 would cost ~+14 s (measured: 0.38 s with
         #     this guard, 14.73 s without). The earlier "~+12 s" is the same
         #     figure quoted differently — cite the pair, not the delta alone.
