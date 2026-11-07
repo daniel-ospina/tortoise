@@ -955,9 +955,17 @@ failure_label() { # <class>
 #            route/deploy surface instead of the PKCE flow (review P2).
 PROBE_DEGRADED_REASON="status"
 
+# 1 when the last attempt's STATUS LINE was healthy but the TRANSFER did not
+# complete (curl exited non-zero after the headers arrived), i.e. the verdict is
+# DOWN and PROBE_CODE still holds the healthy code. Every DOWN-facing artifact
+# renders its status through probe_verdict_status(), which reads this flag —
+# without it the page said "DOWN … (HTTP 200)" (#10892 review round 7, P1).
+PROBE_TRANSFER_INCOMPLETE="0"
+
 # Sets: PROBE_VERDICT, PROBE_CODE, PROBE_FAILURE_CLASS, PROBE_EVIDENCE
-# (multi-line). PROBE_FAILURE_CLASS is the curl-level failure layer from
-# classify_failure() and is what decides whether a restart is even on the table.
+# (multi-line), PROBE_TRANSFER_INCOMPLETE. PROBE_FAILURE_CLASS is the curl-level
+# failure layer from classify_failure() and is what decides whether a restart is
+# even on the table.
 # Retries DOWN verdicts (transient blips) — an UNEXPECTED verdict is a
 # deterministic answer, so it stops immediately.
 probe() {
@@ -966,9 +974,14 @@ probe() {
   PROBE_CODE="000"
   PROBE_FAILURE_CLASS="none"
   PROBE_DEGRADED_REASON="status"
+  PROBE_TRANSFER_INCOMPLETE="0"
 
   attempt=1
   while [ "$attempt" -le "$PROBE_ATTEMPTS" ]; do
+    # Per-ATTEMPT, not per-probe: an incomplete attempt followed by a complete
+    # one is an UP answer, and must not carry the previous attempt's flag into
+    # the status text this run publishes.
+    PROBE_TRANSFER_INCOMPLETE="0"
     body_file="$RUN_TMP/body.$attempt"
     err_file="$RUN_TMP/err.$attempt"
     hdr_file="$RUN_TMP/headers.$attempt"
@@ -1014,6 +1027,7 @@ probe() {
     # `classify_failure` already recorded, so restart eligibility is unchanged).
     if [ "$v" = "UP" ] && [ "$rc" -ne 0 ]; then
       PROBE_EVIDENCE="${PROBE_EVIDENCE}transfer did NOT complete (curl_exit=${rc}, layer=${PROBE_FAILURE_CLASS}) although the status line was ${code} — the BODY never arrived, so this is not an answer (#10892 review round 6, P1)"$'\n'
+      PROBE_TRANSFER_INCOMPLETE="1"
       v="DOWN"
     fi
     # An EXPLICIT header requirement turns an otherwise-UP answer into an
@@ -1742,6 +1756,31 @@ probe_up_contract() {
   fi
 }
 
+# The status parenthetical EVERY DOWN-facing artifact prints: the transition
+# page, the still-DOWN comment, both sustained-escalation texts, the run log's
+# verdict line and the failing run's message. ONE composing site, because the
+# six drifting apart is how this bug survived round 6.
+#
+# ⛔ A DOWN is not always the status it read. curl emits `%{http_code}` as soon
+# as the RESPONSE HEADERS arrive, so a response that stalls mid-body leaves
+# PROBE_CODE at the HEALTHY value while probe() (correctly) grades it DOWN. The
+# page then read, verbatim, "🔴 DOWN — api.premiselabs.co (served request) probe
+# failing (HTTP 200 after 3 attempts)" — the on-call's cheapest reading of that
+# is "the monitor is wrong", on the one arm whose whole purpose (#10892) is to
+# be believed when it says a request did not return (#10892 review round 7, P1).
+# Name the failure, keep the code as evidence. Comparable stacks draw the same
+# line: blackbox_exporter alerts on `probe_success == 0` and exposes the HTTP
+# code for debugging, and curl's own exit code (28/18/56) is what says the
+# transfer failed, independently of the status.
+probe_verdict_status() {
+  if [ "$PROBE_TRANSFER_INCOMPLETE" = "1" ]; then
+    printf '(no complete answer — HTTP %s, but the transfer did NOT complete; layer=%s)' \
+      "$PROBE_CODE" "$PROBE_FAILURE_CLASS"
+  else
+    printf '(HTTP %s)' "$PROBE_CODE"
+  fi
+}
+
 render_body() { # <kind> <kindlabel> <selfheal-note>
   local kind="$1" kindlabel="$2" heal="$3" summary what assertion
   if [ "$kind" = "DOWN" ]; then
@@ -2101,7 +2140,7 @@ main() {
   log "escalation: enabled=${ESCALATE_ENABLED} sustained=${ESCALATE_SUSTAINED_MINUTES}m/${ESCALATE_MIN_RUNS} runs remind=${CAP_RENOTIFY_MINUTES}m recipient=$(if [ -n "${ESCALATION_CHAT_ID}" ]; then if [ "${ESCALATION_CHAT_ID}" = "${TELEGRAM_CHAT_ID}" ]; then printf 'telegram-default'; else printf 'telegram-override'; fi; else printf 'UNCONFIGURED'; fi)"
 
   probe
-  log "verdict: ${PROBE_VERDICT} (HTTP ${PROBE_CODE})"
+  log "verdict: ${PROBE_VERDICT} $(probe_verdict_status)"
   # #4573: the independent-liveness record. Emitted for EVERY verdict (see
   # emit_heartbeat) — a working pager during an incident must not read as dead.
   emit_heartbeat "$PROBE_VERDICT"
@@ -2439,7 +2478,7 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
       exit 1
     fi
     note "filed ${kind} incident #${issue} — ${title}"
-    page "🔴 ${kind} — ${PROBE_HOST_LABEL} probe failing (HTTP ${PROBE_CODE} after ${PROBE_ATTEMPTS} attempts). Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+    page "🔴 ${kind} — ${PROBE_HOST_LABEL} probe failing $(probe_verdict_status) after ${PROBE_ATTEMPTS} attempts. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
   fi
 
   # ── self-heal decision ───────────────────────────────────────────────────
@@ -2748,7 +2787,7 @@ ${heal_note}"
   else
     do_comment=1
     STATE_LAST_COMMENT_TS="$now"
-    comment_body="🔁 **Still ${kind}** — probe run #${STATE_DOWN_RUNS} failed at $(fmt_iso "$now") (HTTP ${PROBE_CODE}); down since $(fmt_iso "$STATE_FIRST_FAILURE_TS") (~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min).
+    comment_body="🔁 **Still ${kind}** — probe run #${STATE_DOWN_RUNS} failed at $(fmt_iso "$now") $(probe_verdict_status); down since $(fmt_iso "$STATE_FIRST_FAILURE_TS") (~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min).
 
 ${heal_note}"
   fi
@@ -2827,7 +2866,7 @@ ${heal_note}"
       esc_why="This class is one self-healing cannot close, so nothing else will escalate it."
     fi
     if [ "$esc_decision" = "remind" ]; then
-      esc_text="🔁 STILL RUNNING for ~${esc_age_min} min (reminder) — ${esc_subject} since $(fmt_iso "$esc_anchor"); ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. Nothing has closed it. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+      esc_text="🔁 STILL RUNNING for ~${esc_age_min} min (reminder) — ${esc_subject} since $(fmt_iso "$esc_anchor"); ${STATE_DOWN_RUNS} failing probe run(s), $(probe_verdict_status). Nothing has closed it. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
     else
       esc_text="📟 HUMAN NEEDED — ${esc_subject} for ~${esc_age_min} min; ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. ${esc_why} Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
     fi
@@ -2848,7 +2887,7 @@ ${heal_note}"
     fi
   fi
 
-  fail "verdict ${PROBE_VERDICT} (HTTP ${PROBE_CODE}) — failing this run so GitHub's own notifications fire; incident: #${issue}"
+  fail "verdict ${PROBE_VERDICT} $(probe_verdict_status) — failing this run so GitHub's own notifications fire; incident: #${issue}"
   exit 1
 }
 

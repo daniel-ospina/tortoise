@@ -2210,6 +2210,84 @@ assert_eq "$RC" "1" "API target: 200 with an INCOMPLETE transfer → exit 1"
 assert_contains "$(created_json)" "PROD DOWN" \
   "API target: the shared probe() applies the same rule (no arm-local special case)"
 
+# ── 100b(ii): EVERY DOWN-facing artifact names the failure, never the healthy ─
+# #10892 review round 7 (P1). Round 6 fixed the incident BODY for this class but
+# left the six artifacts that actually wake someone printing `PROBE_CODE` bare —
+# and on this path PROBE_CODE is the HEALTHY code curl read off the status line
+# before the body never arrived. So the first page of a mid-body-stall outage
+# read, verbatim: "🔴 DOWN — api.premiselabs.co (served request) probe failing
+# (HTTP 200 after 3 attempts)" — the on-call's cheapest reading of which is
+# "the monitor is wrong", on the one arm whose entire purpose is to be believed
+# when it says a request did not return. Compare: blackbox_exporter alerts on
+# `probe_success == 0` and exposes the HTTP code only for debugging.
+# The mutants this pins: reverting any site to `(HTTP ${PROBE_CODE})` (or
+# dropping the PROBE_TRANSFER_INCOMPLETE marker) leaves the headline asserting a
+# status the verdict contradicts.
+reset_case
+export PROBE_URL="$LIVENESS_URL_UNDER_TEST"
+export PROBE_HOST_LABEL="api.premiselabs.co (served request)"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="200"
+export STUB_PROBE_RC=28
+export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+run_watchdog
+assert_eq "$RC" "1" "100b(ii): 200 + incomplete transfer → exit 1"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "no complete answer" \
+  "100b(ii): the TRANSITION PAGE names the failure, not a status that contradicts the verdict"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "(HTTP 200" \
+  "100b(ii): the page never asserts the healthy status as the verdict"
+assert_contains "$OUT" "verdict: DOWN (no complete answer — HTTP 200" \
+  "100b(ii): the RUN LOG's verdict line names the failure (the first artifact an operator reads)"
+assert_contains "$OUT" "verdict DOWN (no complete answer — HTTP 200" \
+  "100b(ii): the FAILING RUN's own message names the failure too"
+
+# The sustained leg: the still-DOWN comment and the escalation text are the same
+# class of artifact and must carry the same wording (a one-site fix at the page
+# would leave the comment and the escalation self-refuting).
+reset_case
+seed_issue down "$((NOW - 1800))" 5 0 ""
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export STUB_PROBE_CODES="200"
+export STUB_PROBE_RC=28
+export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+run_watchdog
+assert_eq "$RC" "1" "100b(ii): a SUSTAINED incomplete-transfer incident still fails the run"
+assert_contains "$OUT" "escalation outcome: page" "100b(ii): …and the sustained leg still pages a human"
+assert_contains "$(comments_all)" "no complete answer" \
+  "100b(ii): the still-DOWN COMMENT names the failure"
+assert_not_contains "$(comments_all)" "(HTTP 200" \
+  "100b(ii): …and does not report the healthy status as the verdict"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "no complete answer" \
+  "100b(ii): the ESCALATION page names the failure"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "(HTTP 200" \
+  "100b(ii): …and never pages with a status that contradicts the verdict"
+
+# The REMINDER arm of the same leg is a SEPARATE text (the reconciliation at
+# `escalate_ts` older than the re-notify window): a fix at the page arm only
+# would leave the hour-later reminder self-refuting. `escalate_state=sent` +
+# an `escalate_ts` past the window is what makes decide_escalation return
+# `remind` rather than `page`.
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 7200)) down_runs=9 last_down_ts=$((NOW - 60)) last_comment_ts=$((NOW - 60)) cap_notified_ts=0 escalate_state=sent escalate_ts=$((NOW - 5400)) page_ok_ts=0 restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export STUB_PROBE_CODES="200"
+export STUB_PROBE_RC=28
+export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: remind" "100b(ii): the reminder arm is the one under test (not a second page)"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "STILL RUNNING" \
+  "100b(ii): the REMINDER text is what was sent"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "no complete answer" \
+  "100b(ii): the REMINDER escalation names the failure"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "(HTTP 200" \
+  "100b(ii): …and never reminds with a status that contradicts the verdict"
+
 
 # ── 88b: a DOWN on the MACHINE-BACKED liveness target names the MACHINE ────
 # Same arm as case 88 (`disarmed:no_machine`), OPPOSITE remediation: this
