@@ -514,10 +514,12 @@ def test_the_point_clear_removes_the_prose_and_keeps_the_node():
     Two arms so neither can pass vacuously:
       (1) the property is GONE while the node and its OTHER props are still there
           — a clear that deleted the node is `tortoise_delete`, not this door;
-      (2) replaying the same creation record puts the prose BACK, i.e. the clear
-          is LIVE-ONLY (`#10429`'s replay half) and a rebuild is not a second
-          clear. If that flips, the doc's LIVE-ONLY bound is wrong and both it
-          and the clear's honest scope have to be updated.
+      (2) replaying the same creation record puts the prose BACK: the clear is
+          JOURNAL-bound (`#10429`'s replay half), so a JOURNAL replay of the
+          creation record re-materialises it, while a RECORD → CACHE rebuild
+          replays the stored `props.story_arc = null` and keeps it clear. If
+          this arm flips, the doc's JOURNAL-bound statement and the clear's
+          honest scope both have to be re-stated.
     """
     if not os.environ.get("TORTOISE_DB_URI"):
         pytest.skip("TORTOISE_DB_URI not set — the clear needs a graph to write")
@@ -555,16 +557,18 @@ def test_the_point_clear_removes_the_prose_and_keeps_the_node():
             "the clear took the node's OTHER properties with it; it must remove ONE "
             f"key. Got {kept!r}")
 
-        # (2) LIVE-ONLY: the CREATION record still carries the prose, and its fold
-        # is the replay fold — so a rebuild re-materialises what the clear removed.
+        # (2) JOURNAL-BOUND: the CREATION record still carries the prose, and its
+        # fold is the journal replay fold — so replaying it re-materialises what
+        # the clear removed. (A RECORD → CACHE rebuild replays the stored null
+        # instead, and keeps it clear — `_props_from_row` + `node_statement`.)
         proj._upsert_point_props(creation)
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.story_arc",
             params={"id": pid}).result_set
         assert rows and rows[0][0] == NARRATIVE, (
             "the `PointAdded` replay fold no longer re-materialises the prose — the "
-            "`#10429` replay half has CLOSED, so `#11325`'s LIVE-ONLY bound and the "
-            "`update_point` clear's scope are stale and must be re-stated")
+            "`#10429` replay half has CLOSED, so `#11325`'s JOURNAL-bound statement "
+            "and the `update_point` clear's scope are stale and must be re-stated")
     finally:
         sdk.close()
 
