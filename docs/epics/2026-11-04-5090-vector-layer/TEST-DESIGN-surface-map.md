@@ -242,7 +242,7 @@ out of the table with an inserted separator**, **retype a crosswalk row's surfac
 as a mechanism, retype a layer as a mechanism, retype a crosswalk surface as one that has no row,
 **splice a raw `|` into a cell**, **splice a `\\|` into a cell**, drop a child, drop a capability, forget
 a seam, destroy the section structure, **append a duplicate section-number decoy**) to an in-memory copy
-and **requires each mutation's stated outcome** — nineteen must be caught, and one, a **NEGATIVE
+and **requires each mutation's stated outcome** — twenty must be caught, and one, a **NEGATIVE
 control**, must leave the verdict UNCHANGED. That is the same discipline the epic applies to its own probe
 — *an instrument that cannot fail is not an instrument.* "Every mention of it" is meant literally: the
 case deletes the mentions, because the first version of the case **renamed** them to `SF1` and so
@@ -256,7 +256,7 @@ refusal cases report it. ⚠️ State the mechanism rather than overclaiming it:
 that a `|`-splitting relaxation **reds the arm**, not that the exact-7 refusal is the only rule that
 could notice. ⚠️ The floor is why re-opening the false PASS is no longer a one-place edit: at the
 shipped floor, deleting the width case alone exits 1
-(`self-test: 19 mutation(s) registered, at least 20 required`), and deleting it,
+(`self-test: 20 mutation(s) registered, at least 21 required`), and deleting it,
 **reverting the width rule's `!= 7` to `< 7`**, *and* lowering the floor to the population that is left
 still exits 1, because the parity case beside it catches the same relaxation. ⚠️ Name all three edits: deleting the case and
 lowering the floor alone leaves the **rule** intact, so the parity case is still refused by the rule it
@@ -298,7 +298,7 @@ a single unrelated violation and accused the checker (`1/21 NOT caught`) of the 
 it FAIL (`expected clean, got refusal`, exit 1). ⚠️ Like the width rule it is a ONE-place guarantee,
 not a three-place one — reverting the shape test, deleting the case and lowering the floor to 16 leaves
 the arm green with the false RED back (measured: self-test exit 0, the `surface`-column table exit 2),
-while deleting the case alone is already red (`19 mutation(s) registered, at least 20 required`).
+while deleting the case alone is already red (`20 mutation(s) registered, at least 21 required`).
 
 **The parity case is the one this review added, because the rule that had no case was the parity
 rule.** `cells()` splits on backslash **parity** — a pipe delimits only after an **even** run of
@@ -375,8 +375,8 @@ honest limit is:
   leaves C1 touching no surface, so `R4 #11084: touches no surface` fires (exit 1) before the pin or
   any case is involved — SF15 is why the silent class is nine rather than ten.
 - **The floor is what stops the green being bought back.** Also deleting the cases that name the surface
-  (SF13 has three: two delete-row cases and the `#11088` child-row case) leaves `17 mutation(s)
-  registered, at least 20 required`, exit 1 — so a shrink is red once it touches a named surface, but
+  (SF13 has three: two delete-row cases and the `#11088` child-row case) leaves `18 mutation(s)
+  registered, at least 21 required`, exit 1 — so a shrink is red once it touches a named surface, but
   `MIN_SELF_TEST_MUTATIONS` is not the first thing to fire, and it reds a shrunk population instead of
   printing a reassuring `self-test: 0/0 … not a rubber stamp`.
 
