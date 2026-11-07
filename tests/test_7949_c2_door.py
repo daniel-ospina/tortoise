@@ -75,6 +75,7 @@ SDK = REPO / "tortoise/sdk.py"
 EXTRACTOR = REPO / "tortoise/extractor_v2.py"
 VALUE_GATE = REPO / "tortoise/value_gate.py"
 SEAM = REPO / "tortoise/s2_decision_seam.py"
+REFERENTIALITY = REPO / "tortoise/referentiality.py"
 PROBE = REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py"
 REGISTRATION = REPO / "docs/evidence/7949-capstone/preregistration.json"
 
@@ -245,6 +246,69 @@ def test_the_v2_arm_calls_the_sdk_extractor_entry():
         f"{EXTRACTOR.relative_to(REPO)} — the door's last hop does not exist")
 
 
+def _sdk_lane_branch() -> ast.If | None:
+    """The ``if`` in ``capture_session`` whose BODY calls the m2 extractor.
+
+    The SDK's shape is a direct call (``self._extract_session_llm(...)``), not the
+    hosted path's ``_run_capture_bounded(slot, sdk._extract_session_llm, ...)``,
+    so this resolves the branch by the CALL it makes. Module-wide matching is
+    what an earlier revision did and it was satisfied by the capture LABEL
+    (``_capture_extractor_record``), not by the dispatch (#10983 review).
+    """
+    def _calls_llm(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Call)
+                and ast.unparse(node.func).endswith("_extract_session_llm"))
+
+    for node in ast.walk(_funcs(SDK)["capture_session"]):
+        if not isinstance(node, ast.If):
+            continue
+        if any(_calls_llm(c) for stmt in node.body for c in ast.walk(stmt)):
+            return node
+    return None
+
+
+def _env_reads(path: Path) -> set[str]:
+    """Every ``TORTOISE_*`` name this module can READ, structurally.
+
+    Two forms are resolved, because a source-text grep is satisfied both by prose
+    and by a LONGER name that begins with the one being looked for
+    (``TORTOISE_LABEL_ORDER`` ⊂ ``TORTOISE_LABEL_ORDER_SEED``,
+    ``TORTOISE_EXTRACTOR`` ⊂ ``TORTOISE_EXTRACTOR_PROMPT``). Found in the #10983
+    review (cycle 5): deleting a real read left the substring version green.
+
+      * a CALL to one of the env readers with a ``TORTOISE_*`` string literal;
+      * a module-level ``NAME = "TORTOISE_..."`` binding the module USES again —
+        the one-indirection form ``referentiality.ENV_FLAG`` takes, which no
+        literal-call grep can see.
+    """
+    tree = _tree(path)
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        if not ast.unparse(node.func).endswith(
+                ("environ.get", "getenv", "env_flag", "ask_env_int")):
+            continue
+        arg = node.args[0]
+        if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                and arg.value.startswith("TORTOISE_")):
+            names.add(arg.value)
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
+            continue
+        target = stmt.targets[0]
+        if not (isinstance(target, ast.Name)
+                and isinstance(stmt.value, ast.Constant)
+                and isinstance(stmt.value.value, str)
+                and stmt.value.value.startswith("TORTOISE_")):
+            continue
+        uses = sum(1 for n in ast.walk(tree)
+                   if isinstance(n, ast.Name) and n.id == target.id)
+        if uses > 1:            # the binding itself, plus at least one USE
+            names.add(stmt.value.value)
+    return names
+
+
 def _llm_call_branch() -> ast.If | None:
     """The ``if`` whose BODY dispatches ``sdk._extract_session_llm``.
 
@@ -277,15 +341,6 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
     decision about how much HTTP boundary to put in front of one door. Pinned
     so a later edit cannot make them disagree.
     """
-    sdk_src = _source(SDK)
-    dispatch = re.search(
-        r'if\s+os\.environ\.get\("TORTOISE_SESSION_EXTRACTOR"\)\s*==\s*"m2"',
-        sdk_src)
-    assert dispatch, (
-        "the SDK's lane dispatch is no longer "
-        "'os.environ.get(\"TORTOISE_SESSION_EXTRACTOR\") == \"m2\"' — the "
-        "hosted mirror and the SDK dispatch have started to disagree about "
-        "which lane is which (#10983)")
     # ⛔ The BRANCH that dispatches the other extractor, structurally. The
     # previous revision read ``_capture_lane`` here — the LABEL the hosted path
     # stamps on the capture, NOT the branch that chooses the extractor. Inverting
@@ -309,17 +364,50 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
         f"the m2 branch no longer compares against the literal 'm2' (#10983): "
         f"{test_src!r}")
 
-    # …and the SDK's dispatch is the same comparison, so one door.
-    sdk_dispatch = [
-        ast.unparse(n.test) for n in ast.walk(_tree(SDK))
-        if isinstance(n, ast.If)
-        and "os.environ.get('TORTOISE_SESSION_EXTRACTOR')"
-        in ast.unparse(n.test).replace('"', "'")
-        and any(isinstance(op, ast.Eq) for op in n.test.ops)]
-    assert sdk_dispatch, (
-        "the SDK no longer has an `== 'm2'` dispatch on "
-        "TORTOISE_SESSION_EXTRACTOR — the hosted mirror and the SDK have "
-        "started to disagree about which lane is which (#10983)")
+    # …and the SDK's dispatch is the same comparison, so one door — resolved to
+    # the BRANCH THAT DISPATCHES the m2 extractor, not to a module-wide grep.
+    # The module-wide form was satisfied by the capture LABEL
+    # (`_capture_extractor_record` reads the same variable), and its list
+    # comprehension required only *an* `Eq`, so swapping the comparator to
+    # `"m2-legacy"` was caught by NOTHING — MEASURED in the #10983 review
+    # (cycle 5): the published test file PASSED that mutant.
+    sdk_branch = _sdk_lane_branch()
+    assert sdk_branch is not None, (
+        "nothing in sdk.capture_session dispatches _extract_session_llm from a "
+        "guarded branch — the SDK has one lane, so the hosted mirror's two-lane "
+        "predicate no longer describes it (#10983)")
+    sdk_test = ast.unparse(sdk_branch.test)
+    assert "TORTOISE_SESSION_EXTRACTOR" in sdk_test, (
+        f"the SDK's m2 branch is no longer guarded by the extraction lane "
+        f"variable (#10983): {sdk_test!r}")
+    assert any(isinstance(op, ast.Eq) for op in sdk_branch.test.ops), (
+        f"the SDK's m2 branch now tests {sdk_test!r} — an inverted comparison "
+        f"moves every session to the other extractor while the log still "
+        f"declares the v2 lane (#10983)")
+    assert any(isinstance(c, ast.Constant) and c.value == "m2"
+               for c in sdk_branch.test.comparators), (
+        f"the SDK's m2 branch no longer compares against the literal 'm2' "
+        f"(#10983): {sdk_test!r}")
+    # ⛔ The FALL-THROUGH arm too. Pinning only the opt-in arm leaves the arm the
+    # acceptance ACTUALLY takes unpinned: MEASURED — adding a third `elif` off
+    # this same chain calling a behaviourally-identical variant left every door
+    # test green, and the negative control cannot see it either (the census is
+    # identical). The door is the pair.
+    fall_through = sdk_branch.orelse
+    assert len(fall_through) == 1, (
+        "the SDK's lane chain now has more than one fall-through statement "
+        f"({[ast.unparse(s) for s in fall_through]}) — a second route off the "
+        "door would run a capture the log still declares as v2 (#10983)")
+    assert not any(isinstance(s, ast.If) for s in fall_through), (
+        "the SDK's lane chain grew ANOTHER `elif` — a third arm is a second "
+        "door; the acceptance pins exactly two lanes (#10983)")
+    fall_calls = [c for s in fall_through for c in ast.walk(s)
+                  if isinstance(c, ast.Call)]
+    assert any(ast.unparse(c.func).endswith("self._extract_session_v2")
+               for c in fall_calls), (
+        "the SDK's non-m2 arm no longer calls self._extract_session_v2 — the "
+        "capture would run some other path while the door's record still "
+        f"declares v2 (#10983): {[ast.unparse(c.func) for c in fall_calls]}")
     hosted_body = _resolve(HOSTED, "_capture_lane")
     assert re.search(r'os\.environ\.get\("TORTOISE_SESSION_EXTRACTOR"\)', hosted_body)
 
@@ -712,12 +800,20 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
     #: pinning them would pin the target rather than the seam.
     acknowledged_inputs = {"TORTOISE_DB_URI", "TORTOISE_API_URL"}
 
-    src = EXTRACTOR.read_text(encoding="utf-8")
-    read = set(re.findall(r'os\.environ\.get\(\s*"([A-Z_0-9]+)"', src))
-    read |= set(re.findall(r'env_flag\(\s*"([A-Z_0-9]+)"', src))
+    #: The MEASUREMENT modules the path renders with. `referentiality.py` is
+    #: here because `extractor_v2` reaches it one call down
+    #: (`_referentiality.enabled()` on the S2 prompt/mention path), so a
+    #: derivation over `extractor_v2.py` ALONE cannot see
+    #: `TORTOISE_REFERENTIALITY` — which is read on every v2 capture and was in
+    #: no ledger, no pin and no input list (#10983 review, cycle 5).
+    path_modules = (EXTRACTOR, REFERENTIALITY)
+
+    read: set[str] = set()
+    for module in path_modules:
+        read |= _env_reads(module)
     assert read, (
-        "no TORTOISE_* reads resolved from extractor_v2.py — the derivation "
-        "itself is broken, so this pin would pass over anything")
+        "no TORTOISE_* reads resolved from the capture path's modules — the "
+        "derivation itself is broken, so this pin would pass over anything")
 
     probe = _load_probe()
     accounted = ({env for env, _w, _d, _s in probe.SEAM_LEDGER}
@@ -733,10 +829,19 @@ def test_every_env_var_the_capture_path_reads_is_accounted_for():
         f"says is pinned (#10983 reviews)")
     # And the reverse: a pinned switch nothing on the path reads is a
     # declaration, not a control.
-    path_src = src + _source(SDK) + _source(HOSTED)
+    # ⛔ STRUCTURAL, not `env not in "".join(sources)`. A substring test over the
+    # whole source is satisfied by a LONGER name that begins with the pinned one
+    # and by prose: `TORTOISE_LABEL_ORDER` ⊂ `TORTOISE_LABEL_ORDER_SEED` and
+    # `TORTOISE_EXTRACTOR` ⊂ `TORTOISE_EXTRACTOR_PROMPT`/`_MAX_TOKENS`/
+    # `_ESCALATION_TOKENS`, so deleting the real `TORTOISE_LABEL_ORDER` read (and
+    # both real `TORTOISE_EXTRACTOR` reads) left this assertion green — measured
+    # in the #10983 review, cycle 5. Each pin must be a RESOLVED READ somewhere on
+    # the path; the probe is included because it is the code that pops and
+    # re-reads them.
+    read_anywhere = read | _env_reads(SDK) | _env_reads(HOSTED) | _env_reads(PROBE)
     dead = sorted(env for env in (set(probe.DOOR_PINNED_OFF)
                                   | {e for e, _v in probe.DOOR_PINNED_ON})
-                  if env not in path_src)
+                  if env not in read_anywhere)
     assert not dead, (
         f"{dead} are pinned but read nowhere on the capture path — a pin that "
         f"cannot matter is the declaration this module refuses elsewhere")

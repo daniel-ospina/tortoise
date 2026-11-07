@@ -346,16 +346,25 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # what the run MEASURES through it, is pinned here and READ BACK like every other
 # switch (the ``arm:`` rule, applied to the door).
 #
-# ⛔ The set below is CLOSED, and that claim is checkable rather than rhetorical:
-# ``extractor_v2.py`` reads exactly ten environment variables, and every one is
-# accounted for — three are arm seams in ``SEAM_LEDGER`` (``TORTOISE_VET``,
-# ``TORTOISE_CLASSIFY_LATER``, ``TORTOISE_S4_DELTA``), six are pinned here, and
-# the last two are INPUTS rather than settings (``TORTOISE_DB_URI`` the graph it
-# writes, ``TORTOISE_API_URL`` a backend label), which the acceptance requires
-# before it writes anything. ``sdk.capture_session``'s path adds the lane, the
-# commit dispatch, the model selector and the offline mock, all pinned here.
-# ``grep -o 'os\.environ\.get("[A-Z_0-9]*"' tortoise/extractor_v2.py`` re-derives
-# the list if the module grows one.
+# ⛔ The set below is CLOSED over the MEASUREMENT modules the path renders with —
+# ``extractor_v2.py`` and ``referentiality.py`` (reached one call down, from the
+# S2 prompt/mention path) — and that claim is checkable rather than rhetorical:
+# every ``TORTOISE_*`` those two modules read is accounted for, either as an arm
+# seam in ``SEAM_LEDGER`` (``TORTOISE_VET``, ``TORTOISE_CLASSIFY_LATER``,
+# ``TORTOISE_S4_DELTA``), or as a pin below, or as an INPUT rather than a setting
+# (``TORTOISE_DB_URI`` the graph it writes, ``TORTOISE_API_URL`` a backend label).
+# The count is NOT restated here on purpose: `tests/test_7949_c2_door.py` derives
+# it from the code every run and refuses an unclassified read.
+#
+# ⚠️ The claim is scoped to what it can enforce. The same call chain also reads
+# INFRASTRUCTURE variables (record DSN, packs dir, embedding gates, store
+# connection). Those are what a run needs in order to happen at all, not settings
+# that move the measured population, and the door neither pins nor partitions
+# them. An earlier revision of this comment called the whole path "closed" over
+# "exactly ten" variables and then partitioned 3 arm seams + 6 pins + 2 inputs =
+# 11; the #10983 review (cycle 5) measured both halves of that false —
+# ``TORTOISE_REFERENTIALITY`` is read on every v2 capture through
+# ``referentiality.ENV_FLAG`` and was accounted for by nothing.
 #
 # ⚠️ The set below is what the #10983 reviews widened, in TWO rounds. The first
 # revision pinned the lane and the two render switches and called that "the seam
@@ -424,6 +433,13 @@ DOOR_LANE = "v2"
 #:   door held (#10983 review round 2).
 #: * ``TORTOISE_EXTRACTOR_ESCALATION_TOKENS`` — the length-truncation RETRY budget
 #:   (``_extractor_escalation_tokens``): the same class, pinned unset.
+#: * ``TORTOISE_REFERENTIALITY`` — the S2.2 mention-selection arm
+#:   (``referentiality.enabled()``, reached through ``referentiality.ENV_FLAG``
+#:   from ``extractor_v2``'s prompt/mention path): armed, the prompt contract and
+#:   the entity mentions a run yields change without changing the lane. Found in
+#:   the #10983 review (cycle 5) as the one measurement switch the set missed,
+#:   because it is read one module away from the file the closure test derived
+#:   from.
 #: * ``TORTOISE_LABEL_ORDER_SEED`` — inert while ``TORTOISE_LABEL_ORDER`` is off,
 #:   and pinned anyway so the pair cannot be split: setting the seed without the
 #:   render switch is a no-op today, and a future edit that reads the seed
@@ -432,7 +448,8 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    "TORTOISE_LABEL_ORDER", "TORTOISE_LABEL_ORDER_SEED",
                    "TORTOISE_SESSION_LLM_MOCK", "TORTOISE_EXTRACTOR_PROMPT",
                    "TORTOISE_EXTRACT_MODEL", "TORTOISE_EXTRACTOR_MAX_TOKENS",
-                   "TORTOISE_EXTRACTOR_ESCALATION_TOKENS")
+                   "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
+                   "TORTOISE_REFERENTIALITY")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
