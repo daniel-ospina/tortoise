@@ -984,8 +984,9 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # The status is DERIVED, not read off `.code`, and it is a statement about the
     # PROCESS. `SystemExit()` and `SystemExit(None)` leave `.code` as `None` and exit
     # 0 while `None != 0` is True, so a bare `code != 0` passes them (measured).
-    # `SystemExit(False)` also exits 0 and `False != 0` happens to red it, but only
-    # because `bool` is an `int`, not because `False` is a status. CPython turns
+    # `SystemExit(False)` also exits 0, and a bare `code != 0` passes it TOO — `bool`
+    # is an `int` and `False == 0`, so `False != 0` is False (measured). `False` is not
+    # a status either, for the same reason. CPython turns
     # `.code` into a status with `0 if code is None else (code if isinstance(code, int)
     # else 1)` and the OS then keeps the low 8 bits — so `SystemExit(256)`, `(512)`,
     # `(-256)` and `(768)` leave the process at **0** while the PRE-MASK value is not
@@ -1018,8 +1019,9 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     exec(code, namespace)  # at the floor the guard must be inert
 
 
-#: The refusal code each of the three files below CHOOSES (`#4053`,
-#: `#11342`), and the verdict code it spares. `SystemExit(<message>)` exits 1 in
+#: The refusal code each of the three files below CHOOSES (`#4053`, `#11342`) —
+#: their guards landed in earlier PRs, and this file only PINS them — and the
+#: verdict code it spares, or reuses on purpose. `SystemExit(<message>)` exits 1 in
 #: CPython, so for two of these files an old interpreter was reported as the
 #: tool's own verdict — `gen_placement_table --check` prints `STALE` and returns
 #: 1, and `test_design_map_check` documents 1 as "violations" while reserving 2

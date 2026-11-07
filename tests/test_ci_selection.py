@@ -19049,9 +19049,10 @@ def test_entry_point_guard_census_runs_on_a_tools_only_change():
     # ⛔ That is the hole the guard exists to close, reopened for one file: a
     # branch rewrite that silently dropped this file's refusal would merge with
     # the census green-by-omission, because the one file whose guard it dropped
-    # selected nothing that runs the census. Every sibling in this PR
-    # (`tools/cache_evict.py`, `tools/gen_placement_table.py`) already had its
-    # row; this file landed in `2cb1f35c21` (PR #11276) without one.
+    # selected nothing that runs the census. Every sibling editor of `tools/` that
+    # already has its row — `tools/cache_evict.py`, `tools/gen_placement_table.py`
+    # — was registered the same way; this file landed in `2cb1f35c21` (PR #11276)
+    # without one.
     # Mutation check: removing the CORE_ALSO entry fails the arms below
     # (surfaces == [] and the census absent from test_files).
     r = _sel(["tools/test_design_map_check.py"])
