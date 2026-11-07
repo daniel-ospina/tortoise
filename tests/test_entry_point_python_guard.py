@@ -975,9 +975,18 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # on purpose: it stays silent about WHICH non-zero code a file chooses
     # (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare` pins the three
     # sites where that choice is a contract decision, not a style one).
-    assert refusal.value.code != 0, (
-        f"{rel}: the guard refused but exited 0 — a refusal that reports success "
-        f"is indistinguishable from the tool having run: {message!r}"
+    #
+    # The status is DERIVED, not read off `.code`: `SystemExit()`, `SystemExit(None)`
+    # and `SystemExit(False)` all exit 0 while `.code` is `None`/`None`/`False`, so
+    # `code != 0` is True for every one of them (measured). CPython's own rule is
+    # `0 if code is None else (code if isinstance(code, int) else 1)` — the string
+    # form exits 1, which is the shape two of the three pinned files must NOT use.
+    _code = refusal.value.code
+    _status = 0 if _code is None else (_code if isinstance(_code, int) else 1)
+    assert _status != 0, (
+        f"{rel}: the guard refused but the PROCESS exits {_status} — a refusal "
+        f"that reports success is indistinguishable from the tool having run: "
+        f"{message!r}"
     )
 
     monkeypatch.setattr(sys, "version_info", (*FLOOR, 0))
@@ -1000,6 +1009,27 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/gen_placement_table.py": 2,
     "tools/test_design_map_check.py": 2,
     "tools/cache_evict.py": 1,
+}
+
+#: Why THAT code is the right one for THAT file — quoted in the failure message, so
+#: a red tells a fixer which contract it is breaking. Deliberately per-entry: a
+#: single generic sentence is wrong for `cache_evict` (whose 1 IS the expected
+#: value, not the collision), and a diagnostic that argues against the correct
+#: answer sends the next fixer to undo it.
+REFUSAL_WHY: dict[str, str] = {
+    "tools/gen_placement_table.py": (
+        "1 is `--check`'s STALE (main() returns 0/1), so an environment refusal "
+        "must not wear it; 2 is spare"
+    ),
+    "tools/test_design_map_check.py": (
+        "1 is \"violations found\", so an environment refusal must not wear it; "
+        "2 is the tool's OWN `Refusal` code (main() returns 0/1/2), reused on purpose"
+    ),
+    "tools/cache_evict.py": (
+        "1 IS this tool's usage code (CACHE_EVICTION_EXIT_USAGE) — its verdicts are "
+        "2/3/4 — so the `raise SystemExit(<message>)` form is CORRECT here and must "
+        "not be normalised to 2"
+    ),
 }
 
 #: Run a tool as a script under a faked pre-3.12 interpreter. `version_info` is
@@ -1032,8 +1062,7 @@ def test_the_refusal_exit_code_is_the_one_the_tool_can_spare(rel):
     )
     assert probe.returncode == expected, (
         f"{rel}: an old interpreter must exit {expected}, got {probe.returncode} "
-        f"(stderr={probe.stderr!r}) — 1 is this tool's own VERDICT code (STALE / "
-        f"violations), so an environment refusal must not wear it"
+        f"(stderr={probe.stderr!r}) — {REFUSAL_WHY[rel]}"
     )
     assert ">= 3.12" in probe.stderr and rel in probe.stderr, (
         f"{rel}: the refusal must stay attributable on stderr: {probe.stderr!r}"
