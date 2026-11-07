@@ -32,6 +32,7 @@ and that no ``${{ secrets.X }}`` remains in any step's run text.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import subprocess
@@ -44,7 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
 
-_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "deploy-hosted.yml"
+ROOT = Path(__file__).resolve().parent.parent
+_WORKFLOW = ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 
 # Anchors inside the workflow (the #1197 blocks). Slicing between markers keeps
 # the scan scoped: RESEND_API_KEY etc. live in other blocks and must not leak in.
@@ -5348,4 +5350,339 @@ def test_any_workflow_line_citation_here_resolves_to_a_real_line_and_the_test_jo
         "the false-RED bound `test_the_census_git_guard_fails_closed_and_never_reds_a_shallow"
         "_checkout` guards against no longer exists, while the guard would keep passing "
         "(#11064 review P2):\n  " + "\n  ".join(ln for ln in step if "fetch-depth" in ln)
+    )
+
+
+# ── #11122 — the mitigation ledger is honoured at SYNC time ───────────────────
+#
+# The ledger (`.github/scripts/fly-secret-mitigations.txt`) records secrets an
+# operator removed ON PURPOSE. Two deploys put SENTRY_DSN back on 2026-11-05/06,
+# on builds that did not contain the fix, because the sync step asserts a desired
+# state and cannot tell "unconfigured" from "deliberately removed".
+#
+# THESE TESTS PIN THE WORKFLOW HALF ONLY. The gate's half (it proves the filter
+# actually suppressed the name, refuses an expired entry, and refuses a name the
+# manifest does not declare) is in `tests/test_fly_secret_drift.py`
+# (`TestTheMitigationLedger`). Both halves are needed: a filter without the gate's
+# reverse check can rot silently, and a gate without the filter only reports the
+# exception (the measured Argo CD trap — `ignoreDifferences` quiets comparison
+# while the sync still applies the desired value).
+
+_LEDGER_PATH = ".github/scripts/fly-secret-mitigations.txt"
+#: Builtins only. The provenance gate classifies the payload by EXECUTING it with
+#: a PATH that holds only fly/flyctl stubs, where every forkable utility
+#: (`grep`, `awk`, `sed`, `tr`, `jq`, `python`) is absent — one would abort the
+#: classification with `command not found`, which the gate correctly reports as
+#: exit 2, i.e. a blocked deploy on every run.
+_FORKABLE_IN_LEDGER_BLOCK = (
+    "grep", "egrep", "awk", "sed", "tr", "cut", "jq", "sort", "uniq", "xargs",
+    "python", "python3", "cat", "wc",
+)
+
+
+def _ledger_block(run: str) -> str:
+    """The ledger machinery, both regions, in the order the deploy runs them.
+
+    Two regions by design: an ENVIRONMENT block before the payload is composed (it
+    blanks each ledgered name so derived values observe the absence) and a PAYLOAD
+    block after it (the belt that removes the name from ARGS when a default branch
+    re-adds it). Joining them is the whole mechanism; either alone is half of it.
+    """
+    env_start = run.index("# ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE ENVIRONMENT")
+    env_end = run.index("# ⛔ #11122 — END OF THE ENVIRONMENT BLOCK")
+    tail_start = run.index("# ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE PAYLOAD")
+    tail_end = run.index('flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq')
+    assert env_start < env_end < tail_start < tail_end, (
+        "marker drift: the ledger regions moved, or the environment block now runs "
+        "after the payload composition (which would restore the derived-value "
+        "inconsistency the ordering exists to prevent)"
+    )
+    return run[env_start:env_end] + run[tail_start:tail_end]
+
+
+def test_the_sync_step_honours_the_mitigation_ledger():
+    """The exception must be enforced where the WRITE happens, not where it is reported.
+
+    A gate that merely warns is the measured false exception: the sync applies the
+    declared value anyway and the exception exists only in the report.
+    """
+    run = _steps()[_SET_STEP]["run"]
+    block = _ledger_block(run)
+
+    # (1) it reads the ledger the manifest lives beside (#11122's file)
+    assert _LEDGER_PATH in block, (
+        "the secrets-set step does not read the mitigation ledger — a ledgered "
+        "secret would be re-staged on the next deploy"
+    )
+    assert "FLY_MITIGATION_LEDGER" in block, (
+        "the ledger path must stay overridable (the gate's stub harness seeds it "
+        "so the payload it classifies is filtered by the same file)"
+    )
+
+    # (2) it drops ledgered names from the argv
+    assert 'case "$MITIGATED" in' in block and 'continue' in block, (
+        "no filtering `case` over the ledger name set — the ledger is read but "
+        "never applied"
+    )
+    # ⛔ The DELIMITERS are the discrimination feature, not decoration (#11332
+    # review, P2). `MITIGATED` is a SPACE-DELIMITED accumulator, so the pattern
+    # must anchor on the leading AND trailing space: the `case` matches by the
+    # ARG's name, so without the delimiters an ENTRY for the LONGER name also
+    # matches the SHORTER arg. This payload really carries `TORTOISE_BACKUP_KEY`
+    # next to `TORTOISE_BACKUP_KEY_PREVIOUS` (deploy-hosted.yml:1214 / :1219, pinned
+    # by `test_every_citation_of_the_backup_key_pair_resolves`), and
+    # `TORTOISE_BACKUP_KEY_PREVIOUS` is the entry an operator is most likely to
+    # write after a rotation — so the LIVE key would silently stop syncing on every
+    # deploy, with no gate reporting it (rotation breaks, #2318). Executed coverage
+    # for this lives in
+    # `tests/test_fly_secret_drift.py::test_a_ledgered_name_does_not_suppress_a_SHORTER_name_it_extends`;
+    # this pin is the static half, so a weakening is visible in the diff as well.
+    assert '*" $ARG_NAME "*' in block, (
+        "the ledger match is not delimited on BOTH sides — `*\"$ARG_NAME\"*` makes "
+        "a ledger entry for `TORTOISE_BACKUP_KEY_PREVIOUS` also suppress the "
+        "SHORTER `TORTOISE_BACKUP_KEY` (the case matches by the ARG's name), so "
+        "the LIVE backup key silently stops syncing and the exception becomes "
+        "wider than the record it came from"
+    )
+    assert 'ARGS=("${STAGED_ARGS[@]}")' in block, (
+        "the filtered array must be assigned back to ARGS — otherwise the filter "
+        "computes a list and `flyctl` still receives the unfiltered one"
+    )
+
+    # (3) it does so BEFORE the call, and the call is unchanged (#4334)
+    assert run.index('ARGS=("${STAGED_ARGS[@]}")') < run.index(
+        'flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq'
+    )
+    assert 'flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq' in run
+
+    # (4) builtins only — see _FORKABLE_IN_LEDGER_BLOCK
+    code = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    for binary in _FORKABLE_IN_LEDGER_BLOCK:
+        assert not re.search(rf"(^|[|;&(\s]){binary}(\s|$)", code), (
+            f"`{binary}` appears in the ledger block — the provenance gate runs "
+            "this payload on a stub PATH holding only fly/flyctl, so a fork fails "
+            "the classification (`command not found` → exit 2 → every deploy "
+            "blocked). Use shell builtins: read/case/parameter expansion/arrays."
+        )
+
+
+def test_the_ledger_fd_is_fixed_and_avoids_the_stub_channel():
+    """The ledger fd is a FIXED number, and it is not the stub channel's (#11332 review).
+
+    Two independent constraints, each with its own failure mode:
+
+    * `exec {LEDGER_FD}<` — bash's auto-allocated form — is a **bash >= 4.1**
+      feature, and it is the ONLY thing in this block that needs anything newer
+      than bash 3.2. Stock macOS `/bin/bash` is 3.2 and the provenance gate
+      resolves its interpreter with `shutil.which("bash")`, so on a developer box
+      every classification dies at `exec: {LEDGER_FD}: not found` (rc 127) and
+      surfaces as an unrelated "unreadable ledger" fault over tests that never
+      touch the ledger. The bash manual also warns that the dynamic form
+      allocates fd >= 10, and that fds greater than 9 "should be used with care, as
+      they may conflict with file descriptors the shell uses internally".
+    * fd **3** is the harness's own write channel (`exec 3>argv.records`, opened by
+      `_capture_payload`'s wrapper around this payload). Reusing it silently
+      re-points that channel, so the classification loses the argv it reads.
+
+    Non-vacuous both ways: reverting to `exec {LEDGER_FD}<` reds the first
+    assertion, and moving the fd to 3 reds the second.
+    """
+    run = _steps()[_SET_STEP]["run"]
+    block = _ledger_block(run)
+    code = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert not re.search(r"exec\s+\{[A-Za-z_]\w*\}<", code), (
+        "the ledger redirect uses bash's `exec {var}<` auto-allocation (bash >= 4.1). "
+        "The gate resolves its shell with `shutil.which(\"bash\")`, so on stock "
+        "macOS (bash 3.2) every classification exits 127 and reports an unrelated "
+        "unreadable-ledger fault. Open a fixed fd instead."
+    )
+    opened = re.findall(r'exec\s+(\d+)<\s*"\$MITIGATION_LEDGER"', code)
+    assert opened == ["4"], (
+        "the ledger must be opened on the fixed fd 4 — NOT fd 3, which "
+        "`_capture_payload` has already opened as the stub binaries' write channel "
+        "(`exec 3>argv.records`), so reusing it loses the argv the gate reads: "
+        f"opened fd(s) = {opened or 'none'}"
+    )
+    assert "done <&4" in code and "exec 4<&-" in code, (
+        "the read loop must consume fd 4 and the shell must close it afterwards — "
+        "otherwise the descriptor leaks for the rest of the step"
+    )
+
+
+def test_the_ledger_mandatory_set_matches_the_verify_gate():
+    """`MANDATORY_FLY_SECRETS` is a SECOND owner of the hard-fail set — pin it.
+
+    The checker refuses a ledger entry naming a secret the deploy cannot run
+    without (removing it is an outage, not a mitigation). That set lives in the
+    workflow's `Verify secrets exist` gate, and a hardcoded copy rots the moment
+    the gate grows a name — so this test derives the set from the workflow's own
+    `exit 1` branches and requires EQUALITY.
+    """
+    run = _steps()[_VERIFY_STEP]["run"]
+    hard_fail: set[str] = set()
+    for block in re.finditer(r"if\b(.*?)\bthen\b(.*?)\n\s*fi\b", run, re.S):
+        condition, body = block.group(1), block.group(2)
+        if "exit 1" not in body:
+            continue
+        hard_fail |= set(_SHELL_TEST.findall(condition))
+    assert hard_fail, (
+        "no `if … then … exit 1 … fi` block in the verify-secrets step — anchor "
+        "drift; the mandatory-set derivation must fail loudly, not pass vacuously"
+    )
+
+    system = importlib.util.spec_from_file_location(
+        "check_fly_secret_drift_mandatory",
+        ROOT / ".github" / "scripts" / "check-fly-secret-drift.py",
+    )
+    assert system is not None and system.loader is not None
+    module = importlib.util.module_from_spec(system)
+    system.loader.exec_module(module)
+
+    assert set(module.MANDATORY_FLY_SECRETS) == hard_fail, (
+        "the ledger's mandatory set drifted from the deploy's hard-fail list: "
+        f"checker-only={sorted(set(module.MANDATORY_FLY_SECRETS) - hard_fail)}, "
+        f"workflow-only={sorted(hard_fail - set(module.MANDATORY_FLY_SECRETS))}. "
+        "A ledger entry for a mandatory name must be REFUSED (removing it is an "
+        "outage); a name missing here could be 'mitigated' into a dead API."
+    )
+
+
+def test_the_shipped_ledger_is_a_tracked_contract_file():
+    """The ledger is not optional: the gate exits 2 (never bypassable) without it."""
+    path = ROOT / _LEDGER_PATH
+    assert path.is_file(), (
+        f"{_LEDGER_PATH} is missing — check-fly-secret-drift.py reads it and treats "
+        "its absence as unreadable state (exit 2), so every deploy would be blocked"
+    )
+    text = path.read_text()
+    assert "issue #11122" in text.lower() or "#11122" in text, (
+        "the ledger must name the issue whose contract it states — a silent file "
+        "cannot be reviewed by the operator who needs to add an entry mid-incident"
+    )
+
+
+def _citation_window(text: str, match: re.Match[str], span: int = 400) -> str:
+    """The text AROUND a citation, where the sentence naming what it pins lives."""
+    return text[max(0, match.start() - span) : match.end() + span]
+
+
+def _test_function_names_in_the_tracked_tree() -> set[str]:
+    """Every `def test_…` name in the tracked tree, in ONE index read.
+
+    `git grep` reads the repo index, so resolving the cited names costs one bounded
+    process instead of a glob-and-read over ~1.4k test modules. A git that cannot run
+    is a HARD FAILURE here, never a `skip`: an empty set would resolve every citation
+    as dangling (a false red), and a skip would pass the guard silently — both are a
+    verdict about a datum that was never read.
+    """
+    proc = _census_git(
+        ROOT, "grep", "-h", "-o", "-E", r"def (test_[A-Za-z0-9_]+)", "--", "tests/"
+    )
+    assert proc.returncode == 0, (
+        "`git grep` over the tests tree failed, so no test-name citation in these "
+        f"comments can be resolved at all (rc={proc.returncode}): "
+        f"{proc.stderr.strip()[:300]}"
+    )
+    names = set(re.findall(r"def (test_[A-Za-z0-9_]+)", proc.stdout))
+    assert names, (
+        "`git grep` returned no `def test_…` for the tracked tests tree — every cited "
+        "name would then read as dangling, which is this guard's empty-set fail-open"
+    )
+    return names
+
+
+def test_every_citation_of_the_backup_key_pair_resolves():
+    """EVERY citation of the pair, not just the pin's own numbers (#11332 round 5, P2).
+
+    Three rounds in a row a `deploy-hosted.yml:<n>` citation in these comments went
+    stale as the payload above it grew. A pin that iterates a hardcoded tuple proves
+    only that the tuple matches — it cannot see a citation in some OTHER comment, and
+    exactly that survived one round of "fixed". So this walks every citation in BOTH
+    test files whose surrounding text names a backup-key variable, and requires the
+    cited line to actually be the assignment of a backup-key name.
+
+    (#11332 review r6, P3) The paragraph that makes the delimiter pattern look pinned
+    cited its companion by **test name**, and this walk was blind to that form: it sat
+    in a backup-key window, so it counted as a citation of the pair while the
+    line-number regex walked past it and the name resolved to nothing. A pointer to a
+    test nobody wrote reads exactly like a pin. So the walk resolves test-name
+    citations too, in the same windows and by the same rule: if it is cited as the
+    thing that pins the pair, it has to exist.
+    """
+    # ⛔ DERIVED, not a hardcoded tuple (#11332 review r8). The map was
+    # `{1197: …, 1202: …}` and it was a SECOND owner of the same two numbers: any
+    # payload block above the pair shifts both lines, the map then disagrees with the
+    # workflow it describes, and the failure it reports is misattributed — the
+    # citation is blamed with a `pair is at [1197, 1202]` that is itself stale
+    # (measured: the ledger block grew 15 lines and this test blamed a CORRECT
+    # citation). Deriving makes the workflow the only owner, and the assert below is
+    # what keeps the derive from passing vacuously.
+    pair_names = ("TORTOISE_BACKUP_KEY", "TORTOISE_BACKUP_KEY_PREVIOUS")
+    lines = _WORKFLOW.read_text().splitlines()
+    expected: dict[int, str] = {}
+    for index, line in enumerate(lines, start=1):
+        for name in pair_names:
+            if f"ARGS+=({name}=" in line:
+                expected[index] = name
+    assert sorted(expected.values()) == sorted(pair_names), (
+        "the backup-key pair is not where the derivation looks for it — expected one "
+        f"`ARGS+=(<name>=` line per name {list(pair_names)}, found {expected}. A "
+        "derivation that finds nothing resolves every citation as wrong."
+    )
+    pair = tuple(expected.values())
+    citation = re.compile(r"deploy-hosted\.yml:(\d+)(?:\s*/\s*:(\d+))?")
+    name_citation = re.compile(r"`(?:[\w/]+\.py::)?(test_[A-Za-z0-9_]+)`")
+    defined = _test_function_names_in_the_tracked_tree()
+    seen: set[int] = set()
+    named: dict[str, str] = {}
+    for path in (
+        ROOT / "tests" / "test_deploy_workflow.py",
+        ROOT / "tests" / "test_fly_secret_drift.py",
+    ):
+        text = path.read_text()
+
+        for match in citation.finditer(text):
+            if not any(name in _citation_window(text, match) for name in pair):
+                continue
+            for number in (int(n) for n in match.groups() if n):
+                seen.add(number)
+                assert 0 < number <= len(lines), (
+                    f"{path.name} cites deploy-hosted.yml:{number}, past the end of "
+                    f"the workflow ({len(lines)} lines)"
+                )
+                assert number in expected, (
+                    f"{path.name} cites deploy-hosted.yml:{number} for a backup-key "
+                    f"variable, but that line is {lines[number - 1].strip()!r} — the "
+                    f"pair is at {sorted(expected)}"
+                )
+                assert f"ARGS+=({expected[number]}=" in lines[number - 1], (
+                    f"{path.name} cites deploy-hosted.yml:{number} for "
+                    f"{expected[number]}, but that line is {lines[number - 1].strip()!r}"
+                )
+        for match in name_citation.finditer(text):
+            if not any(name in _citation_window(text, match) for name in pair):
+                continue
+            where = f"{path.name}:{text.count(chr(10), 0, match.start()) + 1}"
+            named[where] = match.group(1)
+
+    for where, name in sorted(named.items()):
+        assert name in defined, (
+            f"{where} cites `{name}` as the companion that pins the backup-key pair, "
+            "but no `def "
+            f"{name}` exists anywhere in the tracked tests tree — a citation of a "
+            "test nobody wrote reads as a pin and proves nothing (#11332 review r6, "
+            "P3). Point it at the test that does the pinning, or drop the claim."
+        )
+    assert seen == set(expected), (
+        f"the citation walk found {sorted(seen)} — it must see both halves of the "
+        "pair, or this guard passes vacuously"
+    )
+    assert named, (
+        "the test-name walk resolved no citation at all — the delimiter paragraph "
+        "cites its companion pin by name, so an empty walk means this leg is not "
+        "looking where the citations are"
     )

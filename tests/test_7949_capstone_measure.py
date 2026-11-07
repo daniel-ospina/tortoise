@@ -5053,6 +5053,48 @@ _PREREG_STEP_CITE_DOCS = (
 )
 
 
+def _without_change_history(text: str) -> str:
+    """The document minus every `### 10.x` change-control entry.
+
+    §11's cites are LIVE claims about the tree at this head. A §10.x entry records a
+    value the document held in the PAST — its "New value" line quotes the number a
+    re-derivation moved TO. A whole-document ``in text`` check cannot tell the two
+    apart, so a §10.x entry naming the current number satisfies the pin while the
+    live sentence still cites the stale one: the gate is green over exactly the
+    claim it exists to guard. Measured at `6c7a15f2a5` — reverting BOTH live §11
+    sentences (the `if items:` pair at `PRE-REGISTRATION.md:1145` AND the fail-open
+    pair at `:1189`) to the numbers §10.9's "Original value" records left this leg
+    `1 passed`, because §10.9's "New value" names all four current numbers.
+
+    Stripping the history is the general fix: it binds each live claim to live
+    prose by construction, instead of to a hand-picked carrier line. It is also the
+    shape `#11262`'s earlier round landed and the rebase onto `main` dropped, since
+    `main` re-derived the CITES but kept the whole-document check.
+    """
+    out: list[str] = []
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        if re.match(r"^### 10\.", line):
+            skipping = True
+            continue
+        if skipping and re.match(r"^#{1,3} ", line):
+            skipping = False        # the next `## 11.` (or any outer heading)
+        if not skipping:
+            out.append(line)
+    return "".join(out)
+
+
+def _live_blocks(text: str) -> list[str]:
+    """Blank-line-delimited blocks — markdown paragraphs and tables.
+
+    A carrier is scoped to its BLOCK rather than its line so that re-wrapping a
+    sentence cannot red this pin. `PRE-REGISTRATION.md` wraps at ~100 columns, so a
+    line-scoped check would make correctness a property of where a sentence happens
+    to break.
+    """
+    return re.split(r"\n[ \t]*\n", text)
+
+
 def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
     """§11's five code sites are DERIVED from the tree, never typed twice.
 
@@ -5073,6 +5115,34 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
     `:9209`/`:9341` while the tree carried `:9767`/`:9767-9789`/`:10310`/`:10442`,
     and at `c3612c299` it still cited `:9223`/`:9353` for the fail-open `except`
     arms the tree carries at `:10323`/`:10453` — this leg reds on every one of them.
+
+    ⛔ HISTORY IS STRIPPED, AND THE GATES ARE BOUND PER CARRIER. Both bypasses were
+    live at `6c7a15f2a5` and both were measured, and both are the same shape — a
+    whole-document check satisfied by a mention that is not the claim:
+
+    1. §10.9's "New value" quotes all four current numbers, so reverting BOTH live
+       §11 sentences stayed GREEN (`1 passed`, measured). `_without_change_history`
+       fixes it.
+    2. Even with history stripped, `` `if items:` `` has TWO live carriers — the §9
+       provenance row (`:757`) and §11.1's prose sentence (`:1145`) — so reverting
+       the prose alone still left the row satisfying the pin. Every live carrier is
+       now bound to both gates, which is why `_live_blocks` exists.
+
+       The section labels here were wrong in an earlier round of this PR and are
+       pinned to the document's own headings rather than to a memory of it: `## 9.
+       Provenance of every number in this file` opens at `:744` (so the table row at
+       `:757` is §9, not §7 — §7 ends at `:703`, where `## 8.` opens), and `### 11.1`
+       opens at `:1141` (so `:1145` is §11.1, not §11.3 — §11.3 opens at `:1173`). The
+       other §11.3 reference in this docstring, the fail-open pair at `:1189-1195`,
+       IS §11.3 and is unchanged. A wrong label is not cosmetic here: the whole point
+       of this leg is that a reader can go and LOOK at the carrier.
+
+    The fail-open pair needs no per-carrier loop, and that is measured rather than
+    assumed: after the strip, `:12921` and `:13068` each occur in exactly ONE live
+    block (`:1189-1195`, the §11.3 sentence that pairs them), so the whole-document
+    check below binds to that sentence. (`classify(S2) failed` also appears in the
+    frozen YAML corpus pin at `:604-699`, which is why the carriers are located by
+    the `` `if items:` `` phrase and not by the arms' own marker text.)
     """
     collector = _extractor_lineno("def _collect_classify_items(")
     # The collector's EXTENT is read, not assumed: the cited end is a claim too, and
@@ -5092,7 +5162,10 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         _extractor_fail_open_except('errors.append(f"classify(union) failed'),
     )
     for doc_name, path in _PREREG_STEP_CITE_DOCS:
-        text = path.read_text(encoding="utf-8")
+        # §10.x change-control entries quote numbers the document no longer claims,
+        # so they are not live prose and cannot satisfy a live cite. See
+        # `_without_change_history` for the measurement that made this load-bearing.
+        text = _without_change_history(path.read_text(encoding="utf-8"))
         assert f"tortoise/extractor_v2.py:{collector}" in text, (
             f"{doc_name} does not cite the collector at "
             f"tortoise/extractor_v2.py:{collector} — §11's argument rests on "
@@ -5107,11 +5180,26 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             f"tortoise/extractor_v2.py:{collector}-{end} (the `def` through "
             f"`return items`) — a range that runs past the body names the next "
             "function's lines")
-        for gate in gates:
-            assert f"`{gate}`" in text, (
-                f"{doc_name} does not cite the `if items:` gate at {gate} — the "
-                f"classify passes are gated on the collector's list being "
-                f"non-empty, which is the whole of S2.3's conditionality")
+        # ⛔ EVERY LIVE CARRIER MUST NAME BOTH GATES, not just one of them anywhere
+        # in the file. With two live carriers (the §9 provenance row and §11.1's prose)
+        # a single whole-document check is satisfied by whichever one is correct,
+        # so a stale prose cite rode the row's numbers (measured: reverting the
+        # prose alone left this leg `1 passed` at `6c7a15f2a5`).
+        gate_blocks = [b for b in _live_blocks(text) if "`if items:`" in b]
+        assert gate_blocks, (
+            f"{doc_name} no longer cites `if items:` anywhere — S2.3's "
+            "conditionality is stated by that phrase, so this leg cannot find what "
+            "it guards. Re-word the pin if the prose legitimately moved off it")
+        for block in gate_blocks:
+            for gate in gates:
+                assert f"`{gate}`" in block, (
+                    f"{doc_name}: the live `if items:` passage "
+                    f"{block.strip()[:90]!r} does not cite the gate at {gate} — "
+                    f"every live carrier of that phrase must name BOTH gates "
+                    f"({gates[0]}, {gates[1]}), because the classify passes are "
+                    f"gated on the collector's list being non-empty, which is the "
+                    f"whole of S2.3's conditionality. A §10.x history entry does "
+                    f"NOT satisfy this: history is stripped before the check")
         for fail_open in fail_opens:
             assert f"`{fail_open}`" in text, (
                 f"{doc_name} does not cite the fail-open `except` at {fail_open} — "
@@ -10285,6 +10373,49 @@ def test_the_re_run_recipe_states_the_arm_the_probe_actually_sets():
         "the README must STATE that capstone_measure pins the two OFF switches "
         "to an explicit \"0\" — a corrected recipe whose reason is not written "
         "down is the one the next lane reverts")
+
+
+#: ⛔ THE FOURTH COPY (#11298 review, P2). The guard above scans the README; the
+#: arm definition a re-run operator reads FIRST is the PROBE'S OWN module
+#: docstring, and nothing read it. So the stale sentence survived the `#10996`
+#: flip in the file that defines the arm: it still said ``TORTOISE_VALUE_GATE``
+#: was "pinned UNSET" while ``measured_arm()`` sets an explicit ``"0"`` through
+#: ``ARM_OFF``. A phrase list over one document pins that DOCUMENT, not the class.
+_PROBE_DOCSTRING_STALE_ARM = (
+    "pinned UNSET",
+    "pinned unset",
+    "pinned to UNSET",
+    "pinned to an unset",
+)
+
+
+def test_the_probe_docstring_states_the_arm_the_probe_actually_sets():
+    """The probe's own prose must not teach the pre-`#10996` arm.
+
+    Red-first by construction: at the reviewed head the docstring read
+    "``TORTOISE_VALUE_GATE`` is pinned UNSET", so this test FAILED before the fix
+    and passes only once the prose states the explicit ``"0"`` pin AND names
+    ``ARM_OFF`` — the constant that holds the truth — so the next lane that pops
+    it reds here instead of in a re-take.
+    """
+    doc = ast.get_docstring(ast.parse(PROBE.read_text())) or ""
+    flat = " ".join(doc.split())
+    assert flat, (
+        f"no module docstring resolved from {PROBE.name} — the derivation is "
+        "broken, so this pin would pass over anything")
+
+    for phrase in _PROBE_DOCSTRING_STALE_ARM:
+        assert phrase not in flat, (
+            f"the probe's module docstring still says the OFF switches are "
+            f"{phrase!r} — since #10996 an ABSENT `TORTOISE_VALUE_GATE` IS the "
+            "ON arm, so the doc describes the pre-fix behaviour while "
+            "`measured_arm()` sets an explicit \"0\". A re-run operator reads "
+            "THIS docstring first (the README guard above cannot see it)")
+
+    assert 'pinned to an' in flat and '``"0"``' in flat and "ARM_OFF" in flat, (
+        "the probe docstring must state the pin the code actually sets — an "
+        "explicit ``\"0\"`` performed by ``ARM_OFF`` — or a reader cannot tell "
+        "the current arm from the pre-#10996 one")
 
 
 def test_the_control_arm_definition_names_the_frozen_records_divergence():

@@ -1,0 +1,18 @@
+{
+  "blake2b_digest": {
+    "max_ms": 1.4995,
+    "mean_ms": 0.592,
+    "median_ms": 0.5668,
+    "min_ms": 0.5435
+  },
+  "fingerprint_pass": {
+    "max_ms": 0.5616,
+    "mean_ms": 0.1687,
+    "median_ms": 0.164,
+    "min_ms": 0.1602
+  },
+  "migrations": 15,
+  "note": "wall-clock on the box this was taken on; the RATIO is the transferable figure, the absolute values are not",
+  "reps": 200,
+  "total_bytes": 129355
+}

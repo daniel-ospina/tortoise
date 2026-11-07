@@ -278,7 +278,7 @@ def _stamp_quote(point: dict) -> str:
     """The ``quote`` production COMMITS for this point — ``_stamp_inputs``' quote half.
 
     The dedupe half reads quotes too, and ``retrieval._same_fact`` compares the
-    COMMITTED hit (``retrieval.py:3107``: ``qa = str(a.get("quote") or "")``),
+    COMMITTED hit (``retrieval.py:3292``: ``qa = str(a.get("quote") or "")``),
     i.e. after ``extractor_v2`` rewrote the field to the ``_MAX_QUOTE`` span at
     the point's own commit (``:9823``). Reading the raw
     receipt string here would measure a population no package holds — the same
@@ -778,7 +778,7 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
     ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
     answer before the point is committed (``extractor_v2.py:10038`` → ``:10045``),
     and ``_same_fact`` groups on the committed field
-    (``retrieval.py:3103-3105`` — the ``_pkg_turn_key`` pair and its equality
+    (``retrieval.py:3288-3290`` — the ``_pkg_turn_key`` pair and its equality
     test). Same defect class as §2.1's, one leg over —
     grouping by the advisory index counts pairs production never forms."""
     warnings: list[str] = []
@@ -798,7 +798,7 @@ def _same_turn_route(acc: dict, a: dict, b: dict, edus: list[dict]) -> None:
 
     ⛔ Both quotes are the ones production COMMITS (``_stamp_quote``), not the
     receipt's raw strings: ``_same_fact`` compares the committed hit
-    (``retrieval.py:3107-3108``), which the write path already rewrote to
+    (``retrieval.py:3292-3293``), which the write path already rewrote to
     ``[:_MAX_QUOTE]``. On the sealed corpus the published counts are
     clamp-invariant (3 points carry a longer quote, none of them moves a
     counter), so a corpus-shaped pin cannot tell the two readings apart — this
@@ -1219,10 +1219,10 @@ _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
          "the `span_start` field"),
     ("tortoise/commit_schema.py", 705):
         ("return self", "the end of `_span_is_an_address`"),
-    ("tools/longmem_eval/retrieve.py", 939):
+    ("tools/longmem_eval/retrieve.py", 941):
         ('if p.get("span_start") is not None and p.get("span_end") is not None:',
          "the eval lane's offset annotation"),
-    ("tools/longmem_eval/retrieve.py", 941):
+    ("tools/longmem_eval/retrieve.py", 943):
         ('entry["span_end"] = p["span_end"]',
          "the annotated end offset"),
     ("tortoise/sdk.py", 38724):
@@ -1235,24 +1235,24 @@ _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
          "the ⛔ KNOWN LIMITATION comment"),
     ("tortoise/sdk.py", 38707):
         ("# or of #8658.", "the end of the ⛔ KNOWN LIMITATION comment"),
-    ("tortoise/retrieval.py", 3103):
+    ("tortoise/retrieval.py", 3288):
         ("at = _pkg_turn_key(a)",
          "the same-source-turn route's entry"),
-    ("tortoise/retrieval.py", 3105):
+    ("tortoise/retrieval.py", 3290):
         ("if not (at and at == bt):",
          "the same-turn GROUPING test `_same_fact` keys on"),
-    ("tortoise/retrieval.py", 3107):
+    ("tortoise/retrieval.py", 3292):
         ('qa = str(a.get("quote") or "")',
          "the COMMITTED quote read (`_same_fact`)"),
-    ("tortoise/retrieval.py", 3108):
+    ("tortoise/retrieval.py", 3293):
         ('qb = str(b.get("quote") or "")',
          "the COMMITTED quote read, partner half"),
-    ("tortoise/retrieval.py", 3111):
+    ("tortoise/retrieval.py", 3296):
         ("if _pkg_differ_value_critical(qa, qb):",
          "the quote-value guard"),
-    ("tortoise/retrieval.py", 3112):
+    ("tortoise/retrieval.py", 3297):
         ("return False", "the quote-value guard's refusal"),
-    ("tortoise/retrieval.py", 3113):
+    ("tortoise/retrieval.py", 3298):
         ("return _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP",
          "the same-turn overlap gate"),
 }
@@ -1264,7 +1264,7 @@ _CITE_RE = re.compile(r"([\w][\w./-]*\.py):(\d+)(?:-(\d+))?")
 def _resolve_cite_path(spelled: str) -> str | None:
     """The repo-relative path a cite spells, or None if it does not resolve.
 
-    A doc writes both `retrieval.py:3107` and `tortoise/retrieval.py:3107`; the
+    A doc writes both `retrieval.py:3292` and `tortoise/retrieval.py:3292`; the
     mapping is keyed repo-relative so the two spellings share one entry (and a
     spelling that resolves to NOTHING is itself reported, rather than silently
     filtered out of the sweep).

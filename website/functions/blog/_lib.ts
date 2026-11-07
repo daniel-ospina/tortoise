@@ -44,13 +44,27 @@ export interface Env {
 
 export const SITE_URL = "https://tortoise.premiselabs.co";
 
-// The blog's own link-preview card: 1200x630, in the asset tree, and served by
-// the functions fallback (the E2E suite asserts /blog/og-image.png is a 200).
-// It is the fallback for every blog surface that has no cover of its own — the
-// index, tag pages, and a post whose cover_image_url is NULL.
-export const DEFAULT_OG_IMAGE = `${SITE_URL}/blog/og-image.png`;
+// The link-preview card every coverless blog surface falls back to — the index,
+// tag pages, and a post whose cover_image_url is NULL. It is the SAME 1200x630
+// card the static pages use (`website/assets/og-tortoise.jpg`, an author-supplied
+// image with the wordmark and the product line on it), served from the site root,
+// so there is one card to keep and no second artwork to drift from it.
+//
+// ⛔ It replaces `/blog/og-image.png`, which was a 4.6 KB PLACEHOLDER — two
+// colours, 99.2% flat background, a bare accent rule, no wordmark and no text.
+// Dimensions are all a guard could see, so it sat there looking like a card while
+// a real link preview would have rendered an empty dark block. Deleted rather than
+// fixed: the same 1200x630 image measures 411,673 B as PNG (sips) against 94,066 B
+// as the JPEG that already exists.
+// `website/assets/` is classified `public` for the upload, and the card's own file
+// is asserted to be a non-trivial JPEG by tests/test_blog_seo_meta.mjs.
+export const DEFAULT_OG_IMAGE = `${SITE_URL}/assets/og-tortoise.jpg`;
 export const DEFAULT_OG_IMAGE_WIDTH = 1200;
 export const DEFAULT_OG_IMAGE_HEIGHT = 630;
+// The authored card is a JPEG; a post cover's format is whatever the author
+// uploaded, so `image:type` is declared for the default card only — the same rule
+// as the dimensions.
+export const DEFAULT_OG_IMAGE_TYPE = "image/jpeg";
 
 /**
  * The article author — ONE name, four places that must agree (#1383): this
@@ -1077,8 +1091,8 @@ export function headHtml(opts: {
   // ⛔ A CARD WITHOUT AN IMAGE IS NOT A CARD, and `twitter:card` below says
   // `summary_large_image` unconditionally — so every surface with no cover used
   // to advertise a large image and ship none, which renders as a bare title.
-  // The fallback is the blog's own 1200x630 card, already in the asset tree and
-  // already served (the E2E suite asserts /blog/og-image.png is a 200).
+  // The fallback is the shared 1200x630 card the static pages use
+  // (`website/assets/og-tortoise.jpg`), a static asset under `/assets/`.
   const safeImage = image && validUrl(image) ? escapeHtml(image) : DEFAULT_OG_IMAGE;
   // Dimensions are declared ONLY for the card we authored. A post cover is
   // whatever the author uploaded, and stating 1200x630 for it would be a
@@ -1086,7 +1100,7 @@ export function headHtml(opts: {
   // wrong region.
   const isDefaultCard = safeImage === DEFAULT_OG_IMAGE;
   const sizeTags = isDefaultCard
-    ? `\n<meta property="og:image:width" content="${DEFAULT_OG_IMAGE_WIDTH}">\n<meta property="og:image:height" content="${DEFAULT_OG_IMAGE_HEIGHT}">`
+    ? `\n<meta property="og:image:type" content="${DEFAULT_OG_IMAGE_TYPE}">\n<meta property="og:image:width" content="${DEFAULT_OG_IMAGE_WIDTH}">\n<meta property="og:image:height" content="${DEFAULT_OG_IMAGE_HEIGHT}">`
     : "";
   // `alt` is what a reader gets when the image is suppressed. The description
   // is the honest default: it is already the sentence this page is about.

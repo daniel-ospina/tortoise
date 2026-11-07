@@ -586,8 +586,20 @@ def open_record(record_dsn: str | None = None) -> Any:
     it is rather than an unreadable record. The connection is opened with the
     CONNECT bound the ARMING module owns
     (:data:`tortoise.record_writer.CONNECT_TIMEOUT_SECONDS`, applied inside
-    ``_default_connect``) plus a session ``statement_timeout`` set here: a served
-    read must not be able to hang a request on a wedged database.
+    ``_default_connect``) plus a ``statement_timeout`` set here: a served read
+    must not be able to hang a request on a wedged database.
+
+    ⚠️ The timeout is set **transaction-locally** (``set_config(..., true)``), not
+    with a session-level ``SET``, because ``_default_connect`` is POOLED (#9558)
+    and may hand back a connection an earlier caller returned: a session-level
+    ``SET`` would outlive this read and impose a READ-sized bound on the next
+    BORROWER — a write door's record, or a tenant's read under a different
+    timeout. Transaction-local scope is exactly the read (psycopg2's first
+    statement opens the transaction), and the pool's reset-at-reuse
+    (``record_writer._reset_parked_transaction``) then cannot leave it behind —
+    the bound dies with the transaction even though the handle outlives it. Pinned by
+    ``tests/test_9558_record_write_cost.py::test_the_read_door_bounds_its_read_transaction_locally``:
+    reverting this line reds it.
     """
     # ⚠️ The resolver is imported under a DISTINCT name: the parameter above is
     # also called `record_dsn`, and a same-named import rebinds the name so the
@@ -638,8 +650,20 @@ def open_record(record_dsn: str | None = None) -> Any:
             f"is NOT established") from e
     try:
         cur = conn.cursor()
-        cur.execute("SET statement_timeout = %s",
-                    (int(RECORD_STATEMENT_TIMEOUT_MS),))
+        # ⛔ TRANSACTION-LOCAL, because the handle is now POOLED (#9558).
+        # `_default_connect` may return a handle an earlier call returned, and a
+        # session-level `SET` would then outlive this read: the next borrower of
+        # that connection would inherit this read path's 15 s statement timeout
+        # (and, on the write door, a bound chosen for reads). `set_config(...,
+        # true)` scope it to THIS transaction — which is the whole read, since
+        # psycopg2's first statement opens one — and the pool resets that
+        # transaction at the next BORROW (`_reset_parked_transaction`), so the
+        # bound dies with it instead of following the handle to the next
+        # borrower. `SET LOCAL` would do
+        # the same; `set_config` is used because it takes a bind parameter, which
+        # `SET` does not.
+        cur.execute("SELECT set_config('statement_timeout', %s, true)",
+                    (str(int(RECORD_STATEMENT_TIMEOUT_MS)),))
         cur.close()
         return conn
     except Exception as e:
@@ -1207,7 +1231,33 @@ def parity_difference(cache_props: Mapping[str, Any],
       holding the prose and a record row rightly holding it both render as
       ``explained_missing: [...]``, because the caller supplied the arguments and
       so knows which direction it asked. The two need different repairs
-      (``#10017``'s graph-side purge vs nothing at all), and
+      (on either ANCHOR a destructive clear — a full ``record-restore``'s
+      whole-graph wipe (refused PRE-WIPE on a production server graph name,
+      #2944's L2 guard), or a graph-side ``REMOVE n.story_arc`` no instrument
+      ships today — ⚠️ and the WIPE cannot be row-scoped: ``_wipe_all_nodes`` is
+      ``MATCH (n) DETACH DELETE n``, so a graph holding ANY row whose PROSE neither
+      ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+      carries must NOT be restored at all — copy that prose out first, because the
+      wipe destroys the only copy (§17.2, `#11325`); ⚠️ a ``:Point``
+      copy has a NON-destructive one, **on the same per-row test** — only where the
+      record still HOLDS the text for that session
+      (``public.session_narrative.narrative`` — ⛔ NOT the point's own ``props``
+      tail, which the clear's OWN record write consumes: ``point`` has no
+      ``story_arc`` column, so the projection tails the key and the patch merges
+      RIGHT-HAND, ``props = props || %s::jsonb``, so a null OVERWRITES the prose);
+      where the narrative row does not carry it the
+      node's copy is the only one no SHIPPED route can put back on a production
+      graph (the record's KEYED view does not hold it), and the clear deletes it, because the
+      ``rebuild_all`` that would put it back is refused PRE-WIPE on a production
+      name:
+      ``update_point(<id>, story_arc=None)`` clears the property and keeps the
+      node (measured; ``record_reconcile``'s module docstring states the door);
+      ``#10017``'s purge clears only TURN-SHAPED legacy episodic ``:Point``
+      copies (turn shape = ``is_episodic`` + ``pointKind='event'`` +
+      ``is_operator=false`` + a ``<sid>_t<digits>`` id, per
+      ``tools/turn_parity_census.py``) — any other
+      episodic ``:Point`` refuses its sweep rather than being cleared — vs
+      nothing at all), and
       ``record_reconcile`` is where that distinction is made (``graph_only``
       versus a record-side omission), not here.
 
