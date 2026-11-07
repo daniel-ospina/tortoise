@@ -3109,14 +3109,20 @@ def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
     assert error is None, error
     # ⛔ A DECLARED BOUND is not a scan failure — the distinction is what keeps a
     # legitimate by-reference shape from reading as "the scan could not run" and
-    # getting the declaration deleted (#11337 review, P1). The real tree declares
-    # NOTHING at this head (`declared is None`, verified against the source: there
-    # is no `_safe(`-style helper call in `sdk.py`), so only the marker SPELLING is
-    # pinned here — an exact population would red on every unrelated `sdk.py`
-    # change while proving nothing extra, and would re-assert a state the
-    # instrument does not report.
-    assert declared is None or declared.startswith(
+    # getting the declaration deleted (#11337 review, P1). The real tree DOES
+    # declare one at this head (`volunteer_context` passes the leg itself as
+    # `_search_fn`), so only the marker SPELLING is pinned here — an exact
+    # population would red on every unrelated `sdk.py` change while proving
+    # nothing extra.
+    assert declared is not None and declared.startswith(
         "UNMEASURED(declared bound:"), declared
+    # ⛔ THE LEG ITSELF must be mentionable (#11389 review, P1). `direct` excludes
+    # the leg, so a walk built only on `direct` missed `volunteer_context`
+    # (`_search_fn=self.tortoise_fts_query`) — the ONE real shape in this tree —
+    # while three artifacts certified that no such shape existed. Pinned on the
+    # real tree, because that is where the claim was false.
+    assert "tortoise_fts_query" in declared, (
+        f"a mention OF THE LEG is not declared: {declared}")
     assert methods["recall_state"] == {"object", "point"}, methods
     assert methods["search_sessions"] == {"event"}, methods
     assert methods["suggest_entry_points"] == {"point"}, (
@@ -3228,14 +3234,17 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
     an `UNMEASURED` entry. Under-reporting is the dangerous direction here: the
     caller list is the surface an owner approves a removal against.
 
-    `tortoise/sdk.py` holds no such shape at this head (verified against the
-    SOURCE: there is no `_safe(`-style helper call in it), so the fix is a
-    NARROWER CLAIM plus a declaration when the shape appears — pinned with a
-    synthetic tree covering each syntactic position, because a bound that only
-    ever fires on a shape the real tree does not have would otherwise be
-    untestable. The NEGATIVE cases are pinned too (a resolved call, a foreign
-    receiver): an instrument that declares a reach it already traversed puts a
-    caveat on a complete table, which is how a real declaration stops being read.
+    `tortoise/sdk.py` holds exactly ONE such shape at this head —
+    `volunteer_context` passes the leg itself as `_search_fn` — which is why the
+    fix is a NARROWER CLAIM plus a declaration, not a widening of the closure:
+    the class is real and cannot be traversed. The fixture covers each syntactic
+    position with a synthetic tree, because a bound that only ever fires on the
+    shapes one tree happens to contain would otherwise be untestable, and wastes
+    the report on a shape the crew does not have. The NEGATIVE cases are pinned
+    too (a resolved call, a shadowing local in several binding forms, a foreign
+    receiver, an attribute binding): an instrument that declares a reach it
+    already traversed puts a caveat on a complete table, which is how a real
+    declaration stops being read.
     """
     (tmp_path / "tortoise").mkdir()
     (tmp_path / "tortoise" / "sdk.py").write_text(

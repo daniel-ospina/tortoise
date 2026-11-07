@@ -2444,7 +2444,10 @@ def _sdk_methods_on_vector_leg(
     # the class-definition-time argument that would justify excluding a METHOD
     # signature's default does not apply to a nested def, and the previous
     # comment wrongly used it for both. (A mention INSIDE a comprehension body
-    # IS walked and IS reported — only the target binding is skipped.) Under-
+    # IS walked and IS reported — only the target binding is skipped.) Also NOT
+    # modelled in `shadowed`: `*args`/`**kwargs` names, lambda parameters, `match`
+    # patterns and `global`/`nonlocal` — those produce a spurious entry rather
+    # than a missed one, and are owned by `#11397`. Under-
     # reporting is the dangerous direction for a surface an owner approves, so
     # the shape is REPORTED through the same `UNMEASURED` channel the handler
     # scan uses for its own bound (see `by_reference` below) instead of being
@@ -2506,6 +2509,15 @@ def _sdk_methods_on_vector_leg(
     # the cry-wolf failure that makes a real declaration ignorable, produced by
     # the very channel meant to prevent it. The `func` of a `Call` is therefore
     # excluded: the closure owns it.
+    #: ⛔ THE LEG IS IN THE MENTION SET (#11389 review, P1). `direct` excludes it
+    #: (it is not its own caller), but a mention OF the leg is the by-reference
+    #: case in its purest form — `_search_fn=self.tortoise_fts_query` in
+    #: `volunteer_context` passes the leg itself into the volunteer pipeline, which
+    #: calls it with `entity_type="point"`. Without the leg in this set that reach
+    #: was neither traversed (not a `Call.func`) NOR declared, and three artifacts
+    #: asserted no such shape existed. A name-resolved CALL of the leg is still
+    #: excluded, by `call_funcs` above — that is the closure's.
+    mentionable: dict[str, set[str]] = {**direct, VECTOR_LEG_SDK_METHOD: set()}
     by_reference: dict[str, set[str]] = {}
     for fn in functions:
         if fn is leg:
@@ -2564,7 +2576,7 @@ def _sdk_methods_on_vector_leg(
                                  ast.ClassDef)):
                 continue
             if id(node) not in call_funcs:
-                reached = _reachable_by_name(node, direct, shadowed)
+                reached = _reachable_by_name(node, mentionable, shadowed)
                 if reached:
                     by_reference.setdefault(fn.name, set()).add(reached)
             stack.extend(ast.iter_child_nodes(node))
