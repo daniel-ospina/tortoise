@@ -283,22 +283,26 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     assert on["evidence_assembly"] is True
     stats = on["evidence_assembly_stats"]
     # THE WHOLE CENSUS, not a sample of it: this dict IS the arm's record in the
-    # ONLY place the run has one — `retrieve_for_question`'s own return
-    # (`retrieve.py:3324-3326`). ⛔ MEASURED, so the next reader does not assume
-    # it travels: it does NOT reach the run's artifacts. `run.py` contains no
-    # `evidence_assembly` reference at all (`rg -n evidence_assembly
-    # tools/longmem_eval/run.py` → 0 hits), so the outcome whitelist that
-    # mirrors four sibling arm-stat keys (`run.py:5348` temporal_leg_stats,
-    # `:5392` coverage_loop_stats, `:5403` session_reinjection_stats,
-    # `time_aware_stats`) omits this one, and the Layer-1 projection
-    # (`run.py:6145`+) omits it too. The arm state is recorded NOWHERE the eval
-    # lane can read it — not the checkpoint, not the Layer-1 report, and not the
-    # fingerprint (the `tr_session_admission` / `tr_session_completion` CONFIG
-    # FLAGS ride the fingerprint and `r5_knobs` instead, `run.py:1922-1925` /
-    # `:5983-5991`; this arm has neither). `run.py` drops the tr_session `_stats`
-    # halves too, but the temporal-admission driver persists those in its own
-    # rows (`temporal_admission_arms.py:217-218`) — a route this arm has no
+    # ONLY place the run has one — `retrieve_for_question`'s own return.
+    # ⛔ MEASURED, so the next reader does not assume it travels: it does NOT
+    # reach the run's artifacts. `run.py` contains no `evidence_assembly`
+    # reference at all (`rg -n evidence_assembly tools/longmem_eval/run.py` → 0
+    # hits), so the per-outcome dict that mirrors four sibling arm-stat keys
+    # (`temporal_leg_stats`, `time_aware_stats`, `coverage_loop_stats`,
+    # `session_reinjection_stats`) omits this one, and the Layer-1 projection in
+    # `outcomes_to_report` omits it too. The arm state is recorded NOWHERE the
+    # eval lane can read it — not the checkpoint, not the Layer-1 report, and not
+    # the fingerprint (the `tr_session_admission` / `tr_session_completion`
+    # CONFIG FLAGS ride the fingerprint and `r5_knobs` instead; this arm has
+    # neither). `run.py` drops the tr_session `_stats` halves too, but the
+    # temporal-admission driver persists those in its own rows
+    # (`temporal_admission_arms.py:217-218`) — a route this arm has no
     # equivalent of, which is the gap #11467 records.
+    # ⛔ Cited by SYMBOL, not line number, deliberately (`e1ba0974e`'s rule for
+    # code citations): the numbers that stood here had drifted out from under
+    # them — the four keys now sit at `run.py:5396/5431/5440/5451`, the
+    # tr_session fingerprint entries at `:1956-1960`, its knobs at `:6048-6069`.
+    # A key name survives a rebase; a line number does not.
     # Hence this pin is the only guard the census has: a key that grows or
     # disappears is otherwise shipped unseen.
     assert set(stats) == {
