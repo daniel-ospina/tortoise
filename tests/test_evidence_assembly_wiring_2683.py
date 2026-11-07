@@ -136,6 +136,9 @@ _ENV_SCRUB = (
     "TORTOISE_LME_AGGREGATIVE_FLAG",
     "TORTOISE_LME_TR_SESSION_ADMISSION",
     "TORTOISE_LME_TR_SESSION_COMPLETION",
+    # the floor-term guard's lower bound, read at CALL time inside the SUT
+    # (`retrieve.py:2262`) as the two pool-ORDER compositions receive it
+    "TORTOISE_LME_FLOOR_TERM",
     # the reader-window item cap
     "TORTOISE_LME_CONTEXT_ITEMS",
 )
@@ -375,3 +378,7 @@ def test_a_tr_question_is_excluded_and_leaves_the_window_untouched(
     assert _ids(on["context_points"]) == _ids(off["context_points"]), (
         "the TR window is the R5 date machinery's — the assembly arm must not "
         "touch it")
+    # …and the pin above is not satisfiable by two EMPTY windows: `[] == []`
+    # would pass while the R5 machinery emptied the window it protects (the
+    # reason `tr_window_fallback` exists), so pin the window's size too.
+    assert on["context_point_count"] == 4, _ids(on["context_points"])
