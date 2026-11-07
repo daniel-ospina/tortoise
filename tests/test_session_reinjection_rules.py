@@ -943,6 +943,106 @@ def test_identity_less_hits_get_a_per_hit_bucket_3591():
         SeededSession(session_id="s1", rank=0, point_id="a1")]
 
 
+# ── #10540: the wire identity the product fetch actually emits ──────────
+def _wire_turn(pid: str, sid: str, text: str = "[user] hi") -> dict:
+    """A pool hit byte-shaped like ``tortoise_fts_query``'s point fetch
+    returns for a captured turn (``tortoise/sdk.py``, the D3/#3804 block):
+    the session identity arrives as the CAMEL wire key ``sessionId`` ALONE —
+    the fetch resolves it from ``n.sessionId`` / the snake prop / the
+    ``:Session`` ``CONTAINS`` edge and then POPS the snake key. A product
+    turn Point carries no ``session_id`` prop, so there is no snake key to
+    pop and ``sessionId`` is the hit's only identity."""
+    return {"id": pid, "sessionId": sid, "point_kind": TURN_POINT_KIND,
+            "content": text, "is_episodic": True}
+
+
+def test_wire_session_identity_keys_the_pool_and_seeds_the_session():
+    """#10540 red-first: a retrieved answer must carry the source session it
+    came from, and the C4 arm must SEE it.
+
+    MEASURED on the lane's tree before the fix (product-shaped pool, two
+    captured sessions, turns only):
+
+        hit_session_id  -> ['sessA', 'sessB', 'sessA', 'sessB']   (reader: OK)
+        session_key_of  -> ['idx:point:A_t0', 'idx:point:B_t0', ...]  (pool: BLIND)
+        seeded_sessions -> []                                     (arm: INERT)
+
+    i.e. the identity WAS on the retrieved answer (the reader rendered
+    ``[session sessA]``) and the pool authority one layer below it dropped
+    it, so ``seeded_sessions`` rejected every turn hit as a phantom
+    (``_is_real_session_id`` refuses ``idx:*``) and source-session
+    re-injection could not fire on ANY product graph — only on eval graphs,
+    whose hits carry the snake ``session_id``."""
+    pool = [_wire_turn("A_t0", "sessA"), _wire_turn("B_t0", "sessB"),
+            _wire_turn("A_t1", "sessA"), _wire_turn("B_t1", "sessB")]
+
+    # the identity is on the hit; both authorities must agree on it
+    assert [retrieval.hit_session_id(h) for h in pool] == [
+        "sessA", "sessB", "sessA", "sessB"]
+    assert [session_key_of(h) for h in pool] == [
+        "sessA", "sessB", "sessA", "sessB"]
+
+    # ... so the SEED fires, rank-ordered, one entry per distinct session
+    assert seeded_sessions(pool, window=40, limit=5) == [
+        SeededSession(session_id="sessA", rank=0, point_id="A_t0"),
+        SeededSession(session_id="sessB", rank=1, point_id="B_t0")]
+
+    # the phantom branch is still the branch for a hit carrying no identity
+    # in any spelling — #3591's behaviour is untouched
+    assert session_key_of({"id": "z"}) == "idx:point:z"
+    assert seeded_sessions([{"id": "z"}], window=5, limit=5) == []
+
+
+def test_wire_identity_never_moves_an_existing_key():
+    """#10540's inertness claim, and the reason the camel source sits AFTER
+    the ``lme_session_index`` bucket: **every key that already existed stays
+    byte-identical**, so the census #8713 measured cannot move.
+
+    The eval's pool hits carry the snake ``session_id``
+    (``tools/longmem_eval/retrieve.py``: ``{"session_id": p.get("session_id",
+    "")}``) and the eval lane's index bucket rides alongside; both outrank
+    the camel leg."""
+    # an eval-shaped hit: snake + index (+ a camel spelling that must NOT win)
+    eval_hit = {"id": "e1", "session_id": "lme_s1", "lme_session_index": 3,
+                "sessionId": "lme_s1", "point_kind": SESSION_TRANSCRIPT_KIND}
+    assert session_key_of(eval_hit) == "lme_s1"
+    # an eval-shaped hit with NO snake id still keeps its index bucket —
+    # this is the case the camel leg could have silently stolen
+    assert session_key_of({"id": "e2", "lme_session_index": 3,
+                           "sessionId": "lme_s1"}) == "idx:3"
+    assert session_key_of({"id": "e3", "lme_session_index": -1,
+                           "sessionId": "lme_s1"}) == "idx:-1"
+    # explicit identity outranks the derived wire spelling
+    assert session_key_of({"session_id": "snake",
+                           "sessionId": "camel"}) == "snake"
+    # a non-string / empty wire value is not an identity
+    assert session_key_of({"id": "e4", "sessionId": None}) == "idx:point:e4"
+    assert session_key_of({"id": "e5", "sessionId": ""}) == "idx:point:e5"
+
+
+def test_injected_group_anchors_on_its_own_sessions_product_base_ranks():
+    """#10540, the MERGE half: with the wire identity visible, a seeded
+    session's injected group lands immediately AFTER that session's own base
+    ranks.
+
+    MEASURED before the fix on the pool below: the anchor map was built from
+    phantom keys, so ``sessA`` had no base rank at all and its injected turn
+    fell to ``reinjection_merge_order``'s defensive TAIL —
+    ``['A_t0', 'B_t0', 'B_t1', 'A_t1']`` — placing one session's context
+    behind every other session's evidence. That is the displacement direction
+    this issue's title forbids, arriving from the SEED side rather than from
+    a head placement."""
+    pool = [_wire_turn("A_t0", "sessA"), _wire_turn("B_t0", "sessB"),
+            _wire_turn("B_t1", "sessB")]
+    added = {"sessA": [_wire_turn("A_t1", "sessA")]}
+    merged = reinjection_merge_order(pool, added, seed_order=["sessA"],
+                                     max_chunks_per_session=3)
+    assert [h["id"] for h in merged] == ["A_t0", "A_t1", "B_t0", "B_t1"]
+    # additive, never evicting: every base hit survives, in order
+    assert sorted(h["id"] for h in merged) == [
+        "A_t0", "A_t1", "B_t0", "B_t1"]
+
+
 def test_coverage_loop_session_of_delegates_to_the_authority(monkeypatch):
     # sentinel: coverage_loop must DELEGATE, not re-implement — reverting it
     # to the historical inline copy must fail this test

@@ -73,16 +73,29 @@ ONE bounded graph pass:
    within the product every containing Session is a legitimate source
    session, but a seed shared across sessions widens the fetch.
 
-   ⚠️ SEED identity limitation (unchanged by this retarget). The fetch
-   TARGET is product-real; the SEED gate is not, for a turn hit. A product
-   turn Point carries no ``session_id``, so ``session_key_of`` returns the
-   synthetic ``idx:-1`` and :func:`seeded_sessions` drops it as a phantom
-   bucket. In the product the seed is therefore a NON-turn pool hit that
-   carries ``session_id`` (an extracted point — ``capture_session`` links
-   it ``Session-[:CONTAINS]->Point`` and stamps ``session_id``), and the
-   fetch then expands that session's verbatim turns. Letting a turn hit
-   seed itself needs a product-side session identity for turn points; that
-   is a SEED change, out of scope for the fetch retarget.
+   ✅ SEED identity — CLOSED by #10540, and the closure is the whole point
+   of that change. The fetch TARGET was already product-real; the SEED gate
+   used to be inert on a turn hit, because the pool key authority
+   (``retrieval.session_key_of``) read the snake ``session_id`` prop ONLY. A
+   product turn Point has no such prop (``capture_session`` writes
+   content/kind/speaker/is_episodic and links ``Session-[:CONTAINS]->Point``),
+   so a turn HIT keyed as the per-hit phantom ``idx:point:{id}`` and
+   :func:`seeded_sessions` dropped it — meaning the arm fired on NO product
+   graph at all, only on eval graphs whose hits carry snake ids.
+
+   ``session_key_of`` now also reads the CAMEL wire identity ``sessionId``,
+   which is the spelling the product's own point fetch emits: it resolves the
+   session from ``n.sessionId`` / the snake prop / the ``:Session CONTAINS``
+   edge and then pops the snake key (``sdk.tortoise_fts_query``), i.e. the
+   reader ALREADY saw the identity (``retrieval.hit_session_id`` → ``[session
+   A]``) while the pool one layer below it did not. So a turn hit seeds its
+   own session, and :func:`reinjection_merge_order` anchors that session's
+   injected group after its own base ranks instead of dumping it in the
+   defensive tail. The GRAPH side is unchanged and that is deliberate: the
+   fetch still scopes by ``(s:Session)-[:CONTAINS]->(p:Point)`` and still
+   RETURNs ``coalesce(p.session_id, s.id)``, because the Point property is
+   what a *turn Point* does not have — only the PASSAGE-side hit identity was
+   missing.
 
    **Turn-shape constraint.** ``pointKind``'s vocabulary is open
    (``create_point`` accepts any registered kind), so ``pointKind='event'``

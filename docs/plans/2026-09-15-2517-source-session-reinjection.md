@@ -259,10 +259,15 @@ falsified two specifics of the issue text. They are **not** adopted:
    collisions (212 shared dataset ids across the 100-question tail cohort) never
    co-exist in one graph. **Residual:** a content-addressed seed point shared across
    Sessions expands every containing Session (`WITH DISTINCT s` dedups, does not
-   constrain). **SEED limitation (unchanged):** a product turn Point carries no
-   `session_id`, so a turn HIT cannot seed (`session_key_of` → `idx:-1`); in the
-   product the seed is a non-turn point carrying `session_id` and the fetch expands
-   that session's turns.
+   constrain). **SEED limitation — CLOSED by #10540:** a product turn Point carries
+   no `session_id` PROPERTY, so `session_key_of` used to key a turn HIT as the
+   per-hit phantom and a turn hit could not seed; it now also reads the camel
+   wire identity `sessionId` that the product's point fetch emits from the
+   `Session CONTAINS` edge, so a turn hit seeds its own session and the injected
+   group anchors after that session's own base ranks. The GRAPH side is unchanged:
+   the fetch still scopes by `(s:Session)-[:CONTAINS]->(p:Point)` and still returns
+   `coalesce(p.session_id, s.id)`, because the missing thing was the hit's
+   PASSAGE-side identity, never the Point property.
 3. **MERGE** — `reinjection_merge_order(pool, added_by_session, *, ...)`:
    - **anchor** = the seeded session's **last base rank in the pool** (not merely in
      the seed window), guaranteeing the injected group lands **after every base hit

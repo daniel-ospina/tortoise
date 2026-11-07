@@ -438,11 +438,16 @@ def facet_census(proj: Any, query: str, *,
 def _session_of(hit: dict, session_key: Callable[[dict], str] | None = None) -> str:
     """A hit's session identity — delegates to the pool's AUTHORITY
     (``retrieval.session_key_of``: ``session_id`` when present, else the
-    ``idx:{lme_session_index}`` bucket) so the loop's window census and the
-    pool's dedup never disagree on what a session is. The import is
-    FUNCTION-LOCAL: ``coverage_loop`` stays a stdlib-only leaf at import
-    time and the ``retrieval → coverage_loop`` dependency stays one-way
-    (no cycle under either import order).
+    ``idx:{lme_session_index}`` bucket, else the wire ``sessionId``) so the
+    loop's window census and the pool's dedup never disagree on what a
+    session is. The import is FUNCTION-LOCAL: ``coverage_loop`` stays a
+    stdlib-only leaf at import time and the ``retrieval → coverage_loop``
+    dependency stays one-way (no cycle under either import order).
+
+    The camel ``sessionId`` leg is #10540: without it a product turn hit —
+    the only identity such a hit carries — censused as a phantom, so this
+    window census counted ZERO real sessions for a captured-session graph
+    (the same blindness #10632's instrument removed one layer up).
     """
     if session_key is not None:
         return session_key(hit)

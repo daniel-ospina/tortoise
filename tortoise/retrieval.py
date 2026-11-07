@@ -691,13 +691,14 @@ TURN_POINT_KIND = "event"
 def session_key_of(hit: dict) -> str:
     """A hit's pool session identity — the AUTHORITY for the retrieval
     pool's bucket key (C4 #2517). ``session_id`` when present, else the
-    synthetic ``idx:{lme_session_index}`` bucket, else — for a hit carrying
+    synthetic ``idx:{lme_session_index}`` bucket, else the WIRE identity
+    ``sessionId`` the point fetch emits (#10540), else — for a hit carrying
     no session identity at all — a PER-HIT bucket ``idx:point:{id}``
     (#3591). :func:`dedup_pool` and :func:`guard_and_recap_pool` default to
     it, and ``coverage_loop._session_of`` delegates to it (function-local
     import — the module stays a stdlib-only leaf at import time).
 
-    Identity semantics, in precedence order (#3591):
+    Identity semantics, in precedence order (#3591, #10540):
 
     * ``session_id`` present and truthy ⇒ that id;
     * else ``lme_session_index`` PRESENT (an explicit ``-1`` included) ⇒
@@ -706,6 +707,20 @@ def session_key_of(hit: dict) -> str:
       falsy but not identity-less), and an explicit ``-1`` is an explicit
       sentinel rather than indistinguishability — which is why it keeps the
       historical key and is NOT rerouted to the per-hit bucket below;
+    * else ``sessionId`` (the CAMEL wire spelling) when truthy ⇒ that id
+      (**#10540**). This is the spelling the product's own point fetch
+      emits: ``tortoise_fts_query`` resolves a Point's session from
+      ``n.sessionId`` / the snake prop / the ``:Session`` ``CONTAINS`` edge
+      and then POPs the snake key, so a hit for a captured turn carries the
+      CAMEL key ALONE (:func:`hit_session_id` names the same two sources).
+      Before this the authority read neither camel spelling, so every
+      product turn hit — the grain the C4 arm expands — keyed as a phantom
+      and ``seeded_sessions`` dropped it: re-injection could not fire on a
+      product graph at all, and ``reinjection_merge_order`` could not find
+      the session's own base ranks (the injected group fell to the
+      defensive tail). The arm #8713 measured was therefore inert on
+      exactly the surface it exists to enrich, and the identity the READER
+      already renders (``hit_session_id``) was dropped one layer below it;
     * else the hit's OWN ``id`` ⇒ ``idx:point:{id}``: two identity-less hits
       are two DISTINCT entities and must not share a bucket. Before #3591
       both read ``idx:-1``, so the C5 per-session cap
@@ -713,7 +728,7 @@ def session_key_of(hit: dict) -> str:
       and unrelated content was dropped collectively — measured 5-in/3-out
       at ``cap=3`` and 2-in/1-out at ``cap=1``, on chunks whose content had
       nothing to do with each other;
-    * a hit carrying none of the three (no ``id`` either) still maps to
+    * a hit carrying none of the four (no ``id`` either) still maps to
       ``idx:-1``. That is the only bucket for which there is genuinely
       nothing to key on, and it is not reachable from a real pool hit
       (``seeded_sessions`` documents that pool hits always carry their id).
@@ -723,18 +738,41 @@ def session_key_of(hit: dict) -> str:
     :func:`tortoise.session_reinjection.seeded_sessions` drops it and
     ``coverage_loop.coverage_gap`` excludes it from the window census — a
     hit with no session identity cannot seed a session fetch. #3591 made
-    the phantom bucket PER-HIT; it did not make it fetchable.
+    the phantom bucket PER-HIT; #10540 made the phantom branch *fetchable*
+    whenever the hit carries the wire identity, which is what a product hit
+    does.
+
+    Precedence — why ``sessionId`` sits AFTER the index bucket (#10540):
+    every key that already exists stays BYTE-IDENTICAL. The eval's pool
+    hits carry the snake ``session_id`` (``tools/longmem_eval/retrieve.py``),
+    and a hit carrying ``lme_session_index`` keeps its index bucket, so a
+    census measured before this change — #8713's, which this arm must not
+    disturb — cannot move because of it. The only branch that changes is
+    the PHANTOM one, which is exactly the branch a product turn hit falls
+    into.
+
+    ⛔ Not sanitized, deliberately: the key is a DICT KEY and a comparison
+    operand against graph ids, never interpolated into Cypher and never
+    rendered into the reader — :func:`hit_session_id` is the surface that
+    refuses to STATE an unrenderable identity, and it applies
+    ``_safe_session_tag``. Filtering here as well would silently turn a hit
+    the reader can name into a bucket nothing can seed.
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all
-    unchanged) and ``::test_identity_less_hits_get_a_per_hit_bucket_3591``
-    (the #3591 case)."""
+    unchanged), ``::test_identity_less_hits_get_a_per_hit_bucket_3591``
+    (the #3591 case) and
+    ``::test_wire_session_identity_keys_the_pool_and_seeds_the_session``
+    (the #10540 case)."""
     session_id = hit.get("session_id")
     if session_id:
         return session_id
     index = hit.get("lme_session_index")
     if index is not None:
         return f"idx:{index}"
+    wire_id = hit.get("sessionId")
+    if isinstance(wire_id, str) and wire_id:
+        return wire_id
     point_id = hit.get("id")
     if point_id:
         return f"idx:point:{point_id}"

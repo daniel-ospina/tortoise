@@ -207,6 +207,48 @@ def test_search_wire_session_id_carries_the_captured_session():
         assert h["sessionId"] == SID_A, h
 
 
+def test_captured_turn_hits_seed_their_own_session_10540():
+    """#10540 — the C4 SEED must see the identity the read surface ALREADY
+    carries, on the real fetch, not on a modelled hit.
+
+    The chain this pins end to end: ``capture_session``'s turn Points carry
+    NO ``sessionId``/``session_id`` prop, the point fetch derives the
+    identity from the ``(:Session)-[:CONTAINS]->(:Point)`` edge and hands it
+    back as the camel key ONLY (pinned by the siblings above:
+    ``h["sessionId"] == SID_A`` and ``"session_id" not in h``), and the pool
+    authority (``retrieval.session_key_of``) must resolve that same spelling.
+
+    MEASURED on this tree BEFORE the fix, with exactly these two turns:
+    ``retrieval.hit_session_id`` → ``SID_A`` for both hits, while
+    ``session_key_of`` → ``idx:point:{sid}_t0`` / ``idx:point:{sid}_t1`` and
+    ``seeded_sessions`` → ``[]``. ``_is_real_session_id`` refuses an
+    ``idx:`` bucket, so source-session re-injection could not fire on any
+    PRODUCT graph — only on eval graphs, whose hits carry the snake id.
+    """
+    from tortoise.session_reinjection import seeded_sessions
+
+    sdk = _new_sdk()
+    _seed_captured_session(sdk, SID_A, TURNS_A)
+    hits = sdk.tortoise_fts_query("gym schedule", limit=40,
+                                  include_terminal=True)
+
+    # non-vacuity precondition: the captured turns must actually retrieve
+    assert len(hits) == 2, hits
+    # ... and the fetch names the session in the CAMEL key alone (the shape
+    # the pool authority used to ignore)
+    assert all(h["sessionId"] == SID_A for h in hits), hits
+    assert all("session_id" not in h for h in hits), hits
+
+    # the READER's authority and the POOL's authority agree
+    assert all(retrieval.hit_session_id(h) == SID_A for h in hits), hits
+    assert all(retrieval.session_key_of(h) == SID_A for h in hits), hits
+
+    # ... so the seed fires, and it fires on the captured session
+    seeds = seeded_sessions(hits, window=40, limit=5)
+    assert [s.session_id for s in seeds] == [SID_A], seeds
+    assert seeds[0].point_id in {h["id"] for h in hits}, seeds
+
+
 def test_hosted_search_route_returns_the_session_id(hosted_client):
     """The read surface end to end: GET /v1/search on a captured session
     returns the session id on the wire.
