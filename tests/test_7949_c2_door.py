@@ -220,8 +220,14 @@ def test_the_v2_arm_calls_the_sdk_extractor_entry():
     real call left this test GREEN (#10983 review).
     """
     # BOTH arms, resolved from the AST: the target each hosted capture hands the
-    # worker. Requiring both is what makes a SWAPPED arm red, which a single
-    # call-shape match on the v2 arm cannot see.
+    # worker. ⛔ Requiring both is NOT what catches a SWAPPED arm — a swap leaves
+    # both targets present, so these two assertions stay GREEN through it and the
+    # swap is caught by `test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree`,
+    # whose `_llm_call_branch()` resolves which ARM holds the m2 target (#10983
+    # review, cycle 9: the previous wording credited a swap-detection this
+    # assertion set does not have, and an editor simplifying the mapping check on
+    # the strength of it would turn a swap into a silent false PASS). What these
+    # two DO catch is a lost call: an arm rewired to a callee, or one deleted.
     targets = _hosted_capture_targets()
     assert "sdk._extract_session_v2" in targets, (
         f"the hosted capture no longer CALLS sdk._extract_session_v2 — it hands "
@@ -310,12 +316,22 @@ def _extraction_bindings(func: ast.AST) -> list[ast.Assign]:
     assigns to ``extracted`` — left ``len(capture_ifs) == 1`` GREEN while it
     rerouted every capture. A callee this test cannot name must red, not pass.
     """
-    def _binds(node: ast.Assign) -> bool:
+    def _targets(node: ast.AST) -> list[ast.AST]:
+        if isinstance(node, ast.Assign):
+            return list(node.targets)
+        if isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            return [node.target]
+        return []
+
+    def _binds(node: ast.AST) -> bool:
+        if getattr(node, "value", None) is None:      # a bare annotation binds nothing
+            return False
         return any(isinstance(n, ast.Name) and n.id == "extracted"
-                   for target in node.targets for n in ast.walk(target))
+                   for target in _targets(node) for n in ast.walk(target))
 
     return [node for node in ast.walk(func)
-            if isinstance(node, ast.Assign) and _binds(node)]
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign,
+                                 ast.NamedExpr)) and _binds(node)]
 
 
 def _lane_dispatch_ifs(func: ast.AST) -> list[ast.If]:
@@ -368,6 +384,62 @@ def _lane_chain_gates(func: ast.AST, target: ast.If) -> list[ast.If]:
             return gates
 
 
+def _effectful_gates(func: ast.AST) -> dict[str, set[str]]:
+    """Every ``If`` in ``func`` that can CHANGE what a capture returns.
+
+    An arm is effectful when its OWN body returns, binds ``extracted``, or
+    rebinds the door's input ``extraction``. ``_lane_chain_gates`` only walks
+    ``orelse`` ANCESTORS of the m2 branch, so it cannot see an arm placed as a
+    SIBLING above the chain, nor one nested inside another arm's body.
+    MEASURED at the #10983 review (cycle 9), all green at the previous head:
+    ``if os.environ.get("TORTOISE_MUTANT_ARM") == "1": return {...}`` as a
+    sibling above ``if no_provider:``; the same as an early return from a callee
+    of its choosing; a gate that rewrites ``extraction``; and a payload-returning
+    gate nested inside the m2 arm's body. The door is the WHOLE FUNCTION the
+    acceptance calls, not only the branch that happens to be its ancestor.
+    """
+    def _rebinds(stmt: ast.AST) -> bool:
+        if getattr(stmt, "value", None) is None:
+            return False
+        if isinstance(stmt, ast.Assign):
+            targets = list(stmt.targets)
+        elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            targets = [stmt.target]
+        else:
+            return False
+        names = {n.id for target in targets for n in ast.walk(target)
+                 if isinstance(n, ast.Name)}
+        return bool(names & {"extracted", "extraction"})
+
+    gates: dict[str, set[str]] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, ast.If):
+            continue
+        kinds = {kind for kind, hit in (
+            ("returns", any(isinstance(s, ast.Return) for s in node.body)),
+            ("binds", any(_rebinds(s) for s in node.body)),
+        ) if hit}
+        if kinds:
+            gates.setdefault(ast.unparse(node.test), set()).update(kinds)
+    return gates
+
+
+def _env_read_names_in(node: ast.AST) -> set[str]:
+    """Every ``TORTOISE_*`` name read through a LITERAL argument under ``node``."""
+    names: set[str] = set()
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call) or not call.args:
+            continue
+        if not ast.unparse(call.func).endswith(
+                ("environ.get", "getenv", "env_flag", "ask_env_int")):
+            continue
+        arg = call.args[0]
+        if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                and arg.value.startswith("TORTOISE_")):
+            names.add(arg.value)
+    return names
+
+
 def _env_reads(path: Path) -> set[str]:
     """Every ``TORTOISE_*`` name this module can READ, structurally.
 
@@ -383,17 +455,7 @@ def _env_reads(path: Path) -> set[str]:
         literal-call grep can see.
     """
     tree = _tree(path)
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
-            continue
-        if not ast.unparse(node.func).endswith(
-                ("environ.get", "getenv", "env_flag", "ask_env_int")):
-            continue
-        arg = node.args[0]
-        if (isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                and arg.value.startswith("TORTOISE_")):
-            names.add(arg.value)
+    names = _env_read_names_in(tree)
     for stmt in tree.body:
         if not isinstance(stmt, ast.Assign) or len(stmt.targets) != 1:
             continue
@@ -520,18 +582,57 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
         f"{[ast.unparse(b) for b in laundered]} — only the two empty "
         "short-circuit arms (no provider / replay) may do that; a dispatch "
         "laundered through a temporary is still a second door (#10983)")
+    # ⛔ The door's own FUNCTION reads exactly ONE seam variable. `path_modules`
+    # closes over the modules the capture path REACHES, and `sdk.capture_session`
+    # is not one of them — so a new `TORTOISE_*` read added inside this function
+    # was invisible to the closure as well as to the geometric pins (#10983
+    # review, cycle 9). MEASURED: `if os.environ.get("TORTOISE_MUTANT_SEAM") ==
+    # "1": extraction = <other window>` as a sibling above the chain left all 19
+    # tests green while it rewrote the door's INPUT.
+    door_reads = _env_read_names_in(capture_func)
+    assert door_reads == {"TORTOISE_SESSION_EXTRACTOR"}, (
+        "sdk.capture_session reads "
+        f"{sorted(door_reads)} — the door function itself is pinned to exactly "
+        "one seam variable, the one that selects the lane; a second read either "
+        "reroutes the capture or rewrites its input, and `door_record()` would "
+        "still print lane: v2 (#10983)")
+    # ⛔ The WHOLE function, not just the chain above the door. `_lane_chain_gates`
+    # walks `orelse` ancestors, so an arm placed as a SIBLING above the chain — or
+    # nested inside another arm's body — was invisible to every pin above.
+    # MEASURED at the #10983 review (cycle 9), all green: a sibling
+    # `if os.environ.get("TORTOISE_MUTANT_ARM") == "1": return {...}` above
+    # `if no_provider:`; an early return from a callee of its own choosing; a gate
+    # rewriting `extraction`; and a payload-returning gate nested in the m2 arm.
+    effectful = _effectful_gates(capture_func)
+    door_test = "os.environ.get('TORTOISE_SESSION_EXTRACTOR') == 'm2'"
+    assert set(effectful) == {
+        "_blank_session is not None",
+        "not transcript.strip()",
+        "no_provider",
+        "session_existed and (not retry_failed_capture)",
+        door_test,
+    }, (
+        "sdk.capture_session has "
+        f"{len(effectful)} arms that can change what a capture returns, not the "
+        "five pinned (two early-return gates, the two replay short-circuits, and "
+        "the door). A sixth arm — above the chain, below it, or nested inside one "
+        "of them — reroutes captures the record still declares v2 (#10983): "
+        f"{sorted(effectful)}")
+    assert effectful[door_test] == {"binds"}, (
+        f"the m2 arm's effect changed: {sorted(effectful[door_test])} — it must be "
+        "the arm that BINDS `extracted`, not one that also returns (#10983)")
     # ⛔ The CHAIN's shape above the door. An arm woven in above the m2 branch is
     # an ANCESTOR of it, whatever its body does, so the count is the door's own
     # geometry: `no_provider`, then `session_existed`, then the door. A third
     # gate here reds even if it returns a payload without binding `extracted`.
-    gates = _lane_chain_gates(capture_func, capture_ifs[0])
-    assert len(gates) == 2, (
+    chain_gates = _lane_chain_gates(capture_func, capture_ifs[0])
+    assert len(chain_gates) == 2, (
         "sdk.capture_session's lane chain has "
-        f"{len(gates)} gates above the door, not the two pinned "
+        f"{len(chain_gates)} gates above the door, not the two pinned "
         "(no_provider, session_existed) — an arm woven in ABOVE the door "
         "reroutes captures the record still declares v2; re-derive this count "
         "deliberately rather than bumping it (#10983): "
-        f"{[ast.unparse(g.test) for g in gates]}")
+        f"{[ast.unparse(g.test) for g in chain_gates]}")
     assert ast.unparse(capture_ifs[0].test) == sdk_test, (
         "the only lane-dispatching branch in sdk.capture_session tests "
         f"{ast.unparse(capture_ifs[0].test)!r}, not the m2 selector "
