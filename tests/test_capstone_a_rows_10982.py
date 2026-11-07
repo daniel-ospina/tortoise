@@ -749,6 +749,48 @@ def test_a_row_ABSENT_from_the_floor_map_never_has_a_floor_clause_stripped():
     ), "a RATE reusing the floor's number is a bar, not the floor"
 
 
+def test_a_RATE_that_reuses_the_floor_number_and_unit_is_a_BAR():
+    """FAILS IF a quotient appended after the floor's UNIT can reuse its number as a rate.
+
+    ⛔ #11331 review round 11. The exemption matched the unit as a PREFIX, so
+    `floor of >= 30 typed statements per 100 Points` (a 30 % typed share), `… out of 354 Points`
+    and `… share` were stripped exactly like the floor and the gate exited 0 — a RECORD-ONLY edit
+    handing `A4` the very bar the record registers as not existing (`#10988` BLOCKED, `#1022`
+    carries the decision). The clause must END at the unit: only a clause boundary or the end of
+    the cell is accepted after it, so every quotient continuation is refused by OMISSION.
+    """
+    rows = check.parse_criteria_rows(PREREG.read_text())
+    floors = check._registered_floor_values(PREREG_DIR)
+    a4 = next(r for r in rows if r["id"] == "A4")
+    assert floors.units.get("A4") == "typed statements"
+
+    def refused(cell: str) -> bool:
+        return any(
+            "outside its floor" in f
+            for f in check.check_completeness(
+                [dict(r, threshold=cell) if r is a4 else r for r in rows], floors)
+        )
+
+    # (1) The same number AND unit, spent as a RATE, is a bar.
+    for quotient in ("per 100 Points", "out of 354 Points", "share", "of the points", "%",
+                     "/ 100 Points"):
+        cell = f"UNMEASURED(#10988 decides) floor of >= 30 typed statements {quotient}"
+        assert refused(cell), f"a RATE after the unit must be refused: {cell}"
+
+    # (2) …and the row's OWN floor, in every form the record and these tests use, stays exempt —
+    # so the refusal above is the boundary and not a blanket red of the floor clause.
+    for okay in (
+        "floor of >= 30 typed statements",
+        "floor of >= 30 typed statements and compared to no bar)",
+        "floor of >= 30 **typed statements** and no bar",
+        "floor ≥ 30 typed statements",
+        "floor of >=30 typed statements",
+    ):
+        cell = f"UNMEASURED(#10988 decides) {okay}"
+        assert not refused(cell), f"the row's own floor must stay exempt: {cell}"
+    assert not refused(a4["threshold"]), a4["threshold"]
+
+
 def test_a_REQUIRED_row_cannot_declare_itself_a_non_bar():
     """FAILS IF the `UNMEASURED(...)` exemption is reachable from a required row.
 

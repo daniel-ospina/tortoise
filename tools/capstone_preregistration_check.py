@@ -418,6 +418,14 @@ FLOOR_CLAUSE = re.compile(
     + r")\s*(\d+(?:\.\d+)?)",
     re.IGNORECASE,
 )
+#: What may FOLLOW the floor's denominator phrase for the clause to still be a FLOOR. ⛔ A PREFIX
+#: match is not enough: `30 typed statements per 100 Points` / `out of 354 Points` / `share` all
+#: begin with the unit and are RATES — the floor's number spent as a share, i.e. a bar on `A4`,
+#: the one row the record registers as having NO bar (#11331 review round 11). A clause is a floor
+#: only when the unit is followed by a clause boundary or the end of the cell; every quotient
+#: continuation (`per`, `/`, `out of`, `of`, `%`, `rate`, `share`) is therefore refused by
+#: OMISSION, which is why this is an allow-list rather than a block-list.
+FLOOR_CLAUSE_BOUNDARY = re.compile(r"^(?:and\b|or\b|[,;.)\]]|$)", re.IGNORECASE)
 
 
 def _floor_unit(key: str) -> str:
@@ -489,9 +497,15 @@ def _strip_the_rows_own_floor(text: str, value: float | None, unit: str | None =
         except (TypeError, ValueError):
             return match.group(0)
         # The denominator the floor is expressed in must FOLLOW the number, ignoring the markdown
-        # that usually wraps the value (`` `>= 30` typed statements ``).
+        # that usually wraps the value (`` `>= 30` typed statements ``), AND the clause must END
+        # there. ⛔ A PREFIX MATCH IS NOT ENOUGH (#11331 review round 11): `30 typed statements per
+        # 100 Points` begins with the unit and is a RATE — the same 30 spent as a share — so it
+        # stripped exactly like the floor and `A4` could still be handed the owner-gated bar.
         tail = re.sub(r"[`*_\s]+", " ", text[match.end():]).strip().lower()
-        return "" if tail.startswith(wanted) else match.group(0)
+        if not tail.startswith(wanted):
+            return match.group(0)
+        after = tail[len(wanted):].strip()
+        return "" if FLOOR_CLAUSE_BOUNDARY.match(after) else match.group(0)
 
     return FLOOR_CLAUSE.sub(_drop, text)
 
