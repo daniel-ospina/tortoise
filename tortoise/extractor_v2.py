@@ -12219,11 +12219,13 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
     # padded surface over the cap is the same name on both builders — capping
     # first left `"i"` here and `"itx"` there (review at `d785f3da8`, P3).
     # ⛔ EVERY cap is read from `_MENTION_CAPS`, never spelled here (#11368). The
-    # literals this line used to carry (`200`, `_MAX_QUOTE`, `60`) were a SECOND
+    # literals these lines used to carry (`200`, `_MAX_QUOTE`, `60`) were a SECOND
     # spelling of the clamp builder's caps, and the two builders agreed only for as
-    # long as the spellings happened to agree — moving `_MENTION_CAPS["quote"]`
-    # left this builder storing a 250-char quote while `_clamped_mention` stored
-    # 200 for the same entry, with no test reddening.
+    # long as the spellings happened to agree — moving THIS builder's own literal
+    # (`_MAX_QUOTE`) left the record storing a 250-char quote while `_clamped_mention`
+    # stored 200 for the same entry, with no test reddening (review at `7aa10dad8`,
+    # P3: the operands are not interchangeable — moving `_MENTION_CAPS["quote"]`
+    # instead moves the CLAMP and leaves this builder, the mirror image).
     surface = str(surface or "").strip()[:_MENTION_CAPS["surface"]]
     # ⛔ The record's own text is CLAMPED FIRST, because the span is located in it:
     # locating in the unclamped quote and then storing 200 chars shipped
