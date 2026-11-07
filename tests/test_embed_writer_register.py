@@ -47,7 +47,7 @@ is the product home; this file is its proof.
 |---|---|---|
 | `test_the_register_resolves_at_runtime_from_tortoise` | the issue's first row — *"resolvable at runtime from `tortoise/`"* | the register moves out of `tortoise/`, under `tortoise/projection/`, or stops being importable without the tooling |
 | `test_the_register_imports_without_entering_the_projection_cycle` | `04-plan.md` §5's leaf requirement, EXECUTED | importing the register pulls `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk` into `sys.modules`, i.e. it re-enters `projection → pack_state → sdk → projection` — the cycle whose config read is a reproduced `ImportError` (`tortoise.projection.__init__::_config_classes` records it). The "imports ONLY the standard library" arm is `test_the_register_is_not_a_second_rule_set`, not this one |
-| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register's imports leave `{__future__, collections, re, dataclasses, types}`, or it names `value_gate`/`embed_gate`/`RULES`/`EMBEDDING_RULES` in code (the ONE regex it holds is the `#\\d+` `owner_issue` format check, which is not a rule) |
+| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register's imports leave `{__future__, collections, re, dataclasses, types}` — every `import` / `from` at EVERY level counts, so a relative `from .x import …` is not exempt — or it names `value_gate`/`embed_gate`/`RULES`/`EMBEDDING_RULES` in code (the ONE regex it holds is the `#\\d+` `owner_issue` format check, which is not a rule) |
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
@@ -171,7 +171,15 @@ def test_the_register_is_not_a_second_rule_set():
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imported |= {a.name.split(".")[0] for a in node.names}
-        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+        elif isinstance(node, ast.ImportFrom):
+            # ⛔ `level` is NOT filtered here (#11373 round-19 review). Requiring `level == 0` left
+            # every RELATIVE import out of this set, so `from .value_gate import RULES as _R` — the
+            # idiomatic way to reach a sibling from INSIDE the package, i.e. exactly the drift this
+            # test exists to catch — kept arm 1 green (measured). Arm 2 missed it too, because an
+            # alias is neither a `Name` nor an `Attribute` spelled with a banned identifier, and
+            # the subprocess arm stays green because importing `tortoise.value_gate` pulls none of
+            # the three cycle modules (measured). A relative import now contributes its target
+            # (`""` for `from . import x`), neither of which is in the allowlist below.
             imported.add((node.module or "").split(".")[0])
     assert imported <= {"__future__", "collections", "re", "dataclasses", "types"}, (
         f"the register imports {sorted(imported)} — it is a LEAF and must import the standard "

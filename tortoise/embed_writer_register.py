@@ -107,7 +107,7 @@ neither is in `WRITER_CENSUS` or this register at all); by contrast the computed
 `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
 `set_embedding_clause`, NOT off its whole-node replace. The authority for SHAPES is
 `tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which holds both the shapes neither pass can
-spell AND the two SCOPES the walk never enters (module- and class-body stores): a count written
+spell AND the SCOPES the walk never enters (module- and class-body stores): a count written
 here re-stales with every shape added, so this paragraph names forms and instances and does not
 count them.
 ⚠️ `tortoise.sdk::_journal_event_raw_write` is
@@ -556,22 +556,30 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: (`tortoise.session_indexer::main`). A ``gated`` writer needs no declaration — the gate decides the
 #: write it GATES. ⛔ That is not the same sentence as "the gate decides every vector this writer
 #: stores": the module docstring's caveat refutes the wider one for `create_point`/`update_point`,
-#: whose caller-supplied vector is stored verbatim — `create_point` calls `encode_for_row`
-#: UNCONDITIONALLY (the derive is behind no `props` guard) and then discards the DERIVED result
+#: whose caller-supplied vector is stored verbatim. On the CREATE path `create_point` calls
+#: `encode_for_row` (the derive is behind no `props` guard) and then discards the DERIVED result
 #: **when the caller supplied one** (`if "embedding" in props:` pops the caller vector, and
 #: `_create_map["embedding"] = _embedding_expr` is assigned AFTER the props loop, so the caller
-#: branch wins — with no caller vector the derived one is what gets stored), while
-#: `update_point` genuinely skips the derive when `"embedding" in props` — so on one path the gate
-#: RUNS and its verdict is OVERWRITTEN, on the other it is not called at all. Neither outcome is
-#: "the gate decides this vector". ⛔ Symbols only, never a line number: this block is comment prose
+#: branch wins — with no caller vector the derived one is what gets stored) — but that derive is NOT
+#: reached on every call, so the verb is not "unconditionally": a `dedup=True` HIT returns at the
+#: dedup fold BEFORE it, and its props leg hands `props` (a caller vector included) to
+#: `update_point`, which skips its own derive for the same key (`"embedding" in props`) and merges
+#: it verbatim. So on the create path the gate RUNS and its verdict is OVERWRITTEN, and on the
+#: update path — including `create_point`'s own `dedup=True` delegation, which is the MCP door's
+#: default — it is not called at all. Neither outcome is "the gate decides this vector".
+#: ⛔ Symbols only, never a line number: this block is comment prose
 #: and nothing re-derives it, which is the rot `WriterClass.reason`'s rule exists to prevent.
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
 #: docstring: the census's discovery is a source-text regex PLUS the AST pass that decides the
 #: LITERAL container key (`rec["embedding"] = …`), and writers neither can spell (a map-merge, a
 #: COMPUTED dict-key form (`d[KEY] = v`), an inline property map, a clause held in a module constant
-#: or an INTERPOLATED property name) are ABSENT from this population rather than declared here — one
-#: is live in `tortoise/` today (`cache_projection::node_statement`), and `#11274` NAMES the shape
-#: discovery will not decide (`UNDECIDABLE_WRITE_SHAPES`) instead of guessing at it.
+#: or an INTERPOLATED property name) are found BY SHAPE in no case — where one of them does reach the
+#: population it is for ANOTHER reason, and the three live instances differ exactly so:
+#: `sdk::_update_entity` (a map-merge) arrives as an `unresolved_write` and is declared here as
+#: `exempt` under the named `#4094` exemption, `sdk::update_point`'s computed key arrives as `gated`
+#: and is therefore declared nowhere, and `cache_projection::node_statement`'s interpolated property
+#: arrives not at all. `#11274` NAMES the shape discovery will not decide
+#: (`UNDECIDABLE_WRITE_SHAPES`) instead of guessing at it.
 #: Forward — every writer DISCOVERY FINDS outside the gate is declared (never "every writer", see the
 #: docstring's closure-claim caveat):
 #: `tests/test_embed_writer_register.py::test_every_writer_the_instrument_finds_outside_the_gate_is_declared`.
