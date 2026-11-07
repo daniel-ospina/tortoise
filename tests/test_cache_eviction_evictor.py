@@ -85,8 +85,6 @@ class _Record:
 @pytest.fixture()
 def lane():
     """A dedicated graph on the live lane container, dropped afterwards."""
-    import uuid
-
     import redis
     from falkordb import FalkorDB
 
@@ -98,7 +96,28 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    graph_name = f"evict_{uuid.uuid4().hex[:12]}"
+    # Epic #1647 (T7, cycle-6 P1-3): a raw client bypasses `_assert_test_graph`
+    # AND the per-test wipe scope, so the handle must be PER-TEST-UNIQUE, in an
+    # OWNED family, and JOURNALED in this same block — the three halves of one
+    # contract (cycle-8 P2-2), not a rename.
+    #
+    # ⛔ The `test_` prefix is load-bearing, not cosmetic: the session-end sweep
+    # drops only names that match `_SWEEP_OWNED_PREFIXES`
+    # (`tests/_embedded.py::owns_by_ownership_record`). A journaled
+    # `evict_<hex>` takes the PRESERVED branch — the sweep refuses to delete it
+    # AND still removes the journal, so the graph leaks while the only record
+    # that could reclaim it is destroyed. `tests/test_derived_names.py::
+    # test_raw_falkordb_client_detach_uses_per_test_unique_graph` pins the
+    # uniqueness+journal half; the owned prefix is pinned here by construction.
+    #
+    # The `uuid4` this replaced was unique but never OWNED and never journaled,
+    # which is why `main` reddened on the census once a PR's changed-files
+    # selection finally ran `tests/test_derived_names.py` (#11182's class, third
+    # site: this file came in with #11167 without the guard ever seeing it).
+    graph_name = f"test_evict_{os.urandom(6).hex()}"
+    from tests._embedded import _journal_append
+
+    _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
     try:
