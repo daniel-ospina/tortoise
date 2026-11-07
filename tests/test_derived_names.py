@@ -2021,15 +2021,20 @@ def _journal_sites(source: str) -> list[tuple[int, int, str]]:
     if "_journal_append" not in source:
         # Fast path: any CALL of the symbol (bare, or via an attribute/getattr)
         # names it in the source, so a file without the substring journals
-        # nothing. The census walks the 1,183 NON-EXEMPT top-level test files it
-        # actually parses (`test_*.py` less `_is_exempt`) to find 9 calls in 5
-        # of them, and parsing each one cost ~+12 s (#11217 review round 8, A5).
-        # ⛔ 1,183, not 1,360 and not the 1,244 that `test_*.py` globs to: the
-        # exempt check `continue`s BEFORE this function is called, so a larger
-        # number can only be a different population. Measured at f3691d498
-        # (#11217 review round-14 P2) — the earlier number exceeded the whole
-        # top-level glob, which is the population conflation the neighbouring
-        # comment in `_raw_client_call_positions` warns about.
+        # nothing. ⛔ THREE populations, three different numbers — keeping them
+        # apart is the whole point of this comment, and the reason its last two
+        # versions were both wrong (#11217 review rounds 14-15 P2):
+        #   * WALKED: 1,183 non-exempt top-level `tests/test_*.py` (`test_*.py`
+        #     globs to 1,244; the exempt check `continue`s before this function is
+        #     reached, so a larger number can only be the all-`.py` population of
+        #     1,428).
+        #   * PARSED: **9**. 1,174 short-circuit on the substring test above, so
+        #     "the census parses 1,183 files" is false — and self-refuting, since
+        #     it would make this fast path pointless. Measured at 45a1404cd8:
+        #     walked=1183, fast_path=1174, parsed=9, 9 calls in 5 files.
+        #   * COST: parsing ALL 1,183 would cost ~+14 s (measured: 0.38 s with
+        #     this guard, 14.73 s without). The earlier "~+12 s" is the same
+        #     figure quoted differently — cite the pair, not the delta alone.
         return []
     try:
         with warnings.catch_warnings():
