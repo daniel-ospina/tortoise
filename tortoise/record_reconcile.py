@@ -147,14 +147,14 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   the graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
   → the projection's ``_assert_test_graph``, #2944), and no production name does
   (``org_<org_id>``, its ``org_<org_id>_<gid>`` child and a legacy
-  ``team_<org_id>`` alike), so on a production cache no shipped route clears the
-  PROPERTY on either ANCHOR while keeping the entity (``tortoise_delete`` reaches
-  the node only by REMOVING it, and journals the delete that removes its record
-  row; ``update_entity(…, story_arc=None)`` is REFUSED as server-managed on
-  BOTH anchors (``_SOURCE_SERVER_MANAGED_PROPS`` / ``_EVENT_SERVER_MANAGED_PROPS``
-  — each raises and the stored value is untouched, measured; an embedded
-  ``path=`` DB is exempt from the name check, not from
-  supervision) — ⚠️ **but the ``:Point`` half DOES have one, and it is
+  ``team_<org_id>`` alike; an embedded ``path=`` DB is exempt from that name
+  check, not from supervision), so on a production cache no shipped route clears
+  the PROPERTY on either ANCHOR while keeping the entity (``tortoise_delete``
+  reaches the node only by REMOVING it, and journals the delete that removes its
+  record row; ``update_entity(…, story_arc=None)`` is REFUSED as server-managed
+  on BOTH anchors (``_SOURCE_SERVER_MANAGED_PROPS`` /
+  ``_EVENT_SERVER_MANAGED_PROPS`` — each raises and the stored value is
+  untouched, measured) — ⚠️ **but the ``:Point`` half DOES have one, and it is
   non-destructive**: ``update_point(<id>, story_arc=None)`` clears the property
   and KEEPS the node (measured — the ``None`` passes
   ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
