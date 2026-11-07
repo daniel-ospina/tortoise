@@ -4000,6 +4000,38 @@ def _norm(s: str) -> str:
 # out (#10000).
 _UNVERIFIED_TEXT_CAP = 64
 
+#: The characters the cap above must keep out, in addition to bounding length.
+#: C0 (incl. NUL/TAB/LF/CR) and DEL — the bytes that turn one edge property into
+#: several when the write leg (#11237) re-parses it.
+_UNVERIFIED_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _bounded_unverified(value: object) -> tuple[str, str | None]:
+    """Bound an UNVERIFIED relation field, returning ``(text, correction)``.
+
+    Both halves of what `_UNVERIFIED_TEXT_CAP`'s comment claims: control
+    characters are COLLAPSED TO A SPACE **first**, then the result is capped.
+    Order matters — capping first leaves a control character inside the kept
+    window whenever one arrives early (issue #11333: a 3-char ``"a\\nb"`` was
+    short enough that the cap never fired at all, so the newline reached a
+    record the write leg carries as an edge property, which is the prose
+    surface #10000's P0 exists to keep out).
+
+    `correction` names what was done (``None`` when the value was already
+    well-formed) so the caller's warning can say WHICH — a warning that always
+    says "clamped" hides the control-character case behind a length story.
+    """
+    text = str(value)
+    note: str | None = None
+    if _UNVERIFIED_CONTROL_CHARS.search(text):
+        text = _UNVERIFIED_CONTROL_CHARS.sub(" ", text)
+        note = "control characters replaced"
+    if len(text) > _UNVERIFIED_TEXT_CAP:
+        text = text[:_UNVERIFIED_TEXT_CAP]
+        note = (f"{note}, clamped to {_UNVERIFIED_TEXT_CAP}" if note
+                else f"clamped to {_UNVERIFIED_TEXT_CAP}")
+    return text, note
+
 
 def _clip(value: object, limit: int = 60) -> str:
     """Coerce a model-supplied field to bounded text for a report/warning.
@@ -9010,6 +9042,64 @@ def _resolve_relation_endpoint(name: str, exact: set[str],
     return hits[0] if len(hits) == 1 else None
 
 
+def _relation_candidates(value, _depth: int = 0) -> list:
+    """The ONE rule both relation ARRIVALS are judged by (**#11333**).
+
+    One value reaches S5 two ways: as the whole ``relations`` SECTION, or as an
+    ITEM beside a usable list from the other side of the S2∪S4 union
+    (:func:`merge_embed_lists` carries a mistype through as an isolate, so it is
+    counted rather than vanishing). Judging those two arrivals by two rules made
+    the census answer a question about the MERGE SHAPE instead of about the
+    value — the same triple was kept as an item and dropped as a section.
+
+    The rule:
+
+    * a mapping carrying ANY of ``src``/``dst``/``predicate`` is **ONE**
+      candidate — the realistic mistype (the model emitting the triple where a
+      list of triples was asked for). It is RECOVERED, then validated exactly
+      like any other item: its endpoints still have to resolve to entities this
+      emission produced, so nothing is minted here.
+    * a mapping WITHOUT them is a mapping OF relations, judged entry by entry
+      (``{"a": {…}, "b": {…}}`` is two relations, not one lost blob); an EMPTY
+      mapping loses nothing.
+    * a sequence is its items, with one level of embedded-mapping expansion —
+      the union's isolate path and a nested mapping both land on the same list.
+    * anything else (``""``, ``0``, a bare string, a non-dict entry) is ONE
+      malformed candidate, so the caller's own diagnostics count it exactly
+      once, as before.
+
+    Every candidate that is not a relation mapping is returned AS IS; the
+    caller's item loop names and counts it. This function never drops.
+
+    ``_depth`` bounds the mapping recursion: model output nests a handful of
+    levels at most, and a pathological (or self-referential) mapping must be
+    counted ONCE rather than raising `RecursionError` out of the census — a
+    crash here would surface as a dropped payload, not as the one lost relation
+    it actually is.
+    """
+    if value is None:
+        return []
+    if _depth > 8:
+        return [value]
+    if isinstance(value, dict):
+        if {"src", "dst", "predicate"} & set(value):
+            return [value]
+        out: list = []
+        for entry in value.values():
+            out.extend(_relation_candidates(entry, _depth + 1))
+        return out
+    if isinstance(value, (list, tuple)):
+        out = []
+        for entry in value:
+            if isinstance(entry, dict) and \
+                    not ({"src", "dst", "predicate"} & set(entry)):
+                out.extend(_relation_candidates(entry, _depth + 1))
+            else:
+                out.append(entry)
+        return out
+    return [value]
+
+
 def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                         warnings: list[str]) -> tuple[list[dict], int]:
     """Validate the emission's entity↔entity relations. Returns
@@ -9026,30 +9116,26 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
         # it, so a model emitting `"relations": ""` got no diagnostic at all
         # and `relations_dropped` stayed 0.
         return [], 0
-    if not isinstance(raw, list):
-        # A MISTYPED section is a drop, not a no-op: every relation in it is
-        # lost, so it must reach `connections_incomplete` (the reporting
-        # discipline rule 1 rests on) rather than only a shape warning.
-        # ⚠️ `len(dict)` counts KEYS, and the realistic mistype is ONE relation
-        # OBJECT where a list was asked for (`{"src": …, "dst": …,
-        # "predicate": …}`) — counting its three keys reported 3 lost relations
-        # for 1. A mapping OF relations still counts one per entry.
-        if isinstance(raw, dict):
-            n = 1 if ({"src", "dst", "predicate"} & set(raw)) else len(raw)
-        elif isinstance(raw, tuple):
-            n = len(raw)
-        else:
-            n = 1
-        warnings.append(f"relations section is {type(raw).__name__}, not a "
-                        "list — ignored")
-        if n:
-            # An empty falsy mistype (`{}`) is still a SHAPE error and is named
-            # above, but it carries no relation to report as lost.
+    # ⛔ ONE rule for both arrivals (#11333): the section value and an isolate
+    # ITEM from the union are the same question asked twice. Judging them
+    # separately is what made `relations_dropped` depend on the merge shape —
+    # the realistic mistype (the triple where a list was asked for) was KEPT
+    # beside a usable list and DROPPED as the whole section.
+    candidates = _relation_candidates(raw)
+    if not isinstance(raw, (list, tuple)):
+        # Still a SHAPE error and still named (the model is told what it
+        # emitted), but no longer an automatic loss: the candidates below are
+        # validated exactly as list items are, so an edge is recovered when the
+        # value carries one and counted as lost only when it does not.
+        if candidates:
             warnings.append(
-                f"connections_incomplete (#10999): {n} narrative relation(s) "
-                "dropped, 0 carried — the items still commit (S5 Job 1 fails "
-                "open)")
-        return [], n
+                f"relations section is {type(raw).__name__}, not a list — "
+                f"recovered as {len(candidates)} relation candidate(s), judged "
+                "exactly as list items")
+        else:
+            warnings.append(
+                f"relations section is {type(raw).__name__}, not a list — "
+                "nothing to carry")
 
     exact = {str(e.get("name") or "").strip()
              for e in payload_entities if isinstance(e, dict)}
@@ -9101,7 +9187,7 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     kept: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     dropped = 0
-    for i, item in enumerate(raw):
+    for i, item in enumerate(candidates):
         if not isinstance(item, dict):
             warnings.append(
                 f"non-dict relation entry {_clip(item, 60)!r} skipped")
@@ -9176,15 +9262,15 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
         else:
             # Unverified is not UNBOUNDED: with the registry unreadable nothing
             # clamped this value, and `predicate` is a field the write leg
-            # (#11237) carries as an edge property. Clamp, and say so.
-            _unverified = predicate
-            if len(_unverified) > _UNVERIFIED_TEXT_CAP:
+            # (#11237) carries as an edge property. Bound BOTH halves — the
+            # control characters as well as the length (#11333) — and say which
+            # correction was made.
+            _unverified, _correction = _bounded_unverified(predicate)
+            if _correction:
                 warnings.append(
-                    f"relations[{i}] predicate is {len(_unverified)} chars "
+                    f"relations[{i}] predicate is {len(predicate)} chars "
                     "and could not be checked against the declared vocabulary "
-                    f"(registry unreadable) — clamped to "
-                    f"{_UNVERIFIED_TEXT_CAP}, kept, unverified")
-                _unverified = _unverified[:_UNVERIFIED_TEXT_CAP]
+                    f"(registry unreadable) — {_correction}, kept, unverified")
             else:
                 warnings.append(
                     f"relations[{i}] predicate '{_clip(predicate, 40)}' could "
@@ -9251,17 +9337,17 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
                 # ⛔ But it must not carry FREE TEXT either — with the closed set
                 # unreadable, nothing validated this value, and `semantics` is a
                 # field the write leg (#11237) carries as an edge property.
-                # Clamp it and say so: bounded, never silently truncated.
+                # Bound both halves (control characters AND length, #11333) and
+                # say which correction was made: bounded, never silently
+                # truncated.
                 _kept_semantics = _canonical_semantics
                 if _kept_semantics is None:
-                    _kept_semantics = semantics
-                    if len(_kept_semantics) > _UNVERIFIED_TEXT_CAP:
+                    _kept_semantics, _correction = _bounded_unverified(semantics)
+                    if _correction:
                         warnings.append(
-                            f"relations[{i}] semantics is "
-                            f"{len(_kept_semantics)} chars and could not be "
-                            "checked against the closed vocabulary — clamped "
-                            f"to {_UNVERIFIED_TEXT_CAP}")
-                        _kept_semantics = _kept_semantics[:_UNVERIFIED_TEXT_CAP]
+                            f"relations[{i}] semantics is {len(semantics)} "
+                            "chars and could not be checked against the closed "
+                            f"vocabulary — {_correction}")
                 rel["semantics"] = _kept_semantics
         kept.append(rel)
 
