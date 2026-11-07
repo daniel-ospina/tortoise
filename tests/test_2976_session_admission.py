@@ -715,8 +715,16 @@ def test_the_agreement_with_the_pool_authority_is_scoped_to_identified_hits():
               {"id": "I_t1", "sessionId": "sessA"},
               {"id": "I_t2", "sessionId": "sessA",
                "lme_session_index": 3}):
-        if h.get("lme_session_index") is None:
-            assert _session_admission_key(h) == ("session", session_key_of(h))
+        # the branch tests the POOL's own index leg (`isinstance(int)`, not a
+        # bool, `>= 0`), not key PRESENCE — so a fixture carrying -1 or "3"
+        # exercises the leg it actually reaches rather than the one it looks
+        # like it reaches.
+        idx = h.get("lme_session_index")
+        if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
+            # the index outranks the wire id in BOTH grains; each names the
+            # same identity in its own encoding, and above all NEITHER grain
+            # is left unasserted here
+            assert session_key_of(h) == f"idx:{idx}"
+            assert _session_admission_key(h) == ("index", idx)
         else:
-            assert _session_admission_key(h) == (
-                "index", h["lme_session_index"])
+            assert _session_admission_key(h) == ("session", session_key_of(h))

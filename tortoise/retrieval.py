@@ -727,7 +727,7 @@ def session_key_of(hit: dict) -> str:
       ``tests/test_window_arm_baseline_10538.py``): its ``recall_all@5
       0.6761 → 0.8592`` is the session-diverse GUARD's net gain, while the
       INJECTION's own eviction costs ``reader_surface@5 0.9436 → 0.9289``
-      and the guard adds ``evidence_recall@5 0.527 → 0.4706``. Quoting the
+      and the guard COSTS ``evidence_recall@5 0.527 → 0.4706``. Quoting the
       gain alone — as an earlier draft of this docstring did — inverts the
       attribution this fix exists to keep straight and re-arms the arm
       #8713 refuted. Pre-change there was no seed and
