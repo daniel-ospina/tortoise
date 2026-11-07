@@ -42,14 +42,23 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# #5128: refuse a <3.12 interpreter before the imports below, so the refusal is
+# attributable rather than an `ImportError` surfacing from some module-level
+# 3.11+-only import further down the file.
+# ⛔ Status is 2, NOT `SystemExit(<str>)`'s 1 (#4053). 1 already means "the map
+# has violations" (:455), so a caller keying on the status would read an
+# interpreter refusal as "the map is broken"; 2 is this tool's own
+# cannot-evaluate status (:113, :422, :434), which is what a wrong interpreter
+# actually is. `SystemExit(<int>)` carries no message, so the message is printed
+# explicitly — the one other shape the #5128 census accepts.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/test_design_map_check.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/test_design_map_check.py`"
+        f"`uv run python tools/test_design_map_check.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(2)
 
 import argparse
 import json

@@ -76,8 +76,14 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# #5128: refuse a <3.12 interpreter before the imports below, so the refusal is
+# attributable rather than an `ImportError` surfacing from some module-level
+# 3.11+-only import further down the file. The HISTORICAL `raise
+# SystemExit(<str>)` shape is correct HERE and only here: CPython exits 1 for it,
+# which is exactly `CACHE_EVICTION_EXIT_USAGE` (`tortoise/cache_eviction.py:137`,
+# "flag/IO mistake") — a wrong interpreter is a usage mistake for this verb —
+# and this tool's verdict codes are 2/3/4, so status 1 stays unambiguous. The
+# two sibling tools whose exit 1 is a VERDICT cannot use this shape (#4053).
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/cache_evict.py requires Python >= 3.12 (got "
