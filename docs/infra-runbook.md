@@ -1689,7 +1689,9 @@ Two halves close that, and neither is a health *reading*:
 
 1. **`GET /liveness`** (`hosted_api.liveness`) — the handler yields to the loop
    once, then increments a per-process counter **for this request** and reports
-   the age of the last completed one. If the loop cannot run, the coroutine
+   the age of the last request that ENTERED this handler (stamped when the
+   handler runs, not when the response is delivered — see `hosted_api.liveness`).
+   If the loop cannot run, the coroutine
    never resumes, so there is no answer to mistake for health. By construction it
    does no I/O of its own (one loop yield, one counter increment — no DB and no
    network); with the loop blocked, `/health` and `/liveness` both
@@ -1714,7 +1716,9 @@ Two halves close that, and neither is a health *reading*:
 **Blind spots, stated rather than implied.** It detects a loop that cannot
 serve — and, because `curl --max-time 5` turns any answer later than the bound
 into `000` → `DOWN`, it also detects a loop that serves slower than the bound
-(a 6 s answer pages; pinned by harness case 93). What it does NOT detect is a
+(the `000` → `DOWN` mapping is pinned by harness case 93; the conversion of a
+late answer into `000` is curl's own documented `--max-time` behaviour, measured
+here but not a repo pin). What it does NOT detect is a
 loop that serves slowly *within* the bound: a 4 s answer passes a 5 s prober.
 It says nothing about a deploy that never happened (`check-deploy-staleness.sh`),
 and it is not a substitute for the TCP check that catches a dead process. Do

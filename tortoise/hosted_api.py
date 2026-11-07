@@ -6794,7 +6794,10 @@ def _record_health() -> dict:
 #
 # This endpoint is that request, and its answer is deliberately impossible to
 # produce from cached state: it increments a counter FOR THIS REQUEST and
-# reports the age of the last COMPLETED one. If the loop cannot run, this
+# reports the age of the last request that ENTERED this handler (stamped when
+# the handler runs, not when the response is delivered — the prober treats a
+# response that never arrives as DOWN, so the two are the same event for it).
+# If the loop cannot run, this
 # handler never resumes, so no answer exists to be mistaken for health — the
 # prober's own timeout is the signal (`.github/workflows/availability-watchdog.yml`
 # probes it with a 5 s per-request bound, #10892).

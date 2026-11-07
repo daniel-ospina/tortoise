@@ -2196,6 +2196,31 @@ assert_not_contains "$(patched_body)" "NO Fly machine" \
 assert_contains "$(patched_body)" "machine-backed" \
   "liveness: the incident body names the machine-backed surface"
 
+# ── 102: the RESTARTABLE API target's DOWN body keeps the RESTART prose ────
+# The contrast case for the DOWN arm of the machine-vs-Pages split (its DEGRADED
+# analogue is 99b). `render_body` asks is_restartable_url BEFORE
+# is_machine_backed_url, and only that ORDER keeps the primary API probe from
+# describing itself as "deliberately DISARMED" and telling the on-call to
+# "cross-check the primary API incident" — on the incident that IS the primary
+# probe's. Nothing pinned that order: measured by mutation at 429fa670,
+# swapping the two branches left the whole harness GREEN (738/0). This pins it
+# from the restartable side, so the swap now reds.
+reset_case
+export STUB_PROBE_CODES="000"
+# An expectation list is REQUIRED for this case to mean anything: `render_body`'s
+# three-way split lives INSIDE `if [ -n "$PROBE_EXPECT_STATUS" ]`, so with the
+# knobs unset the API target never reaches it and the case would be vacuous
+# (measured: without the list, the branch swap below stayed green).
+export PROBE_EXPECT_STATUS="200"
+export FLY_API_TOKEN="fly-token"     # so the run is a real DOWN on the armed target
+run_watchdog
+assert_eq "$RC" "1" "api DOWN: exit 1"
+assert_contains "$(created_json)" "PROD DOWN" "api DOWN: PROD DOWN title"
+assert_not_contains "$(patched_body)" "deliberately DISARMED" \
+  "api DOWN: the restartable target's body must NOT claim its restart leg is disarmed"
+assert_not_contains "$(patched_body)" "served by the **same Fly machine**" \
+  "api DOWN: the machine-backed prose is the OTHER arm's (this target is that machine)"
+
 # ── 101: a DEGRADED on that same target is a DEPLOY, not a Pages fault ─────
 # The round-3 prose split has TWO arms and only the DOWN one was pinned (case
 # 88b). Measured by mutation at head 2cb81b7: deleting the mirroring

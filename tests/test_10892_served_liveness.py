@@ -28,7 +28,7 @@ one alone is a false PASS:
 1. ``GET /liveness`` (`hosted_api.liveness`) — an answer that can only be
    produced BY being served: it yields to the loop once, then increments a
    per-process counter **for this request** and reports the age of the last
-   completed one. No counter, no answer — so a replayed, cached or off-loop
+   request that ENTERED this handler. No counter, no answer — so a replayed, cached or off-loop
    body is impossible rather than merely unlikely
    (`test_handler_yields_to_the_loop_and_reads_no_cached_state` closes the
    "make it a state read like `/healthz`" regression statically).
