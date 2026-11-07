@@ -26,12 +26,20 @@
 #     (this is how the S2 row was caught dropping its `Observe` half).
 #   * `verdict` is one of verified | failed | blocked | not-covered. There is no
 #     `partial`: every pass that invented one measured the same rows differently.
-#   * `verified` requires at least one evidence entry, and every path must EXIST
-#     in the tree. Described evidence does not count; held evidence does.
+#   * `verified` requires at least one evidence entry that is a file **TRACKED by
+#     git** inside the tree. Described evidence does not count, and neither does a
+#     file that exists only on the authoring box (a gitignored lane artifact).
+#   * a `cmd:` entry is a RECORD of what was run and does NOT satisfy `verified` on
+#     its own — the tool never executes it. It is kept for the reader.
+#   * `criteria_expected` (top level, REQUIRED) pins the denominator, so dropping a
+#     row without moving the count is a refusal.
+#   * YAML merge keys (`<<`) are refused: every row states its own verdict, and a
+#     merged anchor can carry a verdict the row does not say.
 #   * every non-verified row requires `reason`. An unexplained uncovered row is
 #     not an explicit uncovered list.
-#   * `evidence_kind: server-observation` is the declared waiver for a criterion
-#     that is not observable on a screen — see S5. It is per-row on purpose.
+#   * `evidence_kind` is checked for membership in a closed vocabulary ONLY; no
+#     kind grants a waiver. `server-observation` marks S5's shape for the reader,
+#     and S5 still needs a tracked artifact to be `verified`.
 #
 # A MECHANICAL RE-RUN OF THE `cmd:` EVIDENCE:
 #   uv run python tools/capstone_ledger.py check

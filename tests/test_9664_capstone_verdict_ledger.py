@@ -380,10 +380,14 @@ def test_a_cmd_entry_is_accepted_alongside_a_held_artifact(tmp_path):
     assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
 
 
-def test_an_empty_or_unparseable_cmd_entry_is_still_invalid(tmp_path):
-    for bad in ["cmd:", "cmd:   ", "cmd:'unbalanced"]:
-        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, bad])]))
-        assert proc.returncode == cl.EXIT_INVALID, (bad, proc.stdout + proc.stderr)
+def test_only_an_EMPTY_cmd_entry_is_refused(tmp_path):
+    """No parse rule survives: an unmatched quote is a shell-valid record's business,
+    not the ledger's, and refusing it hid the whole uncovered list."""
+    for empty in ["cmd:", "cmd:   "]:
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, empty])]))
+        assert proc.returncode == cl.EXIT_INVALID, (empty, proc.stdout + proc.stderr)
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, "cmd:'unbalanced"])]))
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
 
 
 @pytest.mark.parametrize("escape", ["/etc/hostname", "..", ".", "docs"])
@@ -540,14 +544,100 @@ def test_a_merge_key_is_refused_by_name(tmp_path):
 
 
 def test_an_untracked_artifact_is_invalid(tmp_path):
-    """`is_file()` accepted a GITIGNORED lane artifact, so the row validated on the
-    authoring box and was INVALID for every reader — the opposite of "in the tree"."""
-    report = REPO_ROOT / "WORKTREE-REPORT.md"
-    if not report.is_file():
-        pytest.skip("no local WORKTREE-REPORT.md in this worktree")
-    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=["WORKTREE-REPORT.md"])]))
-    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "not TRACKED" in proc.stderr
+    """HERMETIC: a temp git repo with one committed file and one untracked file.
+
+    The previous version of this test used `WORKTREE-REPORT.md`, which is
+    gitignored and created only by a lane — so the test SKIPPED in every CI run and
+    the refusal it claims to pin was unpinned there: deleting `_is_tracked` from the
+    resolver would have stayed green in CI while a gitignored lane artifact counted
+    as held evidence.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "treerepo"
+    repo.mkdir()
+    (repo / "committed.txt").write_text("held\n", encoding="utf-8")
+    (repo / "untracked.txt").write_text("not in any clone\n", encoding="utf-8")
+    git = ["git", "-C", str(repo)]
+    sp.run([*git, "init", "-q"], check=True)
+    sp.run([*git, "add", "committed.txt"], check=True)
+    sp.run(
+        [
+            *git,
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "seed",
+        ],
+        check=True,
+    )
+
+    ok, why = cl._evidence_is_real("committed.txt", repo_root=repo)
+    assert ok, why
+    ok, why = cl._evidence_is_real("untracked.txt", repo_root=repo)
+    assert not ok, "an untracked artifact must NOT count as held evidence"
+    assert "not TRACKED" in why, why
+
+
+def test_a_cmd_entry_with_a_shell_comment_or_apostrophe_is_accepted(tmp_path):
+    """A shell-VALID record must not invalidate the ledger.
+
+    `shlex` rejects `… -q  # don't rerun - already green` while `bash -n` accepts it,
+    and exit 1 computes NOTHING — so one apostrophe hid all 13 uncovered rows.
+    """
+    proc = _run_cli(
+        tmp_path,
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:pytest tests/test_9664_capstone_verdict_ledger.py -q  # don't rerun",
+                    ],
+                )
+            ]
+        ),
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_a_non_iso_date_or_missing_ref_is_invalid(tmp_path):
+    for bad in ({"ref": "origin/main", "date": "banana"}, {"ref": "", "date": "2026-11-07"}):
+        data = _ledger([_row("A")])
+        data["measured_at"].update(bad)
+        proc = _run_cli(tmp_path, data)
+        assert proc.returncode == cl.EXIT_INVALID, (bad, proc.stdout + proc.stderr)
+
+
+@pytest.mark.parametrize(
+    "injected",
+    [
+        "waiting on X\r    -   S1  verified   FORGED: nothing to see here",
+        # ESC / CSI are NOT whitespace, so `str.split()` lets them through: measured
+        # end to end, this rendered as a forged `verified` row line on a terminal.
+        "waiting on X\x1b[2K\x1b[1G    -   S1  verified   FORGED",
+        "waiting on X\x00\x07\x08\x0e\x1b\x7f\x9b",
+    ],
+)
+def test_a_control_character_in_a_reason_cannot_rewrite_the_printed_row(injected):
+    rows = [
+        {
+            "id": "S1",
+            "text": "t",
+            "verdict": "blocked",
+            "reason": injected,
+            "evidence": [],
+            "evidence_kind": None,
+        }
+    ]
+    out = cl.render(rows, {"ref": "origin/main", "sha": SHA, "date": "2026-11-07"})
+    assert all(ord(ch) >= 32 for ch in out.replace("\n", "")), repr(out)
+    assert out.count("    - ") == 1, out
 
 
 def test_a_one_word_cmd_entry_alongside_a_held_artifact_is_accepted(tmp_path):

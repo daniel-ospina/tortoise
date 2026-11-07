@@ -61,9 +61,11 @@ Record format (committed at `docs/evidence/9664-capstone/verdict-ledger.yml`):
 ⛔ Every cited path must be a **TRACKED** file inside the tree. A row that names a
 path which is not there — or which exists only on the authoring box, e.g. a
 gitignored lane artifact — is REFUSED rather than counted, so a ledger cannot be
-made green by describing evidence instead of holding it. `evidence_kind:
-server-observation` carries an explicit waiver (it is the shape of step 5, which is
-a server-side observation with no screenshot by nature, #9664 comment 6692766222 §D).
+made green by describing evidence instead of holding it.
+`evidence_kind` grants NO waiver — it is checked for membership in a closed
+vocabulary only. `server-observation` names the SHAPE of step 5's evidence, which
+is a server-side observation with no screenshot by nature (#9664 comment
+6692766222 §D); that row still needs a tracked artifact to be `verified`.
 ⛔ YAML merge keys (`<<`) are refused by name: `SafeConstructor` splices a merged
 value's pairs in without constructing that node, so the duplicate-key rule cannot
 see inside it, and this record's rule is that every row states its OWN verdict.
@@ -88,7 +90,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import shlex
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -108,10 +110,10 @@ VERDICTS: Final[frozenset[str]] = frozenset({"verified", "failed", "blocked", "n
 #: The only verdict that counts toward closing. Everything else is uncovered.
 CLEAN_VERDICT: Final[str] = "verified"
 
-#: `server-observation` is the declared waiver: step 5 is a server-side
-#: observation (`connection-written` / `harness-connected` do not happen
-#: on a screen), so it can never carry a screenshot. Naming the kind makes the
-#: waiver explicit and per-row instead of an unwritten convention.
+#: `evidence_kind` is checked for MEMBERSHIP ONLY — no kind grants a waiver. It
+#: names the shape of the evidence for the reader (step 5 is a server-side
+#: observation, so a screenshot can never carry it); the row still needs a TRACKED
+#: artifact to be `verified`.
 EVIDENCE_KINDS: Final[frozenset[str]] = frozenset(
     {"screenshot", "trace", "command", "server-observation"}
 )
@@ -277,19 +279,15 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     """
     root = repo_root.resolve()
     if entry.startswith(_CMD_PREFIX):
-        # Non-empty and parseable is the whole check — this arm confers nothing, so
-        # no shape or token rule here may invalidate a row whose held artifact is
-        # already present (`cmd:make` used to produce exit 1 and lose the report).
         command = entry[len(_CMD_PREFIX) :].strip()
         if not command:
             return False, "`cmd:` evidence names no command"
-        try:
-            shlex.split(command)
-        except ValueError:
-            return False, f"`cmd:` evidence is not a parseable command: {command!r}"
-        # Deliberately NO shape/token rule: this arm confers nothing, so a rule here
-        # can only false-block a row whose held artifact is already present
-        # (measured: `cmd:make` alongside a real path invalidated the record).
+        # NON-EMPTY IS THE WHOLE CHECK — no token, shape or parse rule. Every rule
+        # tried here false-blocked a real record, and because exit 1 computes
+        # NOTHING it also hid the entire uncovered list: `cmd:make` beside a held
+        # artifact did it, and so did a shell-valid command carrying a `#` note with
+        # an apostrophe (`shlex` rejects it while `bash -n` accepts it). An arm that
+        # confers nothing must not be able to invalidate anything.
         return True, ""
     candidate = Path(entry)
     resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
@@ -330,7 +328,19 @@ def _is_tracked(resolved: Path, root: Path) -> bool:
         text=True,
         check=False,
     )
-    return probe.returncode != 0 or probe.stdout.strip() != "true"
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        # Git IS here and it refused this path: the file is untracked. Blame it.
+        return False
+    # Git cannot answer here at all (no `.git`, a tarball, a build context). The
+    # record is not blamed — but the abstention is PRINTED, because a CLEAN verdict
+    # byte-identical to one where the rule ran is how a check quietly stops
+    # checking. (`_commit_state` takes the same doctrine; see its docstring.)
+    print(
+        "CAPSTONE-LEDGER: NOTE — git is unavailable here, so the TRACKED rule cannot "
+        "be evaluated; cited paths were checked for existence only",
+        file=sys.stderr,
+    )
+    return True
 
 
 def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str, Any]]:
@@ -365,8 +375,15 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
             # suite: CI shards check out at fetch-depth 1, where an ancestor sha is
             # simply not in the object database. Blaming the record for that is the
             # #9075 r4 P1 shape.
-        if not str(measured_at.get("date") or "").strip():
+        date = str(measured_at.get("date") or "").strip()
+        if not date:
             problems.append("`measured_at.date` must be set (YYYY-MM-DD)")
+        elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            # `render()` prints this as provenance: `date: banana` rendered
+            # "measured at … on banana" as fact.
+            problems.append(f"`measured_at.date` must be YYYY-MM-DD, got {date!r}")
+        if not str(measured_at.get("ref") or "").strip():
+            problems.append("`measured_at.ref` must be set (e.g. origin/main)")
 
     raw_rows = data.get("criteria")
     # The DENOMINATOR is pinned IN THE RECORD, not only in the suite. Deleting the
@@ -493,6 +510,25 @@ def uncovered(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if row["verdict"] != CLEAN_VERDICT]
 
 
+#: C0 + C1 control characters (ESC, CSI, NUL, BS, SO, DEL included) — see `_flat`.
+_CONTROL_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _flat(text: str) -> str:
+    """Collapse control characters so a reason cannot rewrite the line printing it.
+
+    Measured: a `reason` carrying `\r    -   S1  verified   FORGED: …` still counted
+    the row (exit 2, `uncovered: 1`), but a terminal rendered the line as `verified` —
+    the exact line a lane would quote into a comment.
+    """
+    # EVERY control character, not just the whitespace class: `str.split()` drops
+    # `\r`/`\n` but leaves ESC, CSI (\u009b), NUL, BS, SO and DEL, and
+    # `X\x1b[2K\x1b[1G    -   S1  verified   FORGED` rendered on a terminal as a
+    # forged row line — the same class one byte over from the `\r` case.
+    cleaned = _CONTROL_RE.sub(" ", str(text))
+    return " ".join(cleaned.split())
+
+
 def render(rows: list[dict[str, Any]], measured_at: dict[str, Any]) -> str:
     lines = [
         "CAPSTONE-LEDGER #9664 — computed, not re-read",
@@ -505,7 +541,7 @@ def render(rows: list[dict[str, Any]], measured_at: dict[str, Any]) -> str:
         return "\n".join(lines)
     lines.append("  UNCOVERED LIST (each with the reason the runner recorded):")
     for row in uncovered(rows):
-        lines.append(f"    - {row['id']:>4}  {row['verdict']:<11}  {row['reason']}")
+        lines.append(f"    - {row['id']:>4}  {row['verdict']:<11}  {_flat(row['reason'])}")
     return "\n".join(lines)
 
 
