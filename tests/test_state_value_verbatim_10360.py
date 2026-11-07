@@ -2052,9 +2052,29 @@ def _assert_the_row_names_its_closure(row: str) -> None:
     # its own proof list is `test_the_residual_region_is_scanned_WHERE_a_lane_
     # appends` below — this call is the pin, that test is the pin's own proof.
     claims = _residual_reopening_claims(row)
+    # ⛔ A REFUSAL WHOSE SENTENCE CONTAINS A LEDGER SHAPE SAYS SO, and it POINTS
+    # rather than ruling (#11258 review round 11 `P2`/`P3`, MEASURED): the sentence
+    # can carry BOTH an honest ledger shape and a genuine reopening —
+    # `the ADJACENCY half is not closed, and (b2) is not closed.` matches the
+    # `(b2)` entry inside a real reopening — so a message that calls it "a recorded
+    # over-block, not a reopening" states something false about the artifact it
+    # just refused. The comparison is LOWERCASED on both sides because `claims`
+    # carries the sentence lower-cased while five of the seven ledger entries are
+    # spelled in caps: a case-sensitive compare found 5 of 7 undetectable, the
+    # `minute` cost included (MEASURED).
+    ledger_hits = [s for s in _RESIDUAL_REFUSED_TRUTHFUL
+                   if any(s.rstrip(".").lower() in c.lower() for c in claims)]
     assert claims == [], (
         "the residual region REOPENS a gap this row says is CLOSED: "
-        + "; ".join(claims))
+        + "; ".join(claims)
+        + ("\n⛔ A LEDGER SHAPE IS ALSO IN THIS SENTENCE: "
+           f"{ledger_hits}. `_RESIDUAL_REFUSED_TRUTHFUL` records truthful "
+           "statements this pin refuses, and its note gives the arm, why that arm "
+           "cannot be narrowed, and the phrasing each one accepts — read the "
+           "entry before rewriting: if the WHOLE sentence is honest, the accepted "
+           "workaround is there (for `is not closed` it is `is still open` / "
+           "`remains open`, both MEASURED GREEN); if it also reopens this gap, "
+           "the rest of the sentence is the defect." if ledger_hits else ""))
     assert not tail or any("spelling" in s for s in tail), (
         "a sentence after the adjacency claim says something other than the "
         f"disclosed SPELLING residual — inspect it: {tail!r}")
@@ -2433,6 +2453,27 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
 #:   its reopening twin are indistinguishable to a clause-scoped rule. This is
 #:   the cost a lane is most likely to meet, because the row's surviving gap IS
 #:   the unit-spelling class.
+#: * `(b2) is not closed` / `(e) is not closed` — the `not … closed` arm is
+#:   UNANCHORED on purpose, so it also refuses the honest statement that a
+#:   DIFFERENT residual of this row is still not closed. The row is a list of what
+#:   is still not enforced, and `(b2)` (`STRICT VERBATIM SURVIVAL stays SHORT of
+#:   target`, 38/77 = 49.4%) and `(e)` (`the S5 minted-endpoint site is not judged
+#:   against its own quote … a follow-up`) are items in it, so a lane writing an
+#:   update about them meets this (#11258 review round 11 `P1`, MEASURED RED at
+#:   the append point at `7b3bdd231d`). ⛔ THE WORKAROUND IS A DIFFERENT WORD, not
+#:   a wider arm: `(b2) is still open.` / `(e) remains open.` are GREEN (measured).
+#:   This is a CLASS, not two shapes — a third label meets it too, so ADD the
+#:   sentence here rather than anchoring the arm. ⛔ WHAT ANCHORING ACTUALLY
+#:   COSTS, because the first revision of this bullet cited the wrong sentence: it
+#:   is NOT `the gap those tables closed is not closed` — that one matches
+#:   `_RESIDUAL_CLASS_ANCHOR` and stays RED under the anchored arm (MEASURED both
+#:   ways). The loss is the ANCHOR-FREE `the remaining gap is not closed` family,
+#:   whose four exclusive proofs (`the remaining gap is not closed.` and its three
+#:   `the SPELLING gap is open <but|while|although> the remaining gap is not
+#:   closed` variants) go GREEN under the anchored arm — `the remaining gap` is
+#:   deliberately NOT an anchor, because the row uses it for the SURVIVING open
+#:   residual. Re-measure that set before quoting it again: a comment that names
+#:   the wrong example is how the next lane concludes the arm can be anchored.
 #:
 #: ⛔ WHEN ONE OF THESE STOPS BEING REFUSED, THAT IS AN IMPROVEMENT — move it into
 #: `_RESIDUAL_TRUTHFUL_STATEMENTS` in the same commit. Do NOT delete the test's
@@ -2443,6 +2484,9 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     "the ADJACENCY half is closed rather than open.",
     "the ADJACENCY half is no longer an open question.",
     "the remaining gap is the SPELLING case for `minute`, which is open by design.",
+    # the unanchored `not … closed` arm's over-block, on THIS row's own items
+    "(b2) is not closed.",
+    "(e) is not closed.",
 )
 
 
@@ -2581,12 +2625,14 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
         "A `>=` at the current length costs nothing on growth and refuses any "
         "shrinkage; raise it in the same commit that adds proofs.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 30, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 33, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
-        "list that can be deleted silently is not coverage. ⚠️ Within two of the "
-        "current length on purpose: at `>= 22` against a 35-entry list THIRTEEN "
-        "deletions were free, so the honest closures this branch added could be "
-        "deleted with both tests GREEN (#11258 review round 7 `P2`, measured).")
+        "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
+        "CURRENT LENGTH (33), i.e. ZERO SLACK, the same rule the ledger and the "
+        "mutation list carry: it was `>= 30` against a 33-entry list, so three "
+        "honest closures were deletable with both tests GREEN (the stale "
+        "\"within two of the current length\" note is why it read as tight; "
+        "#11258 review round 11 `P3`, MEASURED)")
     # ⛔ AND THE OVER-BLOCK LEDGER IS PINNED BY SHAPE TOO (#11258 review round 8
     # `P2`, MEASURED): it had a fail-closed re-measurement (`now_accepted == []`)
     # and nothing else, so substituting entry 5 with a DUPLICATE of entry 1 left
@@ -2597,10 +2643,12 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         _RESIDUAL_REFUSED_TRUTHFUL), (
         "the over-block ledger has duplicate entries — a duplicate pays for a "
         "dropped cost while the count stays constant")
-    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 5, (
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 7, (
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
-        "re-derive the ledger rather than deleting shapes")
+        "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
+        "CURRENT LENGTH (7), i.e. ZERO SLACK: the round-11 entries are the "
+        "`not … closed` cost, and slack above them is slack to delete it with")
     for required in (
             # the unit-token waiver cost — the one a lane actually meets, because
             # the row's surviving gap IS the unit-spelling class
@@ -2614,7 +2662,14 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # membership strings, and the proof stayed GREEN. A ledger where a cost
             # can be swapped out silently is the same defect one entry over.
             "the ADJACENCY half is closed rather than open.",
-            "the ADJACENCY half is no longer an open question.",):
+            "the ADJACENCY half is no longer an open question.",
+            # ⛔ AND THE UNANCHORED `not … closed` COST (#11258 review round 11
+            # `P1`): without membership both entries are substitutable by
+            # duplicates of the ones above — uniqueness and length survive and the
+            # measured class is gone from the ledger, the same defect round 9
+            # closed one entry over.
+            "(b2) is not closed.",
+            "(e) is not closed.",):
         assert required in _RESIDUAL_REFUSED_TRUTHFUL, (
             f"the over-block ledger no longer carries {required!r} — that shape's "
             "refusal is the measured price of a specific rule; if it is no longer "
