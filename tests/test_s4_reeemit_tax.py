@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -591,7 +592,8 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
         # redded and then crashed on `None` (#11385 review P3).
         measured = [r for r in rows
                     if r["legacy_out_tokens"] is not None
-                    and r["delta_out_tokens"] is not None]
+                    and r["delta_out_tokens"] is not None
+                    and not r.get("legacy_error") and not r.get("delta_error")]
         assert s["sessions_attempted"] == len(rows), path.name
         assert s["sessions_measured"] == len(measured), path.name
         assert measured, path.name
@@ -645,6 +647,42 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
                 if r.get("out_tokens") is not None:
                     assert r.get("basis"), (path.name, a["session"], arm)
 
+        # ⛔ the summary must be DERIVED from `arms`, not merely self-consistent:
+        # an artifact assembled from two different runs is the corruption this
+        # pin exists for, and every check above would stay green (#11385 P2).
+        assert len(s["rows"]) == len(d["arms"]), path.name
+        for row, a in zip(s["rows"], d["arms"], strict=True):
+            assert row["session"] == a["session"], path.name
+            for arm in ("legacy", "delta"):
+                assert row[f"{arm}_out_tokens"] == a[arm].get("out_tokens"), (
+                    path.name, a["session"], arm)
+        # ⛔ over the MEASURED pairs, mirroring `compare`'s `usable_pairs` —
+        # summing every arm here would red a legitimate artifact that contains
+        # one failed arm, which is the shape this pin must tolerate (a failed
+        # arm keeps its spend and its census, but is excluded from the totals).
+        measured_arms = [a for a in d["arms"]
+                         if a["legacy"].get("out_tokens") is not None
+                         and a["delta"].get("out_tokens") is not None
+                         and not a["legacy"].get("error")
+                         and not a["delta"].get("error")]
+        assert len(measured_arms) == s["sessions_measured"], path.name
+        for arm in ("legacy", "delta"):
+            for k in ("s2_items", "s4_items", "merged_items", "added_by_s4",
+                      "corrected_by_s4", "verbatim_reemissions"):
+                assert s["composition"][arm][k] == sum(
+                    a[arm].get(k) or 0 for a in measured_arms), (path.name, arm, k)
+        # ⛔ EVERY capped list on EVERY arm of EVERY pair, not one list per arm:
+        # the README states the cap never fired, so an unpinned list would let
+        # it become false silently (#11385 P2).
+        for a in d["arms"]:
+            for arm in ("legacy", "delta"):
+                for key in ("added_items", "corrected_items"):
+                    lst = a[arm].get(key) or {}
+                    if not lst:
+                        continue
+                    assert lst["cap_hit"] is False, (path.name, a["session"], arm, key)
+                    assert lst["cap_dropped"] == 0, (path.name, a["session"], arm, key)
+
 
 def test_every_row_records_the_numbers_the_residual_says_it_does(tmp_path):
     """The docstring's raised-attempt residual says "every row carries `attempts`
@@ -673,6 +711,39 @@ def test_every_row_records_the_numbers_the_residual_says_it_does(tmp_path):
 
 # ── the evidence artifact is the deliverable, so pin it to its README ────────
 
+def _tables(readme: str) -> list[dict[str, list[str]]]:
+    """Every pipe table in the document as {first cell: remaining cells}.
+
+    ⛔ A SUBSTRING pin is not a discriminating pin: `201` also occurs in the
+    re-run sentence, `12` occurs four times, `62` occurs four times — so
+    "the figure appears somewhere" stays green when the CELL that states it is
+    wrong (#11385 review P2). Parsing the table makes the assertion about the
+    cell the reader actually reads.
+    """
+    tables: list[dict[str, list[str]]] = []
+    current: dict[str, list[str]] = {}
+    for raw in readme.splitlines():
+        line = raw.strip()
+        if not line.startswith("|"):
+            if current:
+                tables.append(current)
+                current = {}
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if all(set(c) <= set("-: ") for c in cells):
+            continue                              # the header separator
+        current[cells[0]] = cells[1:]
+    if current:
+        tables.append(current)
+    return tables
+
+
+def _num(cell: str) -> int | None:
+    """The integer a table cell states, ignoring emphasis and spacing."""
+    digits = re.sub(r"[^0-9]", "", cell.replace("**", ""))
+    return int(digits) if digits else None
+
+
 _EVID = _REPO / "docs" / "evidence" / "1789-s4-reeemit-tax"
 _PRIMARY = _EVID / "ab-20261107T023958Z.json"
 _RERUN = _EVID / "ab-20261107T024226Z.json"
@@ -681,6 +752,23 @@ _RERUN = _EVID / "ab-20261107T024226Z.json"
 def _thousands(n: int) -> str:
     """How the README renders an integer: 32 787 (thin/plain space groups)."""
     return f"{n:,}".replace(",", " ")
+
+
+def _partition(art: dict) -> dict:
+    """The Task-10-Step-5 buckets, over one artifact's recorded pairs."""
+    pairs = [i for a in art["arms"]
+             for i in a["legacy"]["corrected_items"]["items"]]
+    buckets = {"content": 0, "lifecycle": 0, "slots": 0, "supersedes": 0}
+    for i in pairs:
+        if {"content", "name"} & set(i["changed_fields"]):
+            buckets["content"] += 1
+        elif i["changed_fields"] == ["lifecycle"]:
+            buckets["lifecycle"] += 1
+        elif i["changed_fields"] == ["slots"]:
+            buckets["slots"] += 1
+        elif i["changed_fields"] == ["supersedes"]:
+            buckets["supersedes"] += 1
+    return buckets
 
 
 def test_the_readme_figures_reproduce_from_the_committed_artifacts():
@@ -716,19 +804,81 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # composition: the legacy tax vs the delta arm's zero
         assert lg["verbatim_reemissions"] > 0 and dl["verbatim_reemissions"] == 0
         assert _thousands(lg["s4_items"] - dl["s4_items"]) in readme
-        # the census-vs-mask divergence, and the cap that never fired
-        assert (lg["corrected_by_s4"] - lg["verbatim_reemissions"]) \
-            - sum(a["legacy"]["corrected_items"]["recorded"]
-                  for a in art["arms"]) in (0, 1)
+        # ⛔ EVERY channel figure, pinned IN ITS TABLE CELL: a substring check
+        # stays green when the wrong cell changes, because `201`, `12` and `62`
+        # each occur several times in the document (#11385 review P2). The
+        # TABLE is the PRIMARY run (its caption says so), so the re-run is
+        # pinned by its own sentence instead of being matched against it.
+        assert f"{s['max_session_reduction'] * 100:.1f}" in readme
+        if art is not pri:
+            flat_r = " ".join(readme.split())
+            assert (f"Re-run: legacy {lg['verbatim_reemissions']} verbatim / "
+                    f"{lg['corrected_by_s4']} collisions / {lg['added_by_s4']} "
+                    f"added / **{lg['s4_items']}** emitted") in flat_r, lg
+            assert (f"6 added / **{dl['s4_items']}** emitted — i.e. "
+                    f"{lg['s4_items'] - dl['s4_items']} fewer items") in flat_r
+            continue
+        rows = {}
+        for table in _tables(readme):
+            for label, cells in table.items():
+                if "census" in label and len(cells) >= 2:
+                    rows["census"] = (_num(cells[0]), _num(cells[1]))
+                for key in ("verbatim_reemissions", "corrected_by_s4",
+                            "added_by_s4", "s4_items", "merged_items"):
+                    if f"`{key}`" in label and len(cells) >= 2:
+                        rows[key] = (_num(cells[0]), _num(cells[1]))
+        assert rows["verbatim_reemissions"] == (lg["verbatim_reemissions"], 0), rows
+        assert rows["corrected_by_s4"] == (lg["corrected_by_s4"], 0), rows
+        assert rows["added_by_s4"] == (lg["added_by_s4"], dl["added_by_s4"]), rows
+        assert rows["s4_items"] == (lg["s4_items"], dl["s4_items"]), rows
+        # the census row's label wraps the subtraction, so match on the word
+        assert rows["census"] == (lg["corrected_by_s4"] - lg["verbatim_reemissions"],
+                                  0), rows
+        # the census-vs-mask divergence, as the SENTENCE that states it
+        census = lg["corrected_by_s4"] - lg["verbatim_reemissions"]
+        recorded = sum(a["legacy"]["corrected_items"]["recorded"]
+                       for a in art["arms"])
+        assert census - recorded in (0, 1)
+        flat = " ".join(readme.split())
+        assert f"records **{recorded} correction pairs** against the census's " \
+               f"{census}" in flat, (recorded, census)
+        unclassified = [a["legacy"]["corrected_items"]["unclassified"]
+                        for a in art["arms"]]
+        n_unclass, n_rows = sum(1 for u in unclassified if u), len(unclassified)
+        assert f"`unclassified` is 0 on {n_rows - n_unclass} of the {n_rows} " \
+               f"rows and {n_unclass} on the remaining one" in flat, n_unclass
+        # ⛔ every capped list of every arm, not one list per pair
         for a in art["arms"]:
-            assert a["legacy"]["corrected_items"]["cap_hit"] is False
-            assert a["legacy"]["corrected_items"]["cap_dropped"] == 0
-        # the partition the residual rests on: 62 / 1 / 1, no content change
+            for arm in ("legacy", "delta"):
+                for key in ("added_items", "corrected_items"):
+                    lst = a[arm].get(key) or {}
+                    if lst:
+                        assert lst["cap_hit"] is False
+                        assert lst["cap_dropped"] == 0
+        # the partition the residual rests on: 62 / 1 / 1, no content change —
+        # asserted of the ARTIFACT here and of the README's bucket table below
         pairs = [i for a in art["arms"] for i in a["legacy"]["corrected_items"]["items"]]
-        assert sum(i["changed_fields"] == ["lifecycle"] for i in pairs) == 62
-        assert sum(i["changed_fields"] == ["slots"] for i in pairs) == 1
-        assert sum(i["changed_fields"] == ["supersedes"] for i in pairs) == 1
+        n_lifecycle = sum(i["changed_fields"] == ["lifecycle"] for i in pairs)
+        n_slots = sum(i["changed_fields"] == ["slots"] for i in pairs)
+        n_super = sum(i["changed_fields"] == ["supersedes"] for i in pairs)
+        assert (n_lifecycle, n_slots, n_super) == (62, 1, 1), (
+            n_lifecycle, n_slots, n_super)
         assert not any({"content", "name"} & set(i["changed_fields"]) for i in pairs)
+        # ⛔ BOTH columns: the table states the primary AND the re-run count, so
+        # pinning only the first leaves the second editable (#11385 review P2).
+        want = _partition(pri)
+        want_rer = _partition(rer)
+        buckets = {}
+        for table in _tables(readme):
+            for label, cells in table.items():
+                for key, prefix in (("content", "`content`"),
+                                    ("lifecycle", "`lifecycle`"),
+                                    ("slots", "`slots`"),
+                                    ("supersedes", "`supersedes`")):
+                    if label.startswith(prefix) and len(cells) >= 2:
+                        buckets[key] = (_num(cells[0]), _num(cells[1]))
+        assert buckets == {k: (want[k], want_rer[k]) for k in want}, (
+            buckets, want, want_rer)
         # the delta arm's honest limitation, not a hidden one
         assert sum(a["delta"]["s4_delta_empty"] is False for a in art["arms"]) == 7
     assert f"{pri['summary']['median_session_reduction'] * 100:.1f}" in readme
@@ -779,3 +929,16 @@ def test_a_failed_arm_that_SPENT_is_still_excluded_from_the_reduction():
     # beside a one-session reduction (#11385 review P2).
     assert s["composition"]["legacy"]["s4_items"] == 10      # the healthy pair
     assert s["composition"]["delta"]["s4_items"] == 10
+
+
+def test_a_partial_run_is_flagged_not_silently_published():
+    """A headline computed from 1 of 7 sessions is publishable but must never
+    read as a complete measurement: `partial` says so in one field, and
+    `sessions_failed` keeps the excluded population visible (#11385 review P2)."""
+    one = tool.compare([_pair("a", 1000, 100)])
+    assert one["partial"] is False and one["sessions_failed"] == 0
+    mixed = tool.compare([_pair("a", 1000, 100),
+                          _pair("b", 2000, None, delta={"error": "Boom"})])
+    assert mixed["partial"] is True
+    assert mixed["sessions_failed"] == 1
+    assert mixed["sessions_measured"] == 1

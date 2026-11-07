@@ -628,6 +628,8 @@ def compare(pairs: list[dict]) -> dict:
         "sessions_measured": len(usable),
         "sessions_attempted": len(rows),
         "sessions_failed": failed,
+        # a partial run is visible in ONE field, so no reader has to subtract
+        "partial": 0 < len(usable) < len(rows),
         "sum_legacy_out_tokens": sum_lg,
         "sum_delta_out_tokens": sum_dl,
         # THE number the issue asks for:
@@ -683,6 +685,19 @@ def cmd_run(args: argparse.Namespace) -> int:
             "legacy": "S4_TMPL (complete-list re-emit) — TORTOISE_S4_DELTA=0",
             "delta": "S4_TMPL_DELTA (gaps + corrections only) — shipped default",
         },
+        # ⛔ `run_s4` does not take `core_only`, so `render_s4_prompt` falls back
+        # to `_classify_later_enabled()` — a SECOND env switch that selects a
+        # different TEMPLATE PAIR (`S4_TMPL_CORE_ONLY{,_DELTA}`). Both arms see
+        # the same value, so the A/B stays one-variable, but without this the
+        # artifact cannot say whether the magnitude is reproducible on another
+        # box (#11385 review P2).
+        "classify_later": bool(x._classify_later_enabled()),
+        "templates": {
+            "legacy": "S4_TMPL_CORE_ONLY" if x._classify_later_enabled()
+            else "S4_TMPL",
+            "delta": "S4_TMPL_CORE_ONLY_DELTA" if x._classify_later_enabled()
+            else "S4_TMPL_DELTA",
+        },
         "inputs": [
             {"session": s["session"], "receipt": s["receipt"],
              "s2_items": sum(len(v) for v in s["s2"].values()),
@@ -730,6 +745,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     # FAIL-CLOSED: a run whose every arm failed measured NOTHING, and exit 0
     # there would let a broken credential or a dead endpoint read as "the tax
     # was measured, reduction is null".
+    # a PARTIAL run is publishable but must never read as a complete one: the
+    # population is already in the artifact (`sessions_measured`/`attempted`),
+    # and this makes it impossible to miss (#11385 review P2).
+    if 0 < summary["sessions_measured"] < summary["sessions_attempted"]:
+        print(f"WARNING: PARTIAL — {summary['sessions_measured']} of "
+              f"{summary['sessions_attempted']} sessions produced a usable "
+              "pair; the headline describes the measured ones only.",
+              file=sys.stderr)
     if summary["sessions_measured"] == 0:
         print("FAILED: 0 sessions produced a usable pair — no measurement was "
               "made (see the per-arm errors above; a 401/transport failure is "
