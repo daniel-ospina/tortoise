@@ -450,13 +450,19 @@ def test_an_unseeded_group_key_is_dropped_never_tailed():
     This is the EXCLUSION half of the corrected contract, and it is what
     both ``source_session_chunk_pass`` and the module docstring now promise.
     The sibling test above pins only the tail's ORDER when EVERY added key is
-    seeded, so a refactor that iterated ``added_by_session`` (or its union
-    with ``seed_order``) would keep that test green while making every
-    docstring in this module false again — and the graph fetch would have
-    charged the per-session/total budget for rows it then spliced in.
+    seeded, so a refactor that UNIONED ``added_by_session`` into ``order``
+    would keep that test green while making every docstring in this module
+    false again — and the graph fetch would have charged the per-session /
+    total budget for rows it then spliced in.
 
-    Red on such a refactor; green on the shipped code, which builds its
-    groups over ``order`` (``seed_order``) alone.
+    Red on that refactor; green on the shipped code, which builds its groups
+    over ``order`` (``seed_order``) alone. ⚠️ Scoped to the UNION variant,
+    and measured rather than assumed: making only the group BUILD iterate
+    ``added_by_session`` leaves this test GREEN, because the anchor loop and
+    the defensive tail still walk ``order`` — so the unseeded group is never
+    spliced, i.e. it is still DROPPED, which is exactly what this test
+    asserts. Widening ``order`` itself is the mutation that breaks the
+    contract.
     """
     pool = [_point("a0", "s1"), _point("a1", "s1")]
     added = {"s1": [_chunk("x1", "s1")], "s2": [_chunk("y1", "s2")]}

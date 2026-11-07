@@ -733,8 +733,10 @@ def session_key_of(hit: dict) -> str:
       and the guard COSTS ``evidence_recall@5 0.527 → 0.4706``. Quoting the
       gain alone — as an earlier draft of this docstring did — inverts the
       attribution this fix exists to keep straight and re-arms the arm
-      #8713 refuted. Pre-change there was no seed and
-      therefore no fetch, so no injected group existed to place; and a
+      #8713 refuted. Pre-change there was no seed ON THE PRODUCT GRAIN and
+      therefore no fetch there, so no injected group existed to place on a
+      product pool; on the eval grain the arm DID fire (354 seeds above),
+      and the pre-fix symptom there is placement, not seeding. A
       group whose key the merge does not expect is DROPPED, not tailed
       (see ``session_reinjection.source_session_chunk_pass``). The identity
       the READER already renders (``hit_session_id``) was dropped one layer
@@ -754,11 +756,19 @@ def session_key_of(hit: dict) -> str:
       nothing to key on, and it is not reachable from a real pool hit
       (``seeded_sessions`` documents that pool hits always carry their id).
 
-    Every ``idx:*`` key is a PHANTOM with respect to a graph session: it
-    names no ``p.session_id``, so
+    Almost every ``idx:*`` key is a PHANTOM with respect to a graph
+    session: it names no stored ``p.session_id``, so
     :func:`tortoise.session_reinjection.seeded_sessions` drops it and
     ``coverage_loop.coverage_gap`` excludes it from the window census — a
-    hit with no session identity cannot seed a session fetch. #3591 made
+    hit with no session identity cannot seed a session fetch. ⛔ "Almost
+    every" is load-bearing, not hedging: a stored session whose id is
+    ITSELF spelled ``idx:N`` is writer-producible (``_SAFE_SESSION_TAG_RE``
+    permits ``:``, and ``ids.session_id_refusal`` refuses only blank /
+    non-``str`` ids), so its real session key can COLLIDE with an unrelated
+    hit's ``lme_session_index`` bucket. That is the one shape
+    ``_is_real_session_id`` exists to keep out of the splice
+    (``tools/longmem_eval/retrieve.py``) and that
+    :func:`_session_admission_key`'s divergence list names. #3591 made
     the phantom bucket PER-HIT; #10540 keeps the phantom property and stops
     hits from falling into it when they carry the wire identity — the key a
     hit used to get IS the defect, not the bucket it names.
