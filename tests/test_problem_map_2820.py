@@ -18,9 +18,12 @@ grades (23); a stand-in artifact written FROM SCRATCH for an arm whose failure i
 the artifact's absence or shape rather than its content — a synthesised
 `docs/00_index.md`, a path that does not exist, a directory, a non-UTF-8 file
 (9); a throwaway directory it drives real `git` in, a repo or deliberately NOT
-one for the cannot-answer legs (5); one patched seam the arm requires (14); or
+one for the cannot-answer legs (4); one patched seam the arm requires (15); or
 the shipped source read as an AST — the interpreter guard's exit code, which no
-runtime fixture can produce (1). That is 52 negative controls plus the 4 positives.
+runtime fixture can produce (1). That is 51 negative controls plus 5 positives:
+four read the shipped page, and the fifth is the positive half of a pair —
+`test_an_ancestor_anchor_passes_on_the_same_repo`, counted in the `git` bucket
+because that is the fixture it drives. 56 in all, which is every test function.
 Never a fixture that could not fail, and each test's docstring states (a) the
 exact value/state that makes it fail and (b) why that state is reachable. A guard
 whose negative case cannot be reached is a test that cannot fail — it proves the
@@ -456,10 +459,13 @@ def test_the_ABSTRACT_headline_must_agree_with_the_tables(tmp_path):
     Reachable: that sentence is the one most readers quote (it is the opening
     blockquote of the whole page), and it was not compared to anything before this
     control — a row moving in §3–§7 left it stating the opposite of the table
-    below it. The scope is the body ABOVE `## 1.`, NOT the frontmatter: the
-    frontmatter carries only `measured_at_commit`/`measured_at`, which is why the
-    arm reads `text.split("## 1.", 1)[0]` and why this control is named for the
-    abstract rather than for a frontmatter field that does not hold it.
+    below it. The arm reads everything ABOVE `## 1.` (`text.split("## 1.", 1)[0]`),
+    which INCLUDES the frontmatter — a headline added there is read too, and a
+    second one anywhere above §1 makes the claim ambiguous. The headline that
+    matters is the abstract in the opening blockquote; the frontmatter carries the
+    measurement anchor (`measured_at_commit`, `measured_at`) among its other keys,
+    which is why this control is named for the abstract and not for a frontmatter
+    field.
     """
     copy = _doc_copy(tmp_path)
     text = copy.read_text(encoding="utf-8")

@@ -9912,7 +9912,7 @@ durations:
 
   test_problem_map_2820.py: 0.5  # #2820: 58 collected cases from 56 test
   # functions (ONE is parametrised — 3 arms, one per status token — so
-  # `grep -c '^def test_'` -> 56 while pytest collects 58 — re-derive with `pytest --collect-only -q | tail -1`
+  # `grep -c '^def test_'` -> 56 while pytest collects 58); re-derive with `pytest --collect-only -q | tail -1`
   # rather than trusting this note. The ANCHORED grep is exact here: 56
   # definitions and no prose line matches it. An UNANCHORED `grep -c 'def test_'`
   # INFLATES, because docstring lines that discuss the token match too (4 at this
