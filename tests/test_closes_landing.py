@@ -5865,7 +5865,8 @@ def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
     fixture that drifts reddens here rather than pinning a mutation), and the CONTROLS at the end
     are this PR's own fixes, which must NOT move when this family is fixed — `credit` is a fix
     against `origin/main`, while `blank` is a control that `origin/main` and this head already
-    AGREE on (`Y Y Y Y` on both), i.e. it catches a fix that breaks a case that never was broken.
+    AGREE on (`n n n n` on both), i.e. it catches a fix that breaks a case that never was broken.
+    (`Y Y Y Y` is the BRANCH POINT's answer on that body, which is why the control exists.)
     Deleting the interposed line reproduces the neighbouring test's body and answers `[]` in every
     arm, so the intervening line is demonstrably the discriminator — the family the suite never
     built.
@@ -5913,7 +5914,8 @@ def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
 
     # CONTROLS — this PR's own fixes. A fix for F1/F2 that moves either is not a fix.
     # `credit` is a fix against `origin/main` (`[]` there, `[100]` here). `blank` is NOT a change vs
-    # `origin/main` — both answer `Y Y Y Y` — so it is a regression control, not a fix.
+    # `origin/main` — both answer `n n n n` — so it is a regression control, not a fix. (`Y Y Y Y`
+    # is the BRANCH POINT's answer on this body, measured, not either of these two states.)
     credit = "Notes\n2. -\n  2.     Closes #100\n"
     assert keyword_types(credit) == {"inline"}, credit
     assert answers(credit) == [True, True, True, True], credit

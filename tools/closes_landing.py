@@ -1380,10 +1380,13 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # and round-58 reviews, P1 + P2; re-measured at `e870d7437` and again at `446e0f107e` for this
     # declaration). The grids the sentence below names compose NEITHER a TYPE-7 LINE (`<br />`,
     # `<span>`) NOR a PLAIN PROSE LINE (`Notes`, `x`) between a bare-marker line and the wide-gap
-    # marker, and EITHER KIND moves both columns the wrong way against `origin/main` — which is
-    # `a022f03ce4` (#11330), a descendant of the #11186 squash `193bbfd9a2`, and which gets both
-    # RIGHT because it runs the content ladder at the TOP of this function, exactly where the early
-    # return below pre-empts it. ⛔ BOTH KINDS ARE MEASURED, and the round-59 review was right to
+    # marker, and EITHER KIND moves both columns the wrong way against `origin/main` — tip
+    # `23d227c534`, whose `tools/closes_landing.py` is byte-identical to `a022f03ce4` (#11330, a
+    # descendant of the #11186 squash `193bbfd9a2`) — which gets F1 RIGHT because it runs the content
+    # ladder at the TOP of this function, exactly where the early return below pre-empts it. (It does
+    # NOT get F2 right: the row below records that `origin/main` loses that close in both strict
+    # arms. "Main is right here" is only ever true of F1, and a lane must not read it as a revert
+    # target.) ⛔ BOTH KINDS ARE MEASURED, and the round-59 review was right to
     # refuse the narrower wording: the prose member is NOT a subset of the type-7 one.
     #     `* - x` + `Notes` (or `x`) + `   2. -` + `  2.     Closes #100`
     #         renderer `<pre><code>` -> CODE
