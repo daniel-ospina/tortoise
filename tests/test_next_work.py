@@ -125,6 +125,14 @@ def snap(
             "claims": claims or {},
             "merge_tree": merge_tree or {},
             "local_holders": local_holders or {},
+            # ⛔ A FIXTURE MUST SATISFY THE SCHEMA (#10951). These rows are all
+            # measured-and-kept by the fleet's population rule (bare titles), so
+            # `{}` is the honest verdict — an EMPTY map is a real measurement that
+            # withheld nothing. Leaving the key out is what a snapshot written
+            # before #10951 looks like, and that shape is INCOMPLETE on replay by
+            # design (tests/test_10951_population.py pins it).
+            "population": {},
+            "population_source": "fixture",
             "unreadable": unreadable or [],
         }
     )
