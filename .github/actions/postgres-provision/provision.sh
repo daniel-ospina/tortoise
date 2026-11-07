@@ -60,6 +60,25 @@ for pair in "database:$DB_NAME" "username:$DB_USER" "password:$DB_PASS" \
   esac
 done
 
+# ⛔ THE TWO NAME INPUTS NEED THE SHELL'S OWN RULE, not only the identifier one
+# (#11429 review cycle 5). `dsn_var`/`label_var` are used as INDIRECT references —
+# the teardown reads `LABEL="${!LABEL_VAR:-}"` — and bash REFUSES a name that
+# starts with a digit (`1FOO: invalid variable name`). The check above accepts
+# `1FOO` (every character is legal), so such a name passed validation, was written
+# into `$GITHUB_ENV`, and then aborted cleanup.sh — reddening a job on a diff that
+# never touched it, against the teardown's own contract that it must never change
+# a job's verdict. Names therefore match what bash will actually accept.
+for pair in "dsn_var:$DSN_VAR" "label_var:$LABEL_VAR"; do
+  case "${pair#*:}" in
+    [A-Za-z_]*)
+      ;;
+    *)
+      annotate_error "postgres ${pair%%:*} must be a valid shell variable name (leading A-Za-z_, then A-Za-z0-9_): it is used as an INDIRECT reference, and bash refuses a name that starts with a digit"
+      exit 1
+      ;;
+  esac
+done
+
 # A reference's first path component is a REGISTRY HOST only when it contains a
 # '.' or a ':' (or is literally `localhost`) — Docker's own rule. So
 # `postgres:16` is Docker Hub (two components? no: a SLASHLESS reference has no

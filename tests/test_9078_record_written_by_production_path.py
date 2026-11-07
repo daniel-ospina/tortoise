@@ -3834,6 +3834,25 @@ def test_ci_arms_the_record_against_a_real_postgres():
         f"{name} provisions {len(provisions)} Postgres instance(s) but tears "
         f"down {len(teardowns)}: an unmatched provision leaves a container behind "
         f"until the job's runner is reused (#9567 D8)")
+    # ⛔ EVERY INSTANCE BEYOND THE FIRST MUST CARRY ITS OWN `label_var` — asserted
+    # per step, not only by set equality. `_labels` filters out steps that carry no
+    # `label_var`, so dropping the input from BOTH the second provision and its
+    # teardown satisfied a bare `==` comparison vacuously: `$GITHUB_ENV` is
+    # last-one-wins, so both teardowns then select the SCRATCH label — the scratch
+    # container is removed twice and the RECORD container is never removed, which
+    # is exactly the leak this pin's docstring claims to catch (#11429 cycle 5,
+    # measured: the test still passed with both inputs dropped).
+    for kind, batch in (("provision", provisions), ("teardown", teardowns)):
+        for position, step in enumerate(batch[1:], start=2):
+            assert (step.get("with") or {}).get("label_var"), (
+                f"{name}'s {kind} #{position} carries no `label_var`: two "
+                "instances would share the default name, so one teardown removes "
+                "whichever container the other labelled last and the remaining "
+                "one leaks (#9567 D8)")
+    assert len(set(_labels(provisions))) == len(provisions) - 1, (
+        f"{name}'s labelled provisions are {_labels(provisions)}, which do not "
+        "name one DISTINCT label per extra instance — two provisions sharing a "
+        "label make the teardowns ambiguous (#9567 D8)")
     assert _labels(provisions) == _labels(teardowns), (
         f"{name}'s provision/teardown `label_var` sets do not pair "
         f"(provision {_labels(provisions)}, teardown {_labels(teardowns)}): a "
@@ -3867,6 +3886,39 @@ def test_ci_arms_the_record_against_a_real_postgres():
         f"the drill's scratch env is {RECORD_DB_ENV}, the record's own name: the "
         "second provision would overwrite the first and D8 would refuse its own "
         "target as `refuse_same_database` (#9567 D8)")
+
+
+def test_the_provision_action_refuses_a_name_bash_cannot_indirect(tmp_path):
+    """A NAME input must be a SHELL variable name, not merely alphanumeric.
+
+    `dsn_var`/`label_var` are consumed as INDIRECT references (`${!LABEL_VAR}` in
+    the paired teardown), and bash refuses a name beginning with a digit. The
+    original identifier check accepted `1FOO` — every character is legal — so such
+    a name passed validation, was written into `$GITHUB_ENV`, and then aborted
+    `cleanup.sh` under `set -u`, reddening a job on a diff that never touched it
+    against the teardown's own contract (#11429 review cycle 5).
+
+    Runs the REAL action script; it validates before any pull or container, so no
+    Docker daemon is needed. Mutation: restore the `''|*[!A-Za-z0-9_]*` pattern
+    for the name inputs -> `1FOO` is accepted and this test reds.
+    """
+    env_file = tmp_path / "github_env"
+    result = subprocess.run(
+        ["bash", str(POSTGRES_PROVISION)],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ,
+             "POSTGRES_IMAGE": "mirror.gcr.io/postgres:16",
+             "POSTGRES_DSN_VAR": "1FOO",
+             "GITHUB_ENV": str(env_file)},
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, (
+        "the provision action accepted a name bash cannot indirect-ref:\n" + combined)
+    assert "valid shell variable name" in combined, combined
+    assert "1FOO" not in (env_file.read_text() if env_file.exists() else ""), (
+        "the invalid name was written into $GITHUB_ENV before the refusal — every "
+        "later step of the job would see it")
 
 
 def test_the_armed_record_leg_can_block_a_merge():
@@ -4041,6 +4093,10 @@ _JUNIT_FAILED = """<testsuites><testsuite name="pytest" tests="3" failures="1" \
 </testsuite></testsuites>"""
 
 #: pytest collected nothing (a bad `-k`, a broken module): nothing certified.
+#: ⛔ DELIBERATELY NOT FILLED with the DoD legs — its whole subject is `tests="0"`,
+#: so filling it would make the fixture non-empty and destroy the falsifier it
+#: exists for (#11429 review cycle 5 suggested filling it; refusing that is why a
+#: finding is verified before it is applied).
 _JUNIT_EMPTY = """<testsuites><testsuite name="pytest" tests="0" failures="0" \
  errors="0" skipped="0"/></testsuites>"""
 
@@ -4101,6 +4157,12 @@ _JUNIT_WRONG_FILES = _fill_d_legs(_JUNIT_WRONG_FILES)
 _JUNIT_XFAIL = _fill_d_legs(_JUNIT_XFAIL)
 _JUNIT_D8_XFAILED = _fill_d_legs(_JUNIT_D8_XFAILED)
 _JUNIT_D8_QUARANTINED = _fill_d_legs(_JUNIT_D8_QUARANTINED, omit=(_D8_NAME,))
+#: Filled LATE (the helper is defined below them) so each keeps ONE cause: measured
+#: unfilled, these carried 13/13 problems instead of 1, and a later `any()` -> `==`
+#: tightening would silently assert about the missing legs (#11429 review cycle 5).
+#: `_JUNIT_EMPTY` is the deliberate exception — see its own note.
+_JUNIT_DESELECTED = _fill_d_legs(_JUNIT_DESELECTED)
+_JUNIT_FAILED = _fill_d_legs(_JUNIT_FAILED)
 
 #: One DoD leg deselected, D8 green — the `-k "not D10"` shape (#11429 review
 #: cycle 4). D10 `DROP POLICY`s on the live record, so it is the leg most likely
@@ -4225,6 +4287,43 @@ def test_the_arm_gate_reds_on_any_deselected_dod_leg_not_just_d8(tmp_path):
     assert any("test_D10_" in line for line in errors), errors
     assert not any("test_D8_" in line for line in errors), (
         f"D8 was present in this fixture, so it must not be named as missing: {errors}")
+
+
+def test_the_arm_gate_reds_when_a_dod_leg_is_DELETED_from_the_capstone(tmp_path):
+    """⛔ A required set derived ONLY from the artifact is circular (#11429 cycle 5).
+
+    The rule exists to stop a DoD leg vanishing, but it read the leg list from the
+    capstone itself — so deleting the `def test_D10_…` line deleted the
+    REQUIREMENT with it. Measured on a mirror with every remaining leg green, both
+    armed files present and 0 skips: exit 0, no `::error::`. Renaming the leg had
+    the same effect. `EXPECTED_CAPSTONE_LEGS` is the static half that catches it;
+    the derivation still protects a leg ADDED later.
+
+    Mutation: drop the static tuple from `decide()`'s union -> RED here, and the
+    `-k "not D10"` test stays green (it is caught by the derived half).
+    """
+    source = (REPO_ROOT / CAPSTONE_FILE).read_text(encoding="utf-8")
+    mutant = source.replace(f"def {_D10_NAME}(", "def _no_longer_a_dod_leg(")
+    assert mutant != source, (
+        f"could not rename {_D10_NAME} in {CAPSTONE_FILE} — re-anchor this "
+        "falsifier rather than deleting it")
+
+    mirror = tmp_path / "repo"
+    (mirror / ".github" / "scripts").mkdir(parents=True)
+    (mirror / "tests").mkdir()
+    (mirror / "tests" / CAPSTONE_FILE.split("/")[-1]).write_text(
+        mutant, encoding="utf-8")
+    gate = mirror / ".github" / "scripts" / RECORD_LEG_GATE.name
+    gate.write_text(RECORD_LEG_GATE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = _run_leg_gate(tmp_path, _JUNIT_D10_DESELECTED, script=gate)
+
+    assert result.returncode == 1, (
+        "the gate certified a run after a DoD leg was DELETED from the capstone — "
+        f"the required set vanished with the leg it protects:\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any(_D10_NAME in line for line in errors), (
+        f"expected the deleted leg to be named: {errors}")
 
 
 def test_the_arm_gate_passes_a_green_armed_run(tmp_path):

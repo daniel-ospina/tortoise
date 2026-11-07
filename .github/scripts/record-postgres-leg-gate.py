@@ -81,6 +81,31 @@ REQUIRED_CASES = {
 CAPSTONE_TEST_FILE = (Path(__file__).resolve().parents[2]
                       / "tests" / "test_9567_record_capstone.py")
 
+#: ⛔ THE STATIC HALF OF THE REQUIRED SET (#11429 review cycle 5). Deriving the
+#: required legs ONLY from the capstone's source is circular: the rule exists to
+#: stop a DoD leg vanishing, and deleting the `def test_D10_…` line deletes the
+#: requirement with it — measured, a junit with every remaining leg, both armed
+#: files, 0 skips and 0 failures CERTIFIED (exit 0) once D10 was deleted, and
+#: again once it was merely renamed. So the requirement is `STATIC ∪ DERIVED`:
+#: the tuple below catches a deletion or a rename (as `required leg … did not
+#: run`), and the derivation keeps a NEW `test_D*` protected the day it is
+#: written without a second edit here. Renaming a leg on purpose therefore reds
+#: this gate — update this tuple in the same commit, which is the point.
+EXPECTED_CAPSTONE_LEGS = (
+    "test_D1_every_record_table_exists_on_the_armed_record",
+    "test_D1_an_unset_dsn_reports_NOT_ARMED_and_writes_nothing",
+    "test_D2_one_capture_writes_the_record_with_zero_write_failures",
+    "test_D3_no_write_path_bypasses_the_record",
+    "test_D4_the_restore_runs_with_the_journal_gone",
+    "test_D5_D6_the_restore_reproduces_the_record_per_label_and_per_predicate",
+    "test_D7_the_raw_turn_text_reads_back_from_the_record_only",
+    "test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires",
+    "test_D9_a_cross_tenant_read_is_empty_and_a_cross_tenant_write_is_refused",
+    "test_D10_a_record_table_without_its_policy_fails_closed",
+    "test_D11_the_gate_refuses_at_the_org_limit_and_the_refusal_is_visible",
+    "test_D12_a_gate_with_no_usage_reading_fails_closed",
+)
+
 
 def _capstone_leg_names() -> list[str]:
     """Every DoD leg the capstone FILE defines, read from its source with `ast`.
@@ -203,6 +228,11 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
     # entry (#11429 review cycles 3 and 4).
     try:
         required = dict(REQUIRED_CASES)
+        for leg in EXPECTED_CAPSTONE_LEGS:
+            required.setdefault(
+                leg,
+                "a capstone DoD leg this gate names statically did not run — it "
+                "was deleted or renamed, or a `-k`/`--deselect` filter hid it")
         for leg in _capstone_leg_names():
             required.setdefault(
                 leg,

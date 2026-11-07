@@ -17,9 +17,12 @@ SUFFIX="${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-job}-${GITHUB_RUN_ATTEMPT:-1}"
 # behind by a provision that failed before exporting is removed by provision.sh's
 # own EXIT trap.
 LABEL_VAR="${POSTGRES_LABEL_VAR:-TORTOISE_CI_POSTGRES_LABEL}"
+# A NAME that starts with a digit is not a shell variable name: `${!LABEL_VAR}`
+# then fails with `1FOO: invalid variable name`, which under `set -u` aborts this
+# script — and the job with it — on a diff that never touched it (#11429 cycle 5).
 case "$LABEL_VAR" in
-  ''|*[!A-Za-z0-9_]*)
-    echo "#9551 teardown: refusing label variable name '$LABEL_VAR' (A-Za-z0-9_ only)" >&2
+  ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*)
+    echo "#9551 teardown: refusing label variable name '$LABEL_VAR' (leading A-Za-z_, then A-Za-z0-9_ only — it is used as an indirect reference)" >&2
     exit 0
     ;;
 *)
