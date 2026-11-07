@@ -745,7 +745,8 @@ def test_the_record_restore_writes_no_story_arc_on_any_node():
                                     graph_name=graph)
     try:
         # A LEGACY state: a node that still carries the prose. No purge removes
-        # it (`#10017`'s never matches a `:Source` — #11325); the restore runs over it
+        # it (`#10017`'s purge never matches a `:Source` — #11325); the restore runs
+        # over it
         # (it wipes first), so a restore that re-materialises the key puts it
         # back and this leg reads non-zero.
         proj.g.query(
