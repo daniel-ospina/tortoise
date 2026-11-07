@@ -858,8 +858,11 @@ def _interval_template_owns(question: str) -> re.Match[str] | None:
 
     Each template CAPTURES its own two anchors (named groups a/b). Returns the
     MATCH (not a bool) so the recency predicate can look at the captured anchor
-    text: #8775's exemption is about an adjective in an anchor's narrative
-    EXTENSION, never about one that SELECTS the anchor's referent.
+    text. OWNERSHIP is the whole question here: it says nothing about what the
+    `latest` in those anchors MEANS. Whether a selecting token is exempted is
+    decided by ``_latest_sits_in_a_relative_clause`` (clause position only — see
+    ``_recency_vetoes``), and a selecting `latest` that sits in a relative clause
+    IS exempted (the declared residual, #11458).
     """
     return (_RE_INTERVAL_SINCE.match(question)
             or _RE_INTERVAL_BETWEEN.match(question)

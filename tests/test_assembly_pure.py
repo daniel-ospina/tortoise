@@ -731,8 +731,10 @@ _NARRATIVE_LATEST_Q = (
 _PRE_FIX_CENSUS_SHAPE_DIGEST = (
     "e770cf24a8eca8d5c6dd56769349d7fda59b2be44f01197cf243f9eb6b28b6aa")
 
-#: the census rows whose `latest` IS an ordering instruction — derived from the
-#: census, never transcribed, so the pin cannot drift from the artifact
+#: the census rows whose `latest` IS an ordering instruction — the QIDs are
+#: FIXED (they are what the bound surface was measured against) and only the
+#: question TEXT is read from the artifact, so a re-transcription of the text
+#: cannot drift; the QID set itself is asserted present in the census below
 _RECENCY_ORDERING_INSTRUCTION_QIDS = {
     "gpt4_7f6b06db", "gpt4_7abb270c", "gpt4_e061b84f", "gpt4_f420262c",
 }
@@ -791,8 +793,10 @@ def test_recency_ordering_bounds_still_reject():
     ``CLASS_PLURAL`` — a bounded relative window makes the class-plural branch
     own them, and that branch is entered BEFORE the R13 guard under its own
     recorded OVERRIDES, so the recency veto never sees them. The bound is still
-    present in all 4 and the routing is identical with the narrowing on and off,
-    which is what this test pins.
+    present in all 4. Their routing is identical with the narrowing on and off —
+    an identity pinned by ``test_recency_narrative_latest_off_switch_restores_
+    the_pre_fix_path`` over the whole census, not by this test, which pins the
+    bound and the `main` shape of each row.
     """
     rows = {r["qid"]: r for r in _CENSUS["rows"]}
     assert set(rows) >= _RECENCY_ORDERING_INSTRUCTION_QIDS
@@ -947,7 +951,9 @@ def test_env_example_declares_the_recency_narrative_latest_switch():
         """The line with its leading comment markers AND indentation removed.
 
         This file double-comments the block (``# # VAR=0   # <why>``), so a
-        single ``lstrip("#")`` leaves ``# VAR=0`` and matches nothing.
+        single ``lstrip("#")`` leaves `` # VAR=0`` — the space survives and the
+        remaining ``#`` is internal, so a ``startswith(VAR + "=")`` on the result
+        matches nothing.
         """
         body = line.strip()
         while body[:1] in ("#", " "):
