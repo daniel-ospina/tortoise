@@ -6644,7 +6644,16 @@ def _caller_test_stem() -> str | None:
 # call it, so even a leaked TORTOISE_TEST_MODE=1 env cannot patch stdlib
 # (review P2-1); _record_current_test_stem additionally refuses records
 # outside an active session (prod parity).
-_ORIG_THREAD_START = threading.Thread.start
+# ⛔ The `globals().get(...)` guard is NOT redundant — it is what makes a RELOAD
+# safe. `importlib.reload` re-executes this body into the module's EXISTING dict,
+# so after `install_thread_stamp()` has run, a bare `threading.Thread.start`
+# here is the STAMP, not the original: it would rebind `_ORIG_THREAD_START` to
+# the stamp itself, and the stamp reads that name at CALL time — so every
+# `Thread.start()` raised `RecursionError` after a reload (measured: 2 frames of
+# `_thread_start_inherit_stem` recursing, #11217 round-3 review P1). The name is
+# captured once, at first import, when `Thread.start` is still the real one, and
+# the reload then KEEPS it. Deleting this guard silently re-opens that bug.
+_ORIG_THREAD_START = globals().get("_ORIG_THREAD_START") or threading.Thread.start
 
 
 # Module-load install gate (review P2-1): TORTOISE_TEST_MODE=1 alone is NOT

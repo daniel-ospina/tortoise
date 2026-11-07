@@ -557,7 +557,10 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     # cannot double-wrap even if re-invoked after a reload" — and a `reload`
     # re-executes the module into its EXISTING dict, so the class attribute
     # keeps the PREVIOUS instance's wrapper while `proj_mod` holds the NEW one:
-    # two objects with the same qualname, still ONE layer. Object identity
+    # two objects with the same qualname, still ONE layer — provided the reload
+    # keeps the REAL original as `_ORIG_THREAD_START` (which is what the module's
+    # capture now guarantees; without it the reload rebinds that name to the
+    # stamp and every thread creation recurses). Object identity
     # therefore reds on a legitimate reload AND reports "double-wrapped", which
     # is not what it measured — measured on main `23d227c534` (shard (b), run
     # 42334964535): `<function _thread_start_inherit_stem at 0x7efff24c8f40> is
@@ -565,8 +568,16 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     # stamp functions, with the class marker True. A DOUBLE WRAP is one stamp
     # WRAPPING another, so it is asserted where it is observable: the
     # `_ORIG_THREAD_START` the installed wrapper reads out of its own globals
-    # must not itself be a stamp — except in the reload's self-reference, where
-    # the reload re-binds that name to the same installed wrapper.
+    # must not itself be a stamp. ⛔ There is NO escape clause for the reload's
+    # self-reference: a `_ORIG_THREAD_START` that IS the installed stamp is not
+    # "still ONE layer", it is UNBOUNDED — the wrapper reads that name at CALL
+    # time, so it calls itself and every `Thread.start()` raises
+    # `RecursionError`. That state used to be accepted here (`original is
+    # installed or …`, #11217 round-3 review P1), so this assertion reported
+    # green over a reload that broke ALL thread creation. The module now keeps
+    # the genuine original across a reload (`_ORIG_THREAD_START`'s capture in
+    # `tortoise/projection/__init__.py`), so the state is not reachable — and
+    # this assertion says so instead of tolerating it.
     installed = threading.Thread.start
     assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
         "Thread.start stamp not installed in the test session"
@@ -576,10 +587,13 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
         ("Thread.start is a stamp from OUTSIDE tortoise.projection's namespace "
          f"(the installer never ran, or something else wrapped start): {installed!r}")
     original = installed.__globals__.get("_ORIG_THREAD_START")
-    assert original is installed or getattr(original, "__name__", "") \
-        != "_thread_start_inherit_stem", (
-            "Thread.start was double-wrapped: the installed stamp calls ANOTHER "
-            f"stamp ({original!r}) instead of the original threading start")
+    assert original is not installed, (
+        "Thread.start's stamp reads ITSELF as the original — every thread "
+        f"creation recurses ({original!r}); the reload re-bound "
+        "_ORIG_THREAD_START to the stamp instead of keeping the real one")
+    assert getattr(original, "__name__", "") != "_thread_start_inherit_stem", (
+        "Thread.start was double-wrapped: the installed stamp calls ANOTHER "
+        f"stamp ({original!r}) instead of the original threading start")
     proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
     assert threading.Thread.start is installed, \
         "a re-invoked installer re-wrapped Thread.start despite the marker"

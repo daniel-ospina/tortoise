@@ -687,7 +687,7 @@ def _journal_calls(code: str) -> int:
 #: falkordb [as alias]` captures the alias. A form this cannot read must still
 #: GATE OPEN — see the fallback in `_raw_client_call_positions`.
 _RAW_CLIENT_IMPORT = re.compile(
-    r"^[ \t]*from[ \t]+falkordb[ \t]+import[ \t]*"
+    r"^[ \t]*from[ \t]+falkordb(?:\.[A-Za-z_]\w*)*[ \t]+import[ \t]*"
     r"(?:\((?P<paren>[^)]*)\)|(?P<bare>[^\n\\]*))"
     r"|^[ \t]*import[ \t]+falkordb\b(?:[ \t]+as[ \t]+(?P<alias>\w+))?",
     re.MULTILINE | re.DOTALL)
@@ -720,7 +720,9 @@ def _raw_client_call_positions(source: str) -> list[int]:
     length-preserving, so an offset from one is valid in the other.
 
     An alias (`from falkordb import FalkorDB as Client`), a parenthesised or
-    multi-line import group, `import falkordb [as alias]`, and the dotted form
+    multi-line import group, a DOTTED module spec (`from falkordb.falkordb import
+    FalkorDB` — a valid spelling; the package ships that submodule),
+    `import falkordb [as alias]`, and the dotted construction form
     (`falkordb.FalkorDB(...)`) all resolve. And an import form this parser cannot
     read still gates OPEN (it contributes the conventional `FalkorDB`), because
     an unreadable import must not be the way the arm is switched off — the same
@@ -734,7 +736,7 @@ def _raw_client_call_positions(source: str) -> list[int]:
     in-block construction, because they DETACH through the SDK or a fixture —
     which IS the ownership mechanism — so a DETACH-anchored arm would false-BLOCK
     them all. The split shape is a filed residual (#11344), pinned by
-    `test_the_split_helper_shape_is_a_KNOWN_RESIDUAL_not_a_covered_case`.
+    `test_the_census_anchors_on_the_CALL_not_the_import` (case 3).
     """
     masked = _mask_strings_and_comments(source)
     names: set[str] = set()
@@ -2072,6 +2074,11 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
             "from falkordb import \\\n    FalkorDB\n", "FalkorDB"),
         "import-as alias": (
             "import falkordb as fdb\n", "fdb.FalkorDB"),
+        # A DOTTED module spec is a valid, importable spelling here — the package
+        # ships `falkordb/falkordb.py` — and it matched NO alternative before the
+        # round-3 fix, so the whole file was invisible (#11217 round-3 P2).
+        "dotted submodule": (
+            "from falkordb.falkordb import FalkorDB\n", "FalkorDB"),
     }
     site = tmp_path / "test_spelling.py"
     for label, (header, construct) in spellings.items():
