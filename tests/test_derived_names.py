@@ -832,26 +832,33 @@ def _raw_client_call_positions(source: str) -> list[int]:
     #
     # ⛔ BOTH SPELLINGS, not just the module name (#11217 review round-10 P2).
     # `gated` is `bool(names)` taken BEFORE the conventional `FalkorDB` is added,
-    # so a file whose client arrives by RE-EXPORT (`from tortoise import
-    # FalkorDB` — 28 sites in `tests/`, and `tortoise/__init__.py` documents
-    # `tortoise.FalkorDB` as the public name) with no lowercase `falkordb`
-    # anywhere resolved NO name AND failed a module-name-only mention test: the
-    # whole file returned `[]`, so every raw-DETACH site in it read CLEAN. That
-    # is the file-level switch-off this function's own docstring names as
-    # closed, re-opened one spelling over — measured on a fixture: `sites=0`,
-    # `violations=[]`. Naming the CLASS here restores it. Cost measured over the
-    # exact population the census JUDGES (`tests/test_*.py`, non-exempt: 1183
-    # files): construction sites **7 -> 7**, unchanged, and
-    # `_raw_detach_violations()` stays EMPTY — so the wider gate costs no false
-    # BLOCK. (Across ALL 1428 `.py` files under `tests/` the count goes 10 -> 51,
-    # 41 previously-invisible sites: 27 `test_embedded_lifecycle.py` + 8
-    # `test_guard.py` — both census-EXEMPT — and 6 in
-    # `tests/repro/reproduce_redislite_leak.py`, which the census does not reach
-    # because it globs top-level `test_*.py` only. Cite the judged 7 -> 7 for
-    # "is this gate safe", the 10 -> 51 for "how blind was it"; they measure
+    # so a file whose client arrives by a route NO import parser resolves —
+    # `import tortoise` + `tortoise.FalkorDB(…)`, or `from .tortoise import
+    # FalkorDB` — with no lowercase `falkordb` anywhere resolved NO name AND
+    # failed a module-name-only mention test: the whole file returned `[]`, so
+    # every raw-DETACH site in it read CLEAN. That is the file-level switch-off
+    # this function's own docstring names as closed, re-opened one spelling over
+    # — measured on a fixture: `sites=0`, `violations=[]`. Naming the CLASS here
+    # restores it. Cost measured over the exact population the census JUDGES
+    # (`tests/test_*.py`, non-exempt: 1183 files): construction sites **7 -> 7**,
+    # unchanged, and `_raw_detach_violations()` stays EMPTY — so the wider gate
+    # costs no false BLOCK. (Across ALL 1428 `.py` files under `tests/` the count
+    # goes 10 -> 51, 41 previously-invisible sites: 27
+    # `test_embedded_lifecycle.py` + 8 `test_guard.py` — both census-EXEMPT — and
+    # 6 in `tests/repro/reproduce_redislite_leak.py`, which the census does not
+    # reach because it globs top-level `test_*.py` only. Cite the judged 7 -> 7
+    # for "is this gate safe", the 10 -> 51 for "how blind was it"; they measure
     # different populations and conflating them is how a cost claim rots.)
-    # Pinned by `test_no_IMPORT_SPELLING_can_switch_the_census_gate_off`'s
-    # `re-export from tortoise` and `re-export from tortoise, aliased` cases.
+    #
+    # ⛔ WHAT PINS WHICH (#11217 review round-12 P2). The two mechanisms are
+    # INDEPENDENT and each needs its own case, because the re-export fix RESOLVED
+    # `names` for those fixtures, which means `gated` is already True there and
+    # this line is never reached for them: the `re-export from tortoise [as C]`
+    # cases pin `_FROM_ANY_IMPORT` and this line NOT at all (reverting it left the
+    # whole test file byte-identically green — measured). This line is pinned by
+    # `module-qualified, no import parser resolves it` (`import tortoise` +
+    # `tortoise.FalkorDB(…)`), which has no import hit and no lowercase
+    # `falkordb`, so this alternative is the ONLY thing between it and `[]`.
     if not gated and not re.search(r"\b(?:falkordb|FalkorDB)\b", source):
         return []
     pattern = "|".join(re.escape(n) for n in sorted(names))
@@ -2218,12 +2225,14 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         "import_module, inline": (
             "import importlib\n",
             "importlib.import_module('falkordb').FalkorDB"),
-        # Round-10 P2: the client arrives by RE-EXPORT, so no import STATEMENT
-        # matches and the file never writes lowercase `falkordb` either — the
-        # module-name-only mention test sent the whole file to `return []`.
-        # Measured before the fix: `sites=0`, `violations=[]` for a real unowned,
-        # un-journaled DETACH. `tortoise/__init__.py` documents this as the
-        # public spelling and `tests/` uses it 28 times.
+        # Round-10 P2: the client arrives by RE-EXPORT, which `_RAW_CLIENT_IMPORT`
+        # does not match (it only matches statements naming `falkordb`), and the
+        # file never writes lowercase `falkordb` either — the module-name-only
+        # mention test sent the whole file to `return []`. Measured before that
+        # fix: `sites=0`, `violations=[]` for a real unowned, un-journaled DETACH.
+        # `tortoise/__init__.py` documents this as the public spelling and
+        # `tests/` uses it 28 times. Since round 11 this case is resolved by
+        # `_FROM_ANY_IMPORT`, so it pins THAT loop (see the case below).
         "re-export from tortoise": (
             "from tortoise import FalkorDB\n", "FalkorDB"),
         # ...and the SAME shape under a RENAMED import. Round-11 P2: the plain
@@ -2234,6 +2243,19 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         # `tests/test_embedded_lifecycle.py:364`).
         "re-export from tortoise, aliased": (
             "from tortoise import FalkorDB as C\n", "C"),
+        # ⛔ THE TWO CASES ABOVE PIN `_FROM_ANY_IMPORT`, NOT THE FILE-LEVEL
+        # MENTION TEST — because resolving `names` there makes `gated` True, so
+        # the mention test is never reached for them (round-12 P2: reverting the
+        # `FalkorDB` alternative left the whole file byte-identically green).
+        # This case has NO import-statement hit and NO lowercase `falkordb`, so
+        # the `FalkorDB` alternative in the mention test is the ONLY thing
+        # between it and `return []`. Measured: caught at HEAD, BLIND with that
+        # alternative reverted, and still caught with `_FROM_ANY_IMPORT`
+        # reverted — so it pins the mention test exactly and independently. The
+        # spelling exists in-tree (`tests/test_fork_safety_3845.py:459,462`,
+        # `tests/test_guard.py:148,169`).
+        "module-qualified, no import parser resolves it": (
+            "import tortoise\n", "tortoise.FalkorDB"),
     }
     site = tmp_path / "test_spelling.py"
     for label, (header, construct) in spellings.items():
