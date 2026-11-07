@@ -169,7 +169,14 @@ _TAIL_WITNESS_HINT = "the tail is missing"
 #: OFF-SWITCH for the census's NODE-IDENTITY dedupe (#11176). `=1` restores the
 #: PRE-FIX path EXACTLY: one record per ROW ``_SOURCE_ROWS`` returns, carrying
 #: that row's ``turn_max_index`` — so a ``:Source`` reached by two ``:Session``
-#: rows is counted TWICE and the tail witness is whatever row arrived first.
+#: rows is counted TWICE, the tail witness is whatever row arrived first, and
+#: ``duplicate_session_rows`` is ABSENT (no count was taken).
+#:
+#: ⛔ NARROW BY DESIGN — only the exact string ``1`` disables it, and the site is
+#: declared in ``tests/test_env_truthy.py``'s ``_KNOWN_NARROW_READS`` ledger with
+#: its ``OVERRIDES`` reason (#4097/#4128). A `=true` written for legibility would
+#: silently leave the FIXED census running, i.e. an operator believing they
+#: re-measured with the old instrument would get a number taken by the new one.
 #:
 #: ⛔ WHY A SWITCH EXISTS ON A BUG FIX. This dedupe changes the NUMBER the whole
 #: repair is verified BY (``census_after``, i.e. #10000 criterion 2), so an
@@ -526,8 +533,13 @@ def find_session_sources_carrying_prose(
     dedupe on, and it cannot be addressed by the write either — it is reported
     under ``unaddressable`` by the reconciler, never silently merged into a peer.
 
+    The record carries ``duplicate_session_rows`` (rows beyond the first) ONLY
+    where the dedupe MEASURED it: under the off-switch the key is ABSENT, because
+    no count was taken and ``0`` would read as a measurement.
+
     ``TORTOISE_11070_CENSUS_DEDUPE_DISABLED=1`` restores the pre-fix path
-    exactly (one record per row, first-row mark); see :data:`_CENSUS_DEDUPE_DISABLED`.
+    exactly (one record per row, first-row mark, no duplicate count); see
+    :data:`_CENSUS_DEDUPE_DISABLED`.
     """
     out: list[dict] = []
     #: ``id(s)`` -> the record already emitted for that node, so the second row
@@ -568,13 +580,17 @@ def find_session_sources_carrying_prose(
             _NODE_ID: props.get(_NODE_ID),
             _SUMMARY: summary,
             _SEARCH_TEXT: search_text,
-            #: Rows this NODE contributed beyond the first — 0 for every node
-            #: reached by at most one `:Session`. Non-zero is the
-            #: duplicate-`:Session` signal (#11176), reported rather than hidden.
-            "duplicate_session_rows": 0,
         }
         node_id = record.get(_NODE_ID)
         if dedupe and isinstance(node_id, int) and not isinstance(node_id, bool):
+            #: Rows this NODE contributed beyond the first. ⛔ SET ONLY WHERE IT WAS
+            #: MEASURED — inside the dedupe branch, never on the record's initial
+            #: shape. Under the off-switch no de-duplication happens, so the count is
+            #: not a `0`, it was never taken; emitting `0` there would report a graph
+            #: with two `:Session` rows at one `sessionId` as "no duplicates" — the
+            #: exact signal this field exists to carry, hidden as a measurement
+            #: (#11176 review P2).
+            record["duplicate_session_rows"] = 0
             already = seen.get(node_id)
             if already is not None:
                 already["turn_max_index"] = _strongest_mark(

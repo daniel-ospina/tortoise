@@ -2183,6 +2183,9 @@ def test_the_OFF_SWITCH_restores_the_pre_fix_census_exactly(monkeypatch):
     assert [n["turn_max_index"] for n in found] == [3, 7], (
         "the old path must keep ROW ORDER — that is what 'the old instrument' means")
     assert m.census(graph) == 2
+    assert all("duplicate_session_rows" not in n for n in found), (
+        "the off-switch reported a duplicate count it never took — `0` is a "
+        "measurement, and this run did not take one (#11176 review P2)")
 
     reversed_graph = _RecordingGraph(_two_rows_one_node(marks=(7, 3)))
     assert [n["turn_max_index"]
@@ -2361,9 +2364,11 @@ def test_the_off_switch_reports_the_ROW_level_census_against_a_REAL_graph():
             "the off-switch did not restore the OLD number: an operator comparing "
             "a fresh census against a recorded one cannot re-measure with the "
             "instrument that recorded it")
-        marks = sorted(n["turn_max_index"]
-                       for n in m.find_session_sources_carrying_prose(g))
-        assert marks == [3, 7], marks
+        rows = m.find_session_sources_carrying_prose(g)
+        assert sorted(n["turn_max_index"] for n in rows) == [3, 7]
+        assert all("duplicate_session_rows" not in n for n in rows), (
+            "the off-switch reported a duplicate count it never took on a real "
+            "graph (#11176 review P2)")
 
         del os.environ["TORTOISE_11070_CENSUS_DEDUPE_DISABLED"]
         assert m.census(g) == 1, "clearing the switch did not restore the fix"
@@ -2373,3 +2378,45 @@ def test_the_off_switch_reports_the_ROW_level_census_against_a_REAL_graph():
         else:
             os.environ.pop("TORTOISE_11070_CENSUS_DEDUPE_DISABLED", None)
         _live_utils.drop_test_graph(proj)
+
+
+def test_the_off_switch_never_reports_an_UNMEASURED_zero(monkeypatch, capsys):
+    """#11176 review P2: a count that was never taken must not print as `0`.
+
+    Under `TORTOISE_11070_CENSUS_DEDUPE_DISABLED=1` no de-duplication happens, so
+    `duplicate_session_rows` was never measured. Emitting `0` there is worse than
+    emitting nothing: a duplicate-`:Session` population reads as "no duplicates"
+    in `--json`, which is the graph-health signal this field exists to carry —
+    the same silence, wearing the shape of a measurement.
+
+    (1) FAILS if the key is initialised on the record's base shape (reported as
+        `0` on every row of a two-`:Session` node) instead of inside the dedupe
+        branch.
+    (2) REACHABLE: the off-switch on the duplicate-`:Session` fixture, through
+        the module API and through the CLI's `--json` payload.
+    """
+    from tortoise import session_source_prose_migration as m
+
+    monkeypatch.setenv("TORTOISE_11070_CENSUS_DEDUPE_DISABLED", "1")
+    found = m.find_session_sources_carrying_prose(
+        _RecordingGraph(_two_rows_one_node()))
+    assert len(found) == 2, "precondition: the old instrument sees both rows"
+    assert [n.get("duplicate_session_rows") for n in found] == [None, None], (
+        "the un-deduped run reported a duplicate count it never measured")
+
+    # …and the operator surface must not manufacture one either.
+    _export_a_record_dsn(monkeypatch)
+    _install_cli(monkeypatch, _RecordingGraph(_two_rows_one_node()),
+                 ["--dry-run", "--json"])
+    assert _cli.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [d["duplicate_session_rows"] for d in payload["candidate_detail"]] \
+        == [None, None], (
+        "`--json` said `0` duplicates on a run that never counted them")
+
+    # With the switch OFF the same fixture IS measured (so `None` is the absence
+    # of a measurement, not a bug in the field).
+    monkeypatch.delenv("TORTOISE_11070_CENSUS_DEDUPE_DISABLED")
+    row = m.find_session_sources_carrying_prose(
+        _RecordingGraph(_two_rows_one_node()))[0]
+    assert row["duplicate_session_rows"] == 1
