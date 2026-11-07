@@ -36,7 +36,7 @@ is the product home; this file is its proof.
 | test | claim it falsifies | it goes RED when … |
 |---|---|---|
 | `test_the_register_resolves_at_runtime_from_tortoise` | the issue's first row — *"resolvable at runtime from `tortoise/`"* | the register moves out of `tortoise/`, under `tortoise/projection/`, or stops being importable without the tooling |
-| `test_the_register_imports_without_entering_the_projection_cycle` | `04-plan.md` §5's leaf requirement, EXECUTED | importing the register pulls `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk` into `sys.modules`, i.e. it re-enters `projection → pack_state → sdk → projection` — the cycle whose module-scope config read is a reproduced `ImportError` (`projection/__init__.py:1466-1481`). The "imports ONLY the standard library" arm is `test_the_register_is_not_a_second_rule_set`, not this one |
+| `test_the_register_imports_without_entering_the_projection_cycle` | `04-plan.md` §5's leaf requirement, EXECUTED | importing the register pulls `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk` into `sys.modules`, i.e. it re-enters `projection → pack_state → sdk → projection` — the cycle whose config read is a reproduced `ImportError` (`tortoise.projection.__init__::_config_classes` records it). The "imports ONLY the standard library" arm is `test_the_register_is_not_a_second_rule_set`, not this one |
 | `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register imports `value_gate`/`embed_gate`, or grows a pattern/predicate/rule id |
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
@@ -125,9 +125,9 @@ def test_the_register_imports_without_entering_the_projection_cycle():
 
     `04-plan.md` §5 records the failure mode exactly: a module-scope read of the config constants
     under `tortoise/projection/` is a **reproduced** `ImportError` (`import tortoise.sdk` /
-    `import tortoise.pack_manifest_store` break). This asserts the register pulls in NEITHER
-    `tortoise.projection` nor `tortoise.sdk`, so a future edit that reaches for either reds here
-    before it reaches a user.
+    `import tortoise.pack_manifest_store` break). This asserts the register pulls in NONE of
+    `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk`, so a future edit that reaches for
+    any of the three reds here before it reaches a user.
     """
     code = (
         "import sys, tortoise.embed_writer_register as r\n"
@@ -534,9 +534,13 @@ INVISIBLE_SHAPES = {
     # (`probe._embedding_writers` iterates `FunctionDef`/`AsyncFunctionDef`), so the literal-slice
     # AST pass is never applied to it and `_EMBED_WRITE` has no function source to read. It is a
     # further reason a writer can be absent while holding a perfectly DECIDABLE key, so it is
-    # pinned here rather than left to the header's prose.
+    # pinned here rather than left to the header's prose — BOTH positions, because a widening that
+    # reached one of them alone would leave the other described rather than pinned (round-15 review).
     "module_scope_container_key": (
         'REC = {}\nREC["embedding"] = [0.25, 0.5]\n'
+    ),
+    "class_scope_container_key": (
+        'class C:\n    REC = {}\n    REC["embedding"] = [0.25, 0.5]\n'
     ),
 }
 

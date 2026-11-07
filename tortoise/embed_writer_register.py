@@ -67,7 +67,9 @@ claim and a slogan:
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,
 whose `__init__` is the head of the `projection → pack_state → sdk → projection` cycle where a
 module-scope read of the config constants is a **reproduced `ImportError`**
-(`projection/__init__.py:1466-1481`). This module imports only the standard library — pinned by
+(`tortoise.projection.__init__::_config_classes` records the reproduced `ImportError`, both for a
+module-scope call and for a module-scope read of the constants). This module imports only the
+standard library — pinned by
 `test_the_register_is_not_a_second_rule_set`, which reads this file's own `import` statements — so
 importing it can never ENTER that cycle, which
 `test_the_register_imports_without_entering_the_projection_cycle` proves separately in a subprocess
