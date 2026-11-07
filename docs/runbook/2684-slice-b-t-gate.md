@@ -66,7 +66,7 @@ explicitly or the numbers below are simply not re-read.
 |---|---|---|
 | "extend the value-fidelity discipline … in extraction" | **landed** — `_value_verbatim_span` stamps only a VERBATIM anchor whose addressed text carries a value; the two absence routes are reported, not silent | `tortoise/extractor_v2.py:4244` (`_verbatim_span_in_turn`), `:4272` (`_carries_value`), `:5246` (`_value_verbatim_span`), call site `:10063-10066`; commits `2312845b6` (#8659), `fda19cf93` (#8966) |
 | "a span-carrying schema field" | **landed** — `Point.span_start`/`span_end`, all-or-nothing, `end > start`, `>= 0`, validated on the model AND every write path | `tortoise/commit_schema.py:678-705` (fields + `_span_is_an_address`), `tortoise/commit_schema.py:445` (`validate_span`) — the field itself is #5007's (`2ff8c3c88`) |
-| "the assembly surfaces the span with the point" | **landed on the read path** — the eval lane annotates the offsets onto the hit the package reads, and `package_evidence_pool` copies the kept anchor's keys; the product ask lane's hit carries `quote`/`source_turn_id`/`span_*` since #8658 | `tools/longmem_eval/retrieve.py:939-941`; `tortoise/sdk.py:38730` (the four columns are read — the `RETURN` continuation that appends `n.quote, n.source_turn_id, n.span_start, n.span_end`, six lines past the `rows = graph.query(` opener at `tortoise/sdk.py:38724`); `e70a5ff17` (#8658 / #9543) |
+| "the assembly surfaces the span with the point" | **landed on the read path** — the eval lane annotates the offsets onto the hit the package reads, and `package_evidence_pool` copies the kept anchor's keys; the product ask lane's hit carries `quote`/`source_turn_id`/`span_*` since #8658 | `tools/longmem_eval/retrieve.py:941-943`; `tortoise/sdk.py:38730` (the four columns are read — the `RETURN` continuation that appends `n.quote, n.source_turn_id, n.span_start, n.span_end`, six lines past the `rows = graph.query(` opener at `tortoise/sdk.py:38724`); `e70a5ff17` (#8658 / #9543) |
 | "Requires ONE extractor re-ingest (~4 h) then cached cycles" | **true for T-2 only**; the per-question leg needs **no** re-ingest — the committed receipts + fixtures are the population (§2) | this runbook §2 |
 | the `⛔` residual: the two DEGRADED fallback tiers keep lean projections | **confirmed, and it is a DECLARED boundary** — `fallback_snapshot`/`fallback_tfidf` return before the provenance fetch, so a degraded hit carries no `quote`/`span_*` and Slice A's own-source leg is inert there | `tortoise/sdk.py:38691-38707` (the `⛔ KNOWN LIMITATION` comment: it names #8658's four columns and the declared boundary) |
 
@@ -221,7 +221,7 @@ restated as "this corpus has no near-duplicates".
 
 ⛔ **That zero is about ONE route — and the population it is measured over is the
 other half of the same trap.** `_same_fact` has a second, content-overlap-
-INDEPENDENT route (`retrieval.py:3103-3113`): same `source_turn_id` **and** quote
+INDEPENDENT route (`retrieval.py:3268-3278`): same `source_turn_id` **and** quote
 overlap ≥ 0.75, with `_pkg_differ_value_critical(qa, qb)` consulted on the
 **quotes** first. Over the population dedupe actually sees — **every** extracted
 point of a session-arm, not the value-bearing narrowing this census otherwise
@@ -237,7 +237,7 @@ reachable **and decisive**:
 §2.1's rule, one leg over. Production overwrites the model's advisory index with
 the resolver's answer before the point is committed (`extractor_v2.py:10038` →
 `:10045`), and `_same_fact` groups on the committed field
-(`retrieval.py:3103-3105` — the `_pkg_turn_key` pair and its equality test).
+(`retrieval.py:3268-3270` — the `_pkg_turn_key` pair and its equality test).
 Grouping by the advisory index instead gives
 `43 / 26 / 1 / 2` over all extracted points — a population no package holds, and
 this section's third population error. That reading is **published here and
@@ -251,7 +251,7 @@ counts themselves, not merely on the divergence.
 §2.1's rule one field over. The write path rewrites a point's `quote` to the
 `_MAX_QUOTE` span at that point's own commit (`extractor_v2.py:9823`, carried
 into `pt_entry` at `:10043`) and `_same_fact` compares the committed hit
-(`retrieval.py:3107-3108`), so the census reads its quotes through
+(`retrieval.py:3272-3273`), so the census reads its quotes through
 `_stamp_inputs` — the same clamp the span half applies. The population differs on
 **3 of the 217 points** (exactly the three carrying a >200-char quote) and
 **every published count is clamp-invariant on it**: the table above
@@ -267,7 +267,7 @@ corpus that cannot tell the two apart.
 **The one decisive pair is `wp07_bluepeak_followup`/narrative, turn 14**: a
 value-bearing point paired with a strict SUB-quote that carries no value, at quote
 overlap **1.00**. Delete `if _pkg_differ_value_critical(qa, qb): return False`
-(`retrieval.py:3111-3112`) and the overlap gate collapses those two into one slot
+(`retrieval.py:3276-3277`) and the overlap gate collapses those two into one slot
 — so the guard changes exactly one outcome on this corpus, and that outcome is a
 value-bearing claim losing its own words. ⚠️ The value-bearing-only row is the
 **weaker** reading and its zero is a property of the narrowing, not of the
