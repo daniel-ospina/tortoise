@@ -1039,7 +1039,7 @@ _COMMIT_MITIGATES_ENTRY_NODES = 3
 #: that mint no node.
 _COMMIT_SUPERSESSION_ENTRY_NODES = 2
 
-_COMMIT_FLAT_NODE_LANES = ("entities", "events", "sources")
+_COMMIT_FLAT_NODE_LANES = ("entities", "events")
 
 
 def _operator_op_type(op) -> str:
