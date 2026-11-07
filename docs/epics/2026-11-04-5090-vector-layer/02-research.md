@@ -170,7 +170,7 @@ comparables now say what that measurement will probably show, and how to run it:
 
 ## Extractor-v4 alignment — the check this brief originally omitted (2026-11-05; corrected 2026-11-06)
 
-**Why this section exists.** The first version of this brief never read `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (the design of record for the write path, home `#4894`). That was a Research-stage omission, and it matters because the epic's rule lives **inside** that write path. Reading it produced one genuine gap in what the epic asked for — and two corrections to this brief's own first draft, which had believed the design document's citations over the code.
+**Why this section exists.** The first version of this brief never read `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (the design of record for the write path, home `#4894`). That was a Research-stage omission, and it matters because the epic's rule lives **inside** that write path. Reading it produced one genuine gap in what the epic asked for, and two corrections to this brief's own first draft — one where the draft was right at its `Head` pin and went stale, and one where it repeated a design-document note the code has since outgrown.
 
 ### ⛔ v4 ALREADY RECORDS THE GAP, as G2
 
@@ -202,7 +202,7 @@ This section first repeated v4's wiring note as an open defect. At the branch he
 - `apply_vet`'s Rule 1 is *"Only an explicit `DISCARD` removes anything"* (`tortoise/vet_gate.py`);
 - `vet_s2_pool` carries the S2 pass's removals forward: an **operator** the live `S4` gap-filler re-added against an `S2.2`-discarded item is **not** re-minted by `execute_embed`, and an entity it started referencing does not 422 the session (`S4` here is the code's second extraction pass, which is not the design's removed *"S4 — granularity review"*). Item removal itself is driven by the union pass's own `DISCARD` decisions, not by the pool.
 
-⇒ `DISCARD` already removes from the candidate set before it is classified or committed. (`classify_consolidation` is a per-point dedup API, not the pruning site — citing it for this was wrong twice over.) v4's wiring note still **reads** as outstanding because its citations belong to the `c79ba1cf2` pin; that passage is stale at the branch head, and re-asserting it here is how the stale claim would have propagated.
+⇒ `DISCARD` already removes from the candidate set before it is classified or committed. (`classify_consolidation` is a per-point dedup API, not the pruning site — citing it for this was wrong twice over.) Candidate items are removed by the union pass's own `DISCARD` decisions (`discarded_ids`); the pool additionally participates in the **operator** prune, which is why its two roles are stated separately here. v4's wiring note still **reads** as outstanding because its citations belong to the `c79ba1cf2` pin; that passage is stale at the branch head, and re-asserting it here is how the stale claim would have propagated.
 
 ### The ordering (v4 §4.2, §S2.2)
 
@@ -212,7 +212,7 @@ This section first repeated v4's wiring note as an open defect. At the branch he
 
 ⚠️ **Not** both gates: `embed_gate_enabled()` reads only `TORTOISE_EMBED_GATE` and is **not** folded into `vet_enabled`, so the EMBED point is not subordinate to VET — it sits at the embedding submission seam (`embeddings.encode_for_row`, storage §12.2a), a different step from `S2.2`. A lane that folded it in on the strength of "one rule set, two enforcement points" would be inventing a subordination no source records.
 
-⛔ **And there is no EMBED row to add to that table — its absence IS G2.** v4 §4.2's "resulting order" block has no EMBED entry at all, which is exactly what G2 records as missing. The code applies the gate at `encode_for_row`, called from the graph writers **inside** the commit that `execute_embed` performs (*"S5: deterministic embed EXECUTION"*), so it is neither "before `execute_embed`" nor a step of its own. Stating it as an ordering constraint would invent the placement the design says is absent.
+⛔ **And there is no EMBED row to add to that table — its absence IS G2.** v4 §4.2's "resulting order" block has no EMBED entry at all, which is exactly what G2 records as missing. The code applies the gate at `encode_for_row`, called from the graph writers **when the payload `execute_embed` returns is committed** — `execute_embed` performs no write (it returns a `payload` dict), and the SDK's `create_point` performs the commit and calls `encode_for_row` — so the gate is neither "before `execute_embed`" nor a step of its own. Stating it as an ordering constraint would invent the placement the design says is absent.
 
 (`DISCARD` already precedes the classify/commit pass — see above.)
 
@@ -231,8 +231,8 @@ This section first repeated v4's wiring note as an open defect. At the branch he
 
 This doc can only stop the NEXT copy; each issue body is what a lane building that slice reads as its brief.
 
-- **`#11086`** carries **three** superseded premises, not one: the value gate is no longer off by default; a `DISCARD` no longer reaches `S2.3`/`execute_embed`; and its ordering table *and* its checklist both require **both** gates to stay subordinate to VET — the invented subordination this section disclaims. Correcting all three is part of S1, not a follow-up.
-- **`#11088`** carries the stale v4 §4.2 wiring note too (*"`S2.3 — CLASSIFY` collects from `embed_list`, and `classify_consolidation` does not remove items from it — so anything this issue stops embedding must also be skipped there, or it is classified and embedded anyway"*). The "embedded anyway" half is false: the gate is at `encode_for_row`, so a row that is not embedded gets no vector whatever the classifier does.
+- **`#11086`** carries **four** superseded premises, not one: the value gate is no longer off by default; a `DISCARD` no longer reaches `S2.3`/`execute_embed`; its ordering table *and* its checklist both require **both** gates to stay subordinate to VET — the invented subordination this section disclaims; and that same table still carries the **`EMBED` before `execute_embed`** row, the invented placement refuted above. Correcting all four is part of S1, not a follow-up.
+- **`#11088`** — now **CLOSED**, and it carries the stale v4 §4.2 wiring note (*"`S2.3 — CLASSIFY` collects from `embed_list`, and `classify_consolidation` does not remove items from it — so anything this issue stops embedding must also be skipped there, or it is classified and embedded anyway"*). The "embedded anyway" half is false: the gate is at `encode_for_row`, so a row that is not embedded gets no vector whatever the classifier does. No successor issue carries the removal/surface-approval call, so this one needs checking before it is read as settled.
 
 ## Review gate
 
