@@ -1386,10 +1386,10 @@ def test_every_overrides_marker_the_design_documents_cite_is_the_one_the_code_ci
 
 # The two statements the entry once attributed to §9.1 *"in that place"* and that
 # `STORAGE-ARCHITECTURE.md` does NOT carry: the torn-tail TOLERATED decision (its
-# home is `tortoise/log.py`) and the tenant precedence the store decision asks
-# (`record_tenant_effective`/`is_usable_tenant` in `tortoise/record_writer.py`).
-# Each token is the statement's own identifier, so the split can be checked
-# without reading prose.
+# home is `tortoise/log.py:204`, a block header) and the tenant precedence the
+# store decision asks (`record_tenant_effective`/`is_usable_tenant` in
+# `tortoise/record_writer.py`). Each token is the
+# statement's own identifier, so the split can be checked without reading prose.
 _CODE_SETTLED_TOKENS = ("torn", "record_tenant_effective", "is_usable_tenant")
 
 # A lead-in that points the bullets at the design document as their home. It is
