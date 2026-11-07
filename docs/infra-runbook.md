@@ -1719,9 +1719,9 @@ Two halves close that, and neither is a health *reading*:
 serve — and it also detects a loop that serves slower than the bound, by TWO
 mechanisms, because curl's behaviour differs by where the answer stalls:
 
-* an answer that never starts (no status line inside the bound) comes back as
+- an answer that never starts (no status line inside the bound) comes back as
   `000` with a non-zero curl exit → `DOWN` (harness case 93);
-* an answer whose **headers** arrive inside the bound but whose **body** never
+- an answer whose **headers** arrive inside the bound but whose **body** never
   does comes back as a healthy `200` with a non-zero curl exit (28 timeout, 18
   partial transfer, 56 recv error — measured: `"200 3.002614"`, `curl: (28) …
   10 out of 40 bytes received`). `probe()` therefore grades an `UP` from the
