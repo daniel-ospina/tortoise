@@ -249,14 +249,19 @@ heads" as the identity claim: it is false for row 3.
 
 The gate agrees: `uv run python tools/collision_preflight.py 2513 --repo .` exits **0** —
 `VERDICT: CLEAN (exit 0) — 8/9 surfaces queried` (`ALL_SURFACES` has 9 members on this tree), re-run at
-2026-11-07 01:2x UTC *with this doc's own branch and PR already on the remote*, so the count includes
-this lane's signals. The `--repo .` pin is required: unpinned, `#2513` resolves in both `tortoise` and
-`agent-infra`, and the tool refuses it as AMBIGUOUS (exit 2).
+2026-11-07 01:12 UTC **from this branch's own worktree** *with this doc's own branch and PR already on
+the remote*, so the count includes this lane's signals. The `--repo .` pin is required: unpinned, `#2513`
+resolves in both `tortoise` and `agent-infra`, and the tool refuses it as AMBIGUOUS (exit 2). Read the
+run this way: the tool excludes the caller's own branch/PR, so the verdict is **worktree-relative** — the
+same command run from the hub checkout on `main` returns `VERDICT: COLLISION (exit 1)` on the very PR it
+is clearing here. Quote the worktree it ran in, not just the exit code.
 
-⚠️ Do **not** quote a `who-is-on` verdict as this doc's evidence. It enumerates *live* signals, so it
-read `nobody` at 00:18 UTC (before this lane existed) and `4 holder(s)` at 01:20 UTC (after this lane's
-branch/PR existed) — both correct for their moment, neither durable. The durable claim is the table
-above, not a point-in-time answer.
+⚠️ Do **not** quote a `who-is-on` verdict as this doc's durable evidence, and never merge its numbers
+across checkouts. It enumerates *live* signals, so it read `nobody` at 00:18 UTC (before this lane
+existed) and `4 holder(s) across 4 surface(s)` on the same 01:12 UTC worktree re-run — while the same
+command from the hub checkout answered `2 holder(s)` five minutes later. Every one of those is correct
+for its moment and its checkout, none is durable. The durable claim is the table above, not a
+point-in-time answer.
 
 ### 10.2 Per-unit landing state
 
@@ -268,12 +273,15 @@ must be able to name:
 | 1 | Query expansion / time-aware retrieval | **C6 #2520**; C2 #2518 | #5297 sq `0b3e4a90240`; #10549 sq `2f2582a2720` (DATE-RANGE widens candidates by session); C2's key expansion #2557 sq `0b00b40c274` | eval lane (`tools/longmem_eval/retrieve.py`) | **UNMEASURED** — #10538 open; C2 measured and **not adopted**, fail-safe OFF stands (#2518) |
 | 2 | Source-session re-injection | **C4 #2517** | #3577 sq `26207c42905` (`tortoise/session_reinjection.py`, 714 L); evolved by #10629 sq `58011ae535b` (the guard's missing LOWER bound) | `source_session_chunk_pass` / `reinjection_merge_order` have **exactly one non-test caller**: `tools/longmem_eval/retrieve.py` — a **library + eval arm**, not the product ask path | **UNMEASURED** |
 | 3 | Official-metric framing (`recall_all@5`) | **C1 #2516** | #8707 sq `4a487147a0b`: per-category `recall_all@5` rows (`tools/longmem_eval/report.py:2701`) **and** the fact-grain leg `answer_evidence@k` (`run.py:5362`, `run.py:6215`) — this is item (a) of the #2513 scoping comment's §4.2 amendment | eval lane | the **metric exists**; the **sealed Phase-0 receipt does not** (#2516 indicator 1) |
-| 4 | Aggregation-aware reading | **C5 #2521** | #2607 merge `7361250f0e1` (content `6550db3ee80`): `tortoise/aggregate.py::detect_aggregative_intent`, consumed **in-product**: called at `tortoise/reader.py:400` (via `_is_aggregative_question`, `:382`) and reached from `_system_prompt_for_question` (`:510`) which the ask lane uses (`tortoise/ask_lane.py:702`); #10550 sq `7e866e462f9` (reader keeps counting discipline when its type fragment loses it) | **product reader path** | #10553 open (exact-count accuracy before/after) |
+| 4 | Aggregation-aware reading | **C5 #2521** | #2607 merge `7361250f0e1` (content `6550db3ee80`): `tortoise/aggregate.py::detect_aggregative_intent`, called at `tortoise/reader.py:400` (via `_is_aggregative_question`, `:382`) and appended **unconditionally** — no env gate — by the prompt composer `_system_prompt_for_question` (`:510`); #10550 sq `7e866e462f9` (reader keeps counting discipline when its type fragment loses it). ⛔ **Not a product surface**: the reader is reached only from the **eval-only** ask lane (`tortoise/ask_lane.py:702`) — #3849 removed the `/v1/ask` route, the SDK `ask()` method and any MCP ask tool, and nothing product-side imports `tortoise.reader` (`tortoise/reader.py:1-10`) | **reader prompt composer, reached only from the EVAL-ONLY ask lane** (`tortoise/ask_lane.py`) — no MCP tool, no SDK `ask()`, no `/v1/ask` route (#3849) | #10553 open (exact-count accuracy before/after) |
 | — | Completeness loop (the loop both 1 and 2 compose through) | **C3 #2519** | #2608 sq `77e590f88f7`: `tortoise/coverage_loop.py` shell + `session_diverse_order`; `tortoise/retrieval.py::guard_and_recap_pool` is its single shipped composition point | `guard_and_recap_pool` has **two** non-test call sites — `tools/longmem_eval/retrieve.py:2294` and `tortoise/session_reinjection.py:561` (the re-injection merge) — and both are reached only from the eval lane (`retrieve.py:2597`) | **UNMEASURED**; #2569 / #2570 open |
 
-**The pattern this table records, plainly:** every mechanism is landed and OFF, but exactly **one** unit
-(#4, C5) has a *product* arming point while the other **four** are eval-lane arms. "Landed" therefore
-never means "shipped to users" for this program — read the `Where it is armed` column, not the PR list.
+**The pattern this table records, plainly:** every mechanism is landed, and **none of the five is
+reachable from a product surface** — all five arming points are the eval lane (C5's is the eval-only ask
+lane's reader, not a "product reader path"; #3849). What differs is the default *inside* that lane:
+C5's reader fragment is appended unconditionally (ON, no env gate), while the other four are gated OFF
+by default. "Landed" therefore never means "shipped to users" for this program — read the `Where it is
+armed` column, not the PR list.
 
 ### 10.3 Proof the landed seams are live (the run that backs this section)
 
