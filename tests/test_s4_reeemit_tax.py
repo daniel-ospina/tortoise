@@ -912,6 +912,15 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
     assert max_rer > max_pri, (max_pri, max_rer)   # else the cell's claim is moot
     assert _thousands(max_rer) in flat_all, max_rer
     assert _thousands(max_pri) in flat_all, max_pri
+    # ⛔ "the largest list is 17" is a published figure too: pinning only
+    # `cap_hit`/`cap_dropped` left it stale-proof — a regeneration with a larger
+    # recorded list keeps 17 in the document and every test green (#11385 review P3).
+    biggest = max(len(lst.get("items") or [])
+                  for art in (pri, rer) for a in art["arms"]
+                  for arm in ("legacy", "delta")
+                  for lst in (a[arm].get("added_items") or {},
+                              a[arm].get("corrected_items") or {}))
+    assert f"the largest list is {biggest}" in flat_all, biggest
 
     for art in (pri, rer):
         s, comp = art["summary"], art["summary"]["composition"]
@@ -1130,8 +1139,11 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
     assert flat.count("(") == flat.count(")"), f"unbalanced brackets: {flat}"
     assert "all 266 items offered" not in flat, "the refuted claim is back"
     assert "231 of the 266" in flat, "the corrected population is missing"
-    assert "operators" in flat, (
-        "the row must say WHY it is 231 — the never-rendered operators section")
+    # ⛔ the bare word does not discriminate: the row also says "has no `operators`
+    # section", so deleting the explanatory clause left a green test (#11385
+    # review P3). Pin the CLAUSE.
+    assert "35 `operators` are never offered" in flat, (
+        "the row must say WHY it is 231 — the 35 never-offered operators")
 
 
 def _paren_depth_ok(text: str) -> bool:
