@@ -4924,8 +4924,9 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: reach it.
     _REPORTED_NOT_ASSERTED = re.compile(
         # ⛔ THE NEGATOR MUST REACH THE REPORTING VERB (#11191 review r33-R3, P1 — MEASURED
-        # NEW FALSE RED, 8/8 rows). The first cut put an unanchored `{0,40}?` gap between the
-        # negator and the verb, so ANY negator within 40 characters vetoed a POSITIVE frame:
+        # NEW FALSE RED on every distractor spelling pinned below). The first cut put an
+        # unanchored `{0,40}?` gap between the negator and the verb, so ANY negator within 40
+        # characters vetoed a POSITIVE frame:
         #   "No doubt the note SAYS the tree … was wrong"        -> REFUSED (must accept)
         #   "Nobody DENIES that the note says … was wrong"        -> REFUSED
         #   "Not only does the note say … was wrong"             -> REFUSED
@@ -10095,10 +10096,9 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "The note never says, as the row records, that the tree immediately before #9548 "
         "was wrong.",
         # ⛔ …AND A PARENTHETICAL ASIDE DOES NOT DECIDE IT EITHER (#11191 review r6, P2 —
-        # MEASURED fail-open vs `origin/main`, which REFUSES both rows below as it refuses the
-        # bare spellings above). Putting `(`/`)` back into the gap reds EXACTLY these two rows
-        # and nothing else, so the exclusion buys these two — not asides' punctuation
-        # generally.
+        # MEASURED fail-open vs `origin/main`, which REFUSES both rows below). Putting `(`/`)`
+        # back into the gap reds EXACTLY these two rows and nothing else, so the exclusion buys
+        # these two — not asides' punctuation generally.
         "The note never says (as the row records) that the tree immediately before #9548 "
         "was wrong.",
         "The note never says the tree (which the census names) immediately before #9548 "
