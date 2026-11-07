@@ -449,7 +449,7 @@ def test_a_failed_write_is_not_a_successful_reconcile(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert rc == 1, "a write that did not take must not exit 0"
     assert payload["ok"] is False
-    assert payload["post"]["verdict"] == "VIOLATION", "the read-back must show the failure, not hide it"
+    assert payload["post"]["verdict"] != "OK", "the read-back must show the failure, not hide it"
 
 
 # ------------------------------------- a Windows x64 box is a mis-serve, not a no-op
@@ -503,7 +503,21 @@ def test_an_engage_that_cannot_reach_an_online_x64_runner_is_not_a_success(monke
             ]
         }
     )
-    for pool in (arm_only, offline_x64):
+    # THE CASE THE GATE'S `online` PREDICATE EXISTS FOR, and the one the other two pools cannot
+    # reach: the label IS attached to x64 — but only to an OFFLINE one, so `check` reports no
+    # violation at all (violation #2 is online-filtered) and the gate is the ONLY signal.
+    armed_but_offline = topo.parse_runners(
+        {
+            "runners": [
+                _runner(1, "pi-runner-vm-2", ARM64_PLAIN),
+                _runner(3, "pi-runner-x64-1", [*X64, topo.FALLBACK_LABEL], status="offline"),
+            ]
+        }
+    )
+    assert topo.check(armed_but_offline)["ok"] is True, (
+        "precondition: this pool has NO check violation — the gate must be what catches it"
+    )
+    for pool in (arm_only, offline_x64, armed_but_offline):
         reads = [pool, pool]  # the write takes, and the pool still cannot serve
         monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO, _r=reads: _r.pop(0))
         monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
@@ -521,6 +535,10 @@ def test_an_engage_that_cannot_reach_an_online_x64_runner_is_not_a_success(monke
         assert payload["ok"] is False
         kinds = [v["kind"] for v in payload["post"]["violations"]]
         assert topo.VIOLATION_ENGAGE_NO_X64_SERVER in kinds, kinds
+        assert payload["post"]["verdict"] == topo.VIOLATION_ENGAGE_NO_X64_SERVER, (
+            "the payload must not say verdict=OK while ok=false — that is the same false PASS in the "
+            "field every other reader keys on"
+        )
 
 
 # ------------------------------------------------- the PUT body is what the plan said
@@ -575,3 +593,86 @@ def test_the_check_human_render_names_a_runner_it_did_not_reconcile(capsys):
         )
     assert "pi-runner-win-1" in proc.stdout, f"a runner the tool skipped must be named: {proc.stdout}"
     assert "UNRECONCILED" in proc.stdout
+
+
+# ------------------------------------- an unreadable read-back is not a pass
+def test_an_unreadable_read_back_fails_closed(monkeypatch, capsys):
+    """REGRESSION (#10912 review round 2, P2): the fail-closed guard on the read-back was unpinned —
+    mutating it to treat "could not read back" as a pass left every test green. That mutant is the
+    pre-fix P1 verbatim, so it needs its own test.
+    """
+    pre = measured()
+    calls = {"n": 0}
+
+    def _fetch(repo=topo.REPO):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return pre
+        raise SystemExit("gh api --paginate failed rc=1: HTTP 502")
+
+    monkeypatch.setattr(topo, "fetch_runners", _fetch)
+    monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
+    monkeypatch.setattr(
+        topo,
+        "apply_plan",
+        lambda pending, *, dry_run, repo=topo.REPO: [
+            {"runner": n, "id": rid, "before": b, "after": a, "applied": True}
+            for n, (rid, b, a) in pending.changes.items()
+        ],
+    )
+    rc = topo.main(["apply"])
+    captured = capsys.readouterr()
+    assert rc == 1, "a write we could not read back must not exit 0"
+    assert "UNVERIFIED" in captured.err
+    assert "already at the desired topology" not in captured.out, (
+        "a failed run must not print the success line"
+    )
+
+
+# ------------------------------------- the WRITER's read-only net, not just the plan's
+def test_the_writer_strips_a_read_only_label_even_if_a_plan_carries_one(monkeypatch):
+    """REGRESSION (#10912 review round 2, P2): the `GITHUB_OWNED` filter in the write path was dead
+    from the test's point of view — `desired_label_set` already returns custom-only, so deleting the
+    filter left every test green. Drive the writer with a plan that DOES carry read-only labels.
+    """
+    pending = topo.Plan()
+    pending.changes = {"pi-runner-x64-1": (42, [], ["self-hosted", "Linux", "X64", "self-hosted-x64", "ubuntu-latest"])}
+    sent: list[str] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(argv, **kwargs):
+        sent.append(kwargs.get("input", ""))
+        return _Proc()
+
+    monkeypatch.setattr(topo.subprocess, "run", _fake_run)
+    records = topo.apply_plan(pending, dry_run=False)
+    assert records[0]["applied"] is True
+    body = json.loads(sent[0])["labels"]
+    assert body == ["self-hosted-x64", "ubuntu-latest"], (
+        f"the writer must drop read-only labels itself, not rely on the plan: {body}"
+    )
+
+
+# ------------------------------------- an armed-but-unusable pool is REPORTED
+def test_an_offline_only_carrier_with_an_absorbing_queue_is_reported_as_starvation():
+    """REGRESSION (#10912 review round 2, P2): `starvation_suspected` counted an OFFLINE carrier as
+    engagement, so "label armed, nothing online can serve it, queue absorbing" — this PR's own defect
+    class — produced verdict OK, no violation and no note.
+    """
+    pool = topo.parse_runners(
+        {
+            "runners": [
+                _runner(1, "pi-runner-x64-1", [*X64, topo.FALLBACK_LABEL], status="offline"),
+                _runner(2, "pi-runner-vm-2", ARM64_PLAIN, busy=True),
+            ]
+        }
+    )
+    report = topo.check(pool, queued_oldest_seconds=999_999)
+    assert report["ok"] is True, "an armed-but-offline pool is not one of the two violations"
+    assert report["starvation_suspected"] is True, (
+        "an attached label that no ONLINE runner can serve, with an absorbing queue, must be reported"
+    )

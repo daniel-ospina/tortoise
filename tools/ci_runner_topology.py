@@ -469,10 +469,13 @@ def check(
         }
     found = violations(runners)
     pending = plan(runners, engage=engage)
+    # ⛔ "ENGAGED" IS NOT "USABLE". Counting an OFFLINE carrier as engagement made the exact state
+    # this tool exists to surface — label armed, nothing ONLINE can serve it, queue absorbing —
+    # emit zero signal: verdict OK, starvation_suspected False, an absorbing queue and no note.
     starving = (
         queued_oldest_seconds is not None
         and queued_oldest_seconds >= queued_floor_seconds
-        and not any(r.serves_fallback for r in runners)
+        and not any(r.serves_fallback and r.online for r in runners)
     )
     verdict = "OK" if not found else "VIOLATION"
     return {
@@ -697,7 +700,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 queued_oldest_seconds=fetch_oldest_queued_seconds(args.repo),
                 engage=engage,
             )
-        except SystemExit as exc:
+        except (SystemExit, json.JSONDecodeError, KeyError, ValueError) as exc:
+            # `--paginate` can also yield a truncated stream (JSONDecodeError) or a malformed page
+            # (KeyError/ValueError); catching only SystemExit let those abort AFTER the writes with
+            # a traceback, losing the one record that matters: what was written, and that it is
+            # unverified.
             print(
                 f"WARNING: labels were written but the read-back failed ({exc}) — the post state is "
                 f"UNVERIFIED, and this run must not be reported as a verified reconcile.",
@@ -730,7 +737,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"capacity, however clean the label state looks."
                     ),
                 }
-                post = {**post, "ok": False, "violations": [*post["violations"], gate]}
+                # ⛔ `verdict` IS the field every other reader keys on (`ok` is never printed in the
+                # human render), so leaving it "OK" here makes the payload contradict itself.
+                post = {
+                    **post,
+                    "ok": False,
+                    "verdict": VIOLATION_ENGAGE_NO_X64_SERVER,
+                    "violations": [*post["violations"], gate],
+                }
                 print(
                     f"❌ {VIOLATION_ENGAGE_NO_X64_SERVER}: no online x64 runner serves "
                     f"{FALLBACK_LABEL!r} after the write — engage delivered NO capacity.",
@@ -753,7 +767,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         for rec in records:
             state = "planned" if args.dry_run else ("applied" if rec["applied"] else f"FAILED {rec.get('error','')}")
             print(f"  {rec['runner']}: {rec['before']} -> {rec['after']}  [{state}]")
-        if not records:
+        if not records and ok:
+            # ⛔ ONLY WHEN IT IS TRUE. An engage that changed nothing because the pool has no x64
+            # arm — or only an unmanaged carrier — also produces zero records, and that run FAILS.
             print("  (already at the desired topology — idempotent, nothing to do)")
         for name, why in sorted(pending.unclassified.items()):
             print(f"  ⚠️  {name}: left untouched — {why}")
