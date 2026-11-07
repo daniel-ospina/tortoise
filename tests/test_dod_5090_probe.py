@@ -1069,6 +1069,57 @@ def test_a_refusal_with_TWO_causes_names_BOTH_of_them():
             f"{field} discards the disagreement the width probe measured "
             f"because a DIFFERENT read failed: {blob}")
 
+    # (f) THE CATALOGUE OVERRIDE NAMES EVERY OTHER UNMEASURED CAUSE, not only the
+    # width (#11389 review, P2 — the round-5 fix reached one independent read and
+    # stopped). An unattributable catalogue row sitting BESIDE a readable
+    # covering row whose `dimension` is unreadable: materialising only the
+    # catalogue name sends the reader to repair the catalogue and be refused
+    # again on the dimension.
+    blind_dim = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", None), []],
+        labels=["Point"],
+        vectors={"Point": (6, [[0.0] * 384])},
+    )
+    row_f = probe.vector_census(blind_dim, "g", at="2026-11-07T00:00:00Z",
+                                graph_names=["g"])["labels"]["Point"]
+    for field in ("unindexed", "derived_payload_B"):
+        blob = str(row_f["unindexed"] if field == "unindexed"
+                   else row_f["payload"]["derived_payload_B"])
+        assert "catalogue row" in blob, (field, blob)
+        assert "index dimension" in blob, (
+            f"{field} names the catalogue alone while the index dimension is "
+            f"also unreadable: {blob}")
+    assert "index dimension" in str(row_f["payload"]["how"]), (
+        f"`how` sends the reader to repair only the catalogue: "
+        f"{row_f['payload']['how']}")
+    # ⛔ …and the SAME for an unreadable COUNT under a blind catalogue: the
+    # count is the cause, and it must not be inferred to be a missing width.
+    blind_count = _CountUnreadable(
+        catalogue=[[]], labels=["Point"], vectors={"Point": (6, None)},
+    )
+    row_g = probe.vector_census(blind_count, "g", at="2026-11-07T00:00:00Z",
+                                graph_names=["g"])["labels"]["Point"]
+    for field in ("unindexed", "derived_payload_B"):
+        blob = str(row_g["unindexed"] if field == "unindexed"
+                   else row_g["payload"]["derived_payload_B"])
+        assert "stored count unreadable" in blob, (
+            f"{field} names neither the count nor any other cause: {blob}")
+
+    # (g) A COUNT FAILURE IS NOT A MISSING WIDTH (#11389 review, P2). The width
+    # probe is guarded by `stored > 0`, so no probe statement is issued at all —
+    # naming "stored width not probeable" names a cause that cannot exist, while
+    # the blocking cause goes unnamed.
+    count_only = probe.vector_census(
+        uncountable, "g", at="2026-11-07T00:00:00Z",
+        graph_names=["g"])["labels"]["Point"]["payload"]
+    for cell in (str(count_only["derived_payload_B"]), str(count_only["how"])):
+        assert "count" in cell, (
+            f"a row whose stored count is unreadable does not name it: {cell}")
+    assert "stored width not probeable" not in str(
+        count_only["derived_payload_B"]), (
+        "a probe that was never issued is reported as a failed probe: "
+        f"{count_only['derived_payload_B']}")
+
 
 def test_the_census_still_reports_zero_when_there_is_nothing_to_cover():
     """The refusal above must not over-refuse: 0 stored vectors needs no width.

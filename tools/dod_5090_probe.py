@@ -3021,6 +3021,25 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             unindexed = 0
         else:
             unindexed = stored
+        # ⛔ ONE CAUSE LIST FOR THE CATALOGUE-UNREADABLE OVERRIDE (#11389 review,
+        # P2). The catalogue cell is emitted in THREE places (`unindexed`, the
+        # byte figure, and each one's remedy), and the round-5 fix appended only
+        # the width — so a row whose catalogue row was unreadable AND whose
+        # covering index `dimension` was unreadable, or whose stored count also
+        # failed, named the catalogue alone and threw the other measured facts
+        # away. Repair the catalogue, re-run, be refused again: the same round
+        # trip, in the very lines that were edited. Built once here and reused,
+        # so the three cells cannot drift apart.
+        # ⚠️ ORDER MIRRORS the other arms: count, then dimension, then width.
+        catalogue_extra: list[str] = []
+        if unreadable_here:
+            if isinstance(stored, str):
+                catalogue_extra.append("the stored count unreadable")
+            if covering and dim is None:
+                catalogue_extra.append("the index dimension unreadable")
+            if width_reason:
+                catalogue_extra.append(width_reason)
+        _cat_tail = "".join(f"; {c}" for c in catalogue_extra)
         if isinstance(stored, int) and stored == 0:
             payload = {"derived_payload_B": 0, "how": "no stored vectors on this label"}
         elif unreadable_here:
@@ -3031,22 +3050,17 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             # and `unindexed` already do (review round 1, P2: the row said
             # `indexed: UNMEASURED(...)` and, one field over, "NO covering
             # index" — a coverage fact it had not measured).
-            # ⛔ BUT A FAILED CATALOGUE READ DOES NOT CANCEL WHAT THE WIDTH
-            # PROBE MEASURED (#11389 review, P2). The probe is an independent
-            # read and its disagreement is a MEASURED fact; discarding it made
-            # a reader repair the catalogue, re-run, and be refused again on
-            # the width — the same round trip, in the one arm the previous
-            # enumeration did not count. Measured before the fix: `disagree`
-            # appeared nowhere in the row while the probe had returned both
-            # widths. The catalogue text is otherwise unchanged.
+            # ⛔ BUT A FAILED CATALOGUE READ DOES NOT CANCEL ANY OTHER
+            # INDEPENDENT READ (#11389 review, P2 — twice). First the width the
+            # probe MEASURED was discarded; then, with that fixed, the count
+            # and the index `dimension` still were. All three are named now,
+            # from `catalogue_extra`. The catalogue text is otherwise unchanged.
             payload = {"derived_payload_B": (
                            "UNMEASURED(the catalogue row was unreadable, so "
-                           "coverage is not provable"
-                           + (f"; {width_reason}" if width_reason else "")
-                           + ")"),
+                           "coverage is not provable" + _cat_tail + ")"),
                        "how": (f"catalogue row unreadable: {unreadable_here[0]}"
-                               + ("; the width probe did run" if width_reason
-                                  else ""))}
+                               + (("; also: " + "; ".join(catalogue_extra))
+                                  if catalogue_extra else ""))}
         elif width is None:
             # ⛔ The refusal, BEFORE the index is consulted: without a measured
             # width there is no byte figure, indexed or not — and when the probe
@@ -3069,11 +3083,27 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             # name the same causes or the field is worse than absent.
             payload_causes: list[str] = []
             dim_cause = "the index dimension unreadable"
+            # ⛔ THE COUNT, NOT A PROBE THAT NEVER RAN (#11389 review, P2). The
+            # width read is guarded by `isinstance(stored, int) and stored > 0`,
+            # so when the COUNT is unreadable no `RETURN n.embedding` statement
+            # is ever issued — the row nevertheless said "stored width not
+            # probeable", i.e. it named a cause that cannot exist and to which
+            # the code's own doctrine one branch up (`the WIDTH is deliberately
+            # NOT named here … naming it would be a guess`) refuses to point,
+            # while the blocking cause went unnamed. Measured: probe issued =
+            # False. `UNMEASURED(stored width not probeable)` is preserved for
+            # the case it actually describes — a probe that ran and yielded no
+            # row.
+            if isinstance(stored, str):
+                payload_causes.append("the stored count unreadable")
             if covering and dim is None:
                 payload_causes.append(dim_cause)
-            payload_causes.append(width_reason or "stored width not probeable")
-            how = ("a single width cannot stand for this label's stored vectors"
-                   if width_reason else "needs a width probe")
+            if isinstance(stored, str):
+                how = "needs a measured stored count"
+            else:
+                payload_causes.append(width_reason or "stored width not probeable")
+                how = ("a single width cannot stand for this label's stored "
+                       "vectors" if width_reason else "needs a width probe")
             if covering and dim is None:
                 how += f", and {dim_cause}"
             payload = {"derived_payload_B": "UNMEASURED("
@@ -3174,10 +3204,11 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                         else bool(covering)),
             "unindexed": (
                 f"UNMEASURED(catalogue row unreadable: {unreadable_here[0]}"
-                # ⛔ …and the width the probe DID measure is not cancelled by
-                # it (#11389 review, P2): `width_reason` is a measured fact
-                # from an independent read. Same rule as the payload above.
-                + (f"; {width_reason}" if width_reason else "")
+                # ⛔ …and every other independent read the row already has
+                # (#11389 review, P2): the count and the index `dimension` are
+                # not cancelled by a catalogue failure any more than the width
+                # is. Same `catalogue_extra` list the payload uses.
+                + _cat_tail
                 + ")" if unreadable_here else unindexed),
             "vector_indexes_on_label": found or "none",
             "index": idx or "none",
