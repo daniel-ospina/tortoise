@@ -232,12 +232,17 @@ otherwise clean map), and **rewording the crosswalk header** reds for the same r
 A second table belongs in its own section.
 
 The `--self-test` arm exists because a checker that passes on everything is worse than no checker:
-(`self-test: 19 mutation(s) registered, at least 20 required`), and deleting it, **reverting the width
-layer as a mechanism, retype a crosswalk surface as one that has no row, **splice a raw `|` into a cell**,
-**splice a `\\|` into a cell**, drop a child, drop a capability, forget a seam, destroy the section
-structure, **append a duplicate section-number decoy**) to an in-memory
-copy and **requires each mutation's stated outcome** — nineteen must be caught, and one, a
-**NEGATIVE control**, must leave the verdict UNCHANGED. That is the same discipline the epic applies to its own probe
+it applies the **twenty** mutations an editor actually makes (remove a row, **remove a row and every
+mention of it**, blank a cell, blank a **crosswalk** row's surface cell, **split a blanked crosswalk row
+out of the table with an inserted separator**, **retype a crosswalk row's surface cell as the bare token
+`surface` so it impersonates the header**, **delete a crosswalk row's surface cell** (one column short),
+**rename a crosswalk row and blank its cell**, **add a crosswalk row with no `§` label and a blank cell**,
+**append an ordinary §5 table with a `surface` column and require it to STAY CLEAN**, restate a failure
+as a mechanism, retype a layer as a mechanism, retype a crosswalk surface as one that has no row,
+**splice a raw `|` into a cell**, **splice a `\\|` into a cell**, drop a child, drop a capability, forget
+a seam, destroy the section structure, **append a duplicate section-number decoy**) to an in-memory copy
+and **requires each mutation's stated outcome** — nineteen must be caught, and one, a **NEGATIVE
+control**, must leave the verdict UNCHANGED. That is the same discipline the epic applies to its own probe
 — *an instrument that cannot fail is not an instrument.* "Every mention of it" is meant literally: the
 case deletes the mentions, because the first version of the case **renamed** them to `SF1` and so
 never built the consistent shrink its own label claimed.
@@ -250,9 +255,9 @@ refusal cases report it. ⚠️ State the mechanism rather than overclaiming it:
 that a `|`-splitting relaxation **reds the arm**, not that the exact-7 refusal is the only rule that
 could notice. ⚠️ The floor is why re-opening the false PASS is no longer a one-place edit: at the
 shipped floor, deleting the width case alone exits 1
-`2/12 case(s) UNTESTABLE` before the arm and `2/20 case(s) UNTESTABLE` after it (each exit 1) — it
-rule's `!= 7` to `< 7`**, *and* lowering the floor to the population that is left still exits 1, because
-the parity case beside it catches the same relaxation. ⚠️ Name all three edits: deleting the case and
+(`self-test: 19 mutation(s) registered, at least 20 required`), and deleting it,
+**reverting the width rule's `!= 7` to `< 7`**, *and* lowering the floor to the population that is left
+still exits 1, because the parity case beside it catches the same relaxation. ⚠️ Name all three edits: deleting the case and
 lowering the floor alone leaves the **rule** intact, so the parity case is still refused by the rule it
 splices past, and the arm exits **0** (measured).
 
@@ -275,22 +280,12 @@ surfaces. Content hints ALONE (a third cell reading `surface`, or a first cell r
 graded an ordinary §5 table as the crosswalk, so its 3-cell rows were refused as "one column short"
 — a false RED on the required check blaming a deleted cell nobody deleted (measured at `3b642c7ca`:
 an appended `| area | kind | surface |` table, exit 2, `CLEAN` before the per-block selection
-landed). Requiring both cells AND the four-column width closes it: appended `surface` /
-`surfaces` / `note` / 4-column tables and a `| plan § | note |` table all stay `CLEAN` again, while a
-second, validly-headed crosswalk table is still graded (its 3-cell row refuses, its blank cell
-violates) and a deleted header still fails CLOSED. ⚠️ **The header is a hint, never the authority.**
-A reworded FIRST header cell left the real crosswalk unheaded while a DECOY headed table elsewhere in
-§5 kept the headed set non-empty, so the fail-closed fallback never fired and blanking AND deleting
-§6.4's surface cell both graded `CLEAN` (measured). The pinned seam tokens are the crosswalk's actual
-signature: the crosswalk's WIDTH is now measured from the block that carries the seam tokens, not from
-a shape-matching header, and an unheaded §5 is graded in full rather than exempted block by block. With
-the first cell reworded to `seam` / `Plan §` / `plan`, the blanked cell reds (`R5 §6.4: names no
-surface`) and the deleted one REFUSES — and the untouched map now reds too (`R5 seam: names no
-surface`, measured), because a reworded header row is itself graded as a crosswalk row once it stops
-matching. That is the fail-closed direction stated above, and it is the price of the impersonation arm:
-the same content test that would let a reworded header through untouched also lets a DATA row whose
-surface cell reads the bare token `surface` be skipped when it sits above an alignment row (measured —
-that is the case below, so the two cannot both be relaxed).
+landed). Requiring both cells AND the four-column width closes it — but only for a table of a DIFFERENT
+width: appended `surface` / `surfaces` tables stay `CLEAN` (measured), while a 4-column table
+appended to §5 is graded as if it were the crosswalk and reds (`R5 area: names no surface`,
+measured, and the same statement appears above), which is the fail-closed direction this section
+already claims. A second, validly-headed crosswalk table is still graded (its 3-cell row refuses,
+its blank cell violates) and a deleted header still fails CLOSED.
 
 The false-RED direction has its own self-test case, `append an ordinary §5 table with a
 surface column (must stay CLEAN)`, and it is a **NEGATIVE control**: the one case whose expected

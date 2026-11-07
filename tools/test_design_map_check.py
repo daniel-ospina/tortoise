@@ -413,9 +413,12 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     #
     # So: EVERY `|` line in §5 is graded, minus two classes — an alignment row, and a
     # line that IS the crosswalk header by shape. The one remaining exemption is a
-    # WELL-FORMED table whose own header is a DIFFERENT width from the crosswalk's
-    # (the map's §6 checklist table is 3-wide): it is genuinely another table, and
-    # grading it would refuse a docs-only edit that improves the map (a false RED).
+    # WELL-FORMED table whose own header is a DIFFERENT width from the crosswalk's:
+    # it is genuinely another table, and grading it would refuse a docs-only edit that
+    # appends one to §5 (a false RED). In the SHIPPED map no such table exists — R5
+    # reads §5 only, and §6's 3-wide checklist table is never in scope — so the
+    # exemption exists for an editor's edit, and its negative control is what keeps it
+    # honest.
     # A 4-wide decoy gets no such exemption — that is the shape an impersonating row
     # or a split-off tail would take.
     blocks: list[list[str]] = []
@@ -467,18 +470,33 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
         crosswalk_width = len(cells(sample))
 
     def _is_foreign_table(block: list[str]) -> bool:
-    # NOTE (merge): the pre-merge selection needed a "the header is a HINT, never the
-    # authority" guard, because a DECOY headed block kept the headed set non-empty and
-    # the fail-closed fallback never fired (measured: a reworded first header cell plus
-    # a decoy left §6.4's blanked AND deleted cells CLEAN). There is no headed/default
-    # decision left to decoy here — every `|` line is graded — so that guard's premise
-    # is gone. The decoy it described is now a 4-wide FOREIGN table, which is not
-    # exempt, so its rows are graded (fail-closed).
+        """True only for a WELL-FORMED table that is demonstrably NOT the crosswalk.
+
+        Three conditions, each closing a measured false PASS:
+        1. The block carrying the pinned seam tokens is never exempt — that block IS
+           the crosswalk, whatever its header looks like. Measured: exempting it let a
+           blanked §5 row 3 grade CLEAN once a decoy header block was inserted above it.
+        2. Any block carrying a pinned seam token is never exempt (a second crosswalk
+           table is graded, not skipped).
+        3. The block must be internally CONSISTENT and a different WIDTH from the
+           crosswalk, measured on each block's OWN separator row. Measured: comparing
+           the crosswalk's separator to this block's header excused the crosswalk itself
+           in a well-formed table, and an inconsistent block (a row one column short)
+           silently swallowed the rows after it.
+        """
+        if block is measured_from:
+            return False
+        if any(
+            re.match(r"^\|\s*" + re.escape(seam), line) for line in block for seam in PLAN_SEAMS
+        ):
+            return False
         separator = _separator(block)
         if separator is None or separator == 0:
             return False
-        header = block[separator - 1]
-        return not _is_crosswalk_header(header) and len(cells(header)) != crosswalk_width
+        width = len(cells(block[separator]))
+        if width == crosswalk_width:
+            return False
+        return all(len(cells(line)) == width for line in block if not _is_separator_line(line))
 
     graded_blocks = blocks if not crosswalk_width else [block for block in blocks if not _is_foreign_table(block)]
     rows: list[str] = [
@@ -528,7 +546,7 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
                 f"cell shifts the note into the surface column, where its own words "
                 f"satisfy the arm below"
             )
-        surface_cell = row[2] if len(row) > 2 else ""
+        surface_cell = row[2]
         if not surface_tokens(surface_cell):
             violations.append(f"R5 {label}: names no surface")
         for sf in sorted(surface_tokens(line) - set(surfaces)):
