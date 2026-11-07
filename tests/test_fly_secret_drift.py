@@ -3348,6 +3348,26 @@ class TestTheMitigationLedger:
         assert "LEDGER NOT HONOURED" in proc.stdout
         assert "OPT_SECRET" in proc.stdout
 
+        # ⛔ AND THE LEG THAT ARM DOES *NOT* PIN (#11332 round 14, P3). With the guard's
+        # secret ABSENT in the run, the name is in `live` too, so `assigned | live`
+        # alone catches it and `unconditional` is still unpinned. Carry the secret so
+        # the `-z` guard is OFF everywhere the run sample can see it: the name is then
+        # staged ONLY in the no-secrets sample, i.e. in `unconditional` and nowhere
+        # else. Narrowing check (0) to `mitigated & (assigned | live)` measured rc=0
+        # `MITIGATED` over this exact payload — a re-armed mitigation certified green.
+        guarded_but_present = _ledger_run(
+            _ledger(_entry("OPT_SECRET")),
+            workflow=_fixture("ledger-workflow-zero-unfiltered.yml", zero_guarded),
+            present={"FASTAPI_INTERNAL_KEY", "SENTRY_DSN", "OPT_SECRET"},
+        )
+        assert guarded_but_present.returncode == 2, (
+            "this name is staged only in the NO-SECRETS sample (`unconditional`), so "
+            "this arm is what pins that leg of check (0): "
+            + guarded_but_present.stdout
+        )
+        assert "LEDGER NOT HONOURED" in guarded_but_present.stdout
+        assert "OPT_SECRET" in guarded_but_present.stdout
+
     def test_a_ledgered_name_the_payload_still_stages_fails_the_deploy(self):
         """Dropping the filter from the workflow must not be a silent re-arm.
 
@@ -3546,6 +3566,13 @@ class TestTheMitigationLedger:
             ('"0"', False),  # falsy-looking but a REAL value the deploy applies
             ('"false"', False),  # ditto
             ('"   "', False),  # whitespace is a value, not an absence
+            # ⛔ UNQUOTED, so `tomllib` yields an `int` / `bool`, not a `str` — the
+            # only rows that exercise the reader's typed-value normalisation. Without
+            # it these read FALSY and the entry is certified while `[env]` supplies
+            # them: measured `rc=0 MITIGATED` for `[env] SENTRY_DSN = 0`, against
+            # `rc=2 LEDGER NOT HONOURED` with the normalisation (#11332 round 14, P3).
+            ("0", False),
+            ("false", False),
         ],
     )
     def test_only_an_EMPTY_fly_toml_env_value_lets_the_entry_through(self, literal, allowed):

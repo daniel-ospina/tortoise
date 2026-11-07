@@ -953,12 +953,15 @@ def fly_toml_env_assignments(text: str) -> dict[str, str]:
 
     ⛔ THE VALUE IS NORMALISED TO A NON-EMPTY STRING UNLESS IT IS GENUINELY EMPTY, and
     that is load-bearing rather than cosmetic: the consumer's test is truthiness
-    (`if not env_assignments.get(name)`), and `tomllib` yields TYPED values, so
-    `X = 0` / `X = false` would read as FALSY where they are real values the deploy
-    applies — silently inverting the `"0"` / `"false"` rows of
-    `test_only_an_EMPTY_fly_toml_env_value_lets_the_entry_through` from "refuse" to
-    "certify". `str()` keeps every non-string value truthy, which can only cause a
-    REFUSAL, never a false PASS.
+    (`if not env_assignments.get(name)`), and `tomllib` yields TYPED values, so an
+    UNQUOTED `X = 0` / `X = false` would read as FALSY where they are real values the
+    deploy applies — measured `rc=0 MITIGATED` over `[env] SENTRY_DSN = 0` without the
+    normalisation, against `rc=2 LEDGER NOT HONOURED` with it. `str()` keeps every
+    non-string value truthy, which can only cause a REFUSAL, never a false PASS.
+    Pinned by the two UNQUOTED rows of
+    `test_only_an_EMPTY_fly_toml_env_value_lets_the_entry_through` — the `"0"` /
+    `"false"` rows beside them are TOML strings, so they are truthy either way and
+    prove nothing about this line (#11332 round 14, P3).
 
     The VALUE matters to #11122: `fly.toml` carries five `[env] = ""` placeholders
     (`TORTOISE_BACKUP_KEY`, `R2_*`) that exist only to document the names — a Fly
