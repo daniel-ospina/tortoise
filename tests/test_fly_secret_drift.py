@@ -4315,6 +4315,73 @@ class TestTheMitigationLedger:
         )
         assert "LEDGER-EMPTIED" not in unrelated.stdout, unrelated.stdout
 
+    def test_a_SHORT_ledgered_name_is_still_proven_suppressed(self):
+        """#11332 round 13 (P3) — one name grammar, two readers, and they disagreed.
+
+        `read_mitigation_ledger` accepts `[A-Z][A-Z0-9_]*` (ONE character or more), but
+        the payload extractor demanded three. A ledger entry for a 1–2 character name
+        was therefore recordable and UNPROVABLE: `assigned | unconditional | live` was
+        empty for it, check (0) was vacuous, and the gate printed
+        `MITIGATED … OK` over a payload that still staged the name — exit 0 where the
+        identical run with a three-character name is exit 2 `LEDGER NOT HONOURED`.
+        Measured, only the name's length differing.
+
+        Reachability is low (no such name exists on the app, and Fly has no length
+        floor that would stop one appearing), which is exactly why it is worth a test
+        rather than a paragraph: the failure is SILENT, and the whole point of check
+        (0) is that it cannot be.
+
+        The filter is deliberately ABSENT here — this is "the sync filter was dropped",
+        the regression check (0) exists to catch, for a name whose length used to hide
+        it from the extractor.
+        """
+        workflow = _fixture(
+            "short-name-workflow.yml",
+            "name: Deploy Hosted API\n"
+            "jobs:\n"
+            "  deploy:\n"
+            "    steps:\n"
+            "      - name: Set all app secrets on Fly.io\n"
+            "        run: |\n"
+            '          ARGS=(FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}")\n'
+            '          ARGS+=(AB="${{ secrets.AB }}")\n'
+            '          ARGS+=(ABC="${{ secrets.ABC }}")\n'
+            '          flyctl secrets set --stage "${ARGS[@]}"\n',
+        )
+        manifest = _fixture(
+            "short-name-manifest.txt",
+            "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n"
+            "AB                    gh-secret:AB\n"
+            "ABC                   gh-secret:ABC\n",
+        )
+
+        def drive(name: str) -> subprocess.CompletedProcess[str]:
+            return _run(
+                _secrets_file(["FASTAPI_INTERNAL_KEY"], f"short-{name}.json"),
+                manifest=manifest,
+                workflow=workflow,
+                present={"FASTAPI_INTERNAL_KEY", "AB", "ABC"},
+                extra_env={
+                    "FLY_MITIGATION_LEDGER": str(
+                        _ledger(_entry(name), f"short-ledger-{name}.txt")
+                    ),
+                    "FLY_MITIGATION_TODAY": "2026-11-07",
+                },
+            )
+
+        short = drive("AB")
+        assert short.returncode == 2, (
+            "a 2-character ledgered name was certified as suppressed while the payload "
+            "still stages it — the extractor's name floor is wider than the ledger's, "
+            "so check (0) never saw the assignment: " + short.stdout + short.stderr
+        )
+        assert "LEDGER NOT HONOURED" in short.stdout, short.stdout
+        # …and the length is the ONLY difference: a name of the same shape that the
+        # extractor always handled gets the same verdict.
+        wider = drive("ABC")
+        assert wider.returncode == 2, wider.stdout + wider.stderr
+        assert "LEDGER NOT HONOURED" in wider.stdout, wider.stdout
+
     def test_a_MIXED_guard_name_the_ledger_empties_is_explained_not_refused(self):
         """#11332 round 11 (P3) — the `unmitigated` set must include THIS run's world.
 

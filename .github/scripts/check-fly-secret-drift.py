@@ -227,7 +227,17 @@ def read_gh_secret_presence() -> set[str]:
 
 
 # `NAME=…` tokens in a captured `flyctl secrets set` payload.
-_ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]{2,})=([^\s]*)")
+#
+# ⛔ THE NAME CLASS IS THE LEDGER'S, NOT A WIDER ONE. This was `[A-Z][A-Z0-9_]{2,}`
+# (three characters or more) while `_LEDGER_RE` accepts one (`[A-Z][A-Z0-9_]*`), so a
+# ledger entry for a 1–2 character name was recordable and UNPROVABLE: the extractor
+# saw no assignment, `assigned | unconditional | live` was empty for that name,
+# check (0) was vacuous, and the gate printed `MITIGATED … OK` over a payload that
+# staged it — exit 0 where the same run with a 3-character name is exit 2
+# `LEDGER NOT HONOURED` (#11332 round 13, P3). Two readers of one grammar must not
+# disagree about which names exist. Applied with `fullmatch` to the CAPTURED argv
+# only, never to the script text, so a shell local (`K=…`, `RC=$?`) is not in scope.
+_ASSIGN_RE = re.compile(r"\b([A-Z][A-Z0-9_]*)=([^\s]*)")
 # A comment leader: `#` at the start of a line or after whitespace. NOT any `#` —
 # a `fly-only:#661` issue reference is data, and a plain `split("#", 1)` turned
 # the reference into the empty string, failing the whole manifest as unreadable.
