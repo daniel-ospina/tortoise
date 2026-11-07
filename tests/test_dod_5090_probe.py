@@ -4520,7 +4520,11 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
-_NEGATION = re.compile(r"\b(?:not|never|outside)\b")
+# ⛔ `_NEGATION` (a bare `\b(?:not|never|outside)\b`) was DELETED here: after the
+# governance rule below it is read nowhere, so a reader who edited it expecting an
+# effect got a silent no-op (#11437 review, P3). The past-tense mentions in the
+# comments above and beside `must_red` describe the OLD predicate and stay as the
+# record of what the governance rule replaced — they are history, not a symbol.
 # ⛔ `(?:s|es|ed)?` — NOT `ed?`. `ed?` binds the `?` to the `d`, so it matches only
 # `e` or `ed`: the bare words this vocabulary is named for (`walk`, `visit`,
 # `reach`, `report`) did NOT match, and an honest present-tense rewording
@@ -4860,7 +4864,7 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
                 f"the doc stating the bound")
 
 
-def test_the_residual_pin_separates_the_claim_from_its_inverse():
+def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     r"""The residual predicate must RED the inverse, and must not red the claim.
 
     ⛔ THIS TEST EXISTS BECAUSE THE PIN WAS DORMANT (#11437 review, P2). The
@@ -5169,6 +5173,57 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
             "predicate got more tolerant than this test assumed: move the row "
             "into `must_stay_green` and update `_residual_sentences`'s docstring")
 
+    # ⛔ THE ROW SETS MUST NOT BE ABLE TO VANISH (#11437 review, P2 — category A,
+    # a false PASS). Measured: replacing the whole 27-row `must_red` literal with
+    # `must_red = {}` left this file **FULLY GREEN** — 149 passed, 2 skipped,
+    # byte-identical to baseline. Every assertion above ITERATES the set, so an
+    # empty set is a loop that runs zero times and the file silently returns to
+    # having no discriminating power at all: the pre-#11389 state, where a
+    # polarity regression was invisible. "One row per arm" was therefore a claim
+    # the artifact could not verify.
+    for _set_name, _rows in (("must_red", must_red),
+                             ("must_stay_green", must_stay_green),
+                             ("declared_open", declared_open),
+                             ("declared_blocks", declared_blocks)):
+        assert _rows, (
+            f"the `{_set_name}` row set is EMPTY: every loop over it runs zero "
+            f"times, so this test asserts nothing. A set that can be deleted is "
+            f"a set that cannot pin anything")
+    # A FLOOR, not an exact count — adding rows is free; silently DELETING them is
+    # the failure measured above.
+    assert len(must_red) >= 27, (
+        f"`must_red` has shrunk to {len(must_red)} rows (floor 27). Rows may be "
+        f"added freely, but a row that disappears takes its measured shape's "
+        f"falsifier with it")
+
+    # …and the three alternatives this test claims an executor for are asserted to
+    # HAVE one: with that alternative removed from `_AFFIRMED`, at least one
+    # `must_red` row must go back to GREEN. The other five negated-reverser
+    # branches are deliberately NOT asserted here — they are inert today and
+    # retained as belt (disclosed beside `_AFFIRMED`), so demanding an executor
+    # for them would demand a row nobody has measured.
+    _this_module = sys.modules[__name__]
+    _pinned_affirmed = _AFFIRMED
+    for _arm_name, _arm in (
+            ("therefore reported", r"\btherefore reported\b"),
+            ("skipped", r"\bskipped\b"),
+            ("negated privative",
+             r"\b(?:not|never)\s+un(?:visited|reported|reached|walked|covered"
+             r"|mentioned|seen)\b")):
+        assert _arm in _pinned_affirmed.pattern, (
+            f"the `{_arm_name}` alternative has left `_AFFIRMED`, so the guard "
+            f"below would silently check nothing")
+        monkeypatch.setattr(
+            _this_module, "_AFFIRMED",
+            re.compile(_pinned_affirmed.pattern.replace(
+                _arm, r"\bZZZNEVERMATCH\b")))
+        _carried = [lbl for lbl, sent in must_red.items() if not _red(sent)]
+        monkeypatch.setattr(_this_module, "_AFFIRMED", _pinned_affirmed)
+        assert _carried, (
+            f"no `must_red` row depends on `_AFFIRMED`'s `{_arm_name}` "
+            f"alternative: with it removed every row still reds, so that "
+            f"alternative's closure of its shape is a claim rather than a result")
+
     # ⛔ THE PIN ITSELF MUST BE ABLE TO FAIL (#11437 review, round 2, P1).
     # Everything above pins `_residual_sentences`; this pins the ASSERTION built
     # on it, against the REAL document. Without it the assertion can drift back
@@ -5190,10 +5245,18 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
     # sentences the predicate SELECTS are the cue, whichever words they use.
     s3 = _doc_section(real, "## 3.", "## 4.")
     selected = _residual_sentences(s3)
+    # ⚠️ IMPLIED TODAY, RETAINED DELIBERATELY (#11437 review, P3).
+    # `_assert_census_states_the_residual(real)` above raises on this same
+    # condition first, so as the file stands this assert cannot fire — measured:
+    # deleting §3's residual clause reds the suite at the helper's own
+    # `assert residual`, never here. It stays because it is what stops the TWO
+    # MUTATION LOOPS below from silently running zero iterations if that call is
+    # ever removed: an empty `selected` makes both arms vacuous, which is the
+    # false-PASS shape this whole test is about. Same footing as `_COVERAGE`.
     assert selected, (
         "this test cannot derive a cue to delete because the predicate selects "
-        "nothing on the real doc — that is the pin's own failure, reported by "
-        "`_assert_census_states_the_residual` above")
+        "nothing on the real doc — with no cue the two mutation arms below run "
+        "zero iterations and this test asserts nothing")
 
     def _mutate(sentence: str, new: str) -> str:
         """Replace ONE occurrence in the DOC's own casing, and prove it landed.
