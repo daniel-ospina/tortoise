@@ -6165,9 +6165,10 @@ def test_ci_surfaces_declares_each_yaml_key_at_most_once():
     """Review round 5 on #11057 — a duplicate `durations` key is SILENT, and worse than a list one.
 
     `duplicate_entries` (#2913/#5373, the test above) gates a name repeated within one
-    `surfaces` list, because `config/ci-surfaces.yml` carries `merge=union`: a conflicting
-    hunk keeps BOTH sides' lines, so two lanes appending the same registration is the
-    natural conflict shape. The `durations` map has the same hazard and a strictly worse
+    `surfaces` list, because `config/ci-surfaces.yml` carries `merge=union` — which keeps
+    BOTH sides inside a conflicting hunk and never dedupes, while the same row appended at
+    a DIFFERENT anchor lands twice with no conflict at all (measured; see
+    `duplicate_entries`' docstring). The `durations` map has the same hazard and a strictly worse
     failure mode — it is a YAML MAPPING, so a second row for the same file is not a repeat
     any list check can see. The loader collapses it and the LAST row wins, silently.
 
@@ -6206,9 +6207,12 @@ def test_integrity_reddens_on_a_duplicate_entry(monkeypatch, capsys):
     """#5373: a duplicate entry must FAIL `--integrity`, not print a note.
 
     `config/ci-surfaces.yml` carries `merge=union`, which keeps BOTH sides' lines for
-    a conflicting hunk — so a same-surface duplicate is the exact shape union emits
-    when two lanes register the same test. It used to be a ⚠️ note; a note on a
-    union-merged registry lets the duplicate in silently.
+    a conflicting hunk — so a same-surface duplicate can be exactly what a merge emits
+    when two lanes register the same test, and a note on a union-merged registry lets it
+    in silently. ⛔ Do not expect a byte-identical append to collapse, though: MEASURED
+    on real merges, the same row appended at two DIFFERENT positions survives as two
+    rows with `merge=union` and without it alike; only the same change made in the same
+    place collapses, by git's ordinary identical-change resolution (#3153).
     """
     import tools.ci_selection as cs
 
@@ -12853,8 +12857,9 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     against the job's `timeout-minutes` like any other step. This job cannot
     amortize such a save, and no cap it is allowed to carry can: the cap above
     is pinned at `_CAP_CEILING_FACTOR` x the measured 16.02m pytest step (= 48m
-    at the ceiling), while ONE shard already spends its 19m floor-clamped
-    watchdog plus ~1.5m of setup/provision — and the SAVE has no timeout of its
+    at the ceiling), while ONE shard already spends its 10m embedder cap + 19m
+    floor-clamped watchdog + ~1m setup + the 1m38s `~/.cache/huggingface` POST
+    ≈ 31.6m against a 30m cap — and the SAVE has no timeout of its
     own, so a slow one is unbounded, not merely large. Headroom amortizes a
     bounded cost; it cannot amortize an unbounded one.
 
@@ -12869,8 +12874,8 @@ def test_the_carve_out_job_restores_the_pip_cache_without_saving_it():
     check on a diff that never touched this job.
 
     Nothing is lost by not saving here: the key is SHARED
-    (`pip-<os>-<hash uv.lock>`), written on EVERY run by `test-d14-hosted-api`
-    (unconditional, PR + push) and by `test-slow` only under `slow_run`, so this
+    (`pip-<os>-<hash uv.lock>`), written by `test-d14-hosted-api` on EVERY run
+    (unconditional, PR + push), by `test-slow` only under `slow_run` — each saving on a MISS, so this
     job only ever READ it. The ~90 MB HF embedding cache in the same job is
     deliberately left alone (measured 1m38s to save, and it is the leg's
     provisioning path — an uncached load skip-reds the dense assertion #4387);
@@ -16768,9 +16773,21 @@ def test_surface_audit_tolerates_null_surface_value(tmp_path):
 def test_real_manifest_has_no_duplicate_entries():
     # #3381: two files were each registered twice — one entry added by two
     # different PRs fixing the same drift independently. A same-surface
-    # duplicate is invisible to select() (surfaces are unioned) and reported
-    # non-fatally by `--integrity` and `--surface-audit` — never as a gate
-    # failure — so pin its absence here where CI will actually see it.
+    # duplicate is invisible to select() (surfaces are unioned), but it is a
+    # GATE FAILURE, not a note: `--integrity` reds on it, emitting BOTH shapes in
+    # ONE report — a `duplicate entry '<name>' at .surfaces.<surface>[] (lines N,
+    # M)` element (via `duplicate_mapping_key_issues`, the walk shared with
+    # `tools/registry_integrity.py`) AND a trailing `<surface>: <name>` element
+    # (via `_manifest_contract_issues` -> `duplicate_entries`) — because `main()`
+    # composes all of them into `problems`. (`integrity()` ITSELF does not: it
+    # returns only the `missing` list, which is why that distinction is spelled
+    # out here. The same job's separate `registry_integrity` step reports the
+    # duplicate-entry form as well, so neither step is the only place it appears.)
+    # See `duplicate_entries`' own docstring (#5373), the authority here. Pin
+    # its absence where CI will actually see it. (This comment said "reported
+    # non-fatally … never as a gate failure" until #11285; that was true in the
+    # #3381 era and has been false since #5373 made the duplicate a gate
+    # failure.)
     # Call the production detector rather than reimplementing it, so this pin
     # cannot drift from the real semantics (e.g. cross-surface dual
     # registration is deliberate and must stay allowed).
