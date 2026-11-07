@@ -20,12 +20,13 @@ governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.14; STORAGE-ARCHITECTURE.md
 > `gh api …/issues/2281/sub_issues` returned `[]`.
 >
 > `#11461` committed the 2026-09-05 text with two mechanical changes only — a rewritten frontmatter
-> and `markdownlint` fixes (bullet markers, blank lines, one escaped `|`) — and appended **§7** and
+> and `markdownlint` fixes (bullet markers, blank lines, one cell whose `|` is escaped) — and appended **§7** and
 > **§8**: the decision-state table re-measured on `main = dbbf5d874`, and the workstream → child map.
 >
 > ⚠️ **§1's `path:line` citations are as-of 2026-09-05 and have drifted since.** Read them as
-> historical; §7 carries the re-measured ones (e.g. `_validity_marker` is `retrieval.py:1289`, not
-> `:398`; `invalidate_point` is `sdk.py:20024`, not `:3458`).
+> historical. §7 re-measures the **decisions**, not these citations; measured on this head,
+> `_validity_marker` is `retrieval.py:1289` (not `:398`) and `invalidate_point` is `sdk.py:20024`
+> (not `:3458`).
 
 # Scope research — Epic #2281
 
