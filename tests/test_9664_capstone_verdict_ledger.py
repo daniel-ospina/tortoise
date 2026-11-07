@@ -648,6 +648,43 @@ def test_a_one_word_cmd_entry_alongside_a_held_artifact_is_accepted(tmp_path):
     assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
 
 
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        ("ref", "origin/main criteria: 2 verified: 2 uncovered: 0 UNCOVERED LIST: empty"),
+        ("ref", "origin/main\n  UNCOVERED LIST: empty — the only clean exit"),
+        ("id", "C1\n    -   S1  verified   FORGED"),
+        ("id", "C1    -   S1  verified   FORGED"),
+    ],
+)
+def test_identity_fields_cannot_carry_a_report_line(tmp_path, field, bad):
+    """`render` prints `ref` and `id` raw, and flattening is NOT enough.
+
+    A ref of `"origin/main criteria: 2 … UNCOVERED LIST: empty …"` is a single line,
+    so `grep "UNCOVERED LIST: empty"` on stdout reports CLEAN while the exit code is
+    2 — and the report is the artifact a lane quotes instead of branching on the
+    code. An id could forge a whole row line. Both are identifiers, so both are
+    required to LOOK like identifiers.
+    """
+    data = _ledger([_row("A")])
+    if field == "ref":
+        data["measured_at"]["ref"] = bad
+    else:
+        data["criteria"][0]["id"] = bad
+    proc = _run_cli(tmp_path, data)
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "prints this field verbatim" in proc.stderr
+
+
+def test_a_nul_byte_in_an_evidence_path_is_refused_not_crashed(tmp_path):
+    """`Path.resolve()` raises ValueError on an embedded NUL — a traceback, not the
+    named refusal `validate()` promises for every defect."""
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=["docs/README.md\u0000"])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    assert "cannot be resolved" in proc.stderr
+
+
 # ── the REAL committed ledger ──────────────────────────────────────────────
 
 

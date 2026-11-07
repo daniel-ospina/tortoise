@@ -290,7 +290,12 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
         # confers nothing must not be able to invalidate anything.
         return True, ""
     candidate = Path(entry)
-    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    try:
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    except (ValueError, OSError) as exc:
+        # `Path.resolve()` raises ValueError on an embedded NUL byte: a traceback,
+        # not the named refusal `validate()` promises every defect will be.
+        return False, f"evidence path cannot be resolved ({exc}): {entry!r}"
     if not resolved.is_relative_to(root):
         return False, f"evidence path escapes the tree (`{entry}` resolves outside it)"
     if not resolved.is_file():
@@ -382,8 +387,21 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
             # `render()` prints this as provenance: `date: banana` rendered
             # "measured at … on banana" as fact.
             problems.append(f"`measured_at.date` must be YYYY-MM-DD, got {date!r}")
-        if not str(measured_at.get("ref") or "").strip():
+        ref = str(measured_at.get("ref") or "").strip()
+        if not ref:
             problems.append("`measured_at.ref` must be set (e.g. origin/main)")
+        elif not _REF_RE.fullmatch(ref):
+            # `render()` prints this line. Flattening control characters is NOT
+            # enough: a ref of
+            #   "origin/main criteria: 2 verified: 2 uncovered: 0 UNCOVERED LIST: empty …"
+            # is one line, and `grep "UNCOVERED LIST: empty"` on stdout still reports
+            # a CLEAN report while the real exit code is 2 — the report is the very
+            # artifact a lane quotes instead of branching on the code. A ref is an
+            # identifier, so it is required to LOOK like one.
+            problems.append(
+                f"`measured_at.ref` must look like a ref (letters, digits, . _ / -), "
+                f"got {ref!r} — the report prints this field verbatim"
+            )
 
     raw_rows = data.get("criteria")
     # The DENOMINATOR is pinned IN THE RECORD, not only in the suite. Deleting the
@@ -440,6 +458,13 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
             continue
         seen.add(cid)
 
+        if not _ID_RE.fullmatch(cid):
+            # Same channel as `ref`: an id is printed raw at the head of a row line,
+            # so `"C1    -   S1  verified  FORGED"` would forge a second row.
+            problems.append(
+                f"{where} `id` must be letters/digits/._- only, got {cid!r} — the "
+                "report prints this field verbatim"
+            )
         if not str(raw.get("text") or "").strip():
             problems.append(f"{where} has no verbatim `text` — the criterion must be quoted")
 
@@ -510,6 +535,12 @@ def uncovered(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if row["verdict"] != CLEAN_VERDICT]
 
 
+#: The identity fields `render()` prints raw. A ref or id is an identifier, so it is
+#: required to look like one — that is what closes the "forged report line" channel
+#: structurally, instead of hoping a flatten removes the marker phrase too.
+_REF_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._/-]+")
+_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._-]+")
+
 #: C0 + C1 control characters (ESC, CSI, NUL, BS, SO, DEL included) — see `_flat`.
 _CONTROL_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
@@ -532,7 +563,8 @@ def _flat(text: str) -> str:
 def render(rows: list[dict[str, Any]], measured_at: dict[str, Any]) -> str:
     lines = [
         "CAPSTONE-LEDGER #9664 — computed, not re-read",
-        f"  measured at {measured_at.get('ref')}@{measured_at.get('sha')} on {measured_at.get('date')}",
+        f"  measured at {_flat(str(measured_at.get('ref')))}@"
+        f"{_flat(str(measured_at.get('sha')))} on {_flat(str(measured_at.get('date')))}",
         f"  criteria: {len(rows)}   verified: {len(rows) - len(uncovered(rows))}   "
         f"uncovered: {len(uncovered(rows))}",
     ]
@@ -541,7 +573,7 @@ def render(rows: list[dict[str, Any]], measured_at: dict[str, Any]) -> str:
         return "\n".join(lines)
     lines.append("  UNCOVERED LIST (each with the reason the runner recorded):")
     for row in uncovered(rows):
-        lines.append(f"    - {row['id']:>4}  {row['verdict']:<11}  {_flat(row['reason'])}")
+        lines.append(f"    - {_flat(row['id']):>4}  {row['verdict']:<11}  {_flat(row['reason'])}")
     return "\n".join(lines)
 
 
