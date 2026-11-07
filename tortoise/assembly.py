@@ -554,9 +554,15 @@ _RE_FREQUENCY = re.compile(
 #   * as an ORDERING BOUND (``_RE_RECENCY_LATEST_BOUND``) it is part of
 #     ``_RE_RECENCY``, the surface that ALWAYS vetoes — so the bound
 #     spellings the pattern covers (`from earliest to latest`, `from latest to
-#     earliest`, `latest first`) keep rejecting, which is what keeps this
-#     pattern from becoming dead code for the ordering-list arm below. NOT
-#     every conceivable ordering spelling: a word interposed between the
+#     earliest`, `latest first`) keep rejecting. Its load-bearing case is the
+#     INTERVAL arm — a bound inside an interval question's relative clause, which
+#     the exemption would otherwise admit and fire (`…where we ranked the films
+#     from earliest to latest?` is pinned as a reject for exactly this reason).
+#     It is NOT what saves the ordering-list arm below: every bound spelling
+#     carries the bare token and an ordering-list head can never own an interval
+#     template, so that arm is rejected by the bare-`latest` arm with or without
+#     this one.
+#     NOT every conceivable ordering spelling: a word interposed between the
 #     direction and the connector ("from the earliest one to the latest") falls
 #     out of the bound arm, and inside a relative clause the exemption may then
 #     admit it — measured as zero census impact (all 4 census bound rows MATCH

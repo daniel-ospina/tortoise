@@ -1047,8 +1047,13 @@ def test_recency_latest_selecting_an_interval_anchor_still_rejects():
     referent, and firing the shape is wrong because the arm must then resolve
     WHICH one and cannot: the name leg is an OR-union, so "my latest exam"
     matches any object containing "exam" and the block pairs the wrong exam with
-    the other anchor. Main abstains; so does this, at ANY position in the anchor
-    and in every spelling.
+    the other anchor. Main abstains; so does this whenever NO relative opener
+    precedes the token in its own clause, at ANY position in the anchor and in
+    every spelling. (Where such an opener DOES precede it, a selecting `latest`
+    is exempted instead — the declared residual pinned below by
+    ``test_recency_relative_clause_selector_residual_is_declared_8775``. That is
+    why the boundary here is the CLAUSE and not "position": position was
+    measured and does not separate these two classes.)
 
     The list is the exact set three review rounds found leaking from weaker
     rules — a fixed determiner list (possessives/intensifiers escaped) and a
@@ -1093,7 +1098,9 @@ def test_recency_latest_selecting_an_interval_anchor_still_rejects():
     # …while the issue's row fires: its `latest` sits inside the anchor's
     # RELATIVE CLAUSE (", where the author … is discussing her latest …"), the
     # structural place #8775's exemption keys on — the clause IS carried into
-    # the term, so the exemption is for its being ATTRIBUTIVE, not unread.
+    # the term, so the exemption is for the token lying in a relative clause of a
+    # captured anchor, NOT for it going unread and NOT for attributive-ness (a
+    # selecting token in such a clause is exempted too).
     assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL
     assert classify_question(
         "How many days had passed since I finished the book when I attended "
