@@ -1785,8 +1785,11 @@ _RESIDUAL_NEGATED_OPEN = (
 #: unit`, `the numeric side still fails open on purpose` — the arm REFUSES it, and
 #: the row's own sentence escapes only because its subject (`a unit outside
 #: _UNIT_EQUIV`) carries no anchor (#11258 review round 6 `P2`). That is an
-#: OVER-BLOCK, kept because the alternative is the leak it closes, and recorded
-#: here rather than left to be discovered. ⛔ STILL LEAKING, stated rather than implied: the coordinator form
+#: OVER-BLOCK, kept because the alternative is the leak it closes, and
+#: RECORDED IN THE LEDGER rather than left to be discovered — its two sentences
+#: are entries in `_RESIDUAL_REFUSED_TRUTHFUL`, so the suite re-measures them;
+#: until #11258 review round 19 `P3` they were recorded only in THIS comment,
+#: which is a record that cannot red. ⛔ STILL LEAKING, stated rather than implied: the coordinator form
 #: *“the ADJACENCY half is unjudged and fails open”* stays GREEN, because the
 #: clause split leaves the anchor in the first clause and the phrase in the
 #: second — the same shape as the row's honest sentence, so no clause-scoped rule
@@ -2134,14 +2137,22 @@ def _is_honest_spelling(text: str) -> bool:
 
     ⛔ The withholding set is `_RESIDUAL_WAIVER_WITHHOLD` — NOT
     `_RESIDUAL_CLASS_ANCHOR` "in full", which is what this docstring said until
-    #11258 review round 17 `P2` measured that false at the head. The anchor's
-    membership (adjacency, the time-unit spelling, the carve-out, the retention
-    guarantee, the value class, the numeric side) PLUS the unit vocabulary
-    (`units?`, `unit word`, `kg`, `mi`, `mos`, `millisec(s)`) and the bare
-    `(?<!['’])\b[ms]\b` abbreviation alternative. The unit arms are not
-    decoration: the row's surviving gap IS the unit-spelling class, so a waiver
-    that read only the anchor let `the spelling gap is open because `kg` is no
-    longer fused` through (#11258 review round 5 `P1`, measured). What the anchor
+    #11258 review round 17 `P2` measured that false at the head. It is the anchor
+    PLUS two arms the anchor does not carry: the unit-spelling family declared as
+    `_RESIDUAL_UNIT_WAIVER_ARMS`, and the bare `(?<!['’])\b[ms]\b` abbreviation.
+    ⛔ THE MEMBERS ARE DELIBERATELY NOT RE-ENUMERATED HERE, because two cuts of
+    this paragraph drifted from the code precisely by re-listing them: it named
+    `unit word`, which no declaration carries (`units?` already matches `unit` —
+    DEAD, removed in round 9), and it dropped "a unit token or its abbreviation",
+    which is where `hrs`/`minute` live, while claiming a shape (`… because `kg`
+    is no longer fused`) that `_SPELLING_FLOOR` reds even under the narrower
+    anchor-only withholding — the shape that actually flips is `… because `kg` is
+    not closed` (#11258 review rounds 18-19 `P2`, MEASURED). The declarations
+    above are the statement: `test_every_waiver_withhold_arm_earns_its_place`
+    derives its sample spellings from them, so an arm added or removed there is
+    measured the moment it is declared. WIDEN THAT SET, NOT
+    `_RESIDUAL_CLASS_ANCHOR`: the anchor also arms `_RESIDUAL_ANCHORED_OPENNESS`,
+    and widening it reds every truthful statement (MEASURED). What the anchor
     alone must keep out is unchanged: with `carve-out` dropped from it, `the
     SPELLING carve-out is open again` was waived and the same sentence without
     `spelling` red (round 3 `P1`, measured).
@@ -2258,19 +2269,33 @@ def _assert_the_row_names_its_closure(row: str) -> None:
     # carries the sentence lower-cased while five of the seven ledger entries are
     # spelled in caps: a case-sensitive compare found 5 of 7 undetectable, the
     # `minute` cost included (MEASURED).
+    # ⛔ AND THE ROUTE OUT IS NOT CONDITIONAL ON BEING IN THE LEDGER (#11258 review
+    # round 19 `P2`, MEASURED). It used to be: the whole pointer paragraph hung off
+    # `if ledger_hits else ""`, so an honest sentence about a still-open item that
+    # is NOT one of the recorded entries got the bare accusation and nothing else —
+    # `(a) is not closed.`, `(c) is not closed.`, `(e1) is not closed.` are items of
+    # THIS row's own still-open list, so the statement is true, yet the message told
+    # the lane its disclosure "REOPENS a gap this row says is CLOSED" with no
+    # indication that `is still open` / `remains open` are accepted — the
+    # false-block path that ends with the pin being deleted. `ledger_hits` is now
+    # the SPECIFIC-MATCH detail line only; the pointer is emitted on every refusal.
     ledger_hits = [s for s in _RESIDUAL_REFUSED_TRUTHFUL
                    if any(s.rstrip(".").lower() in c.lower() for c in claims)]
     assert claims == [], (
         "the residual region REOPENS a gap this row says is CLOSED: "
         + "; ".join(claims)
         + ("\n⛔ A LEDGER SHAPE IS ALSO IN THIS SENTENCE: "
-           f"{ledger_hits}. `_RESIDUAL_REFUSED_TRUTHFUL` records truthful "
-           "statements this pin refuses, and its note gives the arm, why that arm "
-           "cannot be narrowed, and — where one exists — the phrasing accepted in "
-           "its place. Read the entry before rewriting: if the WHOLE sentence is "
-           "honest and the entry records a workaround, that is it (for `is not "
-           "closed` it is `is still open` / `remains open`, both MEASURED GREEN); "
-           "if it also reopens this gap, the rest of the sentence is the defect." if ledger_hits else ""))
+           f"{ledger_hits}." if ledger_hits else "")
+        + "\n⛔ THE ROUTE OUT IS THE OVER-BLOCK LEDGER, ALWAYS: "
+        "`_RESIDUAL_REFUSED_TRUTHFUL` records truthful statements this pin "
+        "refuses, and its note gives the arm, why that arm cannot be narrowed, "
+        "and — where one exists — the phrasing accepted in its place. Read it "
+        "before rewriting: if the WHOLE sentence is honest and an entry records "
+        "it, that entry is why this red is not yours (for `not … closed`: `is "
+        "still open` / `remains open` are MEASURED GREEN, and a still-open item "
+        "of this row's own list belongs in the ledger rather than outside it); "
+        "if the sentence also reopens this gap, the rest of the sentence is the "
+        "defect.")
     assert not tail or any("spelling" in s for s in tail), (
         "a sentence after the adjacency claim says something other than the "
         f"disclosed SPELLING residual — inspect it: {tail!r}")
@@ -2857,6 +2882,16 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     # is what round 1's `P2` was: an honest closure that only LOOKS honest because
     # the clause it removes is the one carrying the anchor.
     "the ADJACENCY half is closed by the tables, so the SPELLING gap is what stays open.",
+    # ⛔ THE `fails open` OVER-BLOCK, which was recorded in a COMMENT ONLY (#11258
+    # review round 19 `P3`, MEASURED): the `_RESIDUAL_FAIL_OPEN` note states the cost
+    # "recorded here rather than left to be discovered", and both sentences red at
+    # the append point while appearing in NO ledger entry — prose the suite never
+    # re-measures is the failure this ledger exists to prevent, one layer in. These
+    # are the two shapes that note names, moved here so a change to the arm shows up
+    # as a ledger failure (`now_accepted` in
+    # `test_the_residual_region_is_scanned_WHERE_a_lane_appends`).
+    "the numeric side fails open on an unknown unit",
+    "the numeric side still fails open on purpose",
 )
 
 
@@ -3056,12 +3091,13 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         _RESIDUAL_REFUSED_TRUTHFUL), (
         "the over-block ledger has duplicate entries — a duplicate pays for a "
         "dropped cost while the count stays constant")
-    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 10, (
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 12, (
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
         "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (10), i.e. ZERO SLACK: the round-11 entries are the "
-        "`not … closed` cost, and slack above them is slack to delete it with")
+        "CURRENT LENGTH (12), i.e. ZERO SLACK: the round-11 entries are the "
+        "`not … closed` cost, round 19 added the two `fails open` costs, and "
+        "slack above them is slack to delete one of those with")
     for required in (
             # the unit-token waiver cost — the one a lane actually meets, because
             # the row's surviving gap IS the unit-spelling class
@@ -3081,7 +3117,14 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # measured class is gone from the ledger, the same defect round 9
             # closed one entry over.
             "(b2) is not closed.",
-            "(e) is not closed.",):
+            "(e) is not closed.",
+            # ⛔ AND THE `fails open` PAIR (#11258 review round 19 `P3`): without
+            # membership both are substitutable by duplicates of the entries above
+            # — uniqueness and length survive and the measured class leaves the
+            # ledger, the same defect round 9 closed one entry over. They are also
+            # the ONLY entries that pin `_RESIDUAL_FAIL_OPEN`'s anchor requirement.
+            "the numeric side fails open on an unknown unit",
+            "the numeric side still fails open on purpose",):
         assert required in _RESIDUAL_REFUSED_TRUTHFUL, (
             f"the over-block ledger no longer carries {required!r} — that shape's "
             "refusal is the measured price of a specific rule; if it is no longer "
@@ -3249,6 +3292,77 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         " (with its measured verdict) rather than leaving two lists: "
         f"{now_accepted}"
     )
+
+
+def test_every_refusal_names_the_over_block_ledger():
+    """The route out of a refusal is offered on EVERY refusal (#11258 round 19 `P2`).
+
+    ⛔ MEASURED, and this is why the test exists: the pointer paragraph hung off
+    `if ledger_hits else ""`, so a refusal was told its disclosure "REOPENS a gap
+    this row says is CLOSED" with NO route — the false-block path that ends with
+    the pin being deleted. `(a) is not closed.` is the honest case that matters:
+    `(a)` is an item of the row's OWN still-open list, so the statement is true,
+    and it is not one of the recorded entries.
+
+    ⛔ PRE-FIX BEHAVIOUR: the two non-ledger shapes were refused with a message
+    that did not contain `_RESIDUAL_REFUSED_TRUTHFUL` at all (105 and 104 chars),
+    while `(b2)` — which IS in the ledger — carried the 634-char pointer. A
+    message whose help depends on membership in a hardcoded list is exactly the
+    false block the ledger's own instructions forbid.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    not_in_ledger = ("(a) is not closed.", "(c) is not closed.",
+                     "(e1) is not closed.")
+    for sentence in not_in_ledger:
+        with pytest.raises(AssertionError) as refused:
+            _assert_the_row_names_its_closure(_with_appended(text, sentence))
+        message = str(refused.value)
+        assert "_RESIDUAL_REFUSED_TRUTHFUL" in message, (
+            f"the refusal of {sentence!r} offers no route out — it does not name "
+            "the over-block ledger, so an honest disclosure of a still-open item "
+            f"reads as an accusation with no remedy: {message!r}")
+        assert "is still open" in message, (
+            "the refusal names the ledger but not a phrasing it accepts — a lane "
+            f"cannot rewrite its sentence from that: {message!r}")
+        assert "A LEDGER SHAPE IS ALSO IN THIS SENTENCE" not in message, (
+            f"{sentence!r} is NOT in the ledger, so claiming a ledger shape is "
+            f"in the sentence states something false about the artifact: {message!r}")
+    # and the SPECIFIC match is still reported when there is one — hoisting the
+    # pointer must not flatten the two cases into one message (#11258 round 11
+    # `P2`/`P3`: the sentence can carry BOTH an honest ledger shape and a real
+    # reopening, and a message that calls that a recorded over-block is false).
+    with pytest.raises(AssertionError) as refused:
+        _assert_the_row_names_its_closure(_with_appended(text, "(b2) is not closed."))
+    message = str(refused.value)
+    assert "A LEDGER SHAPE IS ALSO IN THIS SENTENCE" in message, (
+        f"the refusal of a DECLARED ledger shape no longer says so: {message!r}")
+    assert "(b2) is not closed." in message, (
+        f"the refusal does not name the entry that matched: {message!r}")
+
+
+def test_the_fails_open_over_block_is_in_the_ledger_not_only_a_comment():
+    """The `_RESIDUAL_FAIL_OPEN` cost is re-measured, not only written down.
+
+    ⛔ MEASURED at the pre-fix head: the `_RESIDUAL_FAIL_OPEN` note states the
+    over-block is "recorded here rather than left to be discovered", while both
+    of its sentences red at the append point and appear in NO ledger entry — so
+    changing that arm left the suite green and the record stale. The ledger is the
+    only place a cost is re-measured (`now_accepted` in
+    `test_the_residual_region_is_scanned_WHERE_a_lane_appends`), which is the
+    failure this file's own note calls "a stale entry is worse than no entry".
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    for sentence in ("the numeric side fails open on an unknown unit",
+                     "the numeric side still fails open on purpose"):
+        assert sentence in _RESIDUAL_REFUSED_TRUTHFUL, (
+            f"the `fails open` over-block {sentence!r} is not in the ledger, so "
+            "nothing re-measures it — a cost recorded only in a comment can drift")
+        assert _reds(_with_appended(text, sentence)), (
+            f"{sentence!r} is no longer refused — that is an IMPROVEMENT, so move "
+            "it into `_RESIDUAL_TRUTHFUL_STATEMENTS` rather than leaving a stale "
+            "over-block entry behind")
 
 
 def test_the_suffix_comes_from_the_last_digit_run():
