@@ -73,8 +73,23 @@ from tools.next_work import (
     build_units,
     next_command,
 )
+from tools.queue_resweep import parse_config
 
 REPO = "daniel-ospina/tortoise"
+
+#: The gate the READY-TO-LAND premise needs, with the live label vocabulary.
+CFG = parse_config(
+    """
+queue_rules:
+  - name: default
+    queue_conditions:
+      - base=main
+      - -draft
+      - -label=superseded-by-fold
+      - check-success=docs
+      - check-success=test-isolation
+"""
+)
 HERE = Path(__file__).resolve().parent
 FIXTURE_RULE = HERE / "fixtures" / "10951" / "pool-rule.sh"
 REPO_ROOT = HERE.parent
@@ -464,3 +479,248 @@ def test_the_arm_reasons_are_all_refused_by_pickable():
         )
         assert unit.pickable is False, reason
         assert next_command(unit, REPO) is None, reason
+
+
+# ── the two arms the first cut of this suite could not see ────────────────
+# A reviewer measured BOTH of the following as MUTANTS THAT SURVIVED the suite as
+# first written: deleting the with-PR consult and deleting the `_search_issues`
+# field carry each left 29+333 tests green while restoring the #10951 failure.
+def _pull(n: int, closes: list[int]) -> dict:
+    """The collector's PR shape (`collect` builds exactly these keys)."""
+    return {
+        "number": n,
+        "head": "b" * 40,
+        "draft": False,
+        "base": {"ref": "main"},
+        "labels": [],
+        "closing_issues": closes,
+        "refs_issues": [],
+        "title": f"pr {n}",
+        "fold_line": "",
+    }
+
+
+def _ready_snapshot(rows: list[dict], monkeypatch) -> Snapshot:
+    """A snapshot in which each row's PR is READY-TO-LAND.
+
+    Worst case for the population rule: everything else about the row says "merge
+    it now", so only the population verdict can withhold it. Without this the
+    with-PR branch was exercised by nothing, and deleting it changed no assertion.
+    """
+    monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", str(FIXTURE_RULE))
+    monkeypatch.setenv("NEXT_WORK_POPULATION", "1")
+    monkeypatch.delenv("AGENT_INFRA_PATH", raising=False)
+    pulls = [_pull(8000 + i, [int(r["number"])]) for i, r in enumerate(rows)]
+    snap = Snapshot(
+        repo=REPO,
+        base="main",
+        config_source="origin/main:.mergify.yml",
+        gate={
+            "queue_name": CFG.queue_name,
+            "base": CFG.base,
+            "required_checks": list(CFG.required_checks),
+            "required_labels": list(CFG.required_labels),
+            "forbidden_labels": list(CFG.forbidden_labels),
+        },
+        issues=rows,
+        pulls=pulls,
+        check_runs={
+            "b" * 40: [
+                {"id": i, "name": name, "status": "completed", "conclusion": "success",
+                 "app": {"slug": "github-actions"}}
+                for i, name in enumerate(CFG.required_checks)
+            ]
+        },
+        attestation={str(p["number"]): {"verdict": "head"} for p in pulls},
+        merge_tree={str(p["number"]): {"clean": True, "why": ""} for p in pulls},
+    )
+    _population_verdicts(REPO_ROOT, snap)
+    return snap
+
+
+@pytest.mark.parametrize(
+    "row,expected",
+    [
+        (issue(8100, "design(extractor): the destructive half", labels=[], assignees=[]),
+         REASON_CONTAINER),
+        (issue(8101, "epic: a container", labels=[], assignees=[]), REASON_CONTAINER),
+        (
+            issue(8102, "ops(capture): the cap is HELD", labels=["standing-constraint"], assignees=[]),
+            REASON_DECLARED,
+        ),
+        (issue(8103, "feat(x): assigned", labels=[], assignees=[{"login": "d"}]), REASON_ASSIGNED),
+    ],
+)
+def test_a_container_with_a_merge_ready_pr_is_still_not_a_work_unit(row, expected, monkeypatch):
+    """The with-PR branch — the half the code calls load-bearing, and had no test.
+
+    Measured by the reviewer: deleting `elif population:` left everything green,
+    and a `design(extractor):` container whose PR was attested + merge-tree-clean
+    came out `READY-TO-LAND, executable`, with a runnable `merge-one.sh` — the
+    #10951 failure, on the branch that decides merges.
+    """
+    snap = _ready_snapshot([row], monkeypatch)
+    unit = {int(u.issue): u for u in build_units(snap, CFG)}[int(row["number"])]
+    assert unit.position == "READY-TO-LAND", unit.detail          # the premise
+    assert snap.population == {str(row["number"]): expected}, snap.population
+    assert unit.reason == expected
+    assert unit.withheld_by_population is True
+    assert unit.pickable is False
+    assert next_command(unit, REPO) is None
+
+
+def test_a_merge_ready_real_unit_keeps_its_command(monkeypatch):
+    """The control for the test above: the SAME shape, a title the rule keeps."""
+    snap = _ready_snapshot([issue(8110, "fix(quota): real work", labels=[], assignees=[])], monkeypatch)
+    unit = {int(u.issue): u for u in build_units(snap, CFG)}[8110]
+    assert unit.position == "READY-TO-LAND"
+    assert unit.pickable is True
+    assert next_command(unit, REPO) is not None
+
+
+def test_a_withheld_container_does_not_steal_a_real_units_action_target(monkeypatch):
+    """One PR closing a container AND real work must not leave NEITHER offered.
+
+    Measured by the reviewer before this fix: `#8488 … not offered: duplicate of
+    #5333` with no command anywhere, while the footer said "every measured one is
+    held, superseded, or a duplicate" — none of which the target owner was. A
+    container is not a unit, so it owns nothing; the real unit keeps the command.
+    """
+    rows = [
+        issue(8120, "design(extractor): a container", labels=[], assignees=[]),
+        issue(8121, "feat(extractor): real work", labels=[], assignees=[]),
+    ]
+    monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", str(FIXTURE_RULE))
+    monkeypatch.setenv("NEXT_WORK_POPULATION", "1")
+    monkeypatch.delenv("AGENT_INFRA_PATH", raising=False)
+    shared = _pull(8200, [8120, 8121])   # ONE PR closes both
+    snap = Snapshot(
+        repo=REPO,
+        base="main",
+        config_source="origin/main:.mergify.yml",
+        gate={
+            "queue_name": CFG.queue_name,
+            "base": CFG.base,
+            "required_checks": list(CFG.required_checks),
+            "required_labels": list(CFG.required_labels),
+            "forbidden_labels": list(CFG.forbidden_labels),
+        },
+        issues=rows,
+        pulls=[shared],
+        check_runs={
+            "b" * 40: [
+                {"id": i, "name": name, "status": "completed", "conclusion": "success",
+                 "app": {"slug": "github-actions"}}
+                for i, name in enumerate(CFG.required_checks)
+            ]
+        },
+        attestation={"8200": {"verdict": "head"}},
+        merge_tree={"8200": {"clean": True, "why": ""}},
+    )
+    _population_verdicts(REPO_ROOT, snap)
+    assert snap.population == {"8120": REASON_CONTAINER}
+
+    units = {int(u.issue): u for u in build_units(snap, CFG)}
+    assert units[8120].pickable is False
+    assert units[8120].duplicate_of is None
+    assert units[8121].pickable is True, units[8121].detail
+    assert units[8121].duplicate_of is None, "the real unit is not a duplicate of a container"
+    assert next_command(units[8121], REPO) is not None
+
+
+def test_the_collector_carries_the_fields_the_rule_reads(monkeypatch):
+    """`_search_issues` must CARRY labels/assignees — the ordering constraint.
+
+    Measured by the reviewer: deleting the two projection lines left the suite
+    green. On a live collect the payload's labels/assignees would then be empty, so
+    the DECLARED and ASSIGNED arms could never fire — the motivating row and every
+    owner-assigned issue come back pickable — while `population_source` still claims
+    a measurement.
+    """
+
+    class StubClient:
+        def _json(self, args):
+            return {
+                "total_count": 2,
+                "items": [
+                    {
+                        "number": 8300,
+                        "title": "ops(capture): the cap is HELD",
+                        "labels": [{"name": "P1-severe"}, {"name": "standing-constraint"}],
+                        "assignees": [],
+                    },
+                    {
+                        "number": 8301,
+                        "title": "fix(quota): real work",
+                        "labels": [{"name": "P1-severe"}],
+                        "assignees": [{"login": "daniel-ospina"}],
+                    },
+                ],
+            }
+
+    monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", str(FIXTURE_RULE))
+    monkeypatch.setenv("NEXT_WORK_POPULATION", "1")
+    monkeypatch.delenv("AGENT_INFRA_PATH", raising=False)
+    snap = Snapshot()
+    rows = next_work._search_issues(StubClient(), REPO, "P1-severe", snap)
+    assert snap.unreadable == [], snap.unreadable
+    assert rows[0]["labels"] and rows[0]["assignees"] == []
+    assert rows[1]["labels"] and rows[1]["assignees"][0]["login"] == "daniel-ospina"
+
+    snap.issues = rows
+    _population_verdicts(REPO_ROOT, snap)
+    assert snap.population == {"8300": REASON_DECLARED, "8301": REASON_ASSIGNED}, snap.population
+    units = units_by_issue(snap)
+    assert units[8300].pickable is False
+    assert units[8301].pickable is False
+    assert next_command(units[8300], REPO) is None
+    assert next_command(units[8301], REPO) is None
+
+
+def test_an_unrecognised_verdict_string_is_still_refused(monkeypatch):
+    """The refusal is by PRESENCE, not by a literal lookup — measured fail-open.
+
+    A snapshot carrying a verdict from a NEWER vocabulary used to be labelled
+    withheld and handed a runnable command in the same row, because `pickable` only
+    knew the seven literals this version writes.
+    """
+    for verdict in ("STANDING-CONSTRAINT-V2", "container", "CONTAINER "):
+        snap = Snapshot(
+            repo=REPO,
+            base="main",
+            issues=[issue(8400, "fix(a): looks like work")],
+            population={"8400": verdict},
+            population_source="replay from a newer vocabulary",
+        )
+        unit = units_by_issue(snap)[8400]
+        assert unit.withheld_by_population is True, verdict
+        assert unit.pickable is False, verdict
+        assert next_command(unit, REPO) is None, verdict
+
+
+def test_the_render_names_the_population_source(monkeypatch):
+    """The provenance is a FEATURE of this change; it needs an assertion."""
+    snap = snap_with([issue(8500, "fix(a): real work")], monkeypatch)
+    text, _pick = next_work.render(build_units(snap, None), None, snap, repo=REPO, top=5)
+    assert f"population: {snap.population_source}" in text
+    assert "sha256:" in text
+
+
+def test_a_replay_with_a_wrong_typed_population_is_a_named_refusal():
+    """`population: null` used to surface as a raw AttributeError inside INCOMPLETE."""
+    raw = {"repo": REPO, "base": "main", "issues": [issue(8600, "epic: a container")],
+           "population": None}
+    snap = Snapshot.from_json(raw)
+    assert any("population:" in u and "not a map" in u for u in snap.unreadable), snap.unreadable
+    assert snap.population == {}
+
+
+@pytest.mark.parametrize("value", ["OFF", "Off", "NO", "False", "0"])
+def test_the_off_switch_is_case_insensitive(monkeypatch, value):
+    """`NEXT_WORK_POPULATION=False` must not silently leave the rule ON."""
+    monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", str(FIXTURE_RULE))
+    monkeypatch.setenv("NEXT_WORK_POPULATION", value)
+    snap = Snapshot(issues=[issue(8700, "epic: a container")])
+    _population_verdicts(REPO_ROOT, snap)
+    assert snap.population == {}
+    assert snap.population_source.startswith("OFF")

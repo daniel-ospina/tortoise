@@ -402,7 +402,19 @@ class Snapshot:
         # anyway, but normalise so a hand-written snapshot behaves identically.
         snap.attestation = {str(k): v for k, v in snap.attestation.items()}
         snap.merge_tree = {str(k): v for k, v in snap.merge_tree.items()}
-        snap.population = {str(k): str(v) for k, v in snap.population.items()}
+        # ⛔ JUDGED AT THE DOOR, LIKE EVERY OTHER FIELD (#10951 review, follow-up).
+        # `"population": null` used to reach `snap.population.items()` and surface as
+        # a raw AttributeError inside INCOMPLETE — fail-closed, but as the diagnostic
+        # class this door exists to turn into a NAMED refusal.
+        raw_population = raw.get("population")
+        if not isinstance(raw_population, dict):
+            snap.unreadable.append(
+                f"population: the snapshot's population is "
+                f"{type(raw_population).__name__}, not a map — no row's eligibility is provable"
+            )
+            snap.population = {}
+        else:
+            snap.population = {str(k): str(v) for k, v in raw_population.items()}
         # ⛔ A REPLAY MAY NOT FALL OPEN ON A FIELD IT CANNOT PROVE (#10951). The
         # population verdicts are DERIVED data (`collect` fills them by driving the
         # shipped `POOL_JQ`), so a snapshot written before this change carries none
@@ -465,6 +477,13 @@ class Unit:
     #: PR is worked twice — the duplicate pick this tool exists to prevent, one
     #: level below `pick`. The row stays, with the reason, and carries no command.
     duplicate_of: str | None = None
+    #: TRUE when the fleet's population rule WITHHELD this row (#10951). The
+    #: REFUSAL IS BY PRESENCE, not by looking the reason string up in a tuple: the
+    #: tuple can only refuse the literals the version that wrote it knew, so a
+    #: snapshot carrying a verdict from a NEWER vocabulary (`STANDING-CONSTRAINT-V2`)
+    #: would be labelled withheld and handed a runnable command at the same time —
+    #: measured. The reason is kept for the reader; the flag is what decides.
+    withheld_by_population: bool = False
 
     @property
     def sort_key(self) -> tuple[int, int, tuple[int, int]]:
@@ -495,10 +514,16 @@ class Unit:
     def pickable(self) -> bool:
         if self.duplicate_of:
             return False
-        # ⛔ THE POPULATION REASONS ARE IN THIS TUPLE, NOT BESIDE IT (#10951). A
+        # ⛔ A WITHHELD ROW IS REFUSED BY PRESENCE, NOT BY ITS SPELLING (#10951). A
         # withheld row that `pickable` still admits is a row `render` offers a
         # COMMAND for while its own REASON column says it is not a unit — the
-        # command-XOR-action invariant this file keeps breaking.
+        # command-XOR-action invariant this file keeps breaking. And the refusal
+        # cannot be a lookup in `REASONS_WITHHELD`: that tuple only knows the
+        # literals this version writes, so a replay carrying a verdict from a newer
+        # vocabulary was labelled withheld AND handed a command (measured). The
+        # tuple stays for the reasons this file itself writes.
+        if self.withheld_by_population:
+            return False
         return self.reason not in REASONS_WITHHELD
 
     @property
@@ -1260,6 +1285,7 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
                 priority=priority, title=str(iss.get("title") or ""),
                 pr=None, head=None, position="NO-PR",
                 reason=population or (REASON_CLAIMED if holder else "NO-PR"),
+                withheld_by_population=bool(population),
                 detail=[f"no open PR closes or references #{number}"],
                 holder=holder,
             )
@@ -1301,6 +1327,7 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             )
         holder, readable = _claim_of(snap, issue=number, pr=pr_number, head=str(pr.get("head") or ""))
         superseded = bool(folds) or CONSTITUENT_LABEL in _labels(pr)
+        withheld_by_population = bool(population)
         if superseded:
             reason = REASON_SUPERSEDED
             if folds:
@@ -1310,6 +1337,11 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
         elif population:
             reason = population
             detail.append(_population_note(population, snap))
+            if holder:
+                detail.append(
+                    f"…and a lane holds it ({holder}) — the population verdict is the "
+                    "stronger fact: this is not a unit of work to dispatch at all"
+                )
         elif holder:
             reason = REASON_CLAIMED
         else:
@@ -1321,6 +1353,7 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             position=position, reason=reason, detail=detail, holder=holder,
             head_ref=str(pr.get("head_ref") or "") or None,
             draft=bool(pr.get("draft")),
+            withheld_by_population=withheld_by_population,
         )
         if not readable:
             u.detail.append("claim registry UNREADABLE — this row's freedom is not provable")
@@ -1388,9 +1421,16 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
     # here. Blocked rows are registered FIRST and they block unconditionally: a
     # CLAIMED or SUPERSEDED row's target is not free just because another row
     # closing it looks ready.
+    # ⛔ …BUT A POPULATION-WITHHELD ROW OWNS NOTHING (#10951 review, P2). It is not
+    # a unit of work, so the artifact it happens to point at is not "held" by it —
+    # and registering its target made a fully merge-ready REAL unit unofferable:
+    # measured, one PR closing both `design(extractor):` #5333 and `feat(…)` #8488
+    # produced `8488 … duplicate of 5333` with NO command anywhere, while the footer
+    # said "every measured one is held, superseded, or a duplicate" — none of which
+    # the target owner was. Containers commonly share a PR with a closing issue.
     seen_targets: dict[str, str] = {}
     for u in units:
-        if u.pickable:
+        if u.pickable or u.withheld_by_population:
             continue
         seen_targets.setdefault(u.action_target, u.key)
     for u in units:
@@ -2125,7 +2165,9 @@ def _population_verdicts(repo_root: Path, snap: Snapshot) -> None:
     # tortoise#10175 ("the cap is HELD deliberately — never override it") all
     # receive a runnable dispatch command. It exists so the change can be reverted
     # at runtime by a box that cannot carry it, and it is REPORTED, never silent.
-    if os.environ.get("NEXT_WORK_POPULATION", "1").strip() in ("0", "off", "no", "false"):
+    if os.environ.get("NEXT_WORK_POPULATION", "1").strip().lower() in (
+        "0", "off", "no", "false",
+    ):
         snap.population_source = "OFF — NEXT_WORK_POPULATION disabled; no row was checked"
         return
 
@@ -2970,6 +3012,13 @@ def _main(argv: Sequence[str] | None = None) -> int:
                     "repo": repo,
                     "base": snap.base,
                     "gate": snap.config_source,
+                    # ⛔ THE MACHINE CONSUMER NEEDS THE PROVENANCE TOO (#10951 review,
+                    # follow-up). Without it `--json` could not distinguish a real
+                    # measurement from the OFF switch, an UNREADABLE rule or an ABSENT
+                    # replay — the refusal/consent decision was readable only in the
+                    # human render.
+                    "population_source": snap.population_source,
+                    "population": snap.population,
                     "unreadable": snap.unreadable,
                     "refused": refused,
                     "units": [
@@ -2983,6 +3032,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                             "head": u.head,
                             "position": u.position,
                             "reason": u.reason,
+                            "withheld_by_population": u.withheld_by_population,
                             "holder": u.holder,
                             "detail": u.detail,
                             "pickable": False if refused else u.pickable,
