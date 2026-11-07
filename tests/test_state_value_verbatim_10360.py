@@ -666,6 +666,33 @@ def test_the_off_switch_is_read_at_ONE_site():
         "os.environ.get(...)); route it through the helper")
 
 
+def test_the_rule_HONOURS_the_switch_the_caller_handed_it(monkeypatch):
+    """The `armed=` handoff is a guarantee, so it is pinned (review round 3, P3).
+
+    Round 2's defect was exactly the shape this catches: the emit site resolved the
+    switch for a point and the rule resolved it AGAIN, so a mid-batch flip judged
+    one point under two answers and wrote a divergent value with no warning. With
+    the handoff honoured, the caller's answer wins both ways.
+
+    MUTATION CHECK TARGET: replace ``if armed is None: armed = …`` with an
+    unconditional read and this reds (measured: the whole file stayed green under
+    that mutant until this test existed).
+    """
+    content, quote = "the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds"
+    # env ON, caller says OFF → the CALLER's answer wins: no refusal, no report.
+    monkeypatch.delenv(v2.STATE_VALUE_VERBATIM_SWITCH, raising=False)
+    warnings: list[str] = []
+    assert v2._refuse_rewritten_value(content, quote, warnings=warnings,
+                                     armed=False) is False
+    assert warnings == [], warnings
+    # env OFF, caller says ON → the CALLER's answer wins: refusal + report.
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    warnings = []
+    assert v2._refuse_rewritten_value(content, quote, warnings=warnings,
+                                     armed=True) is True
+    assert any("REWRITES its own verbatim quote" in w for w in warnings), warnings
+
+
 def test_the_off_switch_is_INTRINSIC_so_a_second_call_site_cannot_bypass_it(
         monkeypatch):
     """The switch is checked INSIDE the rule, not only at the emit site.
@@ -813,9 +840,20 @@ def test_the_off_switch_is_declared_in_the_env_contract():
     assert declared, (
         f"{name} must be shown as a commented assignment (the example form an "
         "operator copies), not just named in prose")
-    block = " ".join(env.split())
+    # ⚠️ Scoped to THIS block, not the whole file (review round 3, P3): a
+    # file-wide substring search is green for a neighbouring knob's "default-on"
+    # (the S4 delta block has one), so it could not fail for the declaration it
+    # describes.
+    lines = env.splitlines()
+    start = next(i for i, line in enumerate(lines)
+                 if line.strip().startswith(f"# {name}=")
+                 or line.strip().startswith(f"{name}="))
+    block = " ".join("\n".join(lines[max(0, start - 14):start + 4]).split())
     assert "default-on" in block, (
-        "the declaration must state the default, so 'unset' is unambiguous")
+        f"the {name} declaration must state the default, so 'unset' is "
+        f"unambiguous — found in the block: {block[-200:]!r}")
+    assert "ENFORCED" in block, (
+        f"the {name} declaration must name what unset MEANS (enforced)")
 
 
 def test_a_quote_that_only_fragments_the_point_is_not_a_contradiction():

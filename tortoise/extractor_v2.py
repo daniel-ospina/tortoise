@@ -5228,10 +5228,12 @@ def _state_value_verbatim_enforced() -> bool:
     the classifier — an operator can flip it, re-measure, and flip it back without
     re-deriving a tolerance battery.
 
-    ⛔ **TWO reads, and neither is per-point-blind:** the emit site reads it once
-    per POINT (so the hard-cut disclosure and the refusal cannot disagree about
-    the same point) and hands that answer to `_refuse_rewritten_value`; a caller
-    that does not hand one in makes the rule read it itself. So a future second
+    ⛔ **One read per POINT, plus a FALLBACK for a caller that passes none:** the
+    emit site reads it once for the point and hands the answer to
+    `_refuse_rewritten_value` as ``armed``, so the hard-cut disclosure and the
+    refusal cannot disagree about the same point; a caller that hands none in
+    makes the rule read it itself (measured on a 3-point batch: the helper is
+    called exactly 3 times — once per point, never twice). So a future second
     emit path inherits the switch instead of restoring a refusal nobody can turn
     off. All reads go through this helper, which is the module's ONE `env_flag`
     read of the name.
