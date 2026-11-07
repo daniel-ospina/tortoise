@@ -197,7 +197,7 @@ a reader can re-decide.
 
 **The acceptance runs the fleet's v2 extraction lane:**
 
-```
+```text
 tortoise/hosted_api.py::_capture_lane()            → "v2" (default), "m2" iff TORTOISE_SESSION_EXTRACTOR == "m2"
   sdk.capture_session → sdk._extract_session_v2    → tortoise/extractor_v2.py::extract_session_v2
 ```
@@ -328,7 +328,6 @@ what makes a number measured on one lane not a number about the other.
 ⇒ **A number measured on one lane is not a number about the other.** That is exactly why the `m2` column in §1.6.3 (E1b) must not be read as a fleet fact, and why the door is pinned structurally (§1.6.1)
 as well as measured here — a control measures the two lanes *as they are today*, while the pin is
 what stops the selector moving tomorrow.
-
 
 ---
 
