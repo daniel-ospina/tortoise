@@ -15,7 +15,11 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOOL = REPO_ROOT / "tools" / "ci_runner_topology.py"
@@ -95,6 +99,12 @@ MEASURED_2026_11_07 = {
         _runner(21, "pi-runner-x64-2", X64),
     ],
 }
+
+
+@contextmanager
+def tempfile_dir():
+    with tempfile.TemporaryDirectory() as tmp:
+        yield tmp
 
 
 def measured() -> list[topo.Runner]:
@@ -314,23 +324,35 @@ def test_engage_and_disengage_are_mutually_exclusive(tmp_path: Path):
         text=True,
     )
     assert proc.returncode == 2, f"two opposite directions must be a usage error: {proc.stdout}{proc.stderr}"
+    # ⛔ DISCRIMINATING: exit 2 alone proves nothing — with `--disengage` absent entirely (the fix
+    # reverted) argparse also exits 2, on "unrecognized arguments". Only a MUTUALLY EXCLUSIVE group
+    # produces this wording.
+    assert "not allowed with argument" in proc.stderr, (
+        f"the two directions must be a mutually exclusive group, not merely rejected: {proc.stderr}"
+    )
 
 
 # ------------------------------------------- a fixture's ids are not this repo's runners
-def test_apply_from_fixture_refuses_to_write(tmp_path: Path):
+def test_apply_from_fixture_refuses_to_write(tmp_path: Path, monkeypatch, capsys):
     """REGRESSION (#10912 review P2): the measured fixture carries the REAL production ids
     (1-21), so `apply --from-fixture` without `--dry-run` would PUT label sets onto whichever
     runners hold those ids. It must refuse, not write.
+
+    ⛔ RUN IN-PROCESS WITH `apply_plan` TRIPPED, NEVER AS A SUBPROCESS. A subprocess test of this
+    guard is fail-DANGEROUS: if the guard regresses, the test does not merely go red — it executes
+    19 real `PUT .../actions/runners/{1..21}/labels` against production before returning. Here a
+    regression is red with zero network.
     """
     fixture = tmp_path / "runners.json"
     fixture.write_text(json.dumps(MEASURED_2026_11_07))
-    proc = subprocess.run(
-        [sys.executable, str(TOOL), "apply", "--from-fixture", str(fixture)],
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 2, f"a write from a fixture must be refused: {proc.stdout}{proc.stderr}"
-    assert "--dry-run" in proc.stderr, "the refusal must name the flag that makes it safe"
+    calls: list[object] = []
+    monkeypatch.setattr(topo, "apply_plan", lambda *a, **kw: calls.append((a, kw)) or [])
+    monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO: pytest.fail("must not read the pool"))
+    rc = topo.main(["apply", "--from-fixture", str(fixture)])
+    captured = capsys.readouterr()
+    assert rc == 2, f"a write from a fixture must be refused: {captured.out}{captured.err}"
+    assert calls == [], "the refusal must happen BEFORE any write is attempted"
+    assert "--dry-run" in captured.err, "the refusal must name the flag that makes it safe"
 
 
 # ------------------------------------------------- read-only labels come from the API
@@ -428,3 +450,128 @@ def test_a_failed_write_is_not_a_successful_reconcile(monkeypatch, capsys):
     assert rc == 1, "a write that did not take must not exit 0"
     assert payload["ok"] is False
     assert payload["post"]["verdict"] == "VIOLATION", "the read-back must show the failure, not hide it"
+
+
+# ------------------------------------- a Windows x64 box is a mis-serve, not a no-op
+def test_a_non_linux_runner_carrying_ubuntu_latest_is_a_violation():
+    """REGRESSION (#10912 review P2): `violations()` read the ARCH only, so a Windows/X64 runner
+    carrying `ubuntu-latest` was neither a violation nor reconcilable — it was skipped, and the
+    tool reported "0 changes, already at the desired topology" while that box kept accepting
+    Linux jobs. `ubuntu-latest` promises an x86_64 UBUNTU image; platform is part of the promise.
+    """
+    windows = topo.parse_runner(
+        {
+            "id": 55,
+            "name": "pi-runner-win-1",
+            "status": "online",
+            "busy": False,
+            "labels": [
+                {"name": "self-hosted", "type": "read-only"},
+                {"name": "Windows", "type": "read-only"},
+                {"name": "X64", "type": "read-only"},
+                {"name": "ubuntu-latest", "type": "custom"},
+            ],
+        }
+    )
+    found = topo.violations([windows])
+    assert [v.kind for v in found] == [topo.VIOLATION_FALLBACK_ON_NON_X64]
+    assert "platform is not Linux" in found[0].why
+    assert topo.unmanaged_reason(windows) is not None, "and the tool must not silently relabel it either"
+
+
+# --------------------------------------------- engage must deliver capacity, not labels
+def test_an_engage_that_cannot_reach_an_online_x64_runner_is_not_a_success(monkeypatch, capsys):
+    """REGRESSION (#10912 review P1): on a pool with no x64 arm (or a wholly offline one) the
+    ENGAGE plan strips `ubuntu-latest` off the only carriers and attaches it where nobody online
+    can serve it. The writes land, the read-back is clean — `check` cannot red, because "engaged
+    nowhere" is a legitimate mode=github state — and `apply` reported `ok: true`, exit 0, having
+    removed the only runners answering the label. Engage promises CAPACITY; it must fail closed.
+    """
+    arm_only = topo.parse_runners(
+        {
+            "runners": [
+                _runner(1, "pi-runner-vm-2", ARM64_FALLBACK, busy=True),
+                _runner(2, "pi-runner-vm-5", ARM64_FALLBACK, busy=True),
+            ]
+        }
+    )
+    offline_x64 = topo.parse_runners(
+        {
+            "runners": [
+                _runner(1, "pi-runner-vm-2", ARM64_FALLBACK, busy=True),
+                _runner(3, "pi-runner-x64-1", X64, status="offline"),
+            ]
+        }
+    )
+    for pool in (arm_only, offline_x64):
+        reads = [pool, pool]  # the write takes, and the pool still cannot serve
+        monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO, _r=reads: _r.pop(0))
+        monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
+        monkeypatch.setattr(
+            topo,
+            "apply_plan",
+            lambda pending, *, dry_run, repo=topo.REPO: [
+                {"runner": n, "id": rid, "before": b, "after": a, "applied": True}
+                for n, (rid, b, a) in pending.changes.items()
+            ],
+        )
+        rc = topo.main(["apply", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert rc == 1, f"engage with no online x64 server must not exit 0: {payload}"
+        assert payload["ok"] is False
+        kinds = [v["kind"] for v in payload["post"]["violations"]]
+        assert topo.VIOLATION_ENGAGE_NO_X64_SERVER in kinds, kinds
+
+
+# ------------------------------------------------- the PUT body is what the plan said
+def test_the_put_body_is_the_planned_custom_set_and_never_a_read_only_label(monkeypatch):
+    """REGRESSION (#10912 review P2): nothing asserted the wire body. Every apply test either
+    passed `--dry-run` (body never built) or stubbed `apply_plan` out — so the one artefact that
+    decides whether a write lands or 422s ("Cannot set labels that duplicate existing read-only
+    labels: Linux, X64, self-hosted") had ZERO coverage.
+    """
+    runner = topo.parse_runner(_runner(42, "pi-runner-x64-1", [*X64, "gpu"]))
+    pending = topo.plan([runner], engage=True)
+    sent: list[str] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(argv, **kwargs):
+        sent.append(kwargs.get("input", ""))
+        return _Proc()
+
+    monkeypatch.setattr(topo.subprocess, "run", _fake_run)
+    records = topo.apply_plan(pending, dry_run=False)
+    assert records and records[0]["applied"] is True
+    assert len(sent) == 1, "one write per changed runner"
+    body = json.loads(sent[0])["labels"]
+    assert sorted(body) == ["gpu", "self-hosted-x64", "ubuntu-latest"], (
+        f"the body must be the planned CUSTOM set (read-only labels are a 422): {body}"
+    )
+    for read_only in ("self-hosted", "Linux", "X64"):
+        assert read_only not in body, f"{read_only} is read-only and must never be PUT"
+
+
+def test_the_check_human_render_names_a_runner_it_did_not_reconcile(capsys):
+    """REGRESSION (#10912 review P2): `apply` printed `unclassified`, `check` did not — so the
+    tripwire's human render could read `verdict: OK` while naming nothing about a skipped runner.
+    """
+    windows = _runner(
+        55,
+        "pi-runner-win-1",
+        ["self-hosted", "Windows", "X64"],
+        read_only=frozenset({"self-hosted", "Windows", "X64"}),
+    )
+    with tempfile_dir() as tmp:
+        fixture = Path(tmp) / "runners.json"
+        fixture.write_text(json.dumps({"runners": [_runner(1, "pi-runner-x64-1", X64), windows]}))
+        proc = subprocess.run(
+            [sys.executable, str(TOOL), "check", "--from-fixture", str(fixture)],
+            capture_output=True,
+            text=True,
+        )
+    assert "pi-runner-win-1" in proc.stdout, f"a runner the tool skipped must be named: {proc.stdout}"
+    assert "UNRECONCILED" in proc.stdout

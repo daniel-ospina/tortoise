@@ -45,12 +45,12 @@ recorded STATE is stale rather than the CAPABILITY — which is exactly why this
 tool decides from the measured pool and never from the log.
 
 ⛔ THE x64-ONLY DESIRED TOPOLOGY IS NOT A REVERSAL OF A RECORDED DECISION. A
-reviewer read `:931`'s "ARCH IS DELIBERATELY NOT A FILTER HERE" as forbidding the
+reviewer read `:930`'s "ARCH IS DELIBERATELY NOT A FILTER HERE" as forbidding the
 ARM64 strip; the gate's own write path falsifies that. `labels_for` (`:975`)
 derives each runner's body from ITS OWN host and omits `ubuntu-latest` whenever
 the pass is `off`, for EVERY managed runner — arch never enters the disarm —
-and `:882`/`:508` state it directly: "in mode=github the pool is stripped by
-design". The `:931` block bounds the ENGAGE pass's cap (`arm_ids`, which runners
+and `:882` says it directly: "in mode=github the pool is stripped by design"
+(`:507` words it "STRIPPED ON PURPOSE"). The `:930` block bounds the ENGAGE pass's cap (`arm_ids`, which runners
 a fallback arm may touch), not whether an ARM64 runner may carry the label at
 all. `docs/ops/ci-runner-x64.md` records the scope the #2327 decision left open:
 "What changes is only *which architecture* may serve the fallback — which the
@@ -114,8 +114,15 @@ ids 1-21), so writing from it relabels runners nobody asked it to touch.
 
 `apply` needs `administration: write` on the token — `GITHUB_TOKEN` inside
 Actions does NOT have it, so the reconcile is operator/hub-run (the same token
-class `scripts/ci_runner_gate.sh` uses). The WORKFLOW is check-only on purpose:
-a tripwire that goes red, never a mutation nobody reviewed.
+class `scripts/ci_runner_gate.sh` uses).
+
+⛔ THE TRIPWIRE IS NOT SCHEDULED YET, AND THIS FILE DOES NOT PRETEND IT IS. A scheduled
+workflow was written for this tool and dropped on review for two measured reasons:
+`GITHUB_TOKEN` cannot grant `administration: read`, so listing runners from Actions 403s and
+every scheduled run would have reported a VIOLATION (a false alarm that teaches people to
+ignore the tripwire); and `tests/test_runner_tool_contract.py` requires a pool-eligible `gh`
+job to declare the #9018 tool contract. Today `check` is a verb a human or a hub lane runs;
+scheduling it is follow-up work on #10912.
 """
 
 from __future__ import annotations
@@ -168,6 +175,11 @@ VIOLATION_NO_X64_FALLBACK = "NO_X64_FALLBACK"
 #: "I could not look" must never be the last word (the doctrine `ci-queue-health.yml`
 #: states): an empty enumeration is a READ FAILURE, not an absence of violations.
 VIOLATION_UNMEASURED_EMPTY_POOL = "UNMEASURED_EMPTY_POOL"
+
+#: `apply --engage` promises CAPACITY. A reconcile that leaves no ONLINE x64 runner serving the
+#: label has delivered nothing, however clean every other reading is — the same false PASS the
+#: default-direction fix was supposed to close, one layer down (an empty or fully-offline x64 arm).
+VIOLATION_ENGAGE_NO_X64_SERVER = "ENGAGE_PRODUCED_NO_X64_SERVER"
 
 
 @dataclass(frozen=True)
@@ -297,21 +309,33 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
     """
     found: list[Violation] = []
 
-    # 1. The #6897 residual: a non-x64 runner carrying an x86_64 image's label.
+    # 1. The #6897 residual: a runner that cannot serve an x86_64 UBUNTU image carrying that
+    # image's label. TWO ways to be unable — a host that is not x64, and a host on a platform
+    # that is not Linux. Reading only the arch let a Windows/X64 box carrying `ubuntu-latest`
+    # pass as fine: the same mis-serve, invisible to the reading.
     for runner in sorted(runners, key=lambda r: r.name):
-        if runner.serves_fallback and runner.host != HOST_LABEL_X64:
-            found.append(
-                Violation(
-                    kind=VIOLATION_FALLBACK_ON_NON_X64,
-                    runner=runner.name,
-                    why=(
-                        f"carries {FALLBACK_LABEL!r} but its host label is "
-                        f"{runner.host or 'neither X64 nor ARM64'}; an x64-expected job routed "
-                        f"here is silently mis-served (#6897). REMEDY: strip {FALLBACK_LABEL!r} "
-                        f"from this runner."
-                    ),
-                )
+        if not runner.serves_fallback:
+            continue
+        wrong_arch = runner.host != HOST_LABEL_X64
+        wrong_platform = PLATFORM_LINUX not in runner.labels
+        if not (wrong_arch or wrong_platform):
+            continue
+        because = (
+            f"its host label is {runner.host or 'neither X64 nor ARM64'}"
+            if wrong_arch
+            else "its platform is not Linux"
+        )
+        found.append(
+            Violation(
+                kind=VIOLATION_FALLBACK_ON_NON_X64,
+                runner=runner.name,
+                why=(
+                    f"carries {FALLBACK_LABEL!r} but {because}; an x64 Ubuntu-expected job "
+                    f"routed here is silently mis-served (#6897). "
+                    f"REMEDY: strip {FALLBACK_LABEL!r} from this runner."
+                ),
             )
+        )
 
     # 2. The fallback is engaged somewhere, but never where it can serve x64 work.
     # `online`: an OFFLINE runner that carries the label serves nothing, so counting it
@@ -567,6 +591,11 @@ def _print_human(report: Mapping[str, Any]) -> None:
     if report.get("starvation_suspected"):
         print("  NOTE: demand is queued past the floor while the fallback is ENGAGED NOWHERE — "
               "idle-pool topology with an absorbing queue (#10912). Not a violation.")
+    # ⛔ A SKIPPED RUNNER IS NAMED HERE TOO. `apply` printed it and `check` — the form the
+    # docstring calls the tripwire — did not, so a human render could read "verdict: OK" while a
+    # runner the tool never measured was still accepting `ubuntu-latest` work.
+    for name, why in sorted(report.get("unclassified", {}).items()):
+        print(f"  ⚠️  UNRECONCILED {name}: {why}")
     if not report["violations"]:
         print(f"verdict: {report['verdict']}")
     else:
@@ -660,9 +689,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # not part of this: after a successful reconcile the pre-state is exactly what is no
         # longer true.
         ok = all(rec["applied"] for rec in records)
+        post_runners: list[Runner] = []
         try:
+            post_runners = fetch_runners(args.repo)
             post = check(
-                fetch_runners(args.repo),
+                post_runners,
                 queued_oldest_seconds=fetch_oldest_queued_seconds(args.repo),
                 engage=engage,
             )
@@ -676,6 +707,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         # A WRITE WE COULD NOT READ BACK IS NOT A SUCCESS: fail closed, the same direction
         # `ci_runner_gate.sh` fails when its enumeration is unreadable.
         ok = ok and post is not None and post["ok"]
+        # ⛔ AN ENGAGE THAT DELIVERED NO *ONLINE X64* SERVICE IS NOT A RECONCILE. `check` cannot
+        # judge this: "the fallback is engaged nowhere" is a legitimate steady state (mode=github
+        # strips the pool by design), so it must not red there. But `apply --engage` promised
+        # CAPACITY, and on a pool whose x64 arm is empty — or entirely offline — the plan strips
+        # the label off the only carriers and attaches it where nobody online can serve it. The
+        # write lands, the read-back is clean, and the queue still cannot get a runner: the same
+        # false PASS the default-direction fix closed, one layer down.
+        if post is not None and engage:
+            serving = [
+                r for r in post_runners if r.online and r.serves_fallback and r.host == HOST_LABEL_X64
+                and PLATFORM_LINUX in r.labels
+            ]
+            if not serving:
+                ok = False
+                gate = {
+                    "kind": VIOLATION_ENGAGE_NO_X64_SERVER,
+                    "runner": "<pool>",
+                    "why": (
+                        f"engage attached {FALLBACK_LABEL!r} and NOT ONE online x64 runner serves it after "
+                        f"the write ({len(post_runners)} runner(s) read back) — the reconcile delivered no "
+                        f"capacity, however clean the label state looks."
+                    ),
+                }
+                post = {**post, "ok": False, "violations": [*post["violations"], gate]}
+                print(
+                    f"❌ {VIOLATION_ENGAGE_NO_X64_SERVER}: no online x64 runner serves "
+                    f"{FALLBACK_LABEL!r} after the write — engage delivered NO capacity.",
+                    file=sys.stderr,
+                )
 
     payload = {
         "ok": ok,
