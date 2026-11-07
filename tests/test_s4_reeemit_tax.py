@@ -1725,6 +1725,21 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     assert "the 35 operators" in caveats, (
         "the emitted population caveat must name the 35 never-offered operators")
 
+    # ⛔ THE FOURTH COPY, pinned POSITIVELY (#11385 review P2). The README is
+    # excluded from `_REFUTED_DIRECTION_PHRASES` because it must QUOTE the
+    # refuted sentence to record the correction — but an exclusion is not a pin:
+    # deleting `README.md:28-36` (the quote plus the disclosure that BOTH
+    # artifacts' `caveats[0]` were hand-edited after the runs) stayed green at
+    # 511 passed. The disclosure is the only record that the committed artifacts
+    # were edited at all, so its ABSENCE has to red something.
+    _readme_flat = " ".join((_EVID / "README.md").read_text().split())
+    assert "A second artifact field was corrected after the runs" in _readme_flat, (
+        "the README must disclose that BOTH artifacts' caveats[0] were edited")
+    assert "the prompt inputs are identical across arms" in _readme_flat, (
+        "the README must quote the refuted sentence it records the correction of")
+    assert f"+{_per_c} tokens in every session" in _readme_flat, (
+        "the disclosure must carry the derived input cost, not just the claim")
+
 
 #: The phrases the direction retraction removed from this PR's prose. They are
 #: banned as a CLASS — the README copy, the index row, the emitted caveats and
@@ -1750,7 +1765,12 @@ _REFUTED_DIRECTION_PHRASES = (
     # `test_the_emitted_caveats_carry_the_corrected_population_and_direction`.
     # It is NOT applied to the README on purpose: `README.md:30` has to QUOTE the
     # refuted sentence to record the correction, so a ban there would red the one
-    # document that must cite it.
+    # document that must cite it. ⛔ But an exclusion is not a pin: nothing
+    # required that record to EXIST, so deleting `README.md:28-36` — the quote AND
+    # the disclosure that both artifacts' `caveats[0]` were hand-edited after the
+    # runs — left the suite green (511 passed; #11385 review P2). The fourth copy
+    # is therefore pinned POSITIVELY, in
+    # `test_the_emitted_caveats_carry_the_corrected_population_and_direction`.
     "the prompt inputs are identical",
 )
 
