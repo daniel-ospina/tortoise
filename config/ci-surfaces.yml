@@ -9913,7 +9913,7 @@ durations:
   test_problem_map_2820.py: 0.5  # #2820: 43 collected cases from 41 test
   # functions (ONE is parametrised — 3 arms, one per status token — so
   # `grep -c '^def test_'` -> 41 while pytest collects 43 — re-derive with `pytest --collect-only -q | tail -1`
-  # rather than trusting this note. The ANCHORED grep is exact here: 40
+  # rather than trusting this note. The ANCHORED grep is exact here: 41
   # definitions and no prose (an UNANCHORED `grep -c 'def test_'` reads 44, because
   # three docstring lines — 266, 273, 274 — contain the token; prose INFLATES a
   # grep, it never deflates one). The 41 -> 43 gap is the parametrised function's
@@ -9934,9 +9934,9 @@ durations:
   # deliberately a
   # LOWER bound and is NOT a junit measurement; the cost is a bounded `git
   # cat-file`/`merge-base` per anchor, a few `Path.read_text` calls, and one
-  # throwaway `git init` repo in two cases. Measured on this box at the landed
+  # throwaway `git init` repos in three cases. Measured on this box at the landed
   # head with `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q`:
-  # `43 passed in 6.56s` including the repo conftest's import/teardown, so the
+  # `43 passed in 5.94s` including the repo conftest's import/teardown, so the
   # file's own testcase time is well under it. Re-measure rather than quoting
   # this line: it is a datum at ONE head. DB-free, graph-free, network-free (hence the `TORTOISE_TEST_CARVE_OUT=1`
   # lane; without it the suite refuses a target it does not need).

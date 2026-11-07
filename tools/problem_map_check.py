@@ -4,7 +4,7 @@
 `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md` is the status half of issue
 #2820 — 26 named defects, each marked VERIFIED-FIXED / OPEN / UNKNOWN. The map
 exists because the ISSUE went stale: its body was written on 2026-09-10 and still
-reads as 26 problems waiting, while the tree had fixed 20 of them. A document
+reads as 26 problems waiting, while the tree had fixed 21 of them. A document
 whose whole purpose is *"is this still broken?"* is worthless the moment nothing
 can tell that its answers have aged out — that is the drift this tool measures.
 
@@ -39,9 +39,16 @@ What it re-measures, offline, from the tree in front of it:
      `22 fixed · 4 open` while the map said `21 fixed · 5 open`, and the filename
      check was happy).
 
-⛔ **TWO RESIDUALS THIS TOOL CANNOT DECIDE — stated, not implied:**
+⛔ **RESIDUALS THIS TOOL CANNOT DECIDE — stated, not implied.**
 
-- **Anchor relevance** (see check 3): existence + ancestry, never "is this the
+- **A BROKEN object store can read as drift.** `git cat-file -e` exits 128
+  both for its real negatives (no such object / not a commit) and for a store
+  it cannot read (a corrupt loose object). The second is separated by matching
+  git's own failure wording (`_OBJECT_STORE_FAILURE`) and reported UNVERIFIED —
+  but that is TEXT matching, so a git release that rewords those messages
+  reinstates the false drift. Pinned by a real corrupted object in
+  `test_a_corrupt_object_store_reads_as_no_answer_not_as_drift`.
+
   fix". Reading the commit is the reviewer's job.
 - **Pin relevance**: a pin resolves and — for a `tests/*.py` module — declares at
   least one test function (the `_DEF_TEST` floor, which a FIXTURE named `test_*`
@@ -131,12 +138,16 @@ _DEF_TEST = re.compile(r"^\s*(?:async\s+)?def test_", re.MULTILINE)
 #: --is-ancestor` two (0 = ancestor, 1 = not). Everything else — this sentinel, a
 #: negative rc from a child killed by a signal, 129 for a usage error, a wrapper
 #: that exits 1 — is "git did not answer", and every caller maps it to `None`.
+#: ⚠️ One rc carries BOTH of git's 128 meanings (a real negative, and an object
+#: store it cannot read), which is why `commit_exists` inspects stderr on 128 and
+#: why `None` there is not identical to this sentinel.
 _GIT_UNRUNNABLE = 127
 
 #: git's own wording for an object store it cannot READ (as opposed to a
 #: pid/object it looked for and did not find). Measured on a corrupted
 #: loose object: `error: inflate: data stream error (incorrect header
-#: check)` + `fatal: unable to unpack <sha> header`. A miss says
+#: check)` + `error: unable to unpack <sha> header` / `fatal: loose object <sha> …
+#: is corrupt`. A miss says
 #: `fatal: Not a valid object name <sha>^{commit}` instead, which is a
 #: real verdict and stays `False`.
 _OBJECT_STORE_FAILURE = re.compile(
@@ -237,8 +248,10 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
     code, over a document that was never read. Both are state errors. The rc used
     here (`_GIT_UNRUNNABLE`, 127 — the shell's "command not found") is what BOTH
     callers map to "no answer": `is_ancestor` returns `None` for any rc outside
-    {0, 1}, and `commit_exists` returns `None` for exactly this sentinel. Neither
-    could be a bare `== 0` for that reason: a git failure is not a document defect.
+    {0, 1}, and `commit_exists` returns `None` for this sentinel **and** for a 128
+    that carries an object-store failure (`_OBJECT_STORE_FAILURE`), while a plain
+    128 stays the real negative `False`. Neither could be a bare `== 0` for that
+    reason: a git failure is not a document defect.
     """
     try:
         return subprocess.run(

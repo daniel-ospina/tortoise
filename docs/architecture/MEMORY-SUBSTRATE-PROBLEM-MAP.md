@@ -360,7 +360,8 @@ rounding:**
 - **A BROKEN object store can still read as drift.** `git cat-file -e` exits
   **128** both for its real negatives ("no such object", "not a commit") and for a
   store it cannot read (a corrupt loose object: `error: inflate: data stream
-  error`, `fatal: unable to unpack … header`). The guard separates the two by
+  error`, `error: unable to unpack … header`, `fatal: loose object … is
+  corrupt` — measured on git 2.43.0). The guard separates the two by
   matching git's own failure wording, and reports the second as UNVERIFIED — but
   that arm is **TEXT matching**, so a git release that rewords those messages
   turns it back into `False`, i.e. into exactly the false drift the tri-state

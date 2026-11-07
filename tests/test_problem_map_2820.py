@@ -541,7 +541,8 @@ def test_a_corrupt_object_store_reads_as_no_answer_not_as_drift(tmp_path):
 
     `cat-file -e` exits 128 for both of its real negatives ("no such object", "not
     a commit") AND for a corrupt loose object — where git prints `error: inflate:
-    data stream error` / `fatal: unable to unpack … header` while
+    data stream error` / `error: unable to unpack … header` / `fatal: loose
+    object … is corrupt` while
     `rev-parse --is-shallow-repository` still answers `false`. That combination is
     the false DRIFT this tri-state exists to stop: `check_anchors` takes its
     `shallow is False` branch and blames the document.
@@ -578,7 +579,6 @@ def test_a_corrupt_object_store_reads_as_no_answer_not_as_drift(tmp_path):
     assert probe.returncode == 128, probe.returncode
     assert pmc.is_shallow(repo) is False
     assert pmc.commit_exists(repo, head) is None, probe.stderr
-
 
 
 def test_an_ancestor_anchor_passes_on_the_same_repo(tmp_path):
