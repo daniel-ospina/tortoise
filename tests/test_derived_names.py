@@ -957,7 +957,7 @@ _SCOPE_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 # `NamedExpr`, which PEP 572 binds in the scope ENCLOSING the comprehension. So it
 # is walked (never skipped) and everything inside it is conditional.
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-_NESTED_SCOPES = _SCOPE_NODES + (ast.Lambda,) + _COMPREHENSIONS
+_NESTED_SCOPES = (*_SCOPE_NODES, ast.Lambda, *_COMPREHENSIONS)
 
 # `str` methods whose result depends on nothing but their receiver and their
 # arguments — so a call on a CONSTANT receiver has a constant result, evaluated
@@ -990,23 +990,31 @@ _MOD_WIDTH = re.compile(r"%[-+ #0]*(?:\([^)]*\))?(\d*)(?:\.(\d+))?")
 def _width_digits_over_cap(*runs) -> bool:
     """Do any of these WIDTH digits allocate past `_FOLD_WIDTH_CAP`?
 
-    5+ digits is >= 10000 > the cap, so `int()` runs only over the 4-digit band —
-    a very long digit run would otherwise trip CPython's int-string limit instead
-    of comparing.
+    Leading zeros are not significance: `"{:00010}".format(1)` is a ten-character
+    field, and reading the run's LENGTH as its value false-BLOCKed it (follow-up
+    review round 2). Only significant digits decide, which also keeps `int()`
+    away from a very long run that would trip CPython's int-string limit.
     """
     for run in runs:
         if not run:
             continue
-        if len(run) >= 5 or int(run) > _FOLD_WIDTH_CAP:
+        significant = run.lstrip("0")
+        if not significant:
+            continue  # all zeros: a zero width allocates nothing
+        if len(significant) > 4 or int(significant) > _FOLD_WIDTH_CAP:
             return True
     return False
 
 
 def _mod_width_over_cap(template: str) -> bool:
     """A `%`-template's conversion WIDTH — `"%200000000s" % "a"` really builds
-    the field although no argument holds the width (measured: 200 MB)."""
+    the field although no argument holds the width (measured: 200 MB).
+
+    `%%` is an ESCAPED percent, not a conversion: consumed as one, the literal
+    digits after it read as a width and `"%s (100%%20240101)" % "test_x"` — a
+    decidable owned name — went RED (follow-up review round 3)."""
     return any(_width_digits_over_cap(*match.groups())
-               for match in _MOD_WIDTH.finditer(template))
+               for match in _MOD_WIDTH.finditer(template.replace("%%", "")))
 
 
 def _format_specs_over_cap(template: str) -> bool:
@@ -1054,7 +1062,7 @@ def _dotted(node) -> str | None:
         current = current.value
     if not isinstance(current, ast.Name):
         return None
-    return ".".join([current.id] + list(reversed(parts)))
+    return ".".join([current.id, *list(reversed(parts))])
 
 
 def _target_keys(node) -> list[str]:
@@ -1115,6 +1123,9 @@ _CONDITIONAL_NODES = (
 # undecidable case must not also swallow the case that IS decidable).
 _ALWAYS_EXECUTED_FIELD = {ast.If: "test", ast.While: "test"}
 
+# The two node families that push a conditional depth on their children.
+_CONDITIONAL_OR_COMPREHENSION = (*_CONDITIONAL_NODES, *_COMPREHENSIONS)
+
 
 def _own_statements(scope) -> list:
     """`(node, conditional_depth)` for every node in `scope`'s OWN statement
@@ -1140,8 +1151,8 @@ def _own_statements(scope) -> list:
         out.append((node, depth))
         if isinstance(node, _NESTED_SCOPES) and not isinstance(node, _COMPREHENSIONS):
             continue  # a nested def/class/lambda IS another scope
-        child_depth = (depth + 1 if isinstance(node, _CONDITIONAL_NODES)
-                       or isinstance(node, _COMPREHENSIONS) else depth)
+        child_depth = (depth + 1 if isinstance(node, _CONDITIONAL_OR_COMPREHENSION)
+                       else depth)
         always = _ALWAYS_EXECUTED_FIELD.get(type(node))
         for field, value in ast.iter_fields(node):
             field_depth = depth if field == always else child_depth
@@ -1197,11 +1208,10 @@ def _bindings_in(scope, key: str) -> list[tuple[tuple[int, int], object, int]]:
                 target = item.optional_vars
                 if target is not None and key in _target_keys(target):
                     found.append((_pos(node), None, depth))
-        elif isinstance(node, ast.ExceptHandler) and node.name == key:
-            found.append((_pos(node), None, depth))
-        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name == key:
-            found.append((_pos(node), None, depth))
-        elif isinstance(node, ast.MatchMapping) and node.rest == key:
+        elif ((isinstance(node, ast.ExceptHandler) and node.name == key)
+                or (isinstance(node, (ast.MatchAs, ast.MatchStar))
+                    and node.name == key)
+                or (isinstance(node, ast.MatchMapping) and node.rest == key)):
             found.append((_pos(node), None, depth))
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
@@ -1560,7 +1570,7 @@ def _nodes_with_scopes(node, scopes: list):
         yield chain, current
         for child in reversed(list(ast.iter_child_nodes(current))):
             if isinstance(child, _NESTED_SCOPES):
-                stack.append((child, [child] + chain))
+                stack.append((child, [child, *chain]))
             else:
                 stack.append((child, chain))
 
@@ -2264,6 +2274,11 @@ def test_a_digit_run_in_MATERIAL_is_not_a_width(tmp_path):
         '"test_20240101".removeprefix("20240101")',
         '"test_%s_20240101" % "x"',
         '"test_{}".format("graph_2024")',
+        # `%%` is an ESCAPED percent: the digits after it are MATERIAL, and a
+        # scan that consumed `%%` as a conversion read them as a width.
+        '"%s (100%%20240101)" % "test_x"',
+        # A zero-padded width is a LENGTH, not a value: `{:00010}` is ten chars.
+        '"test_{:00010}".format(1)',
     ):
         site.write_text(_raw_client_site(
             "    tag = os.urandom(4).hex()",
@@ -2273,6 +2288,16 @@ def test_a_digit_run_in_MATERIAL_is_not_a_width(tmp_path):
             f"`{journaled}` folds to an OWNED name — a digit run in MATERIAL is "
             f"not a width, and reading it as one false-BLOCKs a compliant site: "
             f"{bad}")
+
+    # A zero-padded WIDTH is a LENGTH, not a value: `{{:00010}}` is a ten-character
+    # field, so the fold is decidable. Asserted on the FOLD rather than through the
+    # census, because a `.format` call that cannot be folded falls back to the
+    # TEMPLATE's head (`"test_…"`), which is owned either way and so would hide the
+    # over-block here (measured: the census stays clean with the bug present).
+    assert _const_str(
+        ast.parse('"test_{:00010}".format(1)').body[0].value) == "test_0000000001", (
+        "a zero-padded width must not be read as a large value, or the fold — and "
+        "any value resolution built on it — loses a decidable answer")
 
 def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_path):
     """#11243 + review round 3: the arm classified TEXT, so every shape it did not
