@@ -75,16 +75,20 @@ the `[embeddings]` extra does not need it either (R3 #1542 D6).
 | Var | Purpose | Default |
 |---|---|---|
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` | provider keys (existing repo pattern, `tortoise.ingest._PROVIDERS`) | required for non-mock runs |
-| `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned — #1525) |
-| `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `openai:gpt-4o-2024-08-06` (the official judge model) |
+| `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `deepseek:deepseek-v4-flash` (M5 pinned — #1525; transport repointed by #8486 — see "Reader pinning" below) |
+| `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `deepseek:deepseek-v4-flash` (#8486 owner ruling 2026-10-27 — internal baseline series; the receipt records `unpinned:<model>` + `inconclusive` by design) |
 
-> **Judge via OpenRouter (no OpenAI key needed).** The official judge is
-> OpenAI's `gpt-4o-2024-08-06` — the model id is what makes it official
-> (external comparability), and the SAME model is served by other
-> configured providers. With only `OPENROUTER_API_KEY` set, run the sealed
-> benchmark with:
+> **The OFFICIAL judge (external comparability) is a configuration, not the
+> default.** `gpt-4o-2024-08-06` is the model the benchmark's own
+> `evaluate_qa.py` baseline ran, and the model id is what makes a number
+> comparable to a published figure — the SAME model is served by other
+> configured providers, so it needs no OpenAI key. Name it explicitly:
 > `export TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'`
 > (provider resolution order: openrouter → deepseek → openai → gemini).
+> The #8486 owner ruling of 2026-10-27 replaced it as the run's *default* —
+> progress against ourselves, not comparability with vendors — and recorded
+> the `OVERRIDES:` line; `judge.OFFICIAL_JUDGE_MODEL` keeps the identity
+> named so this path cannot rot.
 | `TORTOISE_LME_CACHE_DIR` | dataset cache dir (outside the repo) | `~/.cache/tortoise-longmemeval` |
 | `TORTOISE_LME_CHUNK_TURNS` | turns per raw-chunk window (R1 #1540) | `2` (the run protocol step-2 sweep selects the pilot/500-Q value) |
 | `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — rank-interleaved (C1 #1745: points + chunks in true RRF order, the R1 points-first tiering deliberately reversed) bounded by the item cap | `8000` |
@@ -474,7 +478,9 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    (verbatim from LongMemEval `evaluate_qa.py`: contains-answer, temporal
    off-by-one exemption, knowledge-update updated-answer, preference rubric,
    abstention), label = `'yes' in response.lower()`; default
-   `gpt-4o-2024-08-06` at temperature 0. The judge API call replicates
+   `deepseek-v4-flash` at temperature 0 (the #8486 owner ruling of 2026-10-27;
+   `OFFICIAL_JUDGE_MODEL` = `openai:gpt-4o-2024-08-06` remains the named,
+   servable comparability configuration). The judge API call replicates
    `evaluate_qa.py` exactly: a single user message (no system message),
    `n=1, temperature=0, max_tokens=10`, no `response_format` (JSON mode
    would deviate from the official protocol). `--mock` = containment/
@@ -832,8 +838,13 @@ the gate health of the (possibly cached) graph it retrieved from.
 
 The reader model + prompt are **pinned constants for the run**: the code
 default (`READER_MODEL` in `tools/longmem_eval/reader.py`) is
-`openrouter:deepseek/deepseek-v4-flash` — the model the V2 runs actually
-used — so a default-config run is a pinned run. The prompt constants
+`deepseek:deepseek-v4-flash` — the model the V2 runs actually used, on the
+transport the fleet actually runs — so a default-config run is a pinned run.
+(#8486, 2026-11-07: the pin named `openrouter:deepseek/…`, and no box we run
+holds `OPENROUTER_API_KEY`, so the *default* raised at the named-provider check
+before loading a question and every run needed an override — which records
+`reader_pinned: false`. The model is unchanged; only the transport moved.)
+The prompt constants
 (`_SYSTEM_PROMPT`, `_TYPE_FRAGMENTS`) live in the same module. Every report
 records the reader's resolved identity + the verbatim prompt in its
 methodology (`reader_model_spec`, `reader_provider`, `reader_pinned`,

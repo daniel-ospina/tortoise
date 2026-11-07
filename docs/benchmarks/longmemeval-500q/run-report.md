@@ -52,15 +52,66 @@ extends: docs/planning/2026-09-01-2080-gbrain-plan.md (DM-11, §6.6, §7 E2E-8),
 | Run | `run_protocol` step 5 (full 500-Q), resumable state machine |
 | Ingest mode | **`v2`** — the production extractor (statement points + IMPL/NAND operators), i.e. `run_protocol` step 5's documented mode. **SUPERSEDES the `deterministic` record this row carried before #8486**: the belief layer is armable ONLY on a `v2` graph (the runner **refuses** `--activate-beliefs` with `--ingest-mode deterministic` — `parser.error` at the CLI, `ValueError` for programmatic callers), and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs` on every run step, so a `deterministic` step-5 command is now unrunnable. The deterministic raw-content mode (turn points + raw chunks, no operators) remains the historical variant documented in §3; it cannot carry a belief layer. |
 | Belief layer | **`inert` — not activated.** The belief-activation arm (`tools/longmem_eval/run.py --activate-beliefs` → `ep_activation.activate_beliefs`, `#3011`) is now wired into the runner and armed by the `#8486` run protocol; the step-5 run MUST arm it. Reasons it is not optional: `ingest_v2` writes every extraction point `status="draft"` and mints its operators with `promote_source=False`, and `tortoise/ep.py` filters the factor graph with `_live_only(..., include_draft=False)` — so an un-activated graph is **EP-inert** and every claim reads the neutral `0.50` of a Beta(1,1) prior that was never measured (`#2598`). **The four resolved states — and the bar in terms of them** (`tools/longmem_eval/measurement_posture.py::belief_layer_state`, the ONE place they are derived): `activated` = the arm ran **and every question carries a measured posterior** (its post-pass census found at least one non-operator point with `points_with_ep > 0`); `partial` = the arm ran but not every question does — a resumed outcome with no manifest, an activation that failed, or, in the common case on this benchmark, a question whose extraction minted no IMPL/NAND operators, so `sdk.dream` returned with zero belief writes (`no_op_reason = "no_ep_factors"`, and the #1163 stale-run stand-down — single-session questions are frequently this shape); `inert` = the arm was not requested; `unknown` = no posture was ever recorded. **`partial` is the state a correctly-armed step-5 run is expected to report**, so the disclosure bar is PER QUESTION, never all-or-nothing: a `partial` number may be described as measuring Tortoise's reasoning **for the N of M questions whose claims carry a measured posterior** (`posture.activation.questions_with_ep` of `posture.activation.questions`, with `beliefs_activated: false`), and must NOT be described as belief-activated as a whole. Only `activated` licenses the unqualified description (`#8486`). Both halves are carried mechanically: the report's `methodology.measurement_posture` records them, and `w7_publish.validate_receipt` **refuses** a `completed` receipt whose posture is absent or `unknown` (it accepts `partial` — which is why the state has to be defined here, on the surface that states the number). |
-| Reader | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned default, `reader_pinned: true`) |
-| Judge | `openai/gpt-4o-2024-08-06` (the OFFICIAL LongMemEval judge model; verbatim `evaluate_qa.py` anscheck prompts, `judge_call_shape` = official, rubric hash `82d07b0de05daa48`) via the OpenRouter transport — OPENAI_API_KEY absent, identical model id |
+| Reader | `deepseek:deepseek-v4-flash` (M5 pinned default, `reader_pinned: true`) — see §1.1 |
+| Judge | `deepseek:deepseek-v4-flash` — **INTERNAL BASELINE SERIES, not comparable to any published LongMemEval figure**; receipt records `unpinned:deepseek-v4-flash` + `verdict: inconclusive` **by design** — see §1.1 |
 | Backend | real FalkorDB (docker `:falkordb@localhost:6379/tortoise_lme_w7`) — FTS + vector + hybrid RRF |
 | Embedder | `BAAI/bge-small-en-v1.5` (sentence-transformers, local — no API cost) |
 | Commit (exact) | `PENDING — machinery commit; the run's exact commit recorded at execution` |
 | Corpus hash | `sha256:d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442` (verified vs the official split pin) |
 | Protocol state | `.longmemeval_cache/run_protocol_state.json` (gates 1–4 passed with evidence notes; step-5 record) |
-| Cost | PENDING — no run executed; the run window's OpenRouter key-usage delta recorded at execution (see §6) |
+| Cost | PENDING — no run executed; the run window's provider key-usage delta recorded at execution (see §6) |
 | HARD_STOP_USD | 10.00 (pre-registered) |
+
+### 1.1 Judge and reader — annotated (#8486, 2026-11-07)
+
+> **Annotated addition, errata discipline (§7): no number above is changed.**
+> The Reader and Judge rows were repointed at the configuration the fleet
+> actually runs. Both rows previously named a transport (`openrouter`) that
+> holds no key on any box we run, and a judge (`gpt-4o-2024-08-06`) the owner
+> ruling of 2026-10-27 replaced.
+
+**Judge.** The owner ruled on this issue (2026-10-27): *"Judge: our own model
+(`deepseek-v4-flash`), pinned to an exact snapshot id — not a floating alias …
+What the benchmark is for, for now: progress against ourselves."* Re-stated
+2026-11-03: *"we use deepseek … Not OpenAI, not OpenRouter. No credential
+request stands."* The code now defaults to it (`tools/longmem_eval/judge.py`,
+`DEFAULT_JUDGE_MODEL`), and `OFFICIAL_JUDGE_MODEL` keeps the official identity
+named and reachable.
+
+**What a run of this configuration may and may not claim.**
+
+- The receipt will read `judge_pin: unpinned:deepseek-v4-flash` and
+  `verdict: inconclusive`. **That is not a failed run.** It is the gate
+  correctly saying *"this is not the official baseline"* — the two fields are
+  derived from the judge that graded (`w7_publish.judge_pin_for`, an
+  allow-list, never a default), so they cannot say anything else.
+- **Describe it as an internal baseline series.** Never "the LongMemEval
+  number", and never beside a vendor figure (HydraDB 90.79 %, mem0's own
+  numbers) as if it were on the same axis. No comparison to a vendor number is
+  legitimate unless that vendor discloses its reader *and* judge.
+- **Reader and judge are the same model**, so the model grades its own
+  answers. Recorded as a limitation, not a blocker: the bias is roughly
+  constant between runs, so a *trend* survives it, but it can flatten exactly
+  the gains the benchmark is meant to show.
+- The rubric is unchanged (`judge_rubric_id_hash 82d07b0de05daa48`, the
+  verbatim `evaluate_qa.py` anscheck prompts). The **grader** is not the
+  official one, and the direction of that bias is unknown.
+- **The official judge is still servable** by naming it
+  (`TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06`, or a box
+  holding `OPENAI_API_KEY`). That is the only configuration whose number may
+  be compared to a published figure, and running it is a legal configuration
+  rather than a lane's decision.
+
+**Reader.** The M5 pin (#1525) exists so the code default equals what runs use.
+It named `openrouter:deepseek/deepseek-v4-flash`; `OPENROUTER_API_KEY` is absent
+on every box we hold, so a default-config run raised at the named-provider
+check *before loading a question* (measured on this issue 2026-10-23 and
+2026-11-02: `reader.py: ValueError: model spec names provider 'openrouter' but
+its key is not set`). The constant now names the DeepSeek transport. The **model
+is unchanged**; only the transport moved, and a box holding only another
+provider's key uses the documented override (which records
+`reader_pinned: false` rather than silently reporting a different endpoint as
+the pin).
 
 ## 2. Official metric + labeled variants (R12: never mixed)
 
@@ -166,7 +217,6 @@ Full per-`k` table + per-question digests: `w7a-500q.variants.json`
 
 ```bash
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_lme_w7' \
-TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06' \
 python -m tools.longmem_eval.run_protocol run 5 -- \
   --ingest-mode v2 --workers 3
 ```
@@ -175,6 +225,14 @@ python -m tools.longmem_eval.run_protocol run 5 -- \
 and the protocol additionally injects `--activate-beliefs` on every run step.
 A `--ingest-mode deterministic` extra is now refused by the runner's CLI at
 arm resolution, so it can no longer appear here.)
+
+(#8486, 2026-11-07: this command carried
+`TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'` — the
+official judge via a transport holding no key here. The 2026-10-27 ruling made
+our own pinned model the run's judge, so the line is gone: the default *is*
+the ruled configuration (§1.1). Naming the official judge again is a
+`TORTOISE_LME_JUDGE_MODEL` override, and it buys the only number that may be
+compared to a published figure.)
 
 (Full argv in the protocol state file's step-5 `command`.) Resolved knobs are
 recorded in the report methodology: chunk_turns 2, context cap 8000,
@@ -197,7 +255,7 @@ digest).
 | failure_origin | PENDING |
 | commit | PENDING |
 | corpus_hash | sha256:d6f21ea9…3a442 (seal verified, gates 1-4) |
-| judge_pin | `longmemeval-official-anscheck-gpt4o-2024-08-06-v1` |
+| judge_pin | `unpinned:deepseek-v4-flash` under the 2026-10-27 ruling (§1.1) — derives from the judge that graded, so it cannot be pre-filled; the `longmemeval-official-anscheck-gpt4o-2024-08-06-v1` pin is minted only for a run the OFFICIAL judge graded |
 | cost_usd | PENDING |
 
 `w7a-500q.receipt.json` / `w7a-500q.report.json` / `w7a-500q.seal.json`
