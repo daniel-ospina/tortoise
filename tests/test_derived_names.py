@@ -912,8 +912,6 @@ def _raw_client_call_positions(source: str) -> list[int]:
                 for m in re.finditer(rf"(?<![\w])(?:{pattern})\s*\(", normalised)]
 
     found = _sites(names)
-    if found:
-        return found
     # ⛔ FAIL-CLOSED SECOND PASS — resolve a STATIC BINDING ALIAS, and resolve it
     # by MENTION rather than by spelling (#11217 review round-14 P1).
     #
@@ -930,15 +928,27 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # MENTIONS `FalkorDB` anywhere in its subtree aliases the class. That closes
     # chained assignment, multi-target, parenthesised, conditional, `cast(…)`, an
     # annotated target and an attribute target in ONE rule, and it closes the
-    # next spelling before anyone writes it. It can only EXTEND the name set, so
-    # it cannot narrow the gate.
+    # next spelling before anyone writes it. It only ever EXTENDS the name set.
     #
-    # The population it costs is tiny BY CONSTRUCTION, which is why no cheap
-    # regex gate is needed: the pass runs only for a file that (a) resolved no
-    # site, (b) bulk-DETACHes, and (c) writes `FalkorDB` in CODE (`masked`, so a
-    # comment or docstring naming it cannot open it). Any file the pass could
-    # help is in that set, so it cannot under-reach; measured at this head, it
-    # costs 0 additional `ast.parse` calls over the judged corpus.
+    # ⛔ ELIGIBILITY IS THE FILE'S, NEVER `found`'s (#11217 review round-15 P1).
+    # This pass used to be skipped whenever ANY site resolved, which re-opened
+    # the whole family for the file that matters most: the in-tree alias is
+    # MODULE-LEVEL (`REAL_FALKORDB = falkordb.FalkorDB`), so the very next file
+    # that hoists one AND constructs a client anywhere — a helper, an owned
+    # fixture, a second test — resolved a site from the import and returned
+    # before the alias was ever resolved. Measured on a fixture with one owned
+    # `FalkorDB(` block and one aliased leaking `C(` block: `sites=[227]`, and
+    # the leak read CLEAN. So the gate is the THREE FILE-LEVEL conditions below
+    # and nothing about `found`, and the alias sites are UNIONED into it.
+    #
+    # The population that costs a parse is tiny and is the population the pass
+    # can help: a file that bulk-DETACHes and writes `FalkorDB` in CODE
+    # (`masked`, so a comment or docstring naming it cannot open it). Measured at
+    # this head: 6 of the 1,183 judged files reach a parse here, 3 of them
+    # already parsed by `_journal_sites` — so 3 additional `ast.parse` calls over
+    # the judged corpus, not 0. Stated as the measured number rather than as a
+    # proof, because an absolute here is what let the previous version survive a
+    # review round that was hunting exactly this class.
     if "DETACH DELETE" not in source or "FalkorDB" not in masked:
         return found
     try:
@@ -999,19 +1009,20 @@ def _raw_client_call_positions(source: str) -> list[int]:
         return out
 
     # Bounded closure: each pass adds the aliases observable from the names the
-    # previous pass knew. Four is generous (a chain of four hoists) and finite,
-    # so a pathological file cannot spin here. Only ever EXTENDS `names`.
+    # previous pass knew, and the sites visible with what that pass resolved.
+    # Four is generous (a chain of four hoists) and finite, so a pathological
+    # file cannot spin here. ⛔ It ACCUMULATES rather than replacing: a site found
+    # before the alias landed is still a site.
     wanted = {"FalkorDB"}
+    accumulated = set(found)
     for _ in range(4):
         aliases = _bindings(wanted) - names
         if not aliases:
             break
         names |= aliases
         wanted |= aliases
-        found = _sites(names)
-        if found:
-            break
-    return found
+        accumulated |= set(_sites(names))
+    return sorted(accumulated)
 
 
 def _raw_detach_violations(root=None):
@@ -2538,6 +2549,54 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
     assert not _raw_detach_violations(root=tmp_path), (
         "a multi-line import on an owned, journaled site must stay clean: "
         f"{_raw_detach_violations(root=tmp_path)}")
+
+
+def test_an_alias_leak_REDS_even_when_the_SAME_file_resolves_a_site(tmp_path):
+    """#11217 review round-15 P1: the alias pass is gated by the FILE, never by
+    whether a site already resolved.
+
+    The static-binding-alias resolver used to run only when the import parsers
+    found NOTHING (`found = _sites(names); if found: return found`). A file that
+    hoists an alias at MODULE level — the in-tree shape,
+    `tests/test_uri_username_consumed_3081.py:71`, `REAL_FALKORDB =
+    falkordb.FalkorDB` — and ALSO constructs a client anywhere (a helper, an
+    owned fixture, a second test) resolves a site from the import and returned
+    before the alias was ever resolved. Measured on this fixture before the fix:
+    `sites=[227]` only, and the second test's unowned, un-journaled bulk DETACH
+    read CLEAN.
+
+    ⛔ It was also invisible to every other pin here: each spelling fixture's
+    header resolves NO import name, so `found` was always empty and the pass
+    always ran. A guard is only as strong as the case that would catch its
+    removal, and no case in the file could catch this one.
+    """
+    (tmp_path / "test_mixed.py").write_text(
+        "from falkordb import FalkorDB\n"
+        "import tortoise\n"
+        "C = tortoise.FalkorDB\n"
+        "from tests._embedded import _journal_append\n"
+        "\n"
+        "\n"
+        "def test_owned():"          # <- resolves a site from the import
+        "\n    import os\n"
+        '    name = f"test_g_{os.urandom(4).hex()}"\n'
+        "    _journal_append(name)\n"
+        '    c = FalkorDB(host="h")\n'
+        '    c.query("MATCH (n) DETACH DELETE n")\n'
+        "\n"
+        "\n"
+        "def test_leak():"          # <- the ALIASED one, unowned
+        "\n    import os\n"
+        '    name = f"evict_{os.urandom(4).hex()}"\n'
+        '    c = C(host="h")\n'
+        '    c.query("MATCH (n) DETACH DELETE n")\n'
+    )
+    violations = _raw_detach_violations(root=tmp_path)
+    assert violations, (
+        "the aliased leak read CLEAN because a sibling block in the same file "
+        "resolved a site from the import — the alias pass must be gated by the "
+        "FILE, not by `found`")
+    assert any("test_mixed.py" in v for v in violations), violations
 
 
 def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
