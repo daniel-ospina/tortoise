@@ -1703,26 +1703,40 @@ Two halves close that, and neither is a health *reading*:
    Fly token. `curl --max-time 5` is what turns *no answer* into a DOWN verdict
    and a page — during the outage the app took 9–12 s to `000` from outside and
    ~45 s to the eventual 504, so a 5 s bound alarms within one cycle. The URL is
-   in the script's production set (an unrecognised URL is a **DRILL**: no page)
-   and deliberately NOT restartable — the primary API probe owns restarting the
+   in the script's production set (an unrecognised URL is a **DRILL**: `[DRILL]`-titled,
+   **never restartable** — but it still PAGES, with a `[DRILL]` label; a drill is
+   not silent, it is only non-production. Cases 88b and the e2e(l) arm pin both
+   halves) and deliberately NOT restartable — the primary API probe owns restarting the
    machine, and a second restart arm would spend `MAX_RESTARTS_PER_HOUR` twice.
    Pinned in BOTH directions by cases 99 (the step, its label, its production-set
    membership and its 5 s bound), 88b (`000` → `PROD DOWN` + the machine-backed
    prose) and 100 (`200` → UP, exit 0, no incident) of
    `.github/scripts/availability-watchdog.test.sh`; case 101 covers the
-   `404` → `PROD DEGRADED` arm.
+   `404` → `PROD DEGRADED` arm, and case 100b the `200`-with-an-INCOMPLETE-body
+   arm (a status line is not an answer).
 
 **Blind spots, stated rather than implied.** It detects a loop that cannot
-serve — and, because `curl --max-time 5` turns any answer later than the bound
-into `000` → `DOWN`, it also detects a loop that serves slower than the bound
-(the `000` → `DOWN` mapping is pinned by harness case 93; the conversion of a
-late answer into `000` is curl's own documented `--max-time` behaviour, measured
-here but not a repo pin). What it does NOT detect is a
-loop that serves slowly *within* the bound: a 4 s answer passes a 5 s prober.
-It says nothing about a deploy that never happened (`check-deploy-staleness.sh`),
-and it is not a substitute for the TCP check that catches a dead process. Do
-**not** replace it with `loop_stale_ms`: reading the loop's own tick to decide
-the loop is fine is the exact circularity that let this outage run unattended.
+serve — and it also detects a loop that serves slower than the bound, by TWO
+mechanisms, because curl's behaviour differs by where the answer stalls:
+
+- an answer that never starts (no status line inside the bound) comes back as
+  `000` with a non-zero curl exit → `DOWN` (harness case 93);
+- an answer whose **headers** arrive inside the bound but whose **body** never
+  does comes back as a healthy `200` with a non-zero curl exit (28 timeout, 18
+  partial transfer, 56 recv error — measured: `"200 3.002614"`, `curl: (28) …
+  10 out of 40 bytes received`). `probe()` therefore grades an `UP` from the
+  status code **only when curl completed the transfer**; an incomplete transfer
+  falls through to the same `DOWN`/retry class as `000` (harness case 100b pins
+  it for both the liveness arm and the restartable API arm). Without that rule
+  a process that flushed headers and wedged mid-body would have read UP — a
+  false PASS on exactly the property this arm exists to prove.
+
+What it does NOT detect is a loop that serves slowly *within* the bound: a 4 s
+answer passes a 5 s prober. It says nothing about a deploy that never happened
+(`check-deploy-staleness.sh`), and it is not a substitute for the TCP check that
+catches a dead process. Do **not** replace it with `loop_stale_ms`: reading the
+loop's own tick to decide the loop is fine is the exact circularity that let this
+outage run unattended.
 
 > **OVERRIDES:** the industry-default liveness shape — a background heartbeat or
 > event-loop-lag gauge whose timestamp a health handler reads and reports back
@@ -1737,9 +1751,10 @@ the loop is fine is the exact circularity that let this outage run unattended.
 > The marker is repeated on #10892, where a lane adopts or replaces this design.
 
 ⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
-`control_ok()` runs only on the restartable path (`availability-watchdog.sh:2507`,
-inside `if [ "$restart_mode" = "DOWN" ]`), because the disruptive action it
-guards — a machine restart — cannot happen on a hard-disarmed arm. So a TOTAL
+`control_ok()` runs only on the restartable path — the restart decision's own
+`if ! control_ok` guard, inside `if [ "$restart_mode" = "DOWN" ]` — because the
+disruptive action it guards — a machine restart — cannot happen on a
+disarmed arm. So a TOTAL
 runner-side egress failure pages `PROD DOWN` from THIS step instead of
 `INCONCLUSIVE`, even though nothing is wrong with the machine. See §7.8 (the
 INCONCLUSIVE bullet there is scoped to the restartable target) and #11401, which
@@ -1749,7 +1764,15 @@ Operator check, one line, from anywhere:
 
 ```bash
 curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
-# {"status":"ok","served":<N>,"last_served_age_ms":<ms|null>}   # N must GROW
+# {"status":"ok","served":<N>,"last_served_age_ms":<ms|null>}
+# <N> counts requests THIS PROCESS has served, so it must be a NEW number for
+# this process. It is NOT monotonic across a restart: the counter resets to 1 on
+# a redeploy/machine restart, and that reset is itself the evidence of a restart
+# (`tortoise/hosted_api.py`: "a restart starting again at 1 is itself the
+# evidence of a restart"). A SMALLER N right after a deploy is healthy, not a
+# replayed/cached body. `<ms|null>` is `null` on the FIRST answer this process
+# gives and a number from the SECOND on (the age is the pre-increment value, so
+# one served request has no previous tick to measure against).
 ```
 
 ### 6.5 Cost reference (what "one machine warm" actually costs)
@@ -2165,9 +2188,18 @@ limits.
 2. **One GitHub issue** appears (or an existing one gets a comment):
    `[monitor] PROD DOWN — api.premiselabs.co is not answering the availability
    probe` (or `PROD DEGRADED` for the UNEXPECTED class), labelled `auto-filed`.
-   The auth target files a **separate** incident with its own host in the title
-   (`[monitor] PROD DOWN — app.premiselabs.co is not answering the
-   availability probe`). An external page (Telegram) also fires on the
+   Each of the **three** production targets files its **own** incident, titled by
+   its own host — so read the title before you conclude anything about the API:
+
+   | target | title host | what a DOWN means |
+   |---|---|---|
+   | API (default) | `api.premiselabs.co` | the API machine is not answering (§7.1a) |
+   | Pages auth | `app.premiselabs.co` | the Pages auth surface is not answering (§7.1b) |
+   | served-request liveness | `api.premiselabs.co (served request)` | the API accepts TCP but a request that must be **served** did not answer inside 5 s (§7.1c) |
+
+   ⚠️ The liveness incident is the one that fires when the API's Fly checks are
+   still green — that combination is the whole point of #10892, so do not dismiss
+   it because `/health` answers. An external page (Telegram) also fires on the
    transition when the paging secrets are set.
 3. The issue **body** is machine-managed and carries the verdict, the first
    observation time, the failing-run count, the raw probe evidence, and the
@@ -2450,11 +2482,20 @@ machinery (§7, §7.7). Two consequences:
    `is_prod` set would make every production run a silent drill (no PROD page),
    and nothing in the live path would tell you — the drill is where you notice.
 2. **Widening the production set must not let a drill arm self-heal.** The set
-   (`PROD_PROBE_URLS`) and the restartable set (`RESTARTABLE_PROBE_URLS`) are
-   separate; only exact members of the production set are PROD, and only exact
-   members of the restartable set may restart. An unrecognised URL stays a
+   (`PROD_PROBE_URLS`), the restartable set (`RESTARTABLE_PROBE_URLS`) and the
+   machine-backed set (`FLY_MACHINE_PROBE_URLS`) are three SEPARATE sets; only
+   exact members of the production set are PROD, and only exact members of the
+   restartable set may restart. An unrecognised URL stays a
    DRILL with self-heal disarmed — never add a flag, never loosen this to a
    prefix/wildcard match, and never let a drill URL appear in either set.
+   ⛔ **`FLY_MACHINE_PROBE_URLS` must be kept in step with `PROD_PROBE_URLS`.**
+   It decides whether an incident body says "served by Cloudflare Pages" or
+   "served by the same Fly machine". The ONLY production target it may omit is
+   the auth probe (`/auth/start`, served by Pages); every other production
+   target is machine-backed and must be listed. Omitting one does not degrade to
+   a cautious message — the body then positively claims there is no Fly machine
+   and sends on-call to check a Pages deploy during a machine outage, which is
+   the #10892 misdirection itself.
 
 **All three targets are probed on every run**, drills included: the auth and
 liveness steps always use their production URLs and are hard-disarmed from the
@@ -2594,7 +2635,7 @@ tracked as **#5798**.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
   `CONTROL_URL` check) — **on the restartable Fly API target only.** The control
   probe is consulted inside the restart decision
-  (`availability-watchdog.sh:2507`), so the TWO hard-disarmed arms — the Pages
+  (its own `if ! control_ok` guard), so the TWO hard-disarmed arms — the Pages
   auth surface and the served-request liveness surface — never reach it: a total
   runner-side egress failure pages them as `PROD DOWN`/`PROD DEGRADED` (a TRUE
   alert about the runner, not the app), and the case is disambiguated by the

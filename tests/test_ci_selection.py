@@ -2533,7 +2533,7 @@ def test_the_github_prober_paths_fail_closed_to_the_full_matrix():
     to `core`". It matches no `SOURCE_PATTERNS` row, but it does NOT fall
     through: `.github/` is in neither `SOURCE_PATTERNS` nor `CORE_ALSO`, so an
     unknown path takes the fail-closed branch and the WHOLE matrix runs (the
-    comment's own sibling at `ci-surfaces.yml:2310`
+    comment's own sibling at `ci-surfaces.yml:2313`
     (`test_oauth_stray_code_refusal.py`) records this exact false premise being
     registered on once before).
 

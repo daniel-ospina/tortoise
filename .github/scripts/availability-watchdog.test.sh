@@ -2169,6 +2169,48 @@ assert_eq "$(created_json)" "{}" "liveness: 200 → NO incident is filed (a heal
 assert_eq "$(count_calls 'GH POST .*/issues$')" "0" "liveness: 200 → no issue CREATE at all"
 assert_eq "$(count_calls 'FLYCTL')" "0" "liveness: 200 → flyctl was never called"
 
+# ── 100b: a status line is NOT an answer — the transfer must COMPLETE ──────
+# curl emits `%{http_code}` as soon as the RESPONSE HEADERS arrive. A server
+# that sends `200 OK` and then stalls mid-body therefore reports a HEALTHY code
+# with a non-zero curl exit and a truncated body. Case 100 pins the ALIVE
+# direction and case 88b the absence direction, but both are driven by the code
+# ALONE (`STUB_PROBE_CODES`), so neither could see this shape: a `200` that
+# never finished was graded UP by `classify_code`, i.e. a false PASS on the one
+# property the arm exists to prove — that the request RETURNED. Measured against
+# a real stalling server at review round 6 (P1):
+#     curl -sS -o body -w '%{http_code} %{time_total}' --max-time 3 <url>
+#     → "200 3.002614", exit 28, "10 out of 40 bytes received"
+# The mutant this case is built to red: delete the `rc -ne 0` guard in probe()
+# and the verdict falls back to `classify_code 200` → UP, exit 0, no incident.
+reset_case
+export PROBE_URL="$LIVENESS_URL_UNDER_TEST"
+export PROBE_HOST_LABEL="api.premiselabs.co (served request)"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="200"
+export STUB_PROBE_RC=28                       # headers arrived, the BODY never did
+export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+run_watchdog
+assert_eq "$RC" "1" "liveness: 200 with an INCOMPLETE transfer → exit 1 (not a healthy answer)"
+assert_contains "$(created_json)" "PROD DOWN" \
+  "liveness: 200 + curl_exit=28 → PROD DOWN (the body never arrived, so nothing returned)"
+assert_contains "$(created_json)" "transfer did NOT complete" \
+  "the incident BODY names the real class (an incomplete transfer), not 'HTTP 200 was fine'"
+assert_eq "$(count_calls 'CURL probe')" "3" \
+  "liveness: an incomplete transfer is RETRYABLE, so all 3 attempts ran (no UNEXPECTED short-circuit)"
+
+# The same guard must sit in the SHARED probe, not in the liveness arm: the
+# restartable API target has the identical false-PASS shape, and there a
+# truncated body would equally have read UP.
+reset_case
+export STUB_PROBE_CODES="200"
+export STUB_PROBE_RC=28
+export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+run_watchdog
+assert_eq "$RC" "1" "API target: 200 with an INCOMPLETE transfer → exit 1"
+assert_contains "$(created_json)" "PROD DOWN" \
+  "API target: the shared probe() applies the same rule (no arm-local special case)"
+
+
 # ── 88b: a DOWN on the MACHINE-BACKED liveness target names the MACHINE ────
 # Same arm as case 88 (`disarmed:no_machine`), OPPOSITE remediation: this
 # surface IS the Fly machine. The round-3 fix corrected the incident BODY; the
@@ -2378,7 +2420,7 @@ assert_not_contains "$JOB_ENV" "GH_TOKEN" "GH_TOKEN is NOT job-level (step env o
 # GitHub env precedence is STEP > JOB > WORKFLOW, so refusing PROD_PROBE_URLS on
 # the step is not enough: a job-level value reaches the script just as well and
 # narrows the production set, classifying the auth probe a DRILL ([DRILL]-titled,
-# no page, self-heal disarmed) while the diff looks correct. Found in review — the
+# never restartable, but still paged with a [DRILL] label) while the diff looks correct. Found in review — the
 # step-scoped refusal below passes with a job-level PROD_PROBE_URLS present.
 assert_not_contains "$JOB_ENV" "PROD_PROBE_URLS" \
   "PROD_PROBE_URLS is NOT job-level either (env precedence: job-level reaches the script and silently drills the auth probe)"
@@ -2449,7 +2491,8 @@ assert_contains "$AUTH_STEP" "PROBE_HOST_LABEL: $AUTH_HOST" \
   "the auth step's host label matches the host it actually probes (its dedupe key)"
 # …and the script must classify that same URL as PRODUCTION. PROD_PROBE_URLS is
 # built from AUTH_PROBE_URL; if only the workflow moves, the step still runs but
-# is classified a DRILL — [DRILL]-titled, no page, self-heal disarmed — while
+# is classified a DRILL — [DRILL]-titled, never restartable, but still PAGED with
+# a [DRILL] label (it is not silent; see the e2e(l) arm) — while
 # looking correct in the diff. Setting PROD_PROBE_URLS in the step would do the
 # same thing through another route, so it is refused too.
 assert_contains "$(grep '^AUTH_PROBE_URL=' "$WATCHDOG" || true)" "$AUTH_PROBE_URL_STEP" \
@@ -2489,8 +2532,12 @@ assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKE
 # fails silently:
 #   * the step's URL  — without it nothing probes the served path at all;
 #   * script membership in the production set — an unrecognised URL is a DRILL:
-#     [DRILL]-titled incident, NO page, self-heal disarmed. A step that looks
-#     exactly right in the diff can therefore alert nobody.;
+#     a [DRILL]-titled DEGRADED/DOWN incident, self-heal disarmed, and no PROD
+#     incident ever filed. ⛔ It is NOT silent: the DRILL still PAGES, with a
+#     [DRILL] label (e2e(l) pins that) — so a misclassified step is not
+#     inaudible: it reaches on-call labelled as a drill, files no PROD incident
+#     and can never restart. That is harder to diagnose at 3am than a silence,
+#     because something DID page.;
 #   * the 5 s bound — a liveness probe that waits 25 s for an answer is the
 #     status-only probe this issue already had. The bound IS the instrument, so
 #     a later "harmonise the timeouts" tidy-up must red HERE rather than in the
@@ -2502,7 +2549,8 @@ LIVENESS_HOST="$(printf '%s' "$LIVENESS_PROBE_URL_STEP" | sed -n 's|https://\([^
 assert_not_empty "$LIVENESS_PROBE_URL_STEP" "the liveness step's PROBE_URL is derivable (a quoted/folded value must not silently vacate the guards below)"
 assert_contains "$LIVENESS_PROBE_URL_STEP" "/liveness" "the liveness step probes the served-request path, not /health (the endpoint that answered from cached state)"
 # …the script must classify that same URL as PRODUCTION, or the step runs as a
-# DRILL and pages nobody.
+# DRILL — it still pages (labelled `[DRILL]`) but files no PROD incident and can
+# never restart.
 assert_contains "$(grep '^LIVENESS_PROBE_URL=' "$WATCHDOG" || true)" "$LIVENESS_PROBE_URL_STEP" \
   "the watchdog script's LIVENESS_PROBE_URL matches the step's probe URL (else the run is silently a DRILL)"
 assert_eq "$(prod_unit "$LIVENESS_PROBE_URL_STEP")" "PROD" \

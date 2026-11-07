@@ -45,13 +45,16 @@ one alone is a false PASS:
    harness already owns "the step, its label and the script's production-set
    membership must move together".
 
-**Blind spots, stated rather than implied** (the `docs/ops/fleet-liveness.md`
-discipline, per the issue's own scope note): this detects a loop that cannot
-serve, and — the prober's `--max-time` converts an answer later than the bound
-into `000` → `DOWN` (`classify_code`, harness case 93) — a loop that serves
-SLOWER than the bound too. What it does NOT detect is a loop that serves slowly
-WITHIN the bound: a 4 s answer passes a 5 s prober. It says nothing about a
-deploy that never happened (`check-deploy-staleness.sh`), and it is not a
+**Blind spots, stated rather than implied** (the discipline #10892's own scope
+comment asks for — `issues/10892#issuecomment-6698714004`): this detects a loop
+that cannot serve, and — by two mechanisms, because an answer can stall in two
+places — a loop that serves SLOWER than the bound too: no status line inside the
+bound yields `000` → `DOWN` (`classify_code`, harness case 93), and headers
+inside the bound with a body that never arrives yields a healthy-looking `200`
+plus a non-zero curl exit, which `probe()` grades DOWN because the transfer did
+not complete (harness case 100b). What it does NOT detect is a loop that serves
+slowly WITHIN the bound: a 4 s answer passes a 5 s prober. It says nothing about
+a deploy that never happened (`check-deploy-staleness.sh`), and it is not a
 substitute for the TCP check that catches a dead process.
 """
 
@@ -63,6 +66,16 @@ import contextlib
 import threading
 import time
 from pathlib import Path
+
+import pytest
+
+# #1005: this module boots the REAL hosted app in-process, and the lifespan opens
+# embedded (redislite) clients it never closes (the process exit does, in
+# production). The shared helper reproduces the closing half; see
+# `tests/_live_utils.py::close_embedded_clients_opened_since`.
+from tests._live_utils import (
+    close_embedded_clients_opened_since as _close_embedded_clients_opened_since,
+)
 
 REPO = Path(__file__).resolve().parent.parent
 HOSTED_API = REPO / "tortoise" / "hosted_api.py"
@@ -95,6 +108,7 @@ def _live_hosted_service(monkeypatch):
     import uvicorn
 
     import tortoise.hosted_api as ha
+    from tortoise import embedded_lifecycle as embedded_lifecycle
 
     monkeypatch.setattr(ha, "_health_probe_interval", lambda: 3600.0)
     ha._HEALTH_PROBE.reset()
@@ -110,6 +124,11 @@ def _live_hosted_service(monkeypatch):
 
     server = uvicorn.Server(
         uvicorn.Config(ha.app, host="127.0.0.1", port=0, log_level="error"))
+    # #1005: the real lifespan opens embedded (redislite) clients for the boot
+    # sweeps and the DB-probe SDK and never closes them — in production the
+    # process exit does. Snapshot before the boot so the teardown closes only
+    # what THIS boot opened (a co-tenant's clients are left alone).
+    embedded_before = set(embedded_lifecycle._embedded_clients)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     try:
@@ -124,6 +143,25 @@ def _live_hosted_service(monkeypatch):
         server.should_exit = True
         thread.join(timeout=60)
         ha._HEALTH_PROBE.reset()
+        _close_embedded_clients_opened_since(embedded_before)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _close_embedded_clients_this_module_opened():
+    """Race guard: close any embedded client the app's boot sweeps open late.
+
+    The per-boot close above cannot see a client a wedged boot worker registers
+    AFTER its own teardown (``monitoring.run_on_daemon_worker`` abandons rather
+    than delays shutdown), and the next boot's snapshot would count it as
+    pre-existing. This module-scoped sweep closes everything opened since the
+    module started, before the suite's #1005 orphan-hygiene gate runs.
+    Idempotent for every client the per-boot close already handled.
+    """
+    from tortoise import embedded_lifecycle as embedded_lifecycle
+
+    before = set(embedded_lifecycle._embedded_clients)
+    yield
+    _close_embedded_clients_opened_since(before)
 
 
 def _get(base_url: str, path: str, *, timeout: float):
@@ -270,11 +308,28 @@ def test_a_blocked_loop_cannot_serve_either_endpoint(monkeypatch):
         "the loop was blocked and /liveness still answered "
         f"{liveness_outcome.status_code} in {liveness_elapsed:.2f}s — its answer "
         "must be impossible to produce without the loop running it")
-    assert isinstance(health_outcome, str) and isinstance(liveness_outcome, str), (
-        "expected NO answer from either endpoint while the loop is held; got "
-        f"health={health_outcome!r} liveness={liveness_outcome!r}. If one of "
-        "these is a 504, the run is still valid but the block was short — say "
-        "so rather than loosening the assertion")
+    # The two assertions above accept either no answer at all (the probe's own
+    # bound expired) or a 5xx (the outermost WaitBound fired first) — BOTH are
+    # "no usable answer inside the client's bound". ⚠️ The 5xx arm is ROBUSTNESS,
+    # not a path this test measures: `_TRANSPORT_WAIT_BOUND_S` is 10 s while
+    # `PROBE_BUDGET_S` is 5 s and the block is held for `BLOCK_S`, so the client
+    # budget always expires first and both probes end as a read timeout. So the
+    # evidence that
+    # the loop was genuinely HELD is not the ANSWER's shape, it is the TIME: a
+    # probe that returned in a few ms never met the block at all. Asserting that
+    # directly is deterministic where asserting "both timed out" was not (#10892
+    # review round 4: those two branches used to forbid the 504 the messages
+    # above call valid).
+    # ⛔ It must be `/liveness`'s OWN elapsed time, not `max(...)`: a blocked
+    # /health always burns its whole client bound, so a max() over both is
+    # satisfied by /health alone and would pass a run where /liveness answered
+    # instantly with a fast 5xx — the state-read shape this test exists to
+    # reject (review round 6).
+    assert liveness_elapsed >= PROBE_BUDGET_S / 2, (
+        f"/liveness returned in {liveness_elapsed:.2f}s, far below its "
+        f"{PROBE_BUDGET_S:.0f}s bound, while the loop was held for {BLOCK_S:.0f}s "
+        f"(health {health_elapsed:.2f}s) — it never met the block, so an answer "
+        "that fast was not produced by being served")
 
     # …and the service is genuinely serving again afterwards: the two probes
     # above observed a REAL block, not a dead process (which would make the
@@ -357,16 +412,61 @@ def test_the_served_endpoint_is_not_transport_bound_exempt():
     """
     import tortoise.hosted_api as ha
 
+    # The route under test, READ FROM THE APP rather than restated here: an
+    # assertion over a literal ("/liveness") cannot see the endpoint MOVE, so
+    # moving it under the exempt prefix would leave a literal-based assertion
+    # green while the endpoint became exempt (fresh-context review, #11340).
+    routes = [
+        route for route in ha.app.routes
+        if getattr(route, "path", "").rstrip("/").endswith("/liveness")
+    ]
+    assert routes, (
+        "no route ending in /liveness is registered on the app — this test's "
+        "subject is gone, so it cannot certify anything (#10892)")
+
     exempt = set(ha._TRANSPORT_WAIT_BOUND_EXEMPT)
-    assert ("GET", "/liveness") not in exempt, (
-        "/liveness is transport-bound exempt — a stalled request would then hang "
-        "with no refusal at all, and the 504 that made the 2026-11-04 outage "
-        "legible would never be produced (see the exemption's own OVERRIDES "
-        "block in hosted_api.py)")
-    assert not "/liveness".startswith(ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX), (
-        "/liveness sits under the "
-        f"{ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX!r} prefix exemption — that "
-        "prefix is for internal-only routes (the operators that already hold "
-        "the bound themselves), and a probe that must RETURN cannot live under "
-        "it: exempting /liveness there would re-create the silent hang the "
-        "504 exists to make legible (#10892)")
+    for route in routes:
+        path = route.path
+        assert ("GET", path) not in exempt, (
+            f"{path} is transport-bound exempt — a stalled request would then hang "
+            "with no refusal at all, and the 504 that made the 2026-11-04 outage "
+            "legible would never be produced (see the exemption's own OVERRIDES "
+            "block in hosted_api.py)")
+        assert not path.startswith(ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX), (
+            f"{path} sits under the "
+            f"{ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX!r} prefix exemption — that "
+            "prefix is for internal-only routes (the operators that already hold "
+            "the bound themselves), and a probe that must RETURN cannot live under "
+            "it: exempting the liveness route there would re-create the silent hang "
+            "the 504 exists to make legible (#10892)")
+
+
+def test_the_served_endpoint_is_rate_limit_exempt():
+    """`/liveness` must stay in `RateLimitMiddleware.SKIP` (#10892 review round 6).
+
+    The prober makes ONE request per run against a route that does no I/O of its
+    own, so a per-IP bucket can only ever produce a 429 on a HEALTHY origin — and
+    a 429 is a PROD DEGRADED page, i.e. the alarm firing because the alarm was
+    rate limited. `hosted_api.py` argues that in a comment, but a comment cannot
+    fail, and `tests/conftest.py` exports `RATE_LIMIT_DISABLED=1` — so no test
+    in the suite can observe the middleware actually skipping the path. The
+    membership is therefore pinned STRUCTURALLY, and the path is resolved FROM
+    THE APP so a moved route cannot leave this green (the same pattern as the
+    transport-bound test above).
+    """
+    import tortoise.hosted_api as ha
+
+    routes = [
+        route for route in ha.app.routes
+        if getattr(route, "path", "").rstrip("/").endswith("/liveness")
+    ]
+    assert routes, (
+        "no route ending in /liveness is registered on the app — this test's "
+        "subject is gone, so it cannot certify anything (#10892)")
+
+    skip = set(ha.RateLimitMiddleware.SKIP)
+    for route in routes:
+        assert route.path in skip, (
+            f"{route.path} is NOT in RateLimitMiddleware.SKIP — the availability "
+            "prober would then spend a per-IP bucket it does not need, and a 429 "
+            "on a healthy origin would page PROD DEGRADED (#10892)")
