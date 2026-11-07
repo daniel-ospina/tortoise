@@ -3913,14 +3913,35 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
         # Measured on this doc: 1 hit with the clause, 1 with the `inner def`
         # rewording, 0 with the clause deleted, 0 with the clause REVERSED
         # ("Inside the walk, and therefore reported").
-        #  · the polarity cue is why the reversed doc reds: `"decorator" and
+        #  · the polarity is why the reversed doc reds: `"decorator" and
         #    "default"` alone stays GREEN on a sentence that asserts the exact
         #    inverse the comment above names (#11389 review, P3).
+        #  · and the polarity has to be read as three separate facts, because
+        #    `"not" in sentence` is a substring test that any of these defeats
+        #    — all four measured GREEN on this doc before the split (#11389
+        #    review, P3, on this very predicate):
+        #      "…are noted as reported"                       (substring `not`)
+        #      "…are not exempt — reached from inside the walk  (asserts the
+        #       and therefore reported"                         INVERSE)
+        #      "…are never skipped by this walk"                (inverse)
+        #      real clause DELETED + "This section does not discuss
+        #       decorators or defaults"                        (no walk at all)
+        #    So: the negation cue must be a WORD (`\bnot\b`, never `noted`), the
+        #    sentence must also carry the COVERAGE vocabulary the claim is about
+        #    (walk/visit/reach/report — which the decoy lacks), and it must not
+        #    carry the positive reading (`inside the walk` / `therefore reported`
+        #    / `skipped`). Cost, stated where it is taken: a future rewording
+        #    that states the exclusion with none of `not`/`never`/`outside`, or
+        #    that says "skipped", reds.
+        negation = re.compile(r"\b(?:not|never|outside)\b")
+        coverage = re.compile(r"\b(?:walk|visit|reach|report)ed?\b")
+        affirmed = re.compile(r"\binside the walk\b|\btherefore reported\b|\bskipped\b")
         s3 = _doc_section(text, "## 3.", "## 4.").lower()
         residual = [sentence for sentence in s3.split(". ")
                     if "decorator" in sentence and "default" in sentence
-                    and ("not" in sentence or "never" in sentence
-                         or "outside" in sentence)]
+                    and negation.search(sentence)
+                    and coverage.search(sentence)
+                    and not affirmed.search(sentence)]
         assert residual, (
             "the doc claims the declaration is total; the walk does not visit a "
             "nested def's defaults/decorators, and no sentence of §3 says so")
