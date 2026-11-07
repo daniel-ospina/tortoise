@@ -3186,6 +3186,28 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # closed one entry over.
             "(b2) is not closed.",
             "(e) is not closed.",
+            # ⛔ AND THE FOUR THAT WERE STILL SUBSTITUTABLE (#11258 review round 22
+            # `P1`, MEASURED). Rounds 8 and 11 pinned the three comma forms and the
+            # two `(x) is not closed` entries; these four were left with no
+            # membership, so substituting
+            # `the ADJACENCY half is not merely closed, it is fused.` with a
+            # DIFFERENT, equally-refused sentence kept uniqueness, the 15-entry
+            # floor, every membership string already present AND the whole file at
+            # `106 passed` — while the round-15 `P2` cost (the honest assertion of
+            # closure the unanchored `not … closed` arm cannot tell from a
+            # reopening) left the ledger unrecorded. Same defect rounds 8 and 11
+            # closed one entry over, and the rule this file already states:
+            # membership is the only thing that blocks SUBSTITUTION.
+            "the ADJACENCY half is not merely closed, it is fused.",
+            "the ADJACENCY half is not just closed but fused.",
+            # ⛔ this one also pins the `not … closed AGAIN` shape, which is the
+            # only membership entry for it.
+            "the ADJACENCY half is not closed again since the tables landed.",
+            # ⛔ AND THIS ONE IS THE ONLY MEMBERSHIP PIN ON THE CLAUSE SPLITTER:
+            # `_RESIDUAL_CLAUSE_SPLIT` does not break on `, so `, so the sentence is
+            # refused as a UNION. Adding `, so ` to the splitter is what turns it
+            # GREEN, and that widening is what round 16's `P1` refused.
+            "the ADJACENCY half is closed by the tables, so the SPELLING gap is what stays open.",
             # ⛔ AND THE `fails open` PAIR (#11258 review round 19 `P3`): without
             # membership both are substitutable by duplicates of the entries above
             # — uniqueness and length survive and the measured class leaves the
@@ -3369,6 +3391,172 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         " (with its measured verdict) rather than leaving two lists: "
         f"{now_accepted}"
     )
+
+
+#: The PIN'S STRUCTURAL HALF, one falsifier per rule (#11258 review round 22 `P0`).
+#:
+#: ⛔ MEASURED BEFORE THIS EXISTED — every rule below was deletable with the file at
+#: `106 passed`. The reopening half was never in that state: both proof tuples drive
+#: `_residual_reopening_claims`, so an arm there cannot be removed silently. The
+#: structural half is a straight-line run of `assert`s whose only caller feeds it the
+#: REAL row, and a real row satisfies every one of them by definition.
+#:
+#: Each entry is `(label, mutate, attribution)`:
+#:   * `label` — the rule, named the way its own assertion names it;
+#:   * `mutate` — the registry text → a copy that breaks THAT rule;
+#:   * `attribution` — how the red is allowed to arrive:
+#:       `"scan"`   the reopening scan still returns `[]` on the mutant, so the
+#:                  structural rule is the only thing that can have refused it. A
+#:                  mutant that happened to BE a reopening would red through the
+#:                  scan and this test would look like it proved the structural
+#:                  half while proving nothing about it;
+#:       `"region"` the red IS the guard inside `_residual_region`, which the scan
+#:                  calls through — so the scan cannot be run on the mutant at all,
+#:                  and that guard is the rule under test.
+_STRUCTURAL_FALSIFIERS = (
+    (
+        "residual (d) is still stated as the RATE-unit gap",
+        lambda t: t.replace("(d) a RATE unit", "(d) the RATE-unit gap", 1),
+        "scan",
+    ),
+    (
+        "the RATE class's own `per day` example is still in residual (d)'s opening",
+        lambda t: t.replace("requests per\n      day", "requests per\n      week", 1),
+        "scan",
+    ),
+    (
+        "the positive control: the RATE class is still named as NOT JUDGED",
+        lambda t: t.replace("is not judged: no unit is ADJACENT",
+                            "is judged: no unit is ADJACENT", 1),
+        "scan",
+    ),
+    (
+        "the ADJACENCY gap is asserted CLOSED, per SENTENCE",
+        lambda t: t.replace("stand here is CLOSED:",
+                            "stand here was judged, and the tables now cover it:", 1),
+        "scan",
+    ),
+    (
+        "the registry carries exactly ONE residual-list marker",
+        # ⛔ NOT `t.replace(marker, marker + " (2b)")` — MEASURED: that leaves the
+        # count at ONE (the marker substring survives inside its own replacement),
+        # so it mutates nothing the guard reads and would prove the guard missing
+        # when it is present. A second OCCURRENCE is what the guard counts.
+        lambda t: t + "\n      " + _RESIDUAL_MARKER + " — a second, unguarded list\n",
+        "region",
+    ),
+    (
+        "the registry carries exactly ONE `state_value_carve_out` row",
+        lambda t: t + "  - id: state_value_carve_out\n    name: \"a second, unguarded copy\"\n",
+        "region",
+    ),
+)
+
+
+def test_every_structural_rule_in_the_pin_has_a_falsifier():
+    """#11258: the pin's STRUCTURAL half, refused rule by rule.
+
+    ⛔ WHY THIS EXISTS — MEASURED at the review head (`6c3c18b8280f`), and it is
+    this artifact's own defect class one layer in. `_assert_the_row_names_its_
+    closure` has two halves: the REOPENING half, whose arms are iterated by both
+    proof tuples (`_RESIDUAL_REOPENING_MUTATIONS` must RED,
+    `_RESIDUAL_TRUTHFUL_STATEMENTS` must stay GREEN), and the STRUCTURAL half — an
+    unbroken run of `assert`s over the real row. A real row satisfies all of them
+    by definition, so nothing re-measured any of them: neutralising the `(d)`
+    header split, the `per day` example, the `not judged` positive control, the
+    per-sentence CLOSED rule, the single-marker guard AND the single-row guard left
+    this file at **106 passed**.
+
+    ⛔ TWO OF THOSE ARE NOT COSMETIC, which is what makes this a `P0` rather than
+    tidiness:
+      * neutralising the per-sentence CLOSED loop restores review cycle 7's `P1` —
+        a row saying the ADJACENCY half "was judged" (a retired claim: no CLOSED
+        verdict in the sentence) passes, because the block-wide `"closed" in flat`
+        control that cycle 7 replaced is satisfied elsewhere in the 10,019-char
+        block;
+      * neutralising the row guard restores the duplicate-row fail-open its own
+        comment measures — a second `  - id: state_value_carve_out` row publishes
+        its own residual list while the scan reads whichever copy comes first.
+
+    ⛔ AND A MUTANT MUST NOT RED FOR THE WRONG REASON. Each entry declares its
+    attribution and the `"scan"` arm asserts `_residual_reopening_claims(mutant)
+    == []`, so a mutant that is merely a reopening cannot stand in for a missing
+    structural rule. Same shape as the over-block ledger: what is measured is
+    recorded as measured, and what a rule CANNOT do is stated rather than implied.
+
+    ⛔ NOT FALSIFIED HERE, stated rather than implied: the two SPELLING-tail rules.
+    No single edit removes their evidence — in the tail, `spelling` survives in NINE
+    sentences and `spelling` + `open` in TWO — so a per-rule mutation would have to
+    rewrite the row's whole surviving-gap disclosure, and a mutation that large
+    proves the fixture, not the rule. The value is asserted as a RECORD below
+    instead, with instructions for the lane that ever makes it falsifiable.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    # control: the real row must PASS, or a mutant could red for a reason that has
+    # nothing to do with the rule it is labelled with.
+    _assert_the_row_names_its_closure(text)
+    for label, mutate, attribution in _STRUCTURAL_FALSIFIERS:
+        mutant = mutate(text)
+        assert mutant != text, (
+            f"the fixture for {label!r} no longer CHANGES the registry — the row "
+            "wording it targets has moved, so this falsifier proves nothing at all. "
+            "Re-anchor it on the row's new text; do not delete the entry")
+        try:
+            _assert_the_row_names_its_closure(mutant)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(
+                f"the structural rule {label!r} has NO falsifier: a registry that "
+                "breaks it still passes the pin, so the rule is prose the suite "
+                "never re-measures — the class this artifact exists to refuse")
+        if attribution == "scan":
+            # ATTRIBUTION: the red above must not be the REOPENING rule wearing a
+            # structural rule's label. `claims is None` means the claim rule never
+            # ran — a guard inside `_residual_region` refused the mutant first, so
+            # it was never judged a reopening either, which is all this arm needs.
+            try:
+                claims = _residual_reopening_claims(mutant)
+            except AssertionError:
+                claims = None
+            assert claims in (None, []), (
+                f"the falsifier for {label!r} reds through the REOPENING scan, so "
+                "it proves nothing about the structural rule it is labelled with — "
+                "re-derive the mutant so it breaks only that rule")
+        else:
+            assert attribution == "region", f"unknown attribution {attribution!r}"
+            # asserted on the GUARD ITSELF, not inferred from the pin's failure
+            # above: a mutant can break a structural rule AND the region guard, and
+            # then the pin's red says nothing about which one refused it.
+            try:
+                _residual_region(mutant)
+            except AssertionError:
+                pass
+            else:
+                raise AssertionError(
+                    f"the region guard claimed by {label!r} did not refuse its "
+                    "mutant — the row/marker guard is the rule being pinned here, "
+                    "so the red above must come from it")
+    # ⛔ THE RECORD behind "not falsified here": the tail rules cannot be isolated
+    # while more than one tail sentence carries their evidence. If that ever drops
+    # to ONE, they CAN be falsified a sentence at a time and the entries belong in
+    # `_STRUCTURAL_FALSIFIERS` — so this reds and says so rather than leaving a
+    # stale excuse in a docstring (the [pin-defensive-claim] class this file polices).
+    block = text.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
+    flat = " ".join(block.split()).lower()
+    sentences = re.split(r"(?<=[.!?;])\s+", flat)
+    tail = sentences[
+        [i for i, s in enumerate(sentences) if "adjacency" in s][-1] + 1:]
+    assert sum("spelling" in s for s in tail) > 1, (
+        "the SPELLING disclosure is now expressed by a SINGLE tail sentence, so "
+        "`_assert_the_row_names_its_closure`'s two tail rules CAN be falsified one "
+        "sentence at a time — move them into `_STRUCTURAL_FALSIFIERS` and delete "
+        "this record rather than leaving it stale")
+    assert sum("spelling" in s and "open" in s for s in tail) > 1, (
+        "only one tail sentence now carries `spelling` AND `open`, so the tail "
+        "rules' evidence is isolable — falsify them in `_STRUCTURAL_FALSIFIERS` "
+        "instead of recording them as unfalsifiable")
 
 
 def test_the_filler_windows_are_justified_by_the_language_not_by_the_row():
