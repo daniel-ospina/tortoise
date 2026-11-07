@@ -74,11 +74,28 @@ assert that a refused/errored pass issued none.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE every other import. The POSITION is
+# the property this exists for, not this file's current import list: the corpus
+# rule (`tests/test_entry_point_python_guard.py`, property 1) requires `import
+# sys` + the guard to precede all other imports, because a module-level
+# 3.11+-only import raises ImportError on an old interpreter before any
+# LATER-placed guard could run. This file imports no `datetime` today; the guard
+# is hoisted anyway so the rule holds uniformly instead of being re-litigated
+# per import list. `tools/<x>.py` is a LOOSE script, so the invocation named is
+# the script form — `-m tools.cache_evict` is not this file's invocation.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/cache_evict.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/cache_evict.py`"
+    )
+
 import argparse
 import contextlib
 import importlib
 import json
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
