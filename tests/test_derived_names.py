@@ -778,28 +778,34 @@ def _raw_client_call_positions(source: str) -> list[int]:
             # usable). Gate OPEN on the conventional name rather than silently
             # returning no sites for the whole file.
             names.add("FalkorDB")
-    qualified = r"(?:[A-Za-z_]\w*\.)*FalkorDB"
-    if names:
-        # ALWAYS OR in the qualified form. A file can resolve an import name AND
-        # still construct through a SECOND route the statement parser cannot see
-        # — `from falkordb import FalkorDB` plus
-        # `fdb = pytest.importorskip("falkordb")`, where the DETACHing call is
-        # `fdb.FalkorDB(...)`. Restricting the match to the resolved names left
-        # that construction invisible (#11217 round-5 review P2, measured
-        # `sites=0`).
-        pattern = "|".join(
-            [re.escape(n) for n in sorted(names)] + [qualified])
-    else:
-        # The module name may appear only inside a STRING — `fdb =
-        # pytest.importorskip("falkordb")`, `importlib.import_module("falkordb")`
-        # — which masking erases, so this trigger reads the RAW source. A comment
-        # naming it also opens the gate, which is harmless: it only widens the
-        # construction match, and a file with no construction yields no site.
-        if not re.search(r"\bfalkordb\b", source):
-            return []
-        pattern = qualified
+    # ⛔ ALWAYS include the conventional `FalkorDB`, and match it with `.` allowed
+    # before it. Import parsing only ever NARROWS the candidate set, and a set
+    # derived from statements can never be complete: `falkordb` arrives through
+    # `from`/`import`/dotted/alias forms, but also through
+    # `pytest.importorskip("falkordb")`,
+    # `importlib.import_module("falkordb").FalkorDB(...)`, a `try/except
+    # ImportError` pair, or a re-export — an open-ended family, and each hole in
+    # it was a whole file switched off (rounds 2-5 review P2s). So the resolved
+    # aliases EXTEND the set and never replace the conventional name.
+    #
+    # The lookbehind is `(?<![\w])`, NOT `(?<![\w.])`: allowing the dot is what
+    # makes a QUALIFIED construction (`fdb.FalkorDB(`, `falkordb.falkordb.FalkorDB(`,
+    # `import_module("falkordb").FalkorDB(`) a site, and `FakeFalkorDB(` is still
+    # excluded because `e`/`_` are word chars. Cost measured before taking it:
+    # over the 1183 non-exempt corpus files this newly judges ZERO sites.
+    gated = bool(names)
+    names.add("FalkorDB")
+    # Nothing resolved a name and the file may not touch falkordb at all —
+    # `FalkorDB` could be some unrelated class. Require a mention, read from the
+    # RAW source: the module name may live only inside a STRING
+    # (`importorskip("falkordb")`), which masking erases. A comment naming it
+    # also passes, which is harmless — a file with no construction yields no
+    # site.
+    if not gated and not re.search(r"\bfalkordb\b", source):
+        return []
+    pattern = "|".join(re.escape(n) for n in sorted(names))
     return [m.start()
-            for m in re.finditer(rf"(?<![\w.])(?:{pattern})\s*\(", masked)]
+            for m in re.finditer(rf"(?<![\w])(?:{pattern})\s*\(", masked)]
 
 
 def _raw_detach_violations(root=None):
@@ -2069,6 +2075,28 @@ def test_the_census_anchors_on_the_CALL_not_the_import(tmp_path):
         "a construction spelled inside a STRING became a site: "
         f"{_raw_detach_violations(root=tmp_path)}")
 
+    # 6. A LOOKALIKE name is not a FalkorDB construction. The match allows a `.`
+    #    before `FalkorDB` (so qualified calls are sites) but still requires a
+    #    non-word character, so `FakeFalkorDB(` and `FalkorDBAdapter(` cannot
+    #    become phantom sites.
+    site.write_text(
+        "from falkordb import FalkorDB\n"
+        "\n"
+        "\n"
+        "class FakeFalkorDB:\n"
+        "    pass\n"
+        "\n"
+        "\n"
+        "def test_lookalike():\n"
+        "    import os\n"
+        '    name = f"test_g_{os.urandom(4).hex()}"\n'
+        '    c = FakeFalkorDB(host="h")\n'
+        '    c.query("MATCH (n) DETACH DELETE n")\n'
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        "a `FakeFalkorDB(` lookalike was graded as a raw client: "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
 
 def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
     """#11217 round-2 review P2: the file-level GATE must fail CLOSED too.
@@ -2133,6 +2161,12 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
             "from falkordb import FalkorDB\n"
             "import pytest\nfdb = pytest.importorskip(\"falkordb\")\n",
             "fdb.FalkorDB"),
+        # Previously DISCLOSED as still open (the `)` before `.FalkorDB` defeated
+        # the old `(?<![\w.])` lookbehind); the wider lookbehind now matches a
+        # construction in ANY qualifier position.
+        "import_module, inline": (
+            "import importlib\n",
+            "importlib.import_module('falkordb').FalkorDB"),
     }
     site = tmp_path / "test_spelling.py"
     for label, (header, construct) in spellings.items():
