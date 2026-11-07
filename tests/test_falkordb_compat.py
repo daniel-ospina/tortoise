@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -222,7 +223,9 @@ class TestVersionProbeCached:
             _reset_falkordb_version_cache()
 
     def test_unidentified_client_never_cached(self):
-        """No endpoint attrs (unit mocks) → probed fresh every call."""
+        """No endpoint identity at all — no connection attrs AND no pool kwargs
+        (unit mocks) → probed fresh every call. A client with no ATTRS but a pool
+        IS identified now (#11328), which is the whole fix."""
         _reset_falkordb_version_cache()
         try:
             class _Conn:
@@ -284,12 +287,24 @@ class TestVersionProbeCacheKeyServerMode:
             "server", "10.0.0.5", 6379)
 
     def test_the_key_is_the_same_bucket_as_the_store_identity(self):
-        """One store must not land in two buckets: the key the version cache
-        uses and the endpoint the `#4997`/`#11087` registers key on are the
-        SAME tuple for a resolved server client."""
+        """One store must not land in two buckets: the key the version cache uses
+        and the endpoint the `#4997`/`#11087` registers key on are the SAME tuple
+        for a resolved server client.
+
+        ⛔ The projection's `_host` is deliberately set to a DIFFERENT host than
+        the pool's (only a real projection keeps them equal — `__init__` uses one
+        `host` local for both). With them equal this test could not fail for the
+        property it names: `_stable_endpoint()` delegates to this key, so equality
+        would be guaranteed by construction and a future edit that sent the
+        registers to `_host` while the cache keyed on the pool would still pass.
+        Divergent is the only discriminating shape, and it also pins WHICH source
+        wins: the pool's, because a redis-py client carries no endpoint
+        attributes at all.
+        """
         proj = self._proj(
             type("_Db", (), {"connection": self._pool_only_client()})())
-        proj._host = "10.0.0.5"
+        proj._host = "a-different-host"
+        assert proj._falkordb_version_cache_key() == ("server", "10.0.0.5", 6379)
         assert proj._stable_endpoint() == proj._falkordb_version_cache_key()
 
     def test_second_projection_of_a_pool_only_client_skips_the_probe(self):
@@ -329,6 +344,37 @@ class TestVersionProbeCacheKeyServerMode:
         proj._is_embedded = True
         assert proj._falkordb_version_cache_key() == (
             "embedded", "/tmp/embedded.db")
+
+    def test_the_embedded_guard_reads_the_same_attribute_as_the_fallthrough(self):
+        """`_is_embedded` and `_path` are two attributes for one fact, and
+        `__init__` sets them together — but a guard that reads one while the
+        fallthrough reads the other disagrees on the shape where they diverge,
+        silently re-keying an embedded store as a network store (#11360 review
+        P3). The guard must read `_path`, the attribute the embedded key is
+        BUILT from, so the two cannot disagree. Divergence is staged here on
+        purpose: `_path` present, `_is_embedded` left False."""
+        proj = self._proj(
+            type("_Db", (), {"connection": self._pool_only_client()})())
+        proj._path = "/tmp/embedded-but-flagged-server.db"
+        proj._is_embedded = False
+        assert proj._falkordb_version_cache_key() == (
+            "embedded", "/tmp/embedded-but-flagged-server.db")
+
+    def test_a_partial_connection_does_not_mint_a_hybrid_endpoint(self):
+        """Both identity fields must come from ONE source (#11360 review P3):
+        host from the connection and port from the pool would mint
+        `('server', pool-host, conn-port)`, a tuple matching NEITHER source —
+        which can equal a different store's real endpoint, serving its version
+        to this store and merging the two stores' registers. A redis-py client
+        never resolves half an endpoint, but a partial fake does."""
+        partial = SimpleNamespace(connection=SimpleNamespace(port=7000))
+        partial.connection.connection_pool = SimpleNamespace(
+            connection_kwargs={"host": "pool-host", "port": 6399})
+        key = self._proj(partial)._falkordb_version_cache_key()
+        assert key == ("server", "pool-host", 6399), (
+            f"expected the pool's complete pair, got {key!r} — a hybrid sources "
+            "the two fields from different places and matches no real store"
+        )
 
 
 # ── _ensure_indexes vector branch ───────────────────────────────────────────

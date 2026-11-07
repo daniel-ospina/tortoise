@@ -727,16 +727,17 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #
 # ⛔ THE KEY IS A STORE IDENTITY, NOT AN OBJECT ADDRESS, AND BOTH THIS REGISTER
 # AND THE WARNING LATCH USE IT. The key once came from
-# `_falkordb_version_cache_key() or id(self)`, and on a redis-py that hides the
-# endpoint behind `connection_pool.connection_kwargs` that helper answers None —
-# so on the per-request path both the warning and this report were keyed on the
-# ADDRESS of a projection object: one entry (and one WARNING) per live request
-# slot, never evicted, with dedup depending on allocator address recycling
-# rather than on store identity. `_stable_endpoint()` resolves the endpoint from
-# the cache key, then the projection's own `_host` together with the client's
-# port out of `connection_pool.connection_kwargs`, and only then the address —
-# that last case is a bare unit mock, the one shape with no endpoint identity at
-# all.
+# `_falkordb_version_cache_key() or id(self)`, and back then that helper answered
+# None on any redis-py that hides the endpoint behind
+# `connection_pool.connection_kwargs` (redis 7.4.1) — so on the per-request path
+# both the warning and this report were keyed on the ADDRESS of a projection
+# object: one entry (and one WARNING) per live request slot, never evicted, with
+# dedup depending on allocator address recycling rather than on store identity.
+# The helper now resolves that same pool seam (#11328), so on the hosted path it
+# carries the endpoint and `_stable_endpoint()` returns it directly;
+# `_stable_endpoint()`'s other lanes — the projection's `_host` with the client's
+# port, then the address — remain for clients that resolve no endpoint at all
+# (a bare unit mock, the one shape with no store identity).
 _VECTOR_INDEX_PAIR_REPORTED: dict[tuple, tuple[frozenset, frozenset]] = {}
 _VECTOR_INDEX_PAIR_LOCK = threading.Lock()
 
@@ -18642,33 +18643,49 @@ class FalkorProjection(
         exists to remove. So: connection attributes first (a raw
         ``redis.Connection`` does carry them), then the pool kwargs, which is
         the seam ``event_store._store_identity``, ``cypher_guard._client_store_key``
-        and ``_stable_endpoint`` all resolve a store's endpoint from.
+        and ``_stable_endpoint`` all resolve a store's endpoint from. Both
+        fields always come from ONE source, so a partially-resolving client can
+        never mint a hybrid endpoint that matches neither.
 
-        Embedded stays keyed on its PATH: an embedded client's pool kwargs
-        carry ``path``, never ``host``/``port``, and the fallback is skipped for
-        it explicitly so a future default in a vendored pool cannot re-key a
-        bundled-module install as a network store.
+        Embedded stays keyed on its PATH: the fallback is skipped whenever a
+        `_path` is present — the same attribute the embedded key is built from,
+        so the guard and the fallthrough cannot disagree — and an embedded
+        client's pool kwargs carry ``path``, never ``host``/``port``.
         """
         conn = getattr(getattr(self, "db", None), "connection", None)
         host = port = None
         if conn is not None:
-            host = getattr(conn, "_host", None) or getattr(conn, "host", None)
-            port = getattr(conn, "port", None)
-        if (host is None or port is None) and not getattr(
-                self, "_is_embedded", False):
+            conn_host = getattr(conn, "_host", None) or getattr(conn, "host", None)
+            conn_port = getattr(conn, "port", None)
+            # ⛔ BOTH fields from ONE source (#11360 review P3): filling host
+            # from the connection and port from the pool mints a hybrid tuple
+            # like ('server', conn-host, pool-port) that matches NEITHER
+            # source and can equal a different store's real endpoint — which
+            # would serve one store's version to another AND merge the two
+            # stores' `#4997`/`#11087` registers.
+            if conn_host is not None and conn_port is not None:
+                host, port = conn_host, conn_port
+        path = getattr(self, "_path", None)
+        if host is None and path is None:
+            # The guard reads the SAME attribute the fallthrough below reads, so
+            # the two cannot disagree: an embedded store is keyed on its path by
+            # construction, never re-keyed as a network store by the fallback.
             kwargs = _client_pool_kwargs(getattr(self, "db", None)) or {}
-            if host is None:
-                host = kwargs.get("host")
-            if port is None:
-                port = kwargs.get("port")
+            pool_host = kwargs.get("host")
+            pool_port = kwargs.get("port")
+            if pool_host is not None and pool_port is not None:
+                host, port = pool_host, pool_port
         if host is not None and port is not None:
             try:
                 return ("server", str(host), int(port))
             except (TypeError, ValueError):
                 # An unparseable port is no endpoint identity — fall through
                 # rather than mint a key that would collide across stores.
+                # (`int(float('inf'))` raises OverflowError, which is uncaught:
+                # a non-finite port is not a shape any client produces, and
+                # raising here would fail store construction at
+                # `__init__` — the loud failure, kept deliberately.)
                 pass
-        path = getattr(self, "_path", None)
         if path is not None:
             return ("embedded", str(path))
         return None
