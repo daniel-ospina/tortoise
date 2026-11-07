@@ -27,14 +27,19 @@ rule exists to close.
   number, for the reason `tools/dod_5090_probe.py` learned the expensive way. Every citation is
   **re-derived at HEAD**, in the direction that can actually rot: each `reason` must name a
   `module::symbol` the tree still DEFINES, and — where the census has a row — the row's own
-  `CENSUS_EVIDENCE` needles must still be inside that symbol
-  (`tests/test_embed_writer_register.py::test_every_declaration_cites_a_seam_and_an_owning_issue`,
-  `::test_the_instrument_and_the_product_declare_the_same_writers`).
+  `CENSUS_EVIDENCE` needles must still be inside that symbol. The halves are re-derived by
+  DIFFERENT tests and no single one covers all of them: the `module::symbol` half by
+  `tests/test_embed_writer_register.py::test_every_declaration_cites_a_seam_and_an_owning_issue`,
+  the class AGREEMENT half by `::test_the_instrument_and_the_product_declare_the_same_writers`
+  (which reads no `CENSUS_EVIDENCE` at all), and the `CENSUS_EVIDENCE` needles by
+  `tests/test_dod_5090_probe.py::test_every_census_citation_re_derives_at_this_head` (via
+  `probe.census_evidence_violations()`).
   ⚠️ Census evidence and this register are **not** one population:
   `tortoise.session_indexer::main` is the one entry with no census row (it is the instrument's ONE
   `ungated` write path, carried in the census's row-1 prose), so its citation is re-derived by the
   symbol test alone. A reader who wants "re-derivable by `CENSUS_EVIDENCE`" to cover 100% of this
-  file should read it as "by the two tests that re-derive it", which is what they do.
+  file should read it as "by the three tests that re-derive it, one half each", which is what they
+  do.
 
 **Discovery, and the edge of the guard.** The guard's population comes from
 `tools/dod_5090_probe.py::embedding_writers()`, so the guard is exactly as wide as that discovery —
