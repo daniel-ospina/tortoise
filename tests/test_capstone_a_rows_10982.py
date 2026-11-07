@@ -595,6 +595,12 @@ def test_a_registered_non_bar_must_name_its_owner_decision_and_cannot_borrow_the
     for bad, needle in (
         ("UNMEASURED(the bar is owner-gated on a fork nobody opened)", "names no issue"),
         ("UNMEASURED(nothing here) `>= 30` typed statements", "outside its floor"),
+        # ⛔ THE SAME CELL WITH ONE SPACE BEFORE THE PARENTHESIS — the natural prose spelling, and
+        # the one that defeated the arm until round 6: the detector was the literal `UNMEASURED(`,
+        # so `UNMEASURED (…)` fell through to the NUMERIC arms and read the floor clause's `>= 30`
+        # as its bar. Both mutations below pin the tolerance, so reverting `\s*` reds an arm.
+        ("UNMEASURED (nothing here) `>= 30` typed statements", "outside its floor"),
+        ("UNMEASURED (owner-gated — `#10988` decides) `>= 30` typed statements", "outside its floor"),
         # ⛔ The cell that defeated the first cut of this arm: it declares a real bar AFTER the floor
         # clause, and a `floor of[^;]*` strip ate it (#10982 review round 3). The strip is now the
         # comparator THE FLOOR OWNS, so a bar stated afterwards is still seen.
@@ -623,6 +629,11 @@ def test_a_REQUIRED_row_cannot_declare_itself_a_non_bar():
     for cell in (
         "UNMEASURED(the bar is owner-gated — `#10988` decides)",
         "UNMEASURED(owner-gated — `#10988` decides) above the floor of `>= 30` typed statements",
+        # ⛔ The SPACED spelling of the same two cells. `E1` is a REQUIRED row, so a detector that
+        # misses the space lets the record's own floor clause stand in for its bar and the gate
+        # prints OK — the exact false PASS this arm exists to close (#11331 review round 6).
+        "UNMEASURED (the bar is owner-gated — `#10988` decides)",
+        "UNMEASURED (owner-gated — `#10988` decides) above the floor of `>= 30` typed statements",
     ):
         failures = check.check_completeness(
             [dict(r, threshold=cell) if r is e1 else r for r in rows])
