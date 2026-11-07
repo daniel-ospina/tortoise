@@ -1192,13 +1192,13 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
     monkeypatch.setattr(embedded, "_journal_append",
                         lambda name: events.append(("journal", name)))
 
-    # ⛔ `compile()` picks up the CALLING module's future flags, so the probe must carry
-    # `annotations` itself rather than inherit it from this file's own `from __future__`
-    # (measured: without it, the exec'd fixture's `candidate: Candidate` annotations are
-    # evaluated eagerly and the probe dies with a bare NameError).
-    future = ast.parse("from __future__ import annotations").body[0]
-    probe_module = ast.Module(body=[future, *probe_body], type_ignores=[])
-
+    # NOTE: no `from __future__ import annotations` node is injected here, and adding one
+    # is a no-op: `compile(..., dont_inherit=False)` picks up the CALLING module's future
+    # flags, and this file carries `from __future__ import annotations` at its own top, so
+    # the exec'd fixture's annotations are ALREADY lazy (measured: deleting the injection
+    # leaves this pin green). The earlier draft injected one and claimed the probe would
+    # otherwise die with a `NameError` — that claim did not reproduce; the injection was
+    # inert and left the assignment above as a dead store.
     namespace = {"_live_utils": live_utils_stub}
     exec(compile(probe_module, "<lane fixture>", "exec"), namespace)
     # (`exec` here runs this repo's own committed fixture, not third-party input)
