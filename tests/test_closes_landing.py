@@ -5776,9 +5776,22 @@ def test_an_ITEM_whose_own_content_is_a_NESTED_LIST_leaves_NO_paragraph():
 
     33 such bodies on a 3,520-body grid, 10 of them in all four arms. Requiring the line to carry
     content of its own keeps those lazy (the empty-content rule answers them, as round 40 recorded)
-    while an item whose content IS a marker falls through to the ladder. Measured on a 5,376-body
-    grid, all four arms: **0 new fail-opens and 0 new lost closes against `origin/main`**
-    (`d69faaf38e1`). The top-level CONTROL is the neighbouring test's body and must stay `[100]`;
+    while an item whose content IS a marker falls through to the ladder. On the two composed grids
+    (5,376 + 3,520 bodies), all four arms: 0 new fail-opens and 0 new lost closes against
+    `origin/main` (`d69faaf38e1`).
+
+    ⛔ WHAT THIS GATE DOES **NOT** FIX, MEASURED (round-55 final re-review, P1): it overrides the
+    caller's `lazy_marker` answer, so an item-held lazy marker whose content merely LOOKS like a leaf
+    is read by the ladder — contradicting the module's own "the answer is the CALLER's" rule:
+
+        `- item` + `  2. # H` + `  2.     Closes #100`     renderer ONE `<p>` -> PROSE
+            `origin/main` `[100]` in all four arms, `claims()` `[100]`; THIS HEAD `[]` in all four
+            arms, `claims()` `[]` — a LOST close (332 such bodies on a 43,548-body sweep, 25 reaching
+            `claims()`). The right fix is the COLUMN inside `_is_lazy_marker`, not this gate; filed
+            rather than attempted here.
+
+    So "no regression" is a claim about the grids that were composed, and those grids do not compose a
+    leaf-shaped lazy marker's content. No assertion below relies on the overstated reading. The top-level CONTROL is the neighbouring test's body and must stay `[100]`;
     `- item` + `  1.` + the marker is the BLANK-item control and must stay `[100]` in every arm.
     """
     cl = _load_module()

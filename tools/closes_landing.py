@@ -1359,8 +1359,26 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # 33 such bodies on a 3,520-body grid, 10 of them in all four arms. Gating on "this line has
     # content of its own" keeps those lazy (the empty-content rule is what answers them, as round 40
     # recorded) while an item whose content IS a marker falls through to the ladder, which is the
-    # fact the round-51 P0 needed. Measured on the same grid: lost closes vs `origin/main` 206 -> 0,
-    # fail-opens unchanged, and the `* - x` body stays `[]` in every arm.
+    # fact the round-51 P0 needed.
+    # ⛔ WHAT THIS GATE DOES **NOT** FIX, MEASURED (round-55 re-review, P1 — do not read the counts
+    # below as "no regression"): the gate answers ONE question — does this line carry content of its
+    # own — and it OVERRIDES the caller's `lazy_marker` answer to do it. So an item-held lazy marker
+    # whose content merely LOOKS like a leaf is now read by the ladder, contradicting this function's
+    # own rule 50 lines below ("A MARKER LINE THAT OPENS NO ITEM HAS NO CONTENT COLUMN TO INSPECT …
+    # The answer is the CALLER's (`lazy_marker`)"):
+    #     `- item` + `  2. # H` + `  2.     Closes #100`
+    #         renderer ONE `<p>` (an ordered marker >= 2 cannot interrupt a paragraph, so `# H` is
+    #         TEXT) -> PROSE; `origin/main` `[100]` in all four arms, `claims()` `[100]`; THIS HEAD
+    #         `[]` in all four arms, `claims()` `[]` — a LOST close
+    # 332 such bodies on a 43,548-body sweep (25 of them reaching `issue_process_lint.claims()`), none
+    # of them newly blanked by the re-review commit but all of them new against `origin/main`. The
+    # right fix is the COLUMN, not this gate: `_is_lazy_marker`'s `line_col >= container.rest_col` arm
+    # should be measured against the item that actually HOLDS the open paragraph (the nested content
+    # column), and then `lazy_marker` can decide un-overridden — filed rather than attempted here,
+    # because every guard in `_is_lazy_marker` is measured and pinned.
+    # On the two composed grids this gate is clean (0 new fail-opens, 0 new lost closes vs
+    # `origin/main`, all four arms) — those grids do not compose a leaf-shaped lazy marker's content,
+    # which is why the claim must name its grid and not be stated bare.
     if lazy_marker and (container is None or not body.strip()):
         return False
     # ⛔ §4.4 COMES BEFORE THE LEAF TESTS, NOT AFTER THEM (round 50 — the ordering half of the
@@ -2120,7 +2138,9 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 # where the leaf question is asked. Measured: that body `[]` in both arms, the
                 # controls (`Notes` + `2. -` + `> x` + …, `Notes` + `2. -` + `2.     Closes #100`,
                 # `x` + `- 1.` + `2.     Closes #100`) unchanged, and a 60,000-body sweep against
-                # the previous head moving 25 bodies with 0 new fail-opens and 0 new lost closes.
+                # the previous head moving 25 bodies with 0 new fail-opens and 0 new lost closes — a
+                # claim about THAT 60,000-body grid only; round 55's gate has a residual the grid does
+                # not compose, declared at `_leaves_no_paragraph`.
                 _opened = _html_block_leaf(
                     _html_rest,
                     (prev_prose or _blanked_still_open)
