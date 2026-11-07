@@ -594,9 +594,11 @@ mechanisms:
       ATTRIBUTION LOOP now closes ACROSS calls (§12.5b):
       `plan_writeback(already_written=…)` reports what the cheap tier already
       holds (`already_persisted`) instead of re-minting it, and the STORE's class
-      is part of the class-conflict guard. That is the loop's IDENTITY half only
-      — the plan performs no I/O, so §12.5's persistence seam is still the caller's and this
-      module is still not a writer. ⚠️ The caller owns ONE thing the planner cannot
+      is part of the class-conflict guard. That is the module's side only —
+      `unit_key` is what a repeat is recognised BY, and the plan performs no I/O,
+      so LOADING that store and WRITING to it are the caller's. §12.5's
+      persistence seam is therefore still outside this module, and it is still
+      not a writer. ⚠️ The caller owns ONE thing the planner cannot
       check: `already_written` must be loaded FROM the store — a prior plan's
       `units` are not evidence of persistence, and passing them reports a closed
       loop over a unit that was never written. ⚠️ The state stays

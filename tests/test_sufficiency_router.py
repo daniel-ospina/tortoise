@@ -67,7 +67,7 @@ RED:
   of the branch → ``test_a_minted_unit_is_never_also_reported_as_persisted`` RED.
 * **Leave the stored class out of the class guard** — compare only against
   ``seen`` → ``test_a_stored_class_cannot_be_overwritten_by_a_re_escalation``
-  RED, together with the seven the ACROSS-CALL bullet above already names
+  RED, together with the seven other tests that bullet's eight comprises
   (measured: eight in total — that edit IS the loop being ignored; this test is
   the one that names the STORE's class specifically).
 * **Drop the ``already`` strip on conflicted keys** — report a stored unit the
