@@ -33,9 +33,12 @@ What it re-measures, offline, from the tree in front of it:
      workstream BY LABEL), and the page's opening abstract (`**N fixed and N
      open**`) all equal the row table. A summary that drifts from its own table is
      the same defect class as the missing `content_hash` this map's Pattern 1
-     names. Counts that are not a table cell's whole value — the issue numbers
-     narrated inside §2's cells, §8's sentence, §10's census — are NOT read;
-     `check_workstreams`'s docstring and §9 state that residual rather than
+     names. The read set is EXACTLY: §2's three `| STATUS | n |` rows, §2's
+     `Total tracked` row, §2's five `N of M` cells, and the page's opening
+     abstract above `## 1.`; plus, in `check_registration`, the index row's own
+     headline. Everything else the page prints is not read — §1's census
+     sentence, the issue lists inside §2's cells, §8's sentence, §10's census —
+     and `check_workstreams`'s docstring and §9 name each site rather than
      implying coverage.
   6. **Registration** — the page is listed in `docs/00_index.md`, so it is
      reachable rather than merely committed — **and the index entry's own
@@ -169,11 +172,13 @@ _SUMMARY_SECTION = "## 2."
 #: state "Total tracked 30" over a 26-row table and this tool still said CLEAN —
 #: found by review on the version that already guarded the other three counts, so
 #: the rule is: every count the document prints in MACHINE-READABLE form is
-#: compared, or it is not a count. The rule's edge is precise: a count that IS a
-#: table cell's whole value is compared (the statuses, the total, each
-#: workstream's `N of M`, the abstract); a count narrated inside a sentence — the
-#: issue numbers in §2's cells, §8, §10 — is not, and `check_workstreams` plus §9
-#: disclose that instead of claiming it.
+#: compared, or it is not a count. The rule's edge is a READ SET, not a
+#: table-cell/sentence split (the abstract is a sentence and IS read; a cell can
+#: narrate a list that is not): the counts read are §2's three `| STATUS | n |`
+#: rows, §2's `Total tracked` row, §2's five `N of M` cells, the page's opening
+#: abstract, and the index row's headline (`check_registration`). Every other
+#: count the page prints — §1's census sentence, the issue lists inside §2's
+#: cells, §8, §10 — is named as a residual, not claimed.
 _TOTAL = re.compile(r"^\|\s*\*\*Total tracked\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|",
                     re.MULTILINE)
 #: §2's per-workstream row, WITH its label: `| WS-A write-path integrity — … |
@@ -187,10 +192,11 @@ _WS_COUNT = re.compile(
     re.MULTILINE,
 )
 #: The page's opening abstract: "**21 fixed and 5 open**". It lives in the body's
-#: opening blockquote, NOT in the frontmatter (the frontmatter carries
-#: `measured_at_commit`/`measured_at` only), so it is read from the text BEFORE
-#: `## 1.` — and an abstract that carries the sentence twice is reported as
-#: ambiguous rather than resolved by first-match, the `_TOTAL` lesson.
+#: opening blockquote, NOT in the frontmatter (whose keys are `title`,
+#: `measured_at_commit`/`measured_at` and their siblings — it carries no
+#: headline), so it is read from the text BEFORE `## 1.` — and an abstract that
+#: carries the sentence twice is reported as ambiguous rather than resolved by
+#: first-match, the `_TOTAL` lesson.
 _HEADLINE = re.compile(r"\*\*(\d+) fixed and (\d+) open\*\*")
 _HEADLINE_SCOPE = "## 1."
 
@@ -603,7 +609,7 @@ def check_summary(text: str, rows: list[Row]) -> list[str]:
 
 
 def check_workstreams(text: str, rows: list[Row]) -> list[str]:
-    """§2's per-workstream "**N of M fixed**" lines and the frontmatter headline.
+    """§2's per-workstream "**N of M fixed**" lines and the page's abstract headline.
 
     WHY THIS EXISTS (found by fresh review at the post-merge head, reproduced): the
     summary check above compared only the three `| STATUS | n |` rows and the
@@ -618,8 +624,10 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
     report its own shrink. The count is bound to its workstream BY LABEL, not by
     position (a label-only swap was measured to pass a positional bind).
 
-    RESIDUAL, stated rather than implied — the counts this check does NOT read are
-    the ones that are not a table cell's whole value:
+    RESIDUAL, stated rather than implied. The read set is: §2's three
+    `| STATUS | n |` rows + `Total tracked` (in `check_summary`), §2's five
+    `N of M` cells and the opening abstract (here), and the index row's headline
+    (`check_registration`). What is NOT read:
 
       * §1's census sentence ("four rows where …"), which is a count over a
         criterion this guard cannot evaluate — it refuses to read the tracker,
@@ -683,7 +691,14 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
         )
         return errors
     if headline is None:
-        errors.append("the page carries no `**N fixed and N open**` headline")
+        if _HEADLINE.search(text):
+            errors.append(
+                "the `**N fixed and N open**` headline sits outside the opening "
+                "abstract (above `## 1.`), where it is not read — move it into "
+                "the abstract or reword the abstract to carry it"
+            )
+        else:
+            errors.append("the page carries no `**N fixed and N open**` headline")
     else:
         want_fixed = sum(1 for r in rows if r.status == "VERIFIED-FIXED")
         want_open = sum(1 for r in rows if r.status == "OPEN")

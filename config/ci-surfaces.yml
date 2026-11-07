@@ -9956,7 +9956,7 @@ durations:
   # `test_the_ABSTRACT_headline_must_agree_with_the_tables`: §2's five
   # per-workstream "**N of M fixed**" cells and the page's own "**21 fixed and
   # 5 open**" headline were printed counts NOTHING compared — with a row
-  # flipped to OPEN and the four status cells edited to match, the pre-fix
+  # flipped to OPEN and the status cells edited to match, the pre-fix
   # guard returned NO errors over a §2 contradicting its WS-B table), each
   # mutation-verified -> 54 once round 4's two controls landed
   # (`test_a_mislabelled_workstream_row_cannot_pass_on_position`: a
