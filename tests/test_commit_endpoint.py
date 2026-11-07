@@ -5154,7 +5154,9 @@ class Test4051ChargeCoversTheLoopShape:
         charged 4 × 1024 B.
 
         Mutation this REDs: drop `_COMMIT_FIXED_NODES` below the chain's real
-        size (measured: 4 → 3 reds this and both other legs), or add a node to
+        size (measured: 4 → 3 reds this leg, the flat lane and the residual leg
+        — the spend leg is invariant to it, because it pins the charge↔spend
+        identity rather than the constant's value), or add a node to
         `_execute_commit_writes`'s per-session chain without moving that
         constant — either makes the throttle cheaper than the write, the
         fail-OPEN direction (#4051 §3.1).
@@ -5219,9 +5221,11 @@ class Test4051ChargeCoversTheLoopShape:
         follow-up, and closing it needs a body wider than the floor, which this
         class deliberately does not measure.
 
-        Mutations this REDs (each measured): charge the endpoint `0`; charge it
-        `charge - 1` (two then fit in `2 × charge - 1`, so the second is
-        admitted).
+        Mutations this REDs (each measured): charge the endpoint `0` (reds at
+        the `used` observation, `0 != 4096`); charge it `charge - 1` (the SAME
+        `used` observation reds FIRST, `4095 != 4096` — the "second commit is
+        admitted" boundary below therefore never executes under this mutation;
+        it is a second, independent net, not the catcher).
         """
         import tortoise.quota as quota_mod
         from tortoise.commit_schema import (
