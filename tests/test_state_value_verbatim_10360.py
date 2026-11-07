@@ -1450,8 +1450,12 @@ _RESIDUAL_CLOSED_VERDICT = (
     # still open and was GREEN at every head before this one, because the whole
     # `closed` family reads only the PARTICIPLE. It sits in the ANCHORED arm and
     # NOT in `_RESIDUAL_OPENNESS` on purpose: `the tables do not close the
-    # SPELLING gap` is the row's own honest disclosure, and only the anchor
-    # separates the two (measured both ways).
+    # SPELLING gap` is HYPOTHETICAL honest prose — the row does NOT contain it
+    # (`grep -ciF "tables do not close"` over the registry is 0; its real SPELLING
+    # disclosure is "a unit outside `_UNIT_EQUIV` (`800millis`) still fails open on
+    # purpose"), so an earlier version of this comment calling it "the row's own
+    # honest disclosure" was WRONG (#11258 review round 16 `P2`, MEASURED). It is in
+    # `_RESIDUAL_TRUTHFUL_STATEMENTS` now, so the anchoring has a REAL falsifier.
     # ⛔ THREE ALTERNATIVES, because English writes the negation three ways and
     # each round found one of them missing: the contraction on the auxiliary
     # (`doesn't`, `didnt`, `can't`), the spaced `not` (with a window, so
@@ -1630,8 +1634,31 @@ _RESIDUAL_OPENNESS = (
     # RED on the class-word side and GREEN on the unit side once it carried the
     # row's own `, after the widen, ` register (MEASURED: `\`minute\` is, after the
     # widen landed, no longer fused` → GREEN at 20, RED at 80).
+    # ⛔ IT READS THE WHOLE ANCHOR VOCABULARY, not a hand-copied six (#11258 review
+    # round 16 `P1`, MEASURED): the literal here was narrower than
+    # `_RESIDUAL_CLASS_ANCHOR` by exactly `the guarantee`, `retention` and
+    # `the gap that/those … closed`, so the SAME predicate was RED for six of the
+    # nine members and GREEN for the other three:
+    #   GREEN  the gap those tables closed is no longer fused.
+    #   GREEN  the retention guarantee is no longer fused.
+    #   RED    the ADJACENCY half is no longer fused.
+    # The asymmetry was specific to `fused|fusing` — those three subjects RED under
+    # every other arm — and the row uses `retention` / `the guarantee` ABOUT THIS
+    # CARVE-OUT, while `_RESIDUAL_CLASS_ANCHOR`'s own note says `the gap that/those …
+    # closed` "can only be about this one". Widening false-blocks 0 of the truthful
+    # statements and does not red the real row (measured) — the same argument this
+    # comment already uses for admitting the past tense.
+    # ⛔ AND `the gap that/those … closed`, the anchor member that names the gap BY
+    # ITS CLOSURE — listed inside the group, not delegated to
+    # `_RESIDUAL_CLASS_ANCHOR.pattern`, because that pattern also carries the UNIT
+    # TOKENS and would false-block the must-stay-GREEN
+    # `` `percent`/`pct` is no longer fused `` proof (measured). ⚠️ It must sit
+    # INSIDE `(?:…)`: a top-level `|` here makes the anchor word alone a complete
+    # match and reds every truthful statement (measured, twice).
     r"\b(?:adjacency|the\s+half|carve-?out|value\s+class|numeric\s+side|"
-    r"time[- ]unit)\b[^.;]{0,80}?"
+    r"time[- ]unit|retention|the\s+guarantee"
+    r"|the\s+gap\s+(?:that|those)\b[^.;]{0,40}\bclosed\b)"
+    r"[^.;]{0,80}?"
     + _NO_LONGER_WINDOW + r"(?:fused|fusing)\b",
 
     r"\b(?:units?|unit\s+word|second|seconds|minute|minutes|hour|hours|day|days|"
@@ -2226,6 +2253,11 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half is no longer even judged.",
     "the ADJACENCY half is no longer actively judged.",
     "the ADJACENCY half is no longer being fused.",
+    # round 16: gate (a) mirrored only six of the anchor vocabulary's nine
+    # members, so the SAME predicate was RED for `adjacency` and GREEN for
+    # `retention` / `the guarantee` / `the gap that/those … closed`.
+    "the retention guarantee is no longer fused.",
+    "the gap those tables closed is no longer fused.",
     # ⛔ ROUND 12 (#11258 review round 12, MEASURED): the window was fixed in ONE
     # arm and left out of the other three, and `\s+` after `longer` let a
     # punctuated insertion defeat all of them. One shared `_NO_LONGER_WINDOW`
@@ -2449,6 +2481,10 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the ADJACENCY gap is closed by this table.",
     "the SPELLING case is still open on purpose.",
     "the SPELLING gap is not closed.",
+    # round 16: the present-tense `not … close` arm's anchoring falsifier — honest
+    # prose about the SPELLING class the anchor must not read (hypothetical: the
+    # row writes no such sentence, measured).
+    "the tables do not close the SPELLING gap.",
     # ⛔ THE WORKAROUND THE REFUSAL MESSAGE NAMES IS A PROOF, not prose: when a
     # lane's honest `not closed` sentence is refused, the message tells it to say
     # `is still open` / `remains open`, so both must stay GREEN or the advice
@@ -2781,10 +2817,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 123, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 125, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (123), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (125), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
@@ -2793,10 +2829,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
         "A `>=` at the current length costs nothing on growth and refuses any "
         "shrinkage; raise it in the same commit that adds proofs.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 40, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 41, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (40), i.e. ZERO SLACK, the same rule the ledger and the "
+        "CURRENT LENGTH (41), i.e. ZERO SLACK, the same rule the ledger and the "
         "mutation list carry: it was `>= 30` against a 33-entry list, so three "
         "honest closures were deletable with both tests GREEN (the stale "
         "\"within two of the current length\" note is why it read as tight; "
