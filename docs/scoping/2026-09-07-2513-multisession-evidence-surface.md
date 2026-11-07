@@ -259,7 +259,8 @@ is clearing here. Quote the worktree it ran in, not just the exit code.
 ⚠️ Do **not** quote a `who-is-on` verdict as this doc's durable evidence, and never merge its numbers
 across checkouts. It enumerates *live* signals, so it read `nobody` at 00:18 UTC (before this lane
 existed) and `4 holder(s) across 4 surface(s)` on the same 01:12 UTC worktree re-run — while the same
-command from the hub checkout answered `2 holder(s)` five minutes later. Every one of those is correct
+command from the hub checkout (`main`) answers `5 holder(s) across 5 surface(s)`, **more**, because the
+hub does not exclude this lane's own branch/worktree/PR. Every one of those is correct
 for its moment and its checkout, none is durable. The durable claim is the table above, not a
 point-in-time answer.
 
