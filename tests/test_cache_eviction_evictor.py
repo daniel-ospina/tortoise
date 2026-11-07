@@ -85,10 +85,10 @@ class _Record:
 @pytest.fixture()
 def lane():
     """A dedicated graph on the live lane container, dropped afterwards."""
-    import uuid
-
     import redis
     from falkordb import FalkorDB
+
+    from tests._embedded import _journal_append
 
     host = _live_utils.service_host()
     port = _live_utils.docker_port()
@@ -98,7 +98,29 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    graph_name = f"evict_{uuid.uuid4().hex[:12]}"
+    # Epic #1647 (T7, cycle-6 P1-3 / cycle-8 P2-2): a raw client bypasses
+    # `_assert_test_graph` AND the per-test wipe scope, so this handle has to
+    # carry all three halves of the one ownership contract:
+    #
+    # (a) per-test-UNIQUE (`os.urandom`) — a fixed literal would let
+    #     concurrent sessions DETACH each other's live writes;
+    # (b) inside `_SWEEP_OWNED_PREFIXES` (the `test_` stem) — the session-end
+    #     sweep's name gate is FAIL-CLOSED (#7795), so a journaled name outside
+    #     that family is PRESERVED rather than dropped and one empty graph
+    #     leaks per run (the #8746 cache-churn pressure). The old
+    #     `evict_<hex>` spelling was outside it: journaling alone would NOT
+    #     have made it reapable;
+    # (c) JOURNALLED (`_journal_append`) — the record that tells a live PEER's
+    #     `scope=None` sweep this graph is in use, without which a peer may
+    #     `GRAPH.DELETE` it MID-TEST (#3074/#3214). The `finally:` teardown
+    #     below covers only this lane's own clean exit and does not run at all
+    #     if the process dies.
+    #
+    # Pinned by
+    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`,
+    # which reds while any of the three halves is missing (#11182).
+    graph_name = f"test_10976_evict_{os.urandom(6).hex()}"
+    _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
     try:
