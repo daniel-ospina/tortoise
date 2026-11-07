@@ -2920,7 +2920,9 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # network) and `core` is where it is registered. Pinned by
              # tests/test_ci_selection.py::test_cache_evict_runs_on_a_tools_only_change.
              "tools/cache_evict.py",
-             # #11320: the census that holds every GUARDED `tools/` entry point's
+             # #11320 spinoff — that issue records the missing GUARD (landed with
+             # #11292); the SELECTION hole below is measured here, not recorded
+             # there: the census that holds every GUARDED `tools/` entry point's
              # #5128 interpreter guard could not SEE
              # `tools/test_design_map_check.py`'s — the same #1349/#3332/#3616
              # silent-drop class as the entries above. ("Guarded": the census skips
