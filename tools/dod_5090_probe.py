@@ -3039,9 +3039,23 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             # ⛔ The refusal, BEFORE the index is consulted: without a measured
             # width there is no byte figure, indexed or not — and when the probe
             # saw more than one width, the reason is that, not "unprobeable".
+            # ⛔ NAME BOTH CAUSES HERE TOO (#11389 review, P2). The two-cause
+            # rule reached `unindexed` but stopped one branch short of the BYTE
+            # FIGURE: with a covering index whose `dimension` is unreadable over
+            # a mixed-width label, `unindexed` named both causes while
+            # `derived_payload_B` named the width alone — so a reader repairs
+            # the width, re-runs, and is refused again on the dimension. Same
+            # round trip, one field over. Measured before the fix.
+            # The single-cause texts are byte-identical: when `dim` is readable
+            # — or the label has no covering index, where an index `dimension`
+            # is not a cause at all — the old string is unchanged.
+            payload_causes: list[str] = []
+            if covering and dim is None:
+                payload_causes.append("the index dimension unreadable")
+            payload_causes.append(width_reason or "stored width not probeable")
             payload = {"derived_payload_B": "UNMEASURED("
-                                            + (width_reason or
-                                               "stored width not probeable") + ")",
+                                            + " and ".join(payload_causes)
+                                            + ")",
                        "how": ("a single width cannot stand for this label's "
                                "stored vectors" if width_reason
                                else "needs a width probe")}
