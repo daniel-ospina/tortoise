@@ -1985,8 +1985,11 @@ _RESIDUAL_CLAUSE_SPLIT = (
     # the participle landed in different segments and `the SPELLING gap hasn't yet
     # opened again.` went RED while the same denial WITHOUT an honest clause was
     # GREEN (pinned). A verdict must not depend on unrelated content in the
-    # sentence. The bar is fixed-width and applies to `yet` ONLY, so `has yet to be
-    # closed` still splits and its own guard below still holds.
+    # sentence. The bar is fixed-width and applies to `yet` ONLY. ⛔ IT DOES NOT
+    # REOPEN THE ROUND-7 HOLE: the closed-verdict lookahead below still refuses to
+    # split `has yet to be closed` (measured at this head: the sentence stays ONE
+    # segment, so `_RESIDUAL_CLOSED_VERDICT` reads it whole). The bar narrows WHO
+    # may split at `yet`; the lookahead still decides WHERE it may not.
     r";|,?\s+(?:(?:and|but|while|whereas|although|though)\s+"
     r"|(?<![n']t\s)(?<!\bnot\s)(?<!\bnever\s)yet\s+)"
     # ⛔ THE COORDINATOR MUST NOT BITE INSIDE A VERDICT'S OWN TEXT. `has yet to be
@@ -3304,9 +3307,11 @@ def test_every_refusal_names_the_over_block_ledger():
     `(a)` is an item of the row's OWN still-open list, so the statement is true,
     and it is not one of the recorded entries.
 
-    ⛔ PRE-FIX BEHAVIOUR: the two non-ledger shapes were refused with a message
-    that did not contain `_RESIDUAL_REFUSED_TRUTHFUL` at all (105 and 104 chars),
-    while `(b2)` — which IS in the ledger — carried the 634-char pointer. A
+    ⛔ PRE-FIX BEHAVIOUR: every non-ledger shape in `not_in_ledger` below was
+    refused with a message that did not contain `_RESIDUAL_REFUSED_TRUTHFUL` at
+    all (104–105 chars at measurement TIME — the list is pinned by MEMBERSHIP, not
+    by that width, so adding a shape does not stale this sentence), while `(b2)` —
+    which IS in the ledger — carried the 634-char pointer. A
     message whose help depends on membership in a hardcoded list is exactly the
     false block the ledger's own instructions forbid.
     """
