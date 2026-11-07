@@ -184,8 +184,10 @@ half is 2.14–2.25 ms, the connection half **12.7–14.1 ms** and its share
 band being a SENSITIVITY on item 7 rather than a second measurement. ⚠️ This lands near a
 retired "~80-85 % of the ~15 ms saved" (first stated at `6ab6848b8b`), and that is a
 coincidence of BAND, not arithmetic: that revision did charge the consult twice, but at
-0.27–0.33 ms of stat (an uncommitted 0.135–0.166 ms band, with `_migrations_dir()`'s
-resolution never priced at all), which against a ~15 ms win puts the connection half at
+0.27–0.33 ms of stat (a 0.135–0.166 ms band that no committed MEASUREMENT carried —
+`fingerprint-cost.json` does not exist until `1120d0ef7`; the band lived only in
+prose, including this PR's own docstrings — with `_migrations_dir()`'s resolution
+never priced at all), which against a ~15 ms win puts the connection half at
 ~98 % — so its own inputs never produced 80–85 % either. What the two-consult model fixes is
 the SHAPE (both cached readers charged, at committed prices); the magnitude here
 follows from the committed medians, and the intervening one-consult ~92 % is the
@@ -223,15 +225,18 @@ of them: a count over an open history is stale by construction — the same haza
 seam sentence above names, and this one has already been wrong twice.) `6ab6848b8b`
 said "~80-85 % of the ~15 ms saved". Its own inputs do not yield it
 (two 0.135–0.166 ms passes against a ~15 ms win is ~98 %), and it charged the
-consult twice at a band no committed file carries while leaving resolution
-unpriced; the band this bullet now reports agrees with it by coincidence, not
+consult twice at a band no committed MEASUREMENT carried while leaving resolution
+unpriced (the band itself is in committed prose — this PR's docstrings quote it);
+the band this bullet now reports agrees with it by coincidence, not
 arithmetic. ⛔ **CORRECTED:** an earlier revision of THIS erratum read that
 80-85 % as "the connection half as a share of the BEFORE TOTAL, not of the win" —
 falsified by its own text, `git show
 6ab6848b8b:docs/evidence/9558-record-write-cost/README.md` reading "~80-85 % of the
 ~15 ms saved" (a share OF the win) and charging two fingerprints in the same
-bullet. It also said "~92-94 %" (94 % only falls out of the
-superseded ~0.9–1.0 ms column-half estimate the same bullet replaced). `860e85c91c`
+bullet. `1120d0ef7` said "~92-94 %" (94 % only falls out of ITS mean-based
+~1.0–1.1 ms column half, not out of the ~0.9–1.0 ms figure — that one was a STAT figure (and 2 × the whole
+cached call rather than 2 × the stat pass, as `6ab6848b8b`'s own erratum says); it
+was never a column half). `860e85c91c`
 said "~91.6–92.7 %" — the revision before `72df8168b2` — which charged ONE
 column consult while the per-record path pays TWO (both cached readers, above), so
 the column half is 2.386–2.512 ms under the artifact's convention (2.14–2.25 ms if
