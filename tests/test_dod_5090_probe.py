@@ -4499,13 +4499,18 @@ def _doc_section(text: str, start: str, end: str) -> str:
 # WORD, coverage vocabulary the claim is actually about, and the absence of the
 # positive reading.
 _NEGATION = re.compile(r"\b(?:not|never|outside)\b")
-# ⛔ `(?:s|ed)?` — NOT `ed?`. `ed?` binds the `?` to the `d`, so it matches only
+# ⛔ `(?:s|es|ed)?` — NOT `ed?`. `ed?` binds the `?` to the `d`, so it matches only
 # `e` or `ed`: the bare words this vocabulary is named for (`walk`, `visit`,
 # `reach`, `report`) did NOT match, and an honest present-tense rewording
 # ("This walk does not visit …") went RED where the merged predicate was green
 # (#11437 review, P2). Measured: 5 present-tense rewordings 1→0 under `ed?`,
-# all 1 under `(?:s|ed)?`.
-_COVERAGE = re.compile(r"\b(?:walk|visit|reach|report)(?:s|ed)?\b")
+# all 1 under `(?:s|es|ed)?`.
+# ⛔ `es` is in the alternation for the same reason, one inflection further out:
+# without it `(?:s|ed)?` matched `visit`/`visits` but NOT `reaches` (a third-
+# person `-es` verb naming a vocabulary word this list declares), so the honest
+# "the walk never reaches a nested def's decorators and parameter defaults"
+# red while its `visits` twin passed (#11437 review, P3). Measured both ways.
+_COVERAGE = re.compile(r"\b(?:walk|visit|reach|report)(?:s|es|ed)?\b")
 # The positive readings. The last four are the inverse stated WITHOUT the three
 # literal phrases above, which the first version of this fix let through
 # (#11437 review, P1) — measured GREEN as `not outside the walk; they are
@@ -4513,9 +4518,14 @@ _COVERAGE = re.compile(r"\b(?:walk|visit|reach|report)(?:s|ed)?\b")
 # … so they are reported`, and `visited, except that … are not reported`.
 # `not outside the walk` reads as "inside the walk", so the negated REVERSER has
 # to be refused as explicitly as the affirmatives are.
+# ⛔ `except THAT`, not bare `except`: the reverser is the concessive *clause*
+# ("visited, except that … are not reported"), while a bare `except` also reds
+# the honest "…, except when the outer method runs" — which is the real doc's
+# own argument, one rewording away (#11437 review, P3). Measured: the inverse
+# row still reds, the honest `except when` row greens.
 _AFFIRMED = re.compile(
     r"\binside the walk\b|\btherefore reported\b|\bskipped\b"
-    r"|\bnot outside\b|\bnot exempt\b|\bnot left\b|\bexcept\b")
+    r"|\bnot outside\b|\bnot exempt\b|\bnot left\b|\bexcept that\b")
 
 
 def _residual_sentences(s3: str) -> list[str]:
@@ -4782,6 +4792,13 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
             "the walk does not report nested def decorators or defaults",
         "honest, present tense: does not reach":
             "the walk does not reach a nested def's decorators and defaults",
+        "honest, present tense singular: never visits":
+            "the walk never visits a nested def's decorators and defaults",
+        "honest, present tense singular: never reaches":
+            "the walk never reaches a nested def's decorators and defaults",
+        "honest, concessive: except when the outer method runs":
+            "the walk does not visit a nested def's decorators and defaults, "
+            "except when the outer method runs",
         "honest: never touched by the walk":
             "nested def decorators and defaults are never touched by the walk",
         "honest, past tense: are never reached":
