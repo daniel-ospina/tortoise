@@ -2331,8 +2331,8 @@ assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATION_CHAT_ID: \${{ se
 # unwired knob is a documented control an operator cannot engage without editing
 # the workflow, and the unset repo variable silently leaves the script default
 # (paging enabled) in place. It comes from the repository VARIABLE (not a secret:
-# it is a switch, not a credential), and it stays STEP-level: the two probes fail
-# independently, so both must carry it, and step placement keeps the knob visible
+# it is a switch, not a credential), and it stays STEP-level: the probe steps fail
+# independently, so every one must carry it, and step placement keeps the knob visible
 # only where it is consumed (a job-level env would also hand it to
 # actions/checkout and the third-party setup-flyctl action). A workflow-level
 # `vars.` placed after `steps:` would escape the JOB_ENV slice — hence the

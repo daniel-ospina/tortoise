@@ -2107,9 +2107,9 @@ The third step probes `GET https://api.premiselabs.co/liveness`. It exists
 because neither Fly check could see the outage: `servicecheck-00-tcp-8000` is a
 kernel handshake (a hung app passes it) and `loop_liveness` reads the loop's own
 last tick from a listener on **another thread**, so on 2026-11-04 `api.` was
-unusable for ~2 h across two windows while both read `passing`. `/health` itself
-cannot be answered while the loop is blocked — nothing we RAN bounded the
-**absence**.
+unusable for ~2 h, and again for ~6 h the same day, while both read `passing`.
+`/health` itself cannot be answered while the loop is blocked — nothing we RAN
+bounded the **absence**.
 
 | | Value | Why |
 |---|---|---|

@@ -306,8 +306,8 @@ jobs:
           ESCALATION_CHAT_ID: ${{ secrets.ESCALATION_CHAT_ID }}
           # #3887 (round 5): the operator KILL SWITCH, in the SAME repository
           # variable as the API step above (unset → EMPTY → paging ENABLED, the
-          # script default). Both probe steps must carry it: they fail
-          # INDEPENDENTLY, so wiring only one would leave the auth surface
+          # script default). Every probe step must carry it: they fail
+          # INDEPENDENTLY, so wiring only one would leave another surface
           # unkillable. STEP-level, never job-level (same discipline as
           # ESCALATION_CHAT_ID).
           ESCALATE_ENABLED: ${{ vars.ESCALATE_ENABLED }}
@@ -329,10 +329,11 @@ jobs:
         run: bash .github/scripts/availability-watchdog.sh
       # THIRD TARGET (#10892): the SERVED-REQUEST liveness surface. This is the
       # arm that closes "we have no probe that fails when a request cannot be
-      # served". On 2026-11-04 `api.premiselabs.co` was unusable for ~2 h across
-      # two windows while BOTH Fly checks read `passing`: `servicecheck-00-tcp-8000`
-      # is a kernel handshake (a hung app passes it) and `loop_liveness` reads the
-      # loop's own last tick from a listener on another thread. Neither can
+      # served". On 2026-11-04 `api.premiselabs.co` was unusable for ~2 h, and
+      # again for ~6 h the same day, while BOTH Fly checks read `passing`:
+      # `servicecheck-00-tcp-8000` is a kernel handshake (a hung app passes it) and
+      # `loop_liveness` reads the loop's own last tick from a listener on another
+      # thread. Neither can
       # distinguish "answering" from "not answering at all".
       #
       # WHY A SEPARATE STEP rather than re-pointing the API probe: the BOUND is
