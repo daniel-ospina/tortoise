@@ -595,8 +595,9 @@ def open_record(record_dsn: str | None = None) -> Any:
     ``SET`` would outlive this read and impose a READ-sized bound on the next
     BORROWER — a write door's record, or a tenant's read under a different
     timeout. Transaction-local scope is exactly the read (psycopg2's first
-    statement opens the transaction), and `_park_connection`'s release rollback
-    then cannot leave it behind. Pinned by
+    statement opens the transaction), and the pool's reset-at-reuse
+    (``record_writer._reset_parked_transaction``) then cannot leave it behind —
+    the bound dies with the transaction even though the handle outlives it. Pinned by
     ``tests/test_9558_record_write_cost.py::test_the_read_door_bounds_its_read_transaction_locally``:
     reverting this line reds it.
     """
@@ -655,8 +656,10 @@ def open_record(record_dsn: str | None = None) -> Any:
         # that connection would inherit this read path's 15 s statement timeout
         # (and, on the write door, a bound chosen for reads). `set_config(...,
         # true)` scope it to THIS transaction — which is the whole read, since
-        # psycopg2's first statement opens one — and `_park_connection`'s
-        # rollback on release then cannot leave it behind. `SET LOCAL` would do
+        # psycopg2's first statement opens one — and the pool resets that
+        # transaction at the next BORROW (`_reset_parked_transaction`), so the
+        # bound dies with it instead of following the handle to the next
+        # borrower. `SET LOCAL` would do
         # the same; `set_config` is used because it takes a bind parameter, which
         # `SET` does not.
         cur.execute("SELECT set_config('statement_timeout', %s, true)",

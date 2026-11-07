@@ -27,13 +27,15 @@ the issue's own verification checklist makes non-negotiable:
 
 Plus the two things a pool can silently get wrong, which no other test covers: a
 handle whose server went away is DISCARDED rather than handed to the next
-record, and an unfinished or aborted transaction is rolled back before the
-handle is parked.
+record, and an unfinished or aborted transaction is reset before the handle is
+handed to the next borrower (`_reset_parked_transaction`) — never on the release
+path, because a release rollback is a server round trip taken after the rows are
+fetched and therefore before the answer is returned (#9558 review cycle 3, P1).
 
 NO DATABASE. Every connection here is a fake DB-API object (the same shape
 `tests/test_record_writer_seam.py` uses, imported rather than re-invented), and
 the transaction-status constants are patched so this file runs on a lane with no
-`[postgres]` extra (⚠️ SEVEN of its twenty tests then SKIP — the pool pins need the
+`[postgres]` extra (⚠️ SEVEN of its twenty-one tests then SKIP — the pool pins need the
 driver — which is why it is also armed into `test-record-postgres`) — `test_record_writer_seam.py`'s own
 `test_importing_the_seam_pulls_in_no_database_driver` is what keeps the seam
 importable there, and this file must not undo it by importing the driver itself.
@@ -583,24 +585,63 @@ def test_a_broken_handle_is_discarded_not_reused(monkeypatch):
         "the pool re-handed the dead handle instead of opening a fresh one")
 
 
-def test_an_aborted_transaction_is_rolled_back_before_the_handle_is_parked():
+def test_a_parked_transaction_is_reset_at_reuse_not_at_release():
     """A failed write must not fail the NEXT record for the previous one's reason.
 
     `replay` leaves the transaction aborted when a statement fails; without a
-    rollback on release, psycopg2 refuses every subsequent statement on that
-    handle ("current transaction is aborted") and the pool would turn one bad
-    record into a stream of `write_failed`s.
+    reset, psycopg2 refuses every subsequent statement on that handle ("current
+    transaction is aborted") and the pool would turn one bad record into a stream
+    of `write_failed`s.
 
-    FALSIFIER: park the handle without the rollback — `rollbacks` is 0 and this
-    reds.
+    ⛔ THE RESET MUST HAPPEN AT REUSE (#9558 review cycle 3, P1). At RELEASE it is
+    a server round trip on every read borrow — `open_record` always parks INTRANS
+    — taken AFTER the rows are fetched and therefore BEFORE the answer is
+    returned, so a backend that wedges in that window discards a read that
+    already succeeded. libpq has no per-statement timeout to bound it with.
+
+    FALSIFIER, both halves: move the `rollback()` back into `_park_connection`
+    and the first assertion reds (`rollbacks` becomes 1 at park); delete it
+    from `_reset_parked_transaction` and the second reds.
     """
     conn = FakeStatusConnection(status=2)          # INTRANS / INERROR, not IDLE
     rw._park_connection(rw._pool_key("postgresql://record/db"), conn)
-    assert conn.rollbacks == 1, (
-        "an unfinished transaction was parked without a rollback")
+    assert conn.rollbacks == 0, (
+        "a RELEASE took a server round trip — that rollback runs after the "
+        "caller's rows are fetched, so a wedged backend discards a completed "
+        "read; it belongs on the borrow path")
     assert conn.closed == 0
     assert rw._take_idle_connection("postgresql://record/db") is conn, (
-        "the cleaned handle was not returned to the pool")
+        "the handle was not returned to the pool")
+    assert conn.rollbacks == 1, (
+        "a parked unfinished transaction was handed to the next borrower "
+        "without being reset — it would fail for the previous record's reason")
+
+
+def test_a_handle_that_dies_while_idle_is_discarded_at_borrow():
+    """A dead idle handle must not surface to the READ door as an outage.
+
+    Both fields `_connection_is_reusable` reads are LOCAL and therefore stale:
+    a handle parked while its server was alive reports `closed == 0` and
+    `transaction_status == IDLE` after the peer goes away, until something
+    touches the socket. The read door parks INTRANS, so the borrow-time reset is
+    that first touch — it raises, the handle is discarded, and the caller gets a
+    FRESH connection instead of a `RecordUnavailable` a reconnect would have
+    served (#9558 review cycle 3, P1).
+
+    FALSIFIER: hand the candidate back without running the reset (return it as
+    soon as `_connection_is_reusable` says yes) and the dead handle reaches the
+    door; drop the discard-on-failure and the second borrow returns the corpse.
+    """
+    dead = FakeStatusConnection(status=2)          # INTRANS: the read door's shape
+    dead.rollback = lambda: (_ for _ in ()).throw(          # type: ignore[assignment]
+        RuntimeError("server closed the connection unexpectedly"))
+    rw._park_connection(_DSN_KEY, dead)
+    assert rw._take_idle_connection(_DSN) is None, (
+        "a handle whose server died while idle was handed out — the door would "
+        "raise RecordUnavailable for a request a fresh connect serves")
+    assert dead.closed == 1, (
+        "the dead handle was neither handed out nor CLOSED — its socket and "
+        "backend slot leak")
 
 
 def test_the_idle_set_is_bounded_and_overflow_is_closed():
@@ -780,8 +821,8 @@ def test_the_read_door_bounds_its_read_transaction_locally(monkeypatch):
     `_default_connect` is pooled, so a session-level `SET statement_timeout` set
     by a read would outlive the read and bound the next BORROWER — a write door's
     record, or another tenant's read. `set_config(..., true)` scopes it to the
-    read's own transaction, and the release rollback then clears the transaction
-    with it.
+    read's own transaction, and the pool's reset-at-reuse clears the transaction
+    — and the bound with it — before the next borrower sees the handle.
 
     FALSIFIER: restore `SET statement_timeout = %s` and this reds on the
     statement text — nothing else in the tree asserts it, which is exactly why

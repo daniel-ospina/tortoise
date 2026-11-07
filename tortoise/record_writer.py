@@ -171,10 +171,12 @@ process-global guess, never a cross-request leak) is what they share, and
 neither may be replaced by one.
 
 **THE TRANSACTION.** The seam never calls `commit()` and never calls
-`rollback()` — **except at RELEASE**: when the seam opened the connection it
+`rollback()` — **not even at RELEASE**: when the seam opened the connection it
 hands back a `_PooledConnection` whose `close()` returns the handle to the pool,
-and `_park_connection` rolls back an unfinished transaction first so the next
-borrower cannot inherit it. A `conn=` the CALLER injected is never wrapped, so
+and any unfinished transaction on it is rolled back at the next BORROW
+(`_reset_parked_transaction`), never on the release path — a release rollback is
+a server round trip taken after the caller's work is done, which is why it moved.
+A `conn=` the CALLER injected is never wrapped, so
 on that path both are still never called (pinned by a test whose fake
 connection counts both and asserts they are zero). When the caller injects
 `conn=`, the boundary is unambiguously theirs. When the seam opens the connection itself it RETURNS it on the outcome
@@ -188,8 +190,9 @@ caller never receives that handle, so it has nothing to roll back and no way to
 close it, and the raising traceback would otherwise keep the handle (its aborted
 server-side transaction and backend slot) alive for as long as the exception is
 held. ⛔ Since #9558 "disposed of" means RELEASED: the connection
-`_default_connect` hands out is a `_PooledConnection` whose `close()` rolls back
-an unfinished transaction and returns the handle to the idle set, so an aborted
+`_default_connect` hands out is a `_PooledConnection` whose `close()` returns
+the handle to the idle set, and whose next borrower rolls back a transaction the
+failed write left aborted (`_reset_parked_transaction`) — so an aborted
 projection cannot be inherited by the next record and no backend slot is lost.
 An INJECTED connection is never touched — it is the caller's, and its
 transaction stays open and unrolled-back on failure.
@@ -437,9 +440,9 @@ class RecordWrite:
     last_seq: int = 0
     #: The connection the seam OPENED, or ``None`` when the caller injected one
     #: (theirs to close) or the call was not armed. When set, the caller owns the
-    #: transaction: this seam never commits, and never rolls back — except at
-    #: RELEASE, where the pooled handle's ``close()`` rolls back a transaction
-    #: that was left unfinished before parking the connection.
+    #: transaction: this seam never commits, and never rolls back — not even at
+    #: RELEASE, where the pooled handle's ``close()`` parks the connection as it
+    #: stands; the pool resets a leftover transaction on the next BORROW.
     connection: Any | None = field(default=None, repr=False)
     #: WHY an ARMED call did not write — one of the tokens
     #: ``monitoring.metrics()["record_write_failures"]`` / ``["record_non_journal_skips"]``
@@ -957,10 +960,10 @@ def _default_connect(dsn: str) -> Any:
     record. Pooling lives HERE, behind the one function whose job is "give me
     a connection", rather than at a call site, for one reason: it changes the
     cost of a connection and NOTHING about who owns one. `RecordWriter.write`
-    still neither commits nor rolls back (the one exception is RELEASE: the
-    pooled handle's ``close()`` rolls back an unfinished transaction before
-    parking it), `RecordWrite.connection` is still the handle its caller
-    commits, and §2.0's unarmed path still opens nothing.
+    still neither commits nor rolls back (not even at RELEASE: the pooled
+    handle's ``close()`` parks the connection as it stands, and the pool resets a
+    leftover transaction on the next BORROW), `RecordWrite.connection` is still
+    the handle its caller commits, and §2.0's unarmed path still opens nothing.
 
     The handle returned is a :class:`_PooledConnection` whose ``close()``
     RETURNS it to the pool instead of closing it — that is the whole contract
@@ -1068,31 +1071,63 @@ def _connection_is_reusable(conn: Any) -> bool:
         return False
 
 
+def _reset_parked_transaction(conn: Any) -> None:
+    """Clear a transaction an earlier borrower left open — at REUSE, not release.
+
+    ⛔ THIS ROUND TRIP BELONGS ON THE BORROW PATH, AND THAT PLACEMENT IS THE
+    CONTRACT (#9558 review cycle 3, P1). `_park_connection` used to roll back on
+    RELEASE. Every read-door borrow ends INTRANS (``open_record`` issues a
+    statement and never commits), so that put a server round trip on the release
+    of every read — after the rows were already fetched, and therefore before the
+    answer was returned. libpq has no per-statement timeout, so a backend that
+    wedged in that window blocked the release forever and DISCARDED a read that
+    had already succeeded, which is exactly what `open_record`'s own "a served
+    read must not be able to hang a request on a wedged database" promises it
+    cannot do. At BORROW the caller is about to talk to the server anyway, so a
+    hang there is the pre-existing failure mode of the door rather than a new one.
+
+    It doubles as the pool's LIVENESS PROBE for the handles that need it: a
+    handle parked INTRANS whose server died while it sat idle passes
+    `_connection_is_reusable` (both `closed` and `transaction_status` are STALE
+    client-side caches until something touches the socket), and the rollback is
+    the first thing to touch it — so a dead handle is discarded here, before the
+    door opens, instead of surfacing as a spurious `RecordUnavailable` to a
+    caller that a fresh connect would have served (#9558 review cycle 3, P1).
+    """
+    idle_status, _unknown = _transaction_statuses()
+    if conn.info.transaction_status != idle_status:
+        conn.rollback()
+
+
 def _take_idle_connection(dsn: str) -> Any | None:
     """An idle connection for `dsn`, or None when there is nothing to reuse.
 
-    A handle the server no longer backs is DISCARDED here rather than returned,
-    so one record pays for a server restart and the next acquire connects fresh.
-    The discard happens OUTSIDE the lock: `close()` is a socket write (a
-    Terminate packet) that can block on a full send buffer, and holding the pool
-    lock across it would stall every other borrower and every release for that
-    DSN behind one dead handle.
+    A handle the server no longer backs — or one whose parked transaction cannot
+    be reset — is DISCARDED here rather than returned, so one record pays for a
+    server restart and the next acquire connects fresh.
+
+    Every blocking step (the reset, and the discard's Terminate packet) happens
+    OUTSIDE the lock, one candidate at a time: `close()` is a socket write that
+    can block on a full send buffer, and holding the pool lock across it would
+    stall every other borrower and every release for that DSN behind one dead
+    handle.
     """
     key = _pool_key(dsn)
-    dead: list[Any] = []
-    try:
+    while True:
         with _IDLE_CONNECTIONS_LOCK:
             idle = _IDLE_CONNECTIONS.get(key)
-            while idle:
-                candidate = idle.pop()
-                if _connection_is_reusable(candidate):
-                    return candidate
-                dead.append(candidate)
-    finally:
-        for candidate in dead:
-            with contextlib.suppress(Exception):
-                candidate.close()
-    return None
+            candidate = idle.pop() if idle else None
+        if candidate is None:
+            return None
+        if _connection_is_reusable(candidate):
+            try:
+                _reset_parked_transaction(candidate)
+            except Exception:
+                pass
+            else:
+                return candidate
+        with contextlib.suppress(Exception):
+            candidate.close()
 
 
 def _pooled_connection(raw: Any, dsn: str) -> _PooledConnection:
@@ -1229,20 +1264,25 @@ def _park_connection(key: str, conn: Any) -> None:
 
     * it DISCARDS a handle the server no longer backs (`closed`, or
       `TRANSACTION_STATUS_UNKNOWN`), so a restart cannot poison the pool;
-    * it ROLLS BACK an unfinished or aborted transaction before parking the
-      handle. A failed projection leaves the transaction aborted, and handing
-      that to the next record would fail it for the previous record's reason.
+    * it does **NOT** roll back an unfinished or aborted transaction. A failed
+      projection leaves the transaction aborted, and handing that to the next
+      record would fail it for the previous record's reason — so the reset is
+      mandatory, but it happens at REUSE (`_reset_parked_transaction`), not here.
+      ⛔ That placement is deliberate and is pinned by
+      ``tests/test_9558_record_write_cost.py::test_a_parked_transaction_is_reset_at_reuse_not_at_release``:
+      a release rollback is a server round trip on EVERY read borrow, taken after
+      the rows are fetched and therefore before the answer is returned, so a
+      backend that wedges in that window throws away a completed read (P1,
+      #9558 review cycle 3).
 
-    ⚠️ WHAT IT COSTS, stated per door rather than in general. On the WRITE door's
-    happy path ``commit()`` already left the connection IDLE, so release is a
-    status check and **no round trip**. A READ borrow (`record_serve.open_record`)
-    ends INTRANS — it issues a statement and never commits — so every read
-    release takes the `rollback()` branch, i.e. ONE round trip the previous
-    ``close()`` did not wait for. That is still an order of magnitude cheaper
-    than the connect+auth it replaces (**12.5–13.9 ms**, the connection half of
-    the BEFORE record's 18.9–20.1 ms — not the whole record, per
-    `docs/evidence/9558-record-write-cost/`), but it is not free and is named
-    here rather than averaged away.
+    ⚠️ WHAT IT COSTS: nothing on the wire, on either door. It reads two LOCAL
+    fields, normalises a client-side flag, and appends to a list. The single
+    round trip the pool sometimes needs — resetting a transaction an earlier
+    borrower left open — is charged to the next BORROW, where the caller is about
+    to issue statements anyway. The whole mechanism replaces the connect+auth the
+    old close-per-record path paid (**12.5–13.9 ms**, the connection half of the
+    BEFORE record's 18.9–20.1 ms — not the whole record, per
+    `docs/evidence/9558-record-write-cost/`).
 
     ⚠️ It also NORMALISES `autocommit` back to False. The wrapper forwards session
     state on purpose (`__setattr__`), so a caller may legitimately set it — but a
@@ -1252,13 +1292,21 @@ def _park_connection(key: str, conn: Any) -> None:
     tenant-GUC error that names the DSN; and `open_record`'s transaction-local
     `statement_timeout` stops applying, so reads lose their bound silently.
 
-    ⚠️ It does NOT poke the server. A health ``SELECT 1`` per acquire would cost a
-    round trip on every record, and the failure it would prevent is already
-    bounded: a handle whose server vanished mid-idle is detected at RELEASE
-    (status UNKNOWN) and dropped, so at most one record per dead handle is
-    refused (``write_failed``, healed by replay — the record's repair story) and
-    the breaker is NOT tripped, because the record is reachable; only that one
-    handle was not.
+    ⚠️ It does NOT poke the server, and this is why it cannot promise a dead
+    handle is always caught here. A health ``SELECT 1`` per park would cost a
+    round trip on every record. Both fields it reads are LOCAL and therefore
+    STALE once the peer has gone: a handle parked while the server was alive can
+    have died since, and psycopg2 reports it as usable until something touches the
+    socket. What that costs depends on the DOOR, and the two are not the same —
+    an earlier version of this docstring asserted one answer for both and was
+    wrong (#9558 review cycle 3, P1):
+
+    * the WRITE door's happy path parks IDLE, so the death is found at USE — one
+      ``write_failed`` per dead handle, healed by replay (the record's repair
+      story), and the breaker is NOT tripped because the record is reachable;
+    * the READ door parks INTRANS, so ``_reset_parked_transaction`` touches the
+      socket BEFORE the door opens and discards the handle — the fresh connect is
+      then paid by the pool, not by the caller as a ``RecordUnavailable``.
     """
     try:
         if conn is None or conn.closed:
@@ -1267,11 +1315,6 @@ def _park_connection(key: str, conn: Any) -> None:
             with contextlib.suppress(Exception):
                 conn.close()
             return
-        idle_status, _unknown = _transaction_statuses()
-        if conn.info.transaction_status != idle_status:
-            # Aborted (a failed plan) or still open (a caller that did not
-            # commit): either way the next writer must not inherit it.
-            conn.rollback()
         if getattr(conn, "autocommit", False):
             # Set through the wrapper by a caller; the next borrower must not
             # inherit it (see the docstring: a transaction-local `set_config`

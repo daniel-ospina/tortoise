@@ -326,13 +326,25 @@ clears wholesale, a tiny population of cheap-to-rebuild entries, so the two
 bounds are deliberately not the same shape) — and the pin parks
 `MAX_IDLE_KEYS + 2` distinct keys to prove it.
 
-**The read door pays one rollback per borrow, and that is now stated.** The
-release comment claimed "no round trip" — true of the write door's happy path
-(`commit()` leaves the connection IDLE), false of a read, which ends INTRANS and
-therefore takes a `rollback()` on 100% of borrows. One round trip against the
+**The read door's rollback is charged to the BORROW, not the release.** A read
+ends INTRANS, so something must clear that transaction before the next borrower
+inherits it. An earlier revision did it on the release path, which is a server
+round trip taken **after the rows are fetched and therefore before the answer is
+returned** — libpq has no per-statement timeout, so a backend that wedged in that
+window blocked the release forever and threw away a read that had already
+succeeded, contradicting `open_record`'s own "a served read must not be able to
+hang a request on a wedged database". The reset now happens at REUSE
+(`record_writer._reset_parked_transaction`): one round trip against the
 **12.5–13.9 ms** of connect+auth it replaces (bullet (a)'s connection half — not
 the whole 18.9–20.1 ms BEFORE record, which also contains work the read still
-does); named here rather than averaged away.
+does), charged where the caller is about to issue statements anyway. It doubles
+as the pool's liveness probe: both fields `_connection_is_reusable` reads are
+LOCAL and stale once the peer is gone, so a handle parked INTRANS whose server
+died while idle is caught by the borrow-time rollback, discarded, and replaced
+by a fresh connect — instead of reaching the read door as a spurious
+`RecordUnavailable` for a request a reconnect would have served. A handle the
+WRITE door parked IDLE has no such probe; there the death is found at use and
+costs one `write_failed`, healed by replay.
 
 **Two silent-failure shapes are closed on the wrapper.** `close()` is now a fence
 (`cursor`/`commit`/`rollback` raise the driver's `InterfaceError` once returned,
