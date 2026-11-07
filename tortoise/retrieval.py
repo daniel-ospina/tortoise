@@ -723,8 +723,11 @@ def session_key_of(hit: dict) -> str:
       records the arm FIRING on the EVAL grain (``seeded_sessions: 354``,
       ``injected_total_merged: 617/617 at cap10``), so the arm was never
       globally inert — on a product pool it could not seed at all.
-      ⛔ That receipt is cited THREE WAYS or not at all (pinned by
-      ``tests/test_window_arm_baseline_10538.py``): its ``recall_all@5
+      ⛔ That receipt is cited THREE WAYS or not at all — the same
+      discipline ``tests/test_window_arm_baseline_10538.py`` PINS on
+      ``window_arm_baseline``'s ``why`` field (it does not read this
+      docstring; no test does, which is exactly why this line has to carry
+      the rule rather than a pointer): its ``recall_all@5
       0.6761 → 0.8592`` is the session-diverse GUARD's net gain, while the
       INJECTION's own eviction costs ``reader_surface@5 0.9436 → 0.9289``
       and the guard adds ``evidence_recall@5 0.527 → 0.4706``. Quoting the
@@ -2339,11 +2342,16 @@ def _session_admission_key(
     ``tools/longmem_eval/retrieve.py``).
 
     ⚠️ "Two shapes" is the REACHED enumeration, NOT a proof of
-    exhaustiveness — three type/namespace seams diverge too, none reachable
+    exhaustiveness — four type/namespace seams diverge too, none reachable
     from an in-repo writer (measured): a non-``int`` ``lme_session_index``
-    (the pool keys ``idx:{value}``, this grain skips the index leg); a
-    whitespace-only snake id (the pool keys it RAW because it is truthy,
-    while this grain DISCARDS it rather than stripping); and a WIRE id that
+    (the pool keys ``idx:{value}``, this grain skips the index leg — and a
+    ``bool`` IS an ``int`` in Python, which is why this grain excludes it
+    explicitly while the pool does not); a TRUTHY non-``str`` snake id
+    (``session_id: 5`` keys the int ``5`` — the pool leg is untyped and can
+    return a non-``str``, at which point ``seeded_sessions`` raises
+    ``AttributeError`` on ``.startswith``); a whitespace-only snake id (the
+    pool keys it RAW because it is truthy, while this grain DISCARDS it
+    rather than stripping); and a WIRE id that
     spells the ``idx:`` namespace — ``_SAFE_SESSION_TAG_RE`` permits ``:``,
     so a session literally named ``idx:3`` keys ``idx:3`` and FUSES, in the
     pool, with another hit's ``lme_session_index: 3`` bucket while this

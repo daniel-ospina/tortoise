@@ -604,6 +604,83 @@ def test_tr_complete_sessions_splices_on_the_wire_identity_10540(monkeypatch):
     assert [h["content"] for h in out] == ["a0", "b0", "a1", "a2-injected"]
 
 
+def test_tr_complete_sessions_never_splices_an_idx_bucket_onto_a_phantom_hit(monkeypatch):
+    """#10540 R10: the SPLICE carries the SEED's guard, not just its key.
+
+    ``seeded_sessions`` admits only a REAL session key
+    (``_is_real_session_id``), because an ``idx:N`` bucket names no graph
+    session. The splice keyed through ``session_key_of`` but did NOT apply
+    that guard — so a fetched group whose key happens to be spelled in the
+    ``idx:`` namespace could equal a phantom hit's bucket and be spliced into
+    an UNRELATED hit's block, with ``report["sessions"]`` counting a splice
+    the seed never admitted.
+
+    The fused POOL is the shape no in-repo lane produces: the ``idx:``-named
+    session itself IS writer-producible (``ids.session_id_refusal`` refuses
+    only a BLANK id, and ``_SAFE_SESSION_TAG_RE`` admits ``:``), but the
+    colliding bucket requires an eval-stamped ``lme_session_index``. So this
+    pins DEFENCE — the two halves must agree on the one key class that
+    separates a session from a bucket — not a measured live defect.
+
+    Discriminating: removing the gate reds the four BEHAVIOURAL assertions
+    (``sessions``, ``injected``, the merged order, the foreign-id absence);
+    the ``ok`` flag, the fixture check and the input-pool invariant hold
+    either way and are not part of that count.
+    """
+    from tools.longmem_eval import retrieve as R
+    from tortoise import session_reinjection as SR
+    from tortoise.retrieval import session_key_of
+
+    base = [
+        {"id": "P_0", "content": "phantom-0", "lme_session_index": 3,
+         "session_date": "2023-01-08", "match_source": "fts"},
+        {"id": "A_0", "content": "a0", "session_id": "sess-a",
+         "session_date": "2023-01-08", "match_source": "fts"},
+        {"id": "P_1", "content": "phantom-1", "lme_session_index": 3,
+         "session_date": "2023-01-08", "match_source": "fts"},
+    ]
+    # the fixture must actually reach the phantom bucket the guard rejects
+    assert [session_key_of(h) for h in base] == ["idx:3", "sess-a", "idx:3"]
+
+    injected = {"G_foreign": {"content": "FOREIGN", "session_id": "idx:3"},
+                "A_9": {"content": "a9-injected", "session_id": "sess-a"}}
+
+    class _Seed:
+        session_id = "sess-a"
+        point_id = "A_0"
+
+    monkeypatch.setattr(SR, "seeded_sessions", lambda *a, **k: [_Seed()])
+    monkeypatch.setattr(
+        SR, "source_session_chunk_pass",
+        lambda *a, **k: {"ok": True, "dropped_by_cap": 0, "total_cap_hit": False,
+                         "by_session": {"idx:3": [{"id": "G_foreign"}],
+                                        "sess-a": [{"id": "A_9"}]}})
+    monkeypatch.setattr(R, "point_props_for_hits",
+                        lambda proj, ids: {i: injected[i] for i in ids})
+    monkeypatch.setattr(R, "_speaker_for_turns", lambda proj, ids: {})
+
+    class _Sdk:
+        def _get_proj(self):
+            return object()
+
+    out, report = R._tr_complete_sessions(
+        _Sdk(), list(base), ["2023-01-01", "2023-01-02"], seed_window=2,
+        seed_sessions=2, total_cap=5, per_session_cap=5)
+
+    assert report["ok"] is True
+    # the phantom bucket is NOT a splice anchor: one real session, one group
+    assert report["sessions"] == 1, report
+    assert report["injected"] == 1, report
+    # the real group still lands after its OWN session's last base hit …
+    assert [h["content"] for h in out] == [
+        "phantom-0", "a0", "a9-injected", "phantom-1"]
+    # … and the foreign group lands NOWHERE
+    assert not any(h["id"] == "G_foreign" for h in out)
+    # the input pool is untouched (the sibling pin's contract, re-asserted here
+    # because a wrong splice would have mutated `added` before this point)
+    assert [h["id"] for h in base] == ["P_0", "A_0", "P_1"]
+
+
 def test_admission_grain_agrees_with_the_pool_authority_on_a_camel_only_pool():
     """#10540/#11381: the #2976 admission grain must key a hit the SAME way
     the pool authority does.

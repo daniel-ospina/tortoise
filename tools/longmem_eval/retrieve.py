@@ -157,6 +157,7 @@ from tortoise.session_reinjection import (  # C4 (#2517): product rules
     DEFAULT_REINJECTION_SEED_SESSIONS,
     DEFAULT_REINJECTION_SEED_WINDOW,
     DEFAULT_REINJECTION_TOTAL_ITEMS,
+    _is_real_session_id,  # #10540 R10 — the SPLICE needs the SEED's own guard
 )
 
 from . import encode_cache, evidence
@@ -1062,13 +1063,39 @@ def _tr_complete_sessions(
         # returns the snake id where one exists, and otherwise the same
         # ``idx:`` bucket the hit already carried (``_annotate_hits`` always
         # stamps an index, so the camel leg is pre-empted; an Event hit's
-        # empty ``session_id`` becomes ``idx:<n>`` instead of ``""``, and
-        # neither can equal a ``coalesce(p.session_id, s.id)`` group key) —
-        # so the #8713 census cannot move.
+        # empty ``session_id`` becomes ``idx:<n>`` instead of ``""``) — so
+        # the #8713 census cannot move. ⚠️ ONE shape is exempt from that
+        # argument, which is why ``last_index`` below is gated by
+        # ``_is_real_session_id`` (#10540 R10/R11): a stored ``:Session``
+        # whose id literally starts with ``idx:`` (``_SAFE_SESSION_TAG_RE``
+        # permits ``:``, and ``ids.session_id_refusal`` only refuses a BLANK
+        # id, so such a session is writer-producible) makes a REAL group key
+        # that a POOL hit's ``idx:<n>`` bucket can equal, so unguarded one
+        # session's chunks land inside an unrelated index-<n> hit's block and
+        # ``report["sessions"]`` counts a splice the seed never admitted. The
+        # fused POOL is what no in-repo lane produces (the colliding bucket
+        # needs an eval-stamped ``lme_session_index``), so this is defence,
+        # not a measured live defect; the guard costs the reachable path
+        # nothing (a seeded session's key is never an ``idx:`` bucket).
+        #
+        # ⛔ The GATE lives at the build loop, in ONE place (R11). The splice
+        # below needs no copy of it: ``last_index`` can only hold keys this
+        # loop admitted, so ``last_index.get(sid)`` is ``None`` for every key
+        # the guard rejects and ``None == i`` is False for every ``int i``.
+        # A copy there is not merely redundant — it is REACHED before the
+        # lookup, so a pool hit with a truthy non-``str`` snake id (the
+        # untyped-pool seam ``retrieval.session_key_of`` documents) would
+        # raise ``AttributeError`` on ``.startswith`` inside the guarded
+        # expression here and turn a completing run into the fail-open
+        # no-op this block exists to avoid. That is not hypothetical: on the
+        # round-10 tree (guard in BOTH loops) a pool hit with ``session_id:
+        # 5`` reported ``ok=False`` and completed nothing, while removing
+        # only the splice copy returned ``ok=True, sessions=1,
+        # injected=1`` (R11 mutation probe).
         last_index: dict[str, int] = {}
         for i, h in enumerate(pool):
             sid = session_key_of(h)
-            if sid in added:
+            if sid in added and _is_real_session_id(sid):
                 last_index[sid] = i
         merged: list[dict] = []
         for i, h in enumerate(pool):
