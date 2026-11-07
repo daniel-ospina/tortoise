@@ -16,7 +16,9 @@ governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.31; STORAGE-ARCHITECTURE.md
 > (comment `5559702884`; owner scope-stage decisions, human gate passed). It is committed by `#11461`
 > because the durable copy itself promised it — *"Will be committed as `docs/epics/2281-*` during the
 > epic Plan stage"* — and never was: on `main = dbbf5d874` (2026-11-07)
-> `git ls-tree -r origin/main docs/epics/ | grep -c 2281` returned **0**, so every governing fact about
+> `git ls-tree -r --name-only dbbf5d874 docs/epics/ | grep -c 2281` returned **0** (`--name-only` is
+> load-bearing in that quotation — without it the count is `1`, because an unrelated doc's blob sha
+> happens to contain the digits `2281`), so every governing fact about
 > this epic lived only in comments and `gh api …/issues/2281/sub_issues` returned `[]`. (The earlier
 > 2026-09-05 comment, `5552268035`, is the owner's scope-stage decision list; it points at
 > `/tmp/2281-scope.md`, not at this copy.)
@@ -392,7 +394,8 @@ sealed-key publication + erratum (`w7_publish.py`), CI smoke (`--mock` + `longme
 
 ## 7. Decision state — D1–D8 re-measured on `main = dbbf5d874` (2026-11-07)
 
-Every row cites a `path:line` on `main` or a closing issue — no row cites a comment. ✔ = verified this
+Every row's evidence is a tracked path (a `path:line` where a line identifies the construct), a quoted
+command's output, or an issue — no row cites a comment. ✔ = verified this
 wave by reading the tree, not inherited from a prior comment.
 
 | # | decision (2026-09-05) | state | evidence |
@@ -400,7 +403,7 @@ wave by reading the tree, not inherited from a prior comment.
 | **D1** | Option B — additive dated current-state block above raw evidence, no global ranking change | **LANDED** ✔ | `tortoise/assembly.py` renders `STATE (couch): superseded by sofa` — the f-string at `:2985` in `_state_header_hit()` (def at `:2956`; it sat at `:2767` on this doc's measurement base and #11451 moved it, so cite the symbol, not the line); pinned by `tests/test_assembly_sdk.py::test_fired_routing_exact_goldens` |
 | **D2** | single pass (one LLM call per ask; empty output escalates and fails loud, #2280) | **CLOSED BY CONTRACT** | product contract — the abstention label cannot gate a second pass: `tortoise/ask_lane.py:714` computes `abstained` via `_looks_abstained` (`tortoise/reader.py:759`), published as `"abstained"` at `ask_lane.py:824`, and that helper's own docstring says *"measurement/UX sugar — NEVER a gate; the two-phase prompt is authoritative"* (`reader.py:760-762`). A second pass therefore has no gate to hook, and #2280's rule is that empty output escalates and fails loud instead |
 | **D3** | 3-tier read ordering: statement > turn Point > raw chunk | **LANDED** (#9092) ✔ | `tortoise/retrieval.py:3311-3313` (`_PACKAGE_TYPE_STATEMENT/_TURN/_CHUNK = 0/1/2`), `_package_type_tier()` `:3316-3336`, `_package_tier()` `:3339`, which returns `(_package_type_tier(h), marked, _pkg_rank)` at `:3353` so hit type is the primary key. The 2026-10-19 comment's `:1948` citation has drifted; the behaviour has not |
-| **D4** | extend W2-b (sealed-gold discipline); no parallel benchmark | **SATISFIED BY SCOPE** | the sealed-benchmark discipline is `tests/eval/ask/` (20 tracked files) + `w7_publish.py`; no parallel benchmark was built |
+| **D4** | extend W2-b (sealed-gold discipline); no parallel benchmark | **SATISFIED BY SCOPE** | the W2-b sealed-gold discipline is `tests/eval/write_path/` — `gold/` (per-fixture `.gold.json`), `baselines/` (`main.json`, `m2.json`) and `_manifest.json`, 73 tracked files; no parallel benchmark was built |
 | **D5** | code parallel, measurement gated on #2134 | **SATISFIED** ✔ | #2134 **CLOSED** 2026-09-06 — the measurement gate is clear |
 | **D6** | route on retrieval composition; #2009 detector stays parked (0.284) | **HONOURED** | the D3 ordering keys on **hit type**, never on the detector (`_package_type_tier` takes only the hit, `retrieval.py:3316`); the lane still picks its reader prompt by `detect_question_type` (`ask_lane.py:685`/`:934`, `reader.py:532`), which D6 did not forbid. **#2009 is now CLOSED 2026-09-28** — the 2026-09-05 record above calls it OPEN; that is historical text, not a claim about today |
 | **D7** | build the distilled-corpus ask measurement, then promote to the sealed benchmark | **LANDED** (#9095) ✔ | `tools/longmem_eval/measure_ask_distilled.py` + `tests/eval/ask/` (pre-registration, sealed gold, manifest, fixtures) |
