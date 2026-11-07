@@ -1197,8 +1197,8 @@ jobs:
           # configured this" from "an operator removed it 40 minutes ago as the
           # only thing keeping production healthy". Measured 2026-11-05/06: with
           # SENTRY_DSN unset as the live mitigation for #11092's serialization
-          # storm, deploys 42117073101 and 42139810077 each PUT IT BACK, on builds
-          # that provably did not contain the fix.
+          # storm, deploys 42117073101 and 42135045025 each PUT IT BACK, on builds
+          # (46ea687dc, c3af2d0188) that provably did not contain the fix.
           #
           # So this step reads the ledger and drops every recorded name from the
           # payload. THE EXCEPTION MUST BE ENFORCED AT SYNC TIME, NOT ONLY AT
