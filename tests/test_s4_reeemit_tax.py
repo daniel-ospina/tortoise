@@ -1566,7 +1566,8 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
         f"**{_ps['token_weighted_reduction'] / 0.40:.1f}× the 40 % target",
         f"({_plg['added_by_s4']}/{_rlg['added_by_s4']} → "
         f"{_pdl['added_by_s4']}/{_rdl['added_by_s4']})",
-        f"a 16 k cap with a {_max_out / 1000:.1f} k max output",
+        f"cannot truncate the 16 k **default** cap with a "
+        f"{_max_out / 1000:.1f} k max output",
         f"−{_rs['token_weighted_reduction'] * 100:.2f} %",
         "266 of the 311 items the receipts record",
         # ⛔ the input-side clause this row now carries: the per-session cost,

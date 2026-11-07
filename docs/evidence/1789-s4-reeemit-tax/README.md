@@ -1,7 +1,7 @@
 ---
 title: "#1789 — the S4 re-emit tax, measured: −93.8 % output tokens on real geometry"
 type: evidence
-domain: extraction
+domain: platform
 doc_status: final
 created: 2026-11-07
 subjects.team: epistemic-team
