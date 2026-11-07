@@ -902,7 +902,7 @@ def log_result(result: RecordReconcileResult,
         # `rebuild_all` asks the SAME L2 name guard as the restore
         # (`_assert_test_graph`, "REFUSING to run bulk DETACH DELETE on non-test
         # graph", applying to every SERVER graph name per #2944 — an embedded
-        # `path=` DB is exempt from that name check), so on a production server graph the
+        # `path=` DB does not face that name check), so on a production server graph the
         # replay is refused PRE-WIPE and the clear IS durable there); #10017's
         # purge is a DIFFERENT population — legacy episodic turn
         # :Points — and names no story_arc. Calling them all "owned" sends the
