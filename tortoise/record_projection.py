@@ -1541,7 +1541,7 @@ def _read_migrations(migrations_dir: Path | None = None) -> str:
 #: ⛔ The population is NOT static: the key is `(tree, fingerprint)`, so a
 #: production process holds ONE entry while the migration files are unchanged and
 #: gains one more per distinct FILE STATE it observes — an edit, an addition, a
-#: removal (measured 1 → 2 → 3 across three reads with an edit between). Stale
+#: removal (one entry per observed `(tree, fingerprint)` pair). Stale
 #: states are exactly what the wholesale drop clears (#9558).
 _SCHEMA_CACHE_LIMIT = 8
 
@@ -1609,11 +1609,12 @@ def _migrations_fingerprint(base: Path) -> tuple:
     rejected — with the arithmetic quoted from the SAME measurement, because an
     earlier revision of this docstring compared the digest against one pass
     instead of against the win: one fingerprint pass is 0.160–0.169 ms (`fingerprint-cost.json`),
-    blake2b over the same fifteen files (129,355 bytes) is 0.543–0.593 ms
-    (`fingerprint-cost.json`), and the cached read it
+    blake2b over the same fifteen files (129,355 bytes) is 0.543–0.592 ms
+    (`fingerprint-cost.json` — min and mean, the same convention as the pass's
+    0.160–0.169), and the cached read it
     would guard saves ~1.2 ms (uncached `table_columns()` 1.546–1.588 ms → warm
     cached 0.332–0.353 ms, medians from the committed run set), so a digest ADDS
-    0.374–0.433 ms net of the pass it replaces — **~31–36 % of the win** — real but
+    0.374–0.432 ms net of the pass it replaces — **~31–36 % of the win** — real but
     not decisive, and not worth it for a residual that needs an archive extraction
     landing inside a single inode-clock tick. The trade is therefore explicit:
     covered for every writer except that one. The test reds it if the fingerprint

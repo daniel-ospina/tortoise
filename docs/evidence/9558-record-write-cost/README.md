@@ -194,9 +194,9 @@ applies on the DEFAULT filesystem.** On this box (**ext4**, `/dev/root`, in both
 `ctime_ns` **identical** (delta 0 ns), because inode-timestamp granularity is
 coarse on ordinary Linux filesystems. So a `cp -p` landing inside a single tick is
 still invisible. A content digest would close it and was measured and rejected:
-blake2b over the fifteen files (129,355 bytes) costs **0.543–0.593 ms** per pass
+blake2b over the fifteen files (129,355 bytes) costs **0.543–0.592 ms** per pass
 against the stat pass's **0.160–0.169 ms** (`fingerprint-cost.json`), so it ADDS
-0.374–0.433 ms net of the pass it replaces, against a warm-column-map win of
+0.374–0.432 ms net of the pass it replaces, against a warm-column-map win of
 **1.193–1.256 ms** — i.e. **~31–36 % of the win**, about a third. ⛔ An earlier revision said "most of the ~0.5 ms the cache saves", which
 compared the digest against one stat pass instead of against the win and got the
 verdict's character wrong; the remaining figures here are the same measurement,
