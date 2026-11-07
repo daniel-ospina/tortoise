@@ -6494,13 +6494,53 @@ def test_declined_pids_gone_measures_a_declined_server_against_left():
     # pid 7 was declined and is gone at `left`; 8 was declined and is still
     # alive there — `left` already counts 8, so claiming it would DOUBLE-count
     # and mask a genuine shortfall.
-    assert _declined_pids_gone({7, 8}, [8, 9]) == 1
-    assert _declined_pids_gone({7, 8}, [7, 8]) == 0
+    assert _declined_pids_gone({7, 8}, [8, 9], {7, 8}) == 1
+    assert _declined_pids_gone({7, 8}, [7, 8], {7, 8}) == 0
     # No declines at all is a measured 0, not an unmeasured None.
-    assert _declined_pids_gone(set(), [8]) == 0
-    # Either observation missing = UNMEASURED, never a confident 0 (#10255 A).
-    assert _declined_pids_gone(None, [8]) is None
-    assert _declined_pids_gone({7}, None) is None
+    assert _declined_pids_gone(set(), [8], {8}) == 0
+    # Any observation missing = UNMEASURED, never a confident 0 (#10255 A).
+    assert _declined_pids_gone(None, [8], {8}) is None
+    assert _declined_pids_gone({7}, None, {7}) is None
+    assert _declined_pids_gone({7}, [8], None) is None, (
+        "without the pre-sweep population the declined set cannot be bounded "
+        "to it, so the term is UNMEASURED rather than unbounded"
+    )
+
+
+def test_declined_pids_gone_is_bounded_to_the_before_population():
+    """#11427 round 5 (P2, fail-open): the declined term must not claim a
+    server that `before` never held.
+
+    `declined` is accumulated over every iteration's DISCOVERY, and discovery
+    sees servers the pre-sweep probe did not contain: a sibling suite's server
+    started MID-sweep is discovered, and `only_safe=True` declines every live
+    ephemeral candidate. If that server then shuts itself down before the
+    post-sweep probe, an unbounded term claims it as one of OUR natural exits
+    — and `exited` is an addend in `reaped + exited + left >= before`, so the
+    claim cancels exactly one server this sweep genuinely lost. That is a
+    FALSE PASS on a broken sweep, the direction the term's own docstring
+    refuses.
+
+    The sibling term `_vanished_before_discovery` is bounded to `before` by
+    construction (a set difference FROM it); this one had the bound only in
+    prose (#10757 P2: one population per reconciliation).
+    """
+    from tortoise.embedded_reaper import _declined_pids_gone
+
+    # pid 99 appeared after the pre-sweep probe: it is not ours to claim.
+    assert _declined_pids_gone({99}, [], {5}) == 0, (
+        "a server `before` never held must never be claimed as our exit"
+    )
+    # The same disappearance, with the pid inside the measured population.
+    assert _declined_pids_gone({5}, [], {5}) == 1, (
+        "within the bound the term must still fire, or the fix has replaced "
+        "a fail-open term with a dead one"
+    )
+    # Mixed: only the in-population half counts.
+    assert _declined_pids_gone({5, 99}, [], {5}) == 1
+    # `left` still wins inside the bound — an alive server is counted by
+    # `left`, and claiming it too would double-count.
+    assert _declined_pids_gone({5, 99}, [5], {5}) == 0
 
 
 def test_build_end_sweep_report_folds_the_declined_window_into_exited():
@@ -6552,6 +6592,50 @@ def test_build_end_sweep_report_folds_the_declined_window_into_exited():
     assert unmeasured["exited"] == 0, (
         "an un-instrumented sweep (no declined reading) must not invent the "
         "missing pid as a natural exit"
+    )
+
+
+def test_build_end_sweep_report_does_not_claim_a_server_that_appeared_mid_sweep():
+    """#11427 round 5 (P2, fail-open) — end-to-end on the concurrent-suite shape.
+
+    `before_pids = {5}` (ours, and this sweep is about to lose it). A sibling
+    suite starts pid 99 mid-sweep, so discovery examines `{5, 99}` and declines
+    99 (a live client). 99 then shuts itself down; 5 is genuinely lost. An
+    unbounded declined term claims 99 as a natural exit, `exited` becomes 1 and
+    `0 + 1 + 0 >= 1` PASSES — the broken sweep is never reported.
+
+    Same shape with 99 inside `before` must still heal, or the bound has
+    swallowed the term it was meant to scope.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    def report(pre, post):
+        sweep = _scan_aware([])
+        sweep.discovered_pids = {5, 99}
+        sweep.declined_pids = {99}
+        sweep.exited_pids = set()
+        return build_end_sweep_report(
+            iter([sweep]).__next__, deadline=1030.0,
+            probe=iter([pre, post]).__next__, clock=lambda: 1000.0)
+
+    stranger = report([5], [])
+    assert (stranger["before"], stranger["reaped"], stranger["left"]) == (1, 0, 0)
+    assert stranger["exited"] == 0, (
+        "pid 99 was never in `before` — claiming its self-shutdown as OUR "
+        "natural exit buys the gate the slack that hides the lost pid 5"
+    )
+    assert (stranger["reaped"] + stranger["exited"] + stranger["left"]) < stranger["before"], (
+        "fail-closed: the genuine shortfall must survive, which is exactly "
+        "what an unbounded declined term erased"
+    )
+
+    ours = report([5, 99], [5])
+    assert ours["exited"] == 1, (
+        "a declined server that WAS in `before` and is gone at `left` is "
+        "still a natural exit — the bound must not disarm the #11427 term"
+    )
+    assert (ours["reaped"] + ours["exited"] + ours["left"]) >= ours["before"], (
+        "the healed shape's identity must still hold"
     )
 
 

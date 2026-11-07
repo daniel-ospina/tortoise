@@ -2069,7 +2069,9 @@ class _ScanAwareList(list):
     # gate read the shortfall as "the sweep's own measurement is broken" on a
     # run whose pytest passed (measured: before=26, reaped=0, exited=0,
     # left=25, `pytest rc 0`). The builder MEASURES this window against the
-    # post-sweep `left` pid set (see `_declined_pids_gone`).
+    # post-sweep `left` pid set, bounded to the pre-sweep `before` population
+    # so a server a sibling suite started MID-sweep cannot be claimed as ours
+    # (see `_declined_pids_gone`).
     # `None` = NOT MEASURED (an un-instrumented seam, or an incomplete
     # discovery), never "declined nothing" — same fail-closed rule as
     # `discovered_pids`, for the same reason.
@@ -4171,7 +4173,7 @@ def _vanished_before_discovery(before_pids, discovered_pids,
     return len(set(before_pids) - set(discovered_pids) - set(left_pids))
 
 
-def _declined_pids_gone(declined_pids, left_pids) -> int | None:
+def _declined_pids_gone(declined_pids, left_pids, before_pids) -> int | None:
     """DECLINED candidates that are GONE at the post-sweep probe (#11427).
 
     The identity's THIRD unaccounted window, and the one that redded this PR's
@@ -4187,10 +4189,21 @@ def _declined_pids_gone(declined_pids, left_pids) -> int | None:
     shortfall as a broken sweep.
 
     THIS IS A MEASUREMENT, NOT THE COMPLEMENT `before - reaped - left` #6984
-    refused. It is a pid-set difference over TWO observations of ONE declared
-    population: the set `reap()` recorded at each skip decision, and the
-    post-sweep `left` reading. It can therefore FAIL (None) and it is bounded:
-    it can only ever claim pids the sweep itself decided not to act on, so
+    refused. It is a pid-set difference over observations of ONE declared
+    population: the set `reap()` recorded at each skip decision, the pre-sweep
+    `before` probe, and the post-sweep `left` reading. It can therefore FAIL
+    (None). Its population bound is the `before` probe, and it is applied here
+    rather than assumed: `declined` is accumulated over every iteration's
+    DISCOVERY, and discovery sees servers `before` never held — a sibling
+    suite's server started MID-sweep is discovered, declined (`only_safe`
+    declines every live ephemeral candidate), and can then shut itself down
+    before the post-sweep probe. Without the intersection that pid would be
+    claimed as one of OUR natural exits, and `exited` is the addend that makes
+    `reaped + exited + left >= before` hold, so the claim would cancel exactly
+    one server this sweep genuinely lost — a **false PASS** on a broken sweep
+    (#10757 P2: two readings reconciled against each other must be measured
+    over ONE population). Within that bound it can only ever claim pids the
+    sweep itself decided not to act on, so
 
       * a candidate the sweep COMMITTED to act on and then lost is not
         declined, is in neither `reaped` nor `exited` nor `left`, and its
@@ -4211,11 +4224,14 @@ def _declined_pids_gone(declined_pids, left_pids) -> int | None:
     an acted-only cancellation lets a pid declined in one iteration and found
     dead in a later one be claimed twice — measured `exited` 2 for one exit.
 
-    Returns None (UNMEASURED, never 0) when either observation is unavailable.
+    Returns None (UNMEASURED, never 0) when any observation is unavailable —
+    including `before`: an unbounded declined set cannot be measured over the
+    population the identity reconciles, and dropping the bound instead of the
+    term would silently re-open the fail-open direction above.
     """
-    if declined_pids is None or left_pids is None:
+    if declined_pids is None or left_pids is None or before_pids is None:
         return None
-    return len(set(declined_pids) - set(left_pids))
+    return len((set(declined_pids) & set(before_pids)) - set(left_pids))
 
 
 def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
@@ -4244,9 +4260,12 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
     the sweep observed — and is widened here by TWO measured windows: the
     vanished-before-discovery count (#8599), and the declined-then-gone count
     (#11427). Both are natural exits observed by a DIFFERENT instrument (a
-    pid-set difference against the pre- and post-sweep readings), and both are
+    pid-set difference against the pre- and post-sweep readings), both are
     measured only over pids the sweep's own decisions name — so neither can
-    claim a server the sweep committed to act on. Neither can claim one the
+    claim a server the sweep committed to act on — and both are bounded to the
+    `before` population (the vanished term by construction, the declined term
+    by intersecting the accumulated declines with that probe), so neither can
+    claim a server that appeared after the pre-sweep reading. Neither can claim one the
     sweep already counted either: the accumulation below subtracts the pids
     each iteration ACTED on and the pids it OBSERVED as natural exits
     (`exited_pids`), which is what keeps a single exit from being folded into
@@ -4328,8 +4347,10 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
             "identity does not read a self-shutdown as a broken sweep "
             "(#8599)", vanished)
     # #11427: the same treatment for a candidate this sweep DECLINED and that
-    # then shut itself down — the third window, measured against `left`.
-    declined_gone = _declined_pids_gone(declined, left_pids)
+    # then shut itself down — the third window, measured against `left`, and
+    # bounded to the `before` population so a server a sibling suite started
+    # MID-sweep can never close a shortfall this sweep is responsible for.
+    declined_gone = _declined_pids_gone(declined, left_pids, before_pids)
     if declined_gone:
         exited += declined_gone
         logger.warning(

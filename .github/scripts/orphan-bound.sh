@@ -88,19 +88,27 @@
 #         it then shuts itself down (redislite's fire-and-forget NOSAVE close,
 #         asynchronously) nothing accounts for it, and a run whose pytest
 #         passed reds on `before=26, reaped=0, exited=0, left=25`. So
-#         `build_end_sweep_report` folds in `|declined_pids - left_pids|`
-#         (`_declined_pids_gone`), MINUS the pids an iteration already accounted
-#         for — the ones it ACTED on (`reaped`) and the ones it OBSERVED as
-#         natural exits (`exited_pids`). Without that cancellation a server
-#         declined in one iteration and found DEAD at the next iteration's
-#         liveness check is claimed twice (once by `exited`, once here), which
-#         inflates `exited` — the fail-open direction this whole section is
-#         about. With it, the fold is still two observations of ONE population
-#         that the sweep's own skip decisions name, so a server the sweep
-#         COMMITTED to act on and then lost, or one discovery never reached,
-#         still leaves the shortfall visible. An un-instrumented or
+#         `build_end_sweep_report` folds in
+#         `|(declined_pids ∩ before_pids) - left_pids|` (`_declined_pids_gone`),
+#         MINUS the pids an iteration already accounted for — the ones it ACTED
+#         on (`reaped`) and the ones it OBSERVED as natural exits
+#         (`exited_pids`). Without that cancellation a server declined in one
+#         iteration and found DEAD at the next iteration's liveness check is
+#         claimed twice (once by `exited`, once here), which inflates `exited`
+#         — the fail-open direction this whole section is about. The
+#         intersection with `before_pids` is the population bound, and it is
+#         load-bearing for the same reason: `declined` accumulates over every
+#         iteration's DISCOVERY, which sees servers the pre-sweep probe never
+#         held (a sibling suite's server started MID-sweep is discovered and
+#         declined), and claiming such a server as one of OUR exits cancels a
+#         server this sweep genuinely lost — a false PASS on a broken sweep.
+#         With both, the fold is a measurement over ONE population (the
+#         pre-sweep probe the identity reconciles against), so a server the
+#         sweep COMMITTED to act on and then lost, or one discovery never
+#         reached, still leaves the shortfall visible. An un-instrumented or
 #         incompletely-scanned sweep reports it UNMEASURED (None, never 0),
-#         exactly as above.
+#         exactly as above — and so does a missing `before` reading, since
+#         without the population there is no bound to apply.
 #         Skipped only when `before` is `null` (the probe failed — a distinct
 #         state) or `0`; a report that OMITS `before` or `exited` is unusable
 #         → RED, so the
