@@ -2362,8 +2362,9 @@ def _session_admission_key(
     ``tools/longmem_eval/retrieve.py``).
 
     ⚠️ "Two shapes" is the REACHED enumeration, NOT a proof of
-    exhaustiveness — five further seams diverge too, none reachable
-    from an in-repo writer (measured): a non-``int`` ``lme_session_index``
+    exhaustiveness — five further seams diverge too, and none of them FUSES
+    in an in-repo pool (measured: item 4's id IS writer-producible, its
+    bucket partner is not): a non-``int`` ``lme_session_index``
     (the pool keys ``idx:{value}``, this grain skips the index leg — and a
     ``bool`` IS an ``int`` in Python, which is why this grain excludes it
     explicitly while the pool does not); a TRUTHY non-``str`` snake id
@@ -2371,7 +2372,7 @@ def _session_admission_key(
     return a non-``str``, and THREE callers then raise ``AttributeError`` on
     ``.startswith``: ``seeded_sessions``, ``coverage_loop.coverage_gap``
     (``coverage_loop.py``:497) and ``reader_window_displacement``
-    (``session_reinjection.py``:750-752) — while ``dedup_pool`` /
+    (``session_reinjection.py``:750-753) — while ``dedup_pool`` /
     ``session_diverse_order`` / ``reinjection_merge_order`` only dict-key it,
     and dict-keying is safe only for a HASHABLE non-``str`` (``5``,
     ``True``): an UNHASHABLE value (``{}``/``[]``) raises ``TypeError``
