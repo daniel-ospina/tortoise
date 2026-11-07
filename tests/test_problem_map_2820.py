@@ -11,12 +11,20 @@ No network, no DB, no `gh`: the TRACKER half of the map is deliberately not
 guarded (a status is a dated fact — §9 of the document says so), so nothing here
 depends on GitHub.
 
-EVERY NEGATIVE CONTROL MUTATES A COPY OF THE ARTIFACT IT GRADES, DRIVES A
-THROWAWAY REAL GIT REPO, OR PATCHES ONE SEAM THE ARM REQUIRES — never a fixture
-that could not fail — and each test's docstring states (a) the exact value/state
-that makes it fail and (b) why that state is reachable. A guard whose negative
-case cannot be reached is a test that cannot fail — it proves the code ran, not
-that the tree agrees with the document.
+EVERY NEGATIVE CONTROL TAKES ONE OF FOUR SHAPES — a mutated copy of the artifact
+it grades; a throwaway directory it drives real `git` in (a repo, or deliberately
+one that is NOT, for the cannot-answer legs); one patched seam the arm requires;
+or the shipped source read as an AST (the interpreter guard's exit code, which no
+runtime fixture can produce) — never a fixture that could not fail — and each
+test's docstring states (a) the exact value/state that makes it fail and (b) why
+that state is reachable. A guard whose negative case cannot be reached is a test
+that cannot fail — it proves the code ran, not that the tree agrees with the
+document. The four POSITIVE controls read the shipped artifact whole and assert
+its agreed state — `test_the_shipped_map_is_clean`, the taxonomy sums
+(`test_the_taxonomy_counts_are_what_the_summary_declares`), the CLI's
+agree-or-declare contract (`test_the_cli_agrees_or_declares_itself_unverified`)
+and the closed vocabulary (`test_every_status_token_is_in_the_vocabulary`) — and
+are named as such rather than counted as negative controls.
 
 Registered in `config/ci-surfaces.yml` (`manifest-integrity` fails on an
 unregistered test file; a docs-only edit runs `tier1` only, which is why the file
@@ -548,6 +556,30 @@ def test_a_missing_TOTAL_row_is_drift(tmp_path):
     copy.write_text("".join(kept), encoding="utf-8")
     errors = pmc.run(REPO, copy).errors
     assert any("missing its `| **Total tracked**" in e for e in errors), errors
+
+
+def test_a_decoy_TOTAL_row_BEFORE_section_2_cannot_satisfy_the_check(tmp_path):
+    """Fails if `Total tracked` is read from the whole document instead of §2.
+
+    Reachable, and found by fresh review: `_TOTAL` uses `.search()` — FIRST match,
+    unlike the last-wins `parse_summary` the decoy control above covers — so a
+    decoy only wins when it PRECEDES §2. Both TOTAL controls above drive a fixture
+    whose single `Total tracked` row IS §2's, where a scoped and an unscoped search
+    are indistinguishable: measured at the head this landed on,
+    `_TOTAL.search(_section(...))` -> `_TOTAL.search(text)` left every one of them
+    green. Here §2's own total is wrong (30 over a 26-row table) while a decoy
+    `| **Total tracked** | **26** |` sits at the END OF §1, so the unscoped parse
+    reads the decoy, agrees with it, and reports no error at all.
+    """
+    copy = _doc_copy(tmp_path)
+    text = copy.read_text(encoding="utf-8").replace(
+        "| **Total tracked** | **26** |", "| **Total tracked** | **30** |", 1
+    )
+    decoy = "\n| **Total tracked** | **26** |\n"
+    assert text.count("## 2.") == 1, "the §2 marker must be unique for this fixture"
+    copy.write_text(text.replace("## 2.", decoy + "## 2.", 1), encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("Total tracked says 30" in e for e in errors), errors
 
 
 def test_an_unregistered_document_is_drift(tmp_path):
