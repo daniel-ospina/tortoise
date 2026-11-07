@@ -721,21 +721,32 @@ def test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper(
     That is the reload path the installer's own docstring names as the reason the
     marker exists.
 
-    Two arms, so neither can be satisfied by an installer that does nothing:
+    Six arms, one per property, so no arm can be satisfied by an installer that
+    does nothing:
 
       (a) marker PRESENT → the third-party wrapper survives the re-invocation;
-      (b) marker ABSENT  → the SAME call DOES install (non-vacuity, and it is
-          exactly the harm (a) prevents).
+      (b) marker ABSENT  → the SAME call DOES install (non-vacuity: it is
+          exactly the harm (a) prevents, but it also reds an installer that
+          stopped assigning, or that assigns a decoy);
+      (c) the installer RECORDS the marker, which is what makes the NEXT
+          re-invocation a no-op;
+      (d) marker absent + `_TEST_SESSION_ACTIVE` off → declines, and records
+          nothing (a decline that still marks would poison the next call);
+      (e) marker absent + session live + `TORTOISE_TEST_MODE` UNSET → declines;
+      (f) marker absent + session live + `TORTOISE_TEST_MODE="0"` → declines,
+          which pins the clause's exact `== "1"` spelling rather than mere
+          truthiness ("0" is a non-empty string).
 
     ⛔ What each mutation ACTUALLY reds — measured, so the next mutation-tester is
     not sent down a wrong path: deleting the marker clause reds (a); deleting
     `and _TEST_SESSION_ACTIVE` reds (d); deleting the `TORTOISE_TEST_MODE` clause
-    reds (e). Deleting the marker-RECORDING line, or making the installer inert,
-    does NOT reach these arms at all — it reds the precondition above (conftest's
-    own install never sets the marker), and on CPython 3.12 `if False: return` in
-    the source is dead-code-eliminated, so `if False` is not even inert. Two of
-    those three clauses were unpinned before (d)/(e) existed: dropping either
-    left `tests/test_redirect_seam.py` green except for the known pre-existing
+    reds (e); relaxing that clause to a truthiness test reds (f). Deleting the
+    marker-RECORDING line, or making the installer inert, does NOT reach (a)-(f)
+    at all — it reds the precondition above (conftest's own install then never
+    sets the marker), and on CPython 3.12 `if False: return` in the source is
+    dead-code-eliminated, so `if False` is not even inert. Both non-marker
+    clauses were unpinned before (d)/(e) existed: dropping either left
+    `tests/test_redirect_seam.py` green except for the known pre-existing
     connection arm.
     """
     from tortoise import projection as proj_mod
@@ -778,9 +789,9 @@ def test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper(
         "with the session live and the marker absent the installer must install "
         "the stamp — otherwise arm (a) above proves nothing about the guard"
     )
-    # …and it must RECORD the marker, which is what makes the NEXT re-invocation
-    # idempotent; an installer that assigns without marking is not idempotent at
-    # all, and (a) alone would not notice.
+    # (c) …and it must RECORD the marker, which is what makes the NEXT
+    # re-invocation idempotent; an installer that assigns without marking is not
+    # idempotent at all, and (a) alone would not notice.
     assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, (
         "the installer installed the stamp but did not record "
         "`_tortoise_stamp_installed`, so the guard arm (a) relies on can never "
@@ -817,4 +828,17 @@ def test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper(
     assert threading.Thread.start is wrapped_2, (
         "the installer patched `Thread.start` with `TORTOISE_TEST_MODE` unset — "
         "the env clause is one of the two signals that must both be live"
+    )
+
+    # (f) …and the clause is `== "1"`, not truthiness. "0" is a non-empty string,
+    # so a relaxed spelling would install here; the strict one must not.
+    wrapped_3 = functools.wraps(inner)(_third_party_start)
+    monkeypatch.setattr(threading.Thread, "start", wrapped_3)
+    monkeypatch.setenv("TORTOISE_TEST_MODE", "0")
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapped_3, (
+        "the installer patched `Thread.start` with `TORTOISE_TEST_MODE=\"0\"` — "
+        "the guard must compare against the literal `\"1\"`, not test "
+        "truthiness (a non-empty \"0\" is truthy), or any session that sets a "
+        "non-\"1\" value arms the stamp"
     )
