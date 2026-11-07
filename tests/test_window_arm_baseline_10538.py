@@ -19,9 +19,12 @@ postponed. Every figure the arm was justified with lived in issue prose and in
 These tests pin the LAW rather than a happy number: where a pick lands relative
 to the graded top 5, whether the visible evidence-session SET widened or merely
 changed, and whether a displaced slot was a session's sole visible
-representative. They do **not** pin a placement verdict — ``window-exit`` vs
-``ab-head-ab`` is an open owner ruling on #10538, and a test that decided it
-would be a decision recorded in the wrong place.
+representative. They do **not** pin a placement verdict — ``tail`` vs ``head``
+is the still-open question on #10538, and a test that decided it would be a
+decision recorded in the wrong place. ⚠️ Non-eviction itself is NOT open: the
+owner ruled ``window-exit`` on 2026-11-07 and the guard ships ON (it has its own
+file, ``test_temporal_leg_non_eviction_10538.py``); this file pins the
+PRE-RULING splice that the guard is measured against.
 """
 from __future__ import annotations
 
@@ -125,8 +128,8 @@ def test_the_receipt_disclaims_the_measurement_it_is_not():
     why = verdict["why"]
     assert "never been measured on the shipped" in why, (
         "the head counterfactual has NO direct shipped-corpus measurement")
-    # The #8713 citation must carry the source's own THREE-WAY split, because a
-    # pending ruling is argued from this receipt:
+    # The #8713 citation must carry the source's own THREE-WAY split, because the
+    # still-open PLACEMENT verdict is argued from this receipt:
     #   (a) the injection's own eviction -> reader_surface@5 0.9436 -> 0.9289,
     #       and `inj_only` (guard ablated) reads the SAME 0.9289, so the guard
     #       accounts for none of it;
@@ -658,8 +661,9 @@ def test_a_two_slot_session_that_loses_both_slots_is_a_deletion():
     ``evicted_sole_representatives`` is empty and ``net`` reports a WIDENING.
 
     ``additive`` is therefore defined on session DELETION, not on single-slot
-    occupancy — otherwise the field the pending owner ruling will be argued from
-    would answer "no harm, and it widened" for an arm that deleted a session.
+    occupancy — otherwise the field the still-open placement verdict is argued
+    from would answer "no harm, and it widened" for an arm that deleted a
+    session. (Non-eviction is already ruled — see the module docstring.)
     """
     pool = _pool([("sA", 10), ("sB", 2), ("sD", 1), ("sE", 1)])
     order, picks = _fused(pool, window=SHIPPED_WINDOW)
@@ -693,8 +697,9 @@ def test_a_hit_with_no_session_is_not_a_session():
     # ⚠️ `additive` is SESSION-level, so it says NOTHING about displaced
     # non-sessions: a displaced sessionless base slot leaves it True and shows
     # up only here and in the sessionless pair. Pinned as a stated limitation,
-    # not left as an incidental property — `additive` is the field the pending
-    # window-exit / ab-head-ab ruling will be argued from.
+    # not left as an incidental property — `additive` is the field the still-open
+    # PLACEMENT question (tail vs head) will be argued from. (Non-eviction is
+    # already ruled; see the module docstring.)
     assert got["additive"] is True
     assert got["evicted_ids"] == ["x0"], (
         "the displaced sessionless hit must still be reported")

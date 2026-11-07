@@ -56,10 +56,19 @@ The only questions that can be asked of it are therefore window-level:
   ``two_slot_tail_session`` pool below), and a sole representative can be
   displaced while its session stays visible through a DIFFERENT bucket (two hits
   of one session carrying different raw date strings are two buckets). Read
-  ``deleted_sessions`` / ``additive`` for the verdict. The predicate is reported
-  here, never enforced: whether an arm MAY pay for a slot by evicting base
-  evidence is the open owner ruling (``window-exit`` vs ``ab-head-ab``), and this
-  file does not decide it.
+  ``deleted_sessions`` / ``additive`` for the verdict.
+
+  ⛔ WHAT IS AND IS NOT DECIDED HERE. The owner RULED ``window-exit`` on
+  2026-11-07 (#10538, comment ``6711158625``) and the guard that enforces it —
+  ``_non_eviction_filter`` in ``tortoise/temporal_leg.py``, on by default — has
+  shipped. So "may an arm pay for a slot by evicting base evidence?" is NOT an
+  open question and this file does not report a report-only predicate: it asks
+  for the PRE-RULING splice EXPLICITLY (``NON_EVICTION = False``) because its
+  receipt's subject is the baseline the guard is measured AGAINST, and every row
+  stamps which arm produced it (see ``_row``'s note). What remains open, and
+  what this instrument deliberately does not decide, is the PLACEMENT verdict —
+  ``tail`` vs ``head``. A stale "the ruling is undecided" line is how a bypass
+  gets argued later.
 * can the graded metric see the picks at all (``pick_ranks`` vs
   ``graded_by_recall_all_at_5``)?
 

@@ -724,6 +724,32 @@ def test_the_retention_measure_does_not_still_claim_it_never_gates():
     assert g_picks == [] and g_trace["applied"] is True
 
 
+def test_the_baseline_instrument_does_not_still_call_the_ruling_open():
+    """#10538 (cycle 5): the same stale-status class, in the sibling file this
+    PR edits. ``window_arm_baseline``'s MODULE docstring — which is also its
+    ``--help`` description, so it is operator-facing, not internal prose — said
+    the predicate "is reported here, never enforced: whether an arm MAY pay for
+    a slot by evicting base evidence is the open owner ruling". The owner ruled
+    ``window-exit`` on 2026-11-07 and the guard ships ON, so a reader of that
+    line concludes eviction is undecided and a refusal is the bug to remove.
+
+    The correct statement is the one the module now makes: the receipt's SUBJECT
+    is the pre-ruling splice, and the still-open question is PLACEMENT.
+    """
+    from tools.longmem_eval import window_arm_baseline as wab
+
+    doc = wab.__doc__ or ""
+    assert "never enforced" not in doc, (
+        "the instrument still calls the predicate report-only, but the "
+        "2026-11-07 ruling is enforced by _non_eviction_filter")
+    assert "open owner ruling" not in doc
+    assert "RULED" in doc, (
+        "the docstring must state that the ruling is decided, so a lane reading "
+        "it cannot argue a bypass from an 'undecided' premise")
+    # and it still names the one thing that IS open, or the correction over-reads
+    assert "PLACEMENT" in doc
+
+
 # ── 11. the REPLAY instrument's switch and stamp ───────────────────────────
 
 def _replay_question() -> dict:
