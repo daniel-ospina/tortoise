@@ -5265,6 +5265,15 @@ class Test4051ChargeCoversTheLoopShape:
             f"of {2 * charge - 1} B after the first spent {charge} B — the "
             f"endpoint is charging less than `commit_ingest_charge_bytes` "
             f"says (got {r.status_code})")
+        # A bare 429 proves *a* refusal, not the one this leg exists for: the
+        # docstring claims the ingest WINDOW refused it. The endpoint names the
+        # charge that spent the window (`commit_ingest_bytes`), and the class
+        # above already asserts on it (`detail["resource"]`) for the same
+        # reason — a 429 from any other limiter would otherwise satisfy this
+        # leg while the node floor went unspent.
+        assert r.json()["detail"]["resource"] == "commit_ingest_bytes", (
+            f"the refusal does not name the ingest window: "
+            f"{r.json().get('detail')!r}")
 
     def test_a_flat_collection_lane_is_charged_for_every_node_it_mints(
             self, client, monkeypatch):
@@ -5300,10 +5309,6 @@ class Test4051ChargeCoversTheLoopShape:
         second node without raising the rate.
         """
         _pin_shipped_ingest_allowance(monkeypatch)
-
-        assert _commit(client, _raw_payload(
-            0, session_id="s4051FlatWarm", points=[], entities=[],
-            provenance_refs=[])).status_code == 200
 
         entities = [{"name": f"FlatProbe{i}", "kind": "Project",
                      "passes_frequency_gate": True} for i in range(3)]
@@ -5382,15 +5387,12 @@ class Test4051ChargeCoversTheLoopShape:
         """
         import tortoise.quota as quota_mod
 
-        # Pin the SHIPPED figure FIRST — before the warm-up commit, not after it.
-        # Ordering is load-bearing: a LOW ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN``
-        # export throttles this leg's OWN commits, so a pin placed after them
-        # still fails (measured at 4096).
+        # Pin the SHIPPED figure FIRST — before this leg commits anything, not
+        # after it. Ordering is load-bearing: a LOW
+        # ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` export throttles this leg's OWN
+        # commits, so a pin placed after them still fails (measured at 4096).
         _pin_shipped_ingest_allowance(monkeypatch)
 
-        assert _commit(client, _raw_payload(
-            0, session_id="s4051ResidWarm", points=[], entities=[],
-            provenance_refs=[])).status_code == 200
         declared, minted, charge = self._measure(client, _raw_payload(
             0, session_id="s4051ChargeResid", points=[], entities=[],
             provenance_refs=[]))
