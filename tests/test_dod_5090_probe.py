@@ -72,6 +72,7 @@ claims:
 | `test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped` | `#11337`: the closure is over NAME-RESOLVED calls only, and its bound is DECLARED rather than implied — for every named shape, through to the published report | a method passes a leg-reaching function by reference (`_safe(self._review_pool, …)`, a bare name, literal or dynamic `getattr`, or an alias), the scan drops it with no entry anywhere, the caller list of an approval request reads short, or the declaration never reaches `vector_leg_surface()` |
 | `test_a_DECLARED_bound_does_not_swallow_the_DERIVED_failure` | `#11337`: the two channels stay SEPARATE — a declared bound says *"this reach was not traversed"*, never *"the derivation could not run"* | a tree that BOTH takes a leg-reaching function by reference AND fails to derive the surface reports only the declaration, so the derived failure is absorbed into a caveat and the surface reads as merely bounded instead of unknown |
 | `test_a_scan_FAILURE_is_not_a_DECLARED_bound` | the same separation, in the other direction: a scan failure must not be published as a declared bound | a failed walk is reported as `UNMEASURED(declared bound: …)`, so an entry that means *"nothing was measured"* is indistinguishable from one that means *"this named shape was measured and skipped"*, and the `declared bound:` marker stops identifying the by-reference class |
+| `test_an_ERROR_line_does_not_mask_the_derived_FAILURE` | `derived_tool_rows` is read from the scan BEFORE the error lines reach `out`, so "derived nothing" and "published an error" stay different facts | the emptiness check reads `not out` AFTER the handler/leg error entries were appended, so in the error-present, nothing-derived case the derived-failure line is silently dropped and an underivable surface reads as a measured one beside an unrelated failure |
 
 ⛔ **These tests never write a graph and never flip a gate.** `#10465` is
 measurement-only; the instrument is read-only and its pin must be too.
@@ -3491,6 +3492,56 @@ def test_a_DECLARED_bound_does_not_swallow_the_DERIVED_failure(
                  if "declared bound:" in line)
     assert failure < bound, (
         f"the derived FAILURE is published after the caveat: {published}")
+
+
+def test_an_ERROR_line_does_not_mask_the_derived_FAILURE(
+        tmp_path, monkeypatch):
+    """`derived_tool_rows` must be read BEFORE the error lines reach the list.
+
+The guard at `derived_tool_rows = bool(out)` exists because the error channel
+appends to `out` FIRST (handler/leg scan failures, a few lines above the
+emptiness check). Reading `not out` after that append conflates two different
+facts: `out` non-empty because a TOOL ROW was derived, versus `out` non-empty
+because an ERROR was published. In the error-present, nothing-derived case the
+two spellings disagree, and `not out` silently DROPS the derived-failure line —
+the under-reporting direction this channel exists to prevent.
+
+⛔ This case is invisible to `test_a_DECLARED_bound_does_not_swallow_the_
+DERIVED_failure`, whose fixture produces no error entry: with `out` still empty
+at the check, `not out` and `not derived_tool_rows` agree and a revert to
+`not out` stays GREEN. Measured: reverting to `if not out` leaves the whole
+file green without this test. The error arm is what makes the guard
+attributable.
+"""
+    (tmp_path / "tortoise").mkdir()
+    (tmp_path / "tortoise" / "sdk.py").write_text(
+        "class S:\n"
+        "    def tortoise_fts_query(self, q, entity_type='point'):\n"
+        "        return q\n"
+        "    def _pool(self, t):\n"
+        "        return self.tortoise_fts_query('x', entity_type=t)\n"
+        "    def passes_it(self):\n"
+        "        return _safe(self._pool)\n",
+        encoding="utf-8")
+    (tmp_path / "tortoise" / "mcp_server.py").write_text(
+        "def tortoise_health():\n    return {'ok': True}\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    import tortoise.tool_registry as registry
+    monkeypatch.setattr(registry, "TOOL_REGISTRY", [])
+    # ⛔ An ERROR entry, so `out` is NON-EMPTY by the time the emptiness check
+    # runs — the only state in which `not out` and `not derived_tool_rows`
+    # disagree. No tool row can be derived either (no handler forwards the arg).
+    monkeypatch.setattr(
+        probe, "_handlers_forwarding_entity_type",
+        lambda: (set(), "UNMEASURED(handler scan failed: synthetic)"))
+
+    published = [e["tools"] for e in probe.vector_leg_surface() if "tools" in e]
+    assert any("handler scan failed: synthetic" in line for line in published), (
+        f"the fixture no longer publishes the error entry: {published}")
+    assert any("could not be derived" in line for line in published), (
+        "an error entry in the list masked the derived-failure line, so an "
+        "underivable surface reads as a measured one beside an unrelated "
+        f"failure: {published}")
 
 
 def test_a_scan_FAILURE_is_not_a_DECLARED_bound(tmp_path, monkeypatch):
