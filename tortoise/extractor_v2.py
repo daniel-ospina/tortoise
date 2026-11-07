@@ -12439,10 +12439,12 @@ _MENTION_FIELDS: tuple[str, ...] = (
 #: `_write_span(str(q).strip(), _MAX_QUOTE)` — STRIPPED. So for a padded carrier
 #: quote the two cuts are the same length and different strings, and a `"quote"` pair
 #: verified here resolves to other bytes in the point's quote. **Pre-existing** (both
-#: builders cut it that way before #11368) and deliberately out of scope: fixing it
-#: belongs with #11239, the projection that must know which haystack it resolves
-#: against. Recorded on #11376's review; the issue is still OWED (the tracker's
-#: write API was rate-limited for this lane, so nothing was filed from it).
+#: builders cut it that way before #11368) and out of scope HERE: it is tracked as
+#: **#11303**, whose fix is this module's own — cut the mention's quote through
+#: `_write_span(str(q).strip(), _MAX_QUOTE)` so both sides index ONE haystack. It is
+#: NOT #11239's slice: #11239 is the Point-side persistence of `mentions` (DM1's home
+#: declared and unfulfilled), and a reader sent there for THIS defect would find the
+#: write doors, not the haystack (review at #11376, P2).
 _MENTION_CAPS: dict[str, int] = {"surface": 200, "quote": 200, "kind_guess": 60}
 #: The only values ``commit_schema.Mention.span_source`` accepts.
 _MENTION_SPAN_SOURCES = ("quote", "narrative", "model")
