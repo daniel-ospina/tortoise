@@ -3812,7 +3812,7 @@ _WALL_CLOCK_STALE_CITATIONS = ("python-ci.yml:3635", "python-ci.yml:2268-2273", 
 
 def _unregistered_wall_clock_citations(
     text: str,
-    anchors: "tuple[tuple[str, tuple[str, ...]], ...]" = _WALL_CLOCK_CITATION_ANCHORS,
+    anchors: tuple[tuple[str, tuple[str, ...]], ...] = _WALL_CLOCK_CITATION_ANCHORS,
 ) -> set:
     """Every `python-ci.yml:<n>` `text` quotes that `anchors` does not pin.
 
