@@ -2,8 +2,11 @@
 
 WHY THIS FILE EXISTS (the hole it closes)
 -----------------------------------------
-The issue's `O` indicator promises hermetic tests *and* that the eval seam's arm
-markers on ``retrieve_for_question`` outcomes are exercised. The hermetic suite
+The issue's `I` indicator promises hermetic tests (one-fact-one-slot, cross-item
+dedup, ordering contract, OFF-by-default parity), and its `T` line requires the
+arm to be re-enabled atop the fixed assembly in the eval lane — which needs the
+seam's arm state to be observable there. Neither `O` nor `I` names the seam, so
+nothing about the eval WIRING was promised *or* pinned: the hermetic suite
 (``tests/test_evidence_assembly.py``) covers the PURE function and pins the seam's
 signature default with ``inspect.signature`` — but nothing drove
 ``tools/longmem_eval/retrieve.py::retrieve_for_question`` with the arm ON, so the
@@ -15,8 +18,11 @@ one line that makes the mechanism reach the reader was unpinned. Measured on
 leaves ``tests/test_evidence_assembly.py`` (30 passed) and
 ``tests/longmem_eval/test_slice_a_flood_bound.py`` (22 passed) fully GREEN, while
 the eval lane silently measures OFF-vs-OFF: ``evidence_assembly_stats`` is still
-computed and recorded (``applied: True``, ``collapsed_duplicates: N``) and the
-run would report "Slice A changed nothing". That is a false null on the very arm
+computed (``applied: True``, ``collapsed_duplicates: N``) on the outcome the seam
+RETURNS — the runner's per-outcome whitelist (``run.py:5261-5480``) and its Layer-1
+projection (``:6145+``) carry every sibling arm and not this one, so nothing the
+run persists shows the arm state (``#11467``) — and the run would report "Slice A
+changed nothing". That is a false null on the very arm
 the affected-set gate (#8486's ruling, 2026-11-07, comment 6710955512) lists
 #2683 for — the wasted eval the owner forbade.
 
