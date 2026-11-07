@@ -698,8 +698,22 @@ _RAW_CLIENT_IMPORT = re.compile(
 #: statements naming `falkordb`, so `from tortoise import FalkorDB as C` is
 #: invisible to it and `C(…)` was never a candidate site (#11217 review round-11
 #: P2). Same group shape as the statement above, so the two parse alike.
+#:
+#: ⛔ The module part accepts a RELATIVE spec too (`from . import X`, `from
+#: .tortoise import X`, `from ..pkg import X`) — `(?:\.…|[A-Za-z_]…)`. A leading
+#: `[A-Za-z_]` alone silently excluded every relative spelling, which re-opened
+#: the very blindness the aliased re-export fix closed, one spelling over: in
+#: `from .tortoise import FalkorDB as C` no name resolved, so `C(` was not a
+#: site and the block's unowned, un-journaled DETACH read CLEAN (measured:
+#: `sites=0`, `violations=[]`). The unaliased relative form was already covered
+#: by the conventional `FalkorDB` name; the ALIASED one was not. Cost measured
+#: over the judged population (1183 non-exempt top-level `tests/test_*.py`,
+#: and all 1428 `.py` files under `tests/`): construction sites **unchanged**,
+#: `_raw_detach_violations()` stays EMPTY, and no relative aliased `FalkorDB`
+#: re-export exists in this tree yet — which is the point: it costs nothing
+#: today and cannot become the next switch-off.
 _FROM_ANY_IMPORT = re.compile(
-    r"^[ \t]*from[ \t]+[A-Za-z_][\w.]*[ \t]+import[ \t]*"
+    r"^[ \t]*from[ \t]+(?:\.[\w.]*|[A-Za-z_][\w.]*)[ \t]+import[ \t]*"
     r"(?:\((?P<paren>[^)]*)\)|(?P<bare>[^\n\\]*))",
     re.MULTILINE | re.DOTALL)
 
@@ -2243,6 +2257,20 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         # `tests/test_embedded_lifecycle.py:364`).
         "re-export from tortoise, aliased": (
             "from tortoise import FalkorDB as C\n", "C"),
+        # ...and the RELATIVE spellings of the same aliased re-export. The
+        # module part required a leading `[A-Za-z_]`, so a relative spec matched
+        # NO alternative: no name resolved, `C(` was never a site, and the block
+        # read CLEAN (measured: `sites=0`, `violations=[]`). Both the
+        # module-less (`from . import …`) and the dotted (`from .tortoise
+        # import …`) forms are legal Python and are pinned here; the unaliased
+        # relative form needs no case of its own, because the conventional
+        # `FalkorDB` name already covers it. Nothing in this tree writes either
+        # spelling today — which is exactly why they could become the next
+        # switch-off for free.
+        "re-export, RELATIVE (module-less), aliased": (
+            "from . import FalkorDB as C\n", "C"),
+        "re-export, RELATIVE (dotted), aliased": (
+            "from .tortoise import FalkorDB as C\n", "C"),
         # ⛔ THE TWO CASES ABOVE PIN `_FROM_ANY_IMPORT`, NOT THE FILE-LEVEL
         # MENTION TEST — because resolving `names` there makes `gated` True, so
         # the mention test is never reached for them (round-12 P2: reverting the
