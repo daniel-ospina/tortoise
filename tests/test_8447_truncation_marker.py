@@ -32,6 +32,20 @@ which scorer owns the lexical slot is ``TORTOISE_BM25_LEXICAL`` (DEFAULT ON, #10
 test PINS it: the file's verdict does not depend on the shell's value of that knob. The pin is what
 makes that true, so a future test added here must pin it too rather than inherit it.
 
+⛔ **The DB backend is pinned; the DENSE LEG is NOT — it is a lane variable, and that gap has
+already cost a CI red.** CI's ``test (b)`` shard installs the embeddings extra, so there
+``EmbeddingModel.get()`` returns a model: the k-NN dense leg answers EVERY query (no threshold), a
+read therefore has a non-empty pool, and the degraded TF-IDF tiers (guarded by ``if not
+raw_results:``) are never reached. A keyword-only box (this one) reaches them every time. Measured
+at ``45faa1661``: ``TestAnArmThatServedTheSlotIsNotALostLeg::test_the_legacy_corpus_fallback_is_still_lost``
+red on CI with ``this test must exercise the LEGACY tier; got []`` while passing here — the same
+test, green on one lane and unable to reach its subject on the other. Its fix is the #1625
+precedent in ``tests/test_fallback_snapshot.py`` (an autouse ``_no_embedder`` fixture pinning the
+DENSE leg off), and it is scoped to the class that needs the fallback tiers: the other classes here
+are lane-tolerant (measured: this was the ONLY red this module produced on the dense-capable
+lane), and pinning a dense leg off where a test says nothing about it would quietly weaken that
+test. A future test that asserts anything about WHICH degraded tier answered owes the same pin.
+
 The module's two
 pre-existing reds at ``main`` ``5b1888a6e`` were GREEN at ``83a22b2a7`` on a private docker lane with
 ``--extra embeddings`` (the intervening ``search_engine`` change is ``6b8793351``, #10506), but that
@@ -923,6 +937,29 @@ class TestAnArmThatServedTheSlotIsNotALostLeg:
     ``truncated: true`` with all rows delivered: the same false positive as
     judging the arm's own failure, one step further on.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_embedder(self, monkeypatch):
+        """Pin the DENSE leg off so the degraded TF-IDF tiers are reachable.
+
+        The reason is #1625's, measured here at ``45faa1661`` (PR #11468): the
+        dense leg is k-NN with no similarity threshold, so it returns rows for
+        EVERY query. A read that has any dense row never enters the
+        ``if not raw_results:`` block, so on a lane that HAS an embedder (CI
+        installs the embeddings extra) ``tfidf_snapshot`` / ``tfidf_legacy``
+        are unreachable and a test that means to pin WHICH tier answered can
+        only fail or go vacuous. With ``EmbeddingModel.get() -> None`` the
+        vector strategy is never submitted (``sdk.py`` records ``no_embedder``)
+        and the fallback fires deterministically — on every lane.
+
+        ⛔ Do NOT replace this with a skip-when-the-dense-leg-is-live: the CI
+        lane is the one where the fold is gated, so skipping there is exactly
+        the silent hole this class exists to close.
+        """
+        from tortoise.embeddings import EmbeddingModel
+
+        monkeypatch.setattr(EmbeddingModel, "get",
+                            staticmethod(lambda load_timeout=None: None))
 
     @staticmethod
     def _no_fulltext_index(monkeypatch):
