@@ -3133,6 +3133,11 @@ def test_a_bypass_declaration_holds_row_one_at_PARTIAL(tmp_path, monkeypatch):
     in ``CLASSES``), so this can only arrive from a tampered or injected register.
     The row must not assume the register is well-formed: it holds, and it says what
     it found. Same rule the census already applies to its own third class.
+
+    ⛔ Both halves of the refusal are asserted. The class check lives in
+    `declaration_violations` AND the verdict has a separate `bypass_declarations`
+    term, so removing either one alone would still hold the row — which is exactly
+    how one half could be deleted by a refactor with nothing reddening.
     """
     _row_one_fixture(tmp_path, monkeypatch)
     writers = {**_gated_writer("tortoise.a::_gated"),
@@ -3147,6 +3152,9 @@ def test_a_bypass_declaration_holds_row_one_at_PARTIAL(tmp_path, monkeypatch):
     assert "REAL BYPASSES" in row.observed, row.observed
     assert "tortoise.b::_bypass" in next(
         n for n in row.notes if n.startswith("REAL BYPASSES")), row.observed
+    assert "declares `bypass`" in row.observed, (
+        "the class check in `declaration_violations` must also refuse it — the verdict "
+        f"term alone leaves one half unpinned: {row.observed}")
 
 
 def test_the_over_inclusive_enumeration_is_still_printed_when_everything_is_named(
@@ -3183,15 +3191,19 @@ def test_the_over_inclusive_enumeration_is_still_printed_when_everything_is_name
 
 
 def test_a_STALE_declaration_holds_row_one_at_PARTIAL(tmp_path, monkeypatch):
-    """The guard that makes "add a name" INSUFFICIENT — the falsifier answer.
+    """A name with **no writer discovery can see** behind it HOLDS the row.
 
-    The register's entries are hand-written names, so "is this writer named?" alone
-    would let a register edit buy a green row. It cannot: a name with **no live writer
-    behind it** is STALE and HOLDS the row. With the product unchanged this is what an
-    added name always is — the population is already fully declared — so a naming-only
-    edit moves the row toward `PARTIAL`, never toward `MET`. Same contract ESLint's
-    suppressions file enforces: *"There are suppressions left that do not occur
-    anymore … re-run with `--prune-suppressions`"*, a non-zero exit.
+    ⛔ This is the falsifier answer, stated exactly and not more broadly than the code
+    supports: it makes adding a name for a writer **the product does not have**
+    insufficient. While the product is unchanged, every added name is that, so a
+    naming-only edit moves the row toward `PARTIAL` rather than toward `MET`. Same
+    contract ESLint's suppressions file enforces (*"There are suppressions left that do
+    not occur anymore … re-run with `--prune-suppressions`"*, a non-zero exit).
+
+    ⛔ What it does NOT claim (and an earlier draft of this docstring overclaimed): naming
+    a LIVE writer that discovery finds outside the gate DOES green the row — that naming is
+    the acceptance reading (b) asks for. That direction is pinned, on purpose, by
+    `test_naming_a_LIVE_undeclared_writer_is_the_acceptance_reading_b_describes`.
     """
     _row_one_fixture(tmp_path, monkeypatch)
     writers = {**_gated_writer("tortoise.a::_gated"),
@@ -3208,6 +3220,143 @@ def test_a_STALE_declaration_holds_row_one_at_PARTIAL(tmp_path, monkeypatch):
         f"{row.verdict!r} {row.observed}")
     stale = next(n for n in row.notes if n.startswith("stale declarations"))
     assert "tortoise.ghost::_nobody" in stale, stale
+
+
+def test_naming_a_LIVE_undeclared_writer_is_the_acceptance_reading_b_describes(
+        tmp_path, monkeypatch):
+    """The OTHER direction, pinned rather than implied: naming a live writer DOES green it.
+
+    Reading (b), recorded on `#11085`: *"Every embedding writer must route through the gate
+    or be a named, accepted exception in the product."* A writer discovery finds outside the
+    gate, carrying an `exempt` declaration with an owning issue, IS that exception — so the
+    row credits it. This is not a hole this lane left open; it is the recorded decision's own
+    consequence, and the reason `tortoise/embed_writer_register.py` is product code that needs
+    review rather than a suppression file.
+
+    ⛔ The alternative — refusing it — would reverse the decision, and would re-make row 1
+    unreachable, which is the defect `#11444` exists to fix. Pinned so the honest limit is a
+    measured fact instead of a sentence in a comment that the next lane reads as a promise.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.b::_accepted")}
+    declarations = {
+        "tortoise.b::_accepted": _declared(
+            "tortoise.b::_accepted", probe.CENSUS_EXEMPT, owner="#10541"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", (
+        f"a NAMED writer is reading (b)'s accepted exception: {row.verdict!r} {row.observed}")
+    assert "1 of 1 outside-gate writers" in row.observed, row.observed
+
+
+def test_a_path_spelled_declaration_KEY_is_one_writer_not_stale_plus_undeclared(
+        tmp_path, monkeypatch):
+    """The register admits two spellings for a citation; its KEYS are normalised the same way.
+
+    ⛔ Measured before this: a key written as `tortoise/projection/__init__.py::_apply_one`
+    produced `stale: [<that key>]` AND `undeclared: [tortoise.projection::_apply_one]` for the
+    SAME live function — the row blamed the product for not declaring a writer it had just
+    declared, and named two symptoms of one spelling difference. Normalising only the CITATION
+    side (the first version) could not see it.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.projection::_apply_one")}
+    declarations = {
+        "tortoise/projection/__init__.py::_apply_one": _declared(
+            "tortoise.projection::_apply_one"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
+    assert "stale declarations" not in row.observed, row.observed
+    assert "undeclared writers" not in row.observed, row.observed
+
+
+def test_the_ROUTE_seams_are_the_register_OWN_exported_definition():
+    """No second spelling of `recognised_producer`'s definition lives in this file.
+
+    A copy drifts in the FALSE-HOLD direction: a seam added to the register would leave every
+    correct declaration reading as uncorroborated, so the row would hold on a correct tree —
+    the opposite of the defect `#11444` fixes. The instrument reads the declaration, so it
+    reads this too.
+    """
+    from tortoise import embed_writer_register as register
+
+    assert probe.route_calls() == tuple(register.RECOGNISED_PRODUCER_SEAMS)
+    assert probe.route_calls(), "an empty seam set would corroborate every route claim"
+    assert "set_embedding_clause" in probe.route_calls(), probe.route_calls()
+
+
+def test_TWO_spellings_of_ONE_writer_are_refused_not_silently_merged():
+    """`_normalise_declared_keys` refuses a collision, and refuses a non-`module::symbol`.
+
+    ⛔ Both refusals are DOCUMENTED contracts with no other pin: the live register carries one
+    spelling per writer, so a regression to "the later key silently wins" would leave every
+    test green — the same hole the register's own `test_a_duplicate_key_raises` closes one
+    normalisation earlier. The second half matters for the same reason `load()` refuses a bare
+    function name: a key that is not `module::symbol` cannot be matched to a writer at all.
+    """
+    entry = {"cls": probe.CENSUS_EXEMPT, "owner_issue": "#1", "reason": "x"}
+    with pytest.raises(ValueError) as two_spellings:
+        probe._normalise_declared_keys({
+            "tortoise.projection::_apply_one": entry,
+            "tortoise/projection/__init__.py::_apply_one": entry,
+        })
+    assert "both name" in str(two_spellings.value), two_spellings.value
+    with pytest.raises(ValueError) as not_a_key:
+        probe._normalise_declared_keys({"tortoise.z": entry})
+    assert "module::symbol" in str(not_a_key.value), not_a_key.value
+    # The GREEN direction: one spelling normalises to itself and survives intact.
+    assert probe._normalise_declared_keys({
+        "tortoise/projection/__init__.py::_apply_one": entry,
+    }) == {"tortoise.projection::_apply_one": entry}
+
+
+def test_the_row_carries_its_OWN_scope_so_MET_is_not_a_closure_proof(
+        tmp_path, monkeypatch):
+    """`MET` means "gated or NAMED", never "no vector escapes the rule" — on the row itself.
+
+    `tortoise/embed_writer_register.py` says a `gated` writer may still store a caller-supplied
+    `embedding` VERBATIM (`create_point`/`update_point`, the recorded `#5004`/PR `#3018`
+    decision) and that `#11086` "must not read it as a closure proof". A `MET` this instrument
+    starts producing would be exactly where that gets lost, so the scope travels in the row's
+    own evidence rather than only in a docstring.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.b::_named")}
+    declarations = {"tortoise.b::_named": _declared("tortoise.b::_named")}
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
+    assert "measures the WRITER population, not every stored vector" in row.observed, (
+        row.observed)
+    assert "create_point" in row.observed and "update_point" in row.observed, row.observed
+
+
+def test_a_malformed_entry_is_NAMED_not_a_crash(tmp_path, monkeypatch):
+    """Register corruption becomes a named hold — never a traceback that kills all four rows.
+
+    `main()`'s exit contract makes a traceback (exit 1) indistinguishable from "a row was NOT
+    MET" (exit 1 is also not the documented `2`), and a crash aborts rows 2–4 as well. So the
+    register boundary coerces and names: an inadmissible class is a VIOLATION for that writer
+    (the row holds and says why), not an exception.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.b::_weird")}
+    declarations = {
+        "tortoise.b::_weird": _declared(
+            "tortoise.b::_weird", ["not", "a", "class"]),  # type: ignore[arg-type]
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()  # must not raise
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    assert "outside" in row.observed, row.observed
+    assert "uncorroborated declarations" in row.observed, row.observed
 
 
 def test_a_ROUTE_claim_its_body_does_not_make_is_not_credited(tmp_path, monkeypatch):
