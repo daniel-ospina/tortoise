@@ -2139,6 +2139,13 @@ assert_eq "$RC" "1" "auth: 503 → exit 1"
 assert_contains "$(created_json)" "PROD DOWN" "auth: 503 → PROD DOWN title"
 assert_eq "$(count_calls 'FLYCTL')" "0" "auth: 503 → flyctl was NEVER called (no Fly machine; no restart)"
 assert_contains "$OUT" "restart decision: disarmed:no_machine" "auth: the run log names the no-machine disarm"
+# …and the run-log WORDING for the non-machine arm, not just the shared decision
+# line. Without this the split could be made unconditional for the machine
+# message and the suite would stay green while the AUTH target's run log claimed
+# a Fly machine — the mirror of the misdirection case 88b pins (found by
+# mutation: replacing the branch with the bare machine-backed `log` left the
+# whole suite green).
+assert_contains "$OUT" "production surface with no Fly machine" "auth: the run log names the Pages surface (the non-machine arm of the split)"
 assert_contains "$(patched_body)" "NO Fly machine" "auth: the incident body explains why nothing was restarted"
 
 # ── 88b: a DOWN on the MACHINE-BACKED liveness target names the MACHINE ────

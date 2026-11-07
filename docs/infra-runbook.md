@@ -2122,7 +2122,10 @@ second arm would let one wedged machine spend `MAX_RESTARTS_PER_HOUR` **twice**.
 `disarmed:no_machine` here therefore does **NOT** mean "no machine" — check the
 machine (`flyctl checks list`, `flyctl logs`, `flyctl machine list`) and
 cross-check the primary API incident, and do **not** go looking for a Cloudflare
-Pages deploy. §7.7 states the residual this bound accepts.
+Pages deploy. The residual this bound accepts — a TRUE but duplicate DOWN page
+during a machine restart or a deploy rollout, because this arm's 35 s tolerance
+fires before the primary probe's 95 s budget — is stated under §7.8 Known
+limits.
 
 ### 7.2 How to read a failure
 
@@ -2241,7 +2244,8 @@ Three further safeguards worth knowing:
 | Secret | Needed for | If missing |
 |---|---|---|
 | `FLY_API_TOKEN` | the automated restart of the **Fly API** target — **not** the Pages auth step, which is hard-disarmed regardless | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | transition paging (**optional**) **and** the sustained-incident escalation leg (**required once an incident is sustained**) | A transition page is skipped with a log line. A **sustained** incident's escalation is **fail-closed**: the run FAILS with `escalation REQUIRED and NOT DELIVERED`, nothing is stamped as delivered, and the incident body records `escalate_state=failed` — a broken pager is never rendered as “all clear”. Both probe steps get them at STEP level |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | transition paging (**optional**) **and** the sustained-incident escalation leg (**required once an incident is sustained**) | A transition page is skipped with a log line. A **sustained** incident's escalation is **fail-closed**: the run FAILS with `escalation REQUIRED and NOT DELIVERED`, nothing is stamped as delivered, and the incident body records `escalate_state=failed` — a broken pager is never rendered as “all clear”. Every one of the three probe steps
+gets them at STEP level |
 | `ESCALATION_CHAT_ID` | **optional** recipient override for the sustained-escalation leg only (restart / failed-restart / cap / INCONCLUSIVE pages keep going to `TELEGRAM_CHAT_ID`) | Defaults to `TELEGRAM_CHAT_ID`, so point it at an on-call group without moving any existing page |
 
 `GITHUB_TOKEN` is supplied by Actions and needs `issues: write` (granted in the
@@ -2267,7 +2271,7 @@ per `CAP_RENOTIFY_MINUTES` while it stays failing.
 
 | Knob | Derived default | Meaning |
 |---|---|---|
-| `ESCALATE_ENABLED` | `1` | `0` is an operator **kill switch**: no sustained page, no stamp, logged loudly and stated in the incident body (a kill, never an “all clear”). **Wired in CI** — both probe steps read the repository variable `ESCALATE_ENABLED` (step-level, `vars.ESCALATE_ENABLED`), so the switch is usable *without editing the workflow*; an unset variable expands to empty, which is the enabled default. Only a **byte-exact** `0` disables escalation: a padded value (`" 0"`, `"0\n"`, a YAML block/folded scalar) warns and **keeps paging** |
+| `ESCALATE_ENABLED` | `1` | `0` is an operator **kill switch**: no sustained page, no stamp, logged loudly and stated in the incident body (a kill, never an “all clear”). **Wired in CI** — every probe step reads the repository variable `ESCALATE_ENABLED` (step-level, `vars.ESCALATE_ENABLED`), so the switch is usable *without editing the workflow*; an unset variable expands to empty, which is the enabled default. Only a **byte-exact** `0` disables escalation: a padded value (`" 0"`, `"0\n"`, a YAML block/folded scalar) warns and **keeps paging** |
 | `ESCALATE_SUSTAINED_MINUTES` | `3 × SUSTAINED_DOWN_MINUTES` = **30** | Wall-clock floor for the SUSTAINED page. Derived from the (normalized) sustained pair, and **clamped UP to `SUSTAINED_DOWN_MINUTES`** if set below it: the human page must never fire before the automated action it escalates. (The clamp floor is the restart gate, not the derived 30 — an explicit value in `[SUSTAINED_DOWN_MINUTES, 30)` is honoured). **Not wired in CI** — a script default; to override it (or `ESCALATE_MIN_RUNS`) in CI you must add it to the probe step's `env:` (same caveat as `.env.example`) |
 | `ESCALATE_MIN_RUNS` | `SUSTAINED_MIN_RUNS + 1` = **3** | Observed failing runs. One bad probe satisfies neither leg. **Not wired in CI** — a script default, overridable only by adding it to the probe step's `env:` |
 | `CAP_RENOTIFY_MINUTES` (shared) | `60` | For this leg: the minimum gap between a **confirmed** human page and the next sustained page, **and** the reminder interval while an incident stays failing — so this leg cannot re-page inside a window a confirmed page already covered. **One-directional, and not “of any kind”:** the pre-existing `cap` / `INCONCLUSIVE` re-notify gates still throttle on their own `cap_notified_ts` **attempt** stamp, which a failed send also consumes — that divergence is #4575 |
@@ -2538,13 +2542,25 @@ tracked as **#5798**.
 
 ### 7.8 Known limits
 
-- **Two probes, still narrow.** The API probe checks ONE route
+- **Three probes, still narrow.** The API probe checks ONE route
   (`/v1/organizations`) and only its no-auth branch; the auth probe checks ONE
-  route (`/auth/start`) and asserts 302 + the PKCE header. An outage that leaves
-  either route answering as expected while other routes fail reads as UP
-  (green) — and so does an auth-leg break that rejects every *real* token (the
-  probe sends none). Together they cover the two paths where a silent outage is
-  worst, not the whole surface.
+  route (`/auth/start`) and asserts 302 + the PKCE header; the liveness probe
+  checks ONE route (`/liveness`) and asserts only that a request which does no
+  I/O of its own returns `200` inside 5 s. An outage that leaves a probed route
+  answering as expected while other routes fail reads as UP (green) — and so
+  does an auth-leg break that rejects every *real* token (the probe sends none).
+  Together they cover the paths where a silent outage is worst, not the whole
+  surface.
+- **The liveness arm's 35 s tolerance can file a TRUE but DUPLICATE page**
+  during a machine restart (`fly.toml` `kill_timeout = 30` plus a cold boot) or
+  a ~85 s deploy rollout (§6, cold boot): the primary API probe runs first and
+  owns both, and its 95 s budget absorbs them while this arm's 3×5 s + 2×10 s =
+  35 s does not, so it pages for a window in which nothing is serving. Left in on
+  purpose — the alternative, a longer bound here, is exactly the status-only
+  probe with a generous timeout this target replaces — and the two arms own
+  separate incident titles, so the operator sees “one machine restarting” rather
+  than a merged, unattributable alert. The same reasoning is stated beside the
+  step in `.github/workflows/availability-watchdog.yml`.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
   `CONTROL_URL` check). Alerting still fires; no restart is issued. The
   INCONCLUSIVE page is throttled to at most once per `CAP_RENOTIFY_MINUTES`,
