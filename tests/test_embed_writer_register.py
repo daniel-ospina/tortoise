@@ -13,14 +13,36 @@ from discovery — and every test below is green. ⚠️ The SHAPE is what is bl
 WRITER carrying it — do not drop this qualifier, which the register's docstring carries:
 `tortoise.sdk::update_point`'s computed key sits in the discovered map as `gated`, and
 `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` (declared off its
-`set_embedding_clause`, not off its `SET n = $p`). A WRITER is absent for one of THREE reasons and
-none of them means "no such write": it holds NO decidable statement
-(`tortoise.cache_projection::node_statement`, `tortoise.sdk::_emit_event`), OR its module is outside
-the walk — `tortoise/embeddings.py` is skipped on purpose, which is why
-`stamp_journal_embedding` / `_drop_journalled_embedding` hold a DECIDABLE container key and are still
-absent — OR its module will not parse, in which case discovery carries one `UNPARSEABLE:<rel>` row
-and none of that module's writers is enumerated at all (the register's docstring names all three).
-`#11274` owns widening it; the register's module docstring states the same boundary.
+`set_embedding_clause`, not off its `SET n = $p`). No COUNT of reasons is stated here on purpose —
+it already moved inside this PR's own review — but every one of them shares a property: none means
+"no such write". A writer is absent when it holds NO decidable statement
+(`tortoise.cache_projection::node_statement`, `tortoise.sdk::_emit_event`); when its module is
+outside the walk (`tortoise/embeddings.py` is skipped on purpose, which is why
+`stamp_journal_embedding` / `_drop_journalled_embedding` hold a DECIDABLE container key and are
+still absent); when its module will not parse (discovery carries one `UNPARSEABLE:<rel>` row and
+enumerates none of that module's writers); when the store sits at MODULE or CLASS scope, since the
+walk visits `def`s only — pinned as `module_scope_container_key` and `class_scope_container_key`
+below. `#11274` owns widening it. ⚠️ Together with the name-collision case below, this enumerates
+what makes the DISCOVERED MAP unable to NAME OR CLASSIFY a writer; it is not a list of every
+reason a writer can escape a declaration — `gated` and `producer` escape it too, by design, and are
+stated in the register instead.
+
+⚠️ A NAME-COLLIDING writer is the case here that can be NEITHER absent NOR declarable, and the
+mechanism differs by whether the walk reaches the colliding def:
+
+* **BOTH defs discovered** → the KEY stays in the map with its KIND replaced by `"duplicate"`
+  (`probe._embedding_writers`'s `_put`), which is outside `NEEDS_A_DECLARATION`: it owes no
+  declaration while its class is UNRESOLVED (it may or may not store a vector the gate sees).
+* **Colliding def NOT discovered** → `_put` is never reached for it and the key keeps the DISCOVERED
+  def's kind. If that kind is `unresolved_write`/`ungated` (measured in both orders), the writer is
+  **caught** — the kind is in `NEEDS_A_DECLARATION`. If it is `gated` or `producer`, the key stops at
+  a class that owes no declaration and the colliding writer is neither absent nor declarable — the
+  same gap, reached through a sibling this file cannot see into.
+
+So a `duplicate` row is the narrow case, and the guard below PINS the population at zero `duplicate`
+rows rather than reading the class as acceptable: a writer being IN the map is not the same thing as
+being classifiable. What closes the sibling case is the register's closure-claim caveat (§ the
+`gated` escape), not this list.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (read `WRITER_CENSUS`
 for the class counts rather than a number restated here — the #11274 widening moved them) but left
@@ -34,14 +56,15 @@ is the product home; this file is its proof.
 | test | claim it falsifies | it goes RED when … |
 |---|---|---|
 | `test_the_register_resolves_at_runtime_from_tortoise` | the issue's first row — *"resolvable at runtime from `tortoise/`"* | the register moves out of `tortoise/`, under `tortoise/projection/`, or stops being importable without the tooling |
-| `test_the_register_imports_without_entering_the_projection_cycle` | `04-plan.md` §5's leaf requirement, EXECUTED | the register imports anything from `tortoise`, so it can re-enter `projection → pack_state → sdk → projection` — the cycle whose module-scope config read is a reproduced `ImportError` (`projection/__init__.py:1466-1481`) |
-| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register imports `value_gate`/`embed_gate`, or grows a pattern/predicate/rule id |
+| `test_the_register_imports_without_entering_the_projection_cycle` | `04-plan.md` §5's leaf requirement, EXECUTED | importing the register pulls `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk` into `sys.modules`, i.e. it re-enters `projection → pack_state → sdk → projection` — the cycle whose config read is a reproduced `ImportError` (`tortoise.projection.__init__::_config_classes` records it). The "imports ONLY the standard library" arm is `test_the_register_is_not_a_second_rule_set`, not this one |
+| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register's imports leave `{__future__, collections, re, dataclasses, types}` — every `import` / `from` at EVERY level counts, so a relative `from .x import …` is not exempt — or it names `value_gate`/`embed_gate`/`RULES`/`EMBEDDING_RULES` in code (the ONE regex it holds is the `#\\d+` `owner_issue` format check, which is not a rule) |
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
-| `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer **discovery decides** whose vector the gate does not see and the product has no declaration for it — the population is the syntax the AST/regex pass can decide, and the shapes it cannot are NAMED (`UNDECIDABLE_WRITE_SHAPES` in the instrument, `INVISIBLE_SHAPES` below for the forms neither the regex nor the AST pass decides) and pinned by `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` |
+| `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer **discovery decides** whose vector the gate does not see and the product has no declaration for it — the population is the syntax the AST/regex pass can decide, and what it cannot are NAMED (`UNDECIDABLE_WRITE_SHAPES` in the instrument, `INVISIBLE_SHAPES` below for the forms neither pass decides AND the scopes the walk never enters) and pinned by `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` |
 | `test_the_live_guard_has_teeth_on_an_INJECTED_writer` | the same guard, driven through **DISCOVERY** (`probe._embedding_writers` on an injected tree) rather than through set arithmetic | the guard goes vacuous when the tree's population is all-declared (the `#10541` guard's own lesson), or the discovery filter regresses and stops seeing a writer — in EITHER the clause shape or the container-key shape (`#11274`) |
 | `test_the_register_names_the_shapes_its_discovery_cannot_see` | `#11274` — the guard is exactly as wide as discovery, so discovery's blind spots are NAMED rather than implied | the instrument stops naming a shape it cannot decide, claims to decide one it cannot (or the reverse), or the register's docstring stops scoping its claim to the mechanism |
+| `test_the_seam_CALL_population_is_the_one_the_register_names` | the register's ONE duty to a `gated` writer — an accurate statement of WHO is in that population, since it owes no declaration | the sentence that says *why* the shape-holding writers are in the map anyway enumerates a SUBSET of the writers that reach the seam by CALL (it named 4 of 9 at `#11373`'s review), or discovery grows/removes a member |
 | `test_the_instrument_and_the_product_declare_the_same_writers` | `04-plan.md` §6.2 — *"the instrument and the product cannot disagree about which writer a row is about"* | a class changes in one place, the census keeps an entry the register dropped, or the register invents one the instrument does not find |
 | `test_the_three_writers_that_carried_no_declaration_now_carry_one` | **this issue's own objective** (`03-scope.md` S2) | one of the three named writers loses its declaration, or the declaration stops naming `#11085` as the issue that accepted it |
 | `test_every_declaration_cites_a_seam_and_an_owning_issue` | the issue's `{class, reason, owning issue}` shape | an entry carries a claim with no symbol behind it, or an owner that is not an issue |
@@ -84,8 +107,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_FILE = Path(register.__file__).resolve()
 
 #: The three writers `#11085` names as carrying **no declared exemption in the product at all**
-#: before this change (`tools/dod_5090_probe.py`'s census comment: *"the other three carry NO
-#: declared exemption"*). This list is the issue's own acceptance, spelled out so it cannot be
+#: before this change (`tools/dod_5090_probe.py`'s census comment, quoted verbatim: *"The other
+#: three (`restore_graph`, `_event_plain_merge`, `_rebuild_all_replay`) carried NO declared
+#: exemption in the PRODUCT until `#11085`"* — the `in the PRODUCT` clause is the distinction this
+#: file exists to draw, so do not shorten it). This list is the issue's own acceptance, spelled out
+#: so it cannot be
 #: satisfied by declaring three unrelated writers.
 THE_THREE = (
     "tortoise.hosted_backup::restore_graph",
@@ -94,8 +120,10 @@ THE_THREE = (
 )
 
 #: Writer kinds whose vector the gate does NOT see, so the product must say what they are.
-#: `gated` is excluded — the gate itself decides those, and declaring them would be a second
-#: answer to a question the seam already answers. `producer` is excluded — it computes a vector a
+#: `gated` is excluded — a `gated` writer owes no declaration. ⛔ That is a statement about
+#: DECLARATION, never about the gate deciding every vector on that path: `sdk::create_point` and
+#: `sdk::update_point` are `gated` and still store a caller-supplied vector verbatim (read the
+#: register's closure-claim caveat). `producer` is excluded — it computes a vector a
 #: DIFFERENT function writes, and that writer is in the map under its own key.
 NEEDS_A_DECLARATION = ("unresolved_write", "ungated")
 
@@ -121,9 +149,9 @@ def test_the_register_imports_without_entering_the_projection_cycle():
 
     `04-plan.md` §5 records the failure mode exactly: a module-scope read of the config constants
     under `tortoise/projection/` is a **reproduced** `ImportError` (`import tortoise.sdk` /
-    `import tortoise.pack_manifest_store` break). This asserts the register pulls in NEITHER
-    `tortoise.projection` nor `tortoise.sdk`, so a future edit that reaches for either reds here
-    before it reaches a user.
+    `import tortoise.pack_manifest_store` break). This asserts the register pulls in NONE of
+    `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk`, so a future edit that reaches for
+    any of the three reds here before it reaches a user.
     """
     code = (
         "import sys, tortoise.embed_writer_register as r\n"
@@ -154,7 +182,15 @@ def test_the_register_is_not_a_second_rule_set():
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imported |= {a.name.split(".")[0] for a in node.names}
-        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+        elif isinstance(node, ast.ImportFrom):
+            # ⛔ `level` is NOT filtered here (#11373 round-19 review). Requiring `level == 0` left
+            # every RELATIVE import out of this set, so `from .value_gate import RULES as _R` — the
+            # idiomatic way to reach a sibling from INSIDE the package, i.e. exactly the drift this
+            # test exists to catch — kept arm 1 green (measured). Arm 2 missed it too, because an
+            # alias is neither a `Name` nor an `Attribute` spelled with a banned identifier, and
+            # the subprocess arm stays green because importing `tortoise.value_gate` pulls none of
+            # the three cycle modules (measured). A relative import now contributes its target
+            # (`""` for `from . import x`), neither of which is in the allowlist below.
             imported.add((node.module or "").split(".")[0])
     assert imported <= {"__future__", "collections", "re", "dataclasses", "types"}, (
         f"the register imports {sorted(imported)} — it is a LEAF and must import the standard "
@@ -275,6 +311,27 @@ def test_every_writer_the_instrument_finds_outside_the_gate_is_declared():
         "these writers store a vector the gate does not see and carry NO declaration in "
         f"`tortoise/embed_writer_register.py`: {register.undeclared(outside)}"
     )
+    # ⛔ `kind == "duplicate"` is OUTSIDE `NEEDS_A_DECLARATION`, so a name-colliding writer owes no
+    # declaration and its KIND IS UNRESOLVED — it may or may not store a vector the gate sees. The
+    # collapse needs BOTH defs discovered: `_put` is only reached for a def the walk classifies, and
+    # a def it does not reach `continue`s before `_put`, leaving the discovered def's own kind in
+    # place (measured: a same-named pure reader second leaves `unresolved_write`, which IS
+    # declarable). Zero at this head, and the cheapest real repair is that it stays zero: an
+    # unresolvable class must not sit in the population at all, or the guard is green over a writer
+    # nothing can classify.
+    duplicates = sorted(
+        key for key, entry in probe.embedding_writers().items()
+        if entry.get("kind") == "duplicate"
+    )
+    assert not duplicates, (
+        "discovery collapsed a name-colliding writer into a `duplicate` row, so its kind is "
+        "UNRESOLVED — it may store a vector the gate does not see, and it owes NO declaration "
+        "either way, which is the gap this guard exists to refuse: "
+        f"{duplicates}. Reconcile the collision (rename or merge the two same-named defs in one "
+        "module) so discovery can classify the writer. It cannot be DECLARED instead: `duplicate` "
+        "is not a declarable class, and declaring a key the instrument does not find outside the "
+        "gate reds the agreement test. Do not delete this arm."
+    )
 
 
 def test_the_live_guard_has_teeth_on_an_INJECTED_writer(tmp_path):
@@ -369,7 +426,11 @@ def test_the_register_names_the_shapes_its_discovery_cannot_see():
     """`#11274`: the guard is exactly as wide as discovery — so its blind spots are NAMED.
 
     A register whose claim is "an undeclared writer cannot bypass silently" is only as true as the
-    filter that populates it. Two shapes matter and only one is decidable:
+    filter that populates it. The INSTRUMENT names these write shapes, and no COUNT is written here
+    because it moves: the CLAUSE shape (`probe._EMBED_WRITE`) and the CONTAINER KEY
+    (`probe._writes_an_embedding`) are DECIDED, the MAP-MERGE (`probe.UNDECIDABLE_WRITE_SHAPES`)
+    is deliberately not; the shapes neither pass can decide are pinned as data in `INVISIBLE_SHAPES`
+    below, so this docstring does not count them:
 
     * CONTAINER KEYS are decided on the AST (`probe._writes_an_embedding`), so they must NOT be in
       the blind list any more;
@@ -392,6 +453,74 @@ def test_the_register_names_the_shapes_its_discovery_cannot_see():
         "the register's own docstring must scope its claim to what discovery can decide — a "
         "measured limitation nobody reading the register can see is the claim being wider than "
         "the mechanism"
+    )
+
+
+def test_the_seam_CALL_population_is_the_one_the_register_names():
+    """A `gated` writer owes NO declaration — so the register's only duty to it is an accurate
+    statement of WHO is in that population, and this is the one claim about it that can go stale.
+
+    `probe._embedding_writers` classes a writer `gated` the moment it CALLS the seam
+    (`probe.SEAM_CALL`) — the write predicate is not consulted — so membership is INDEPENDENT of
+    the write shape. The register's paragraph that says exactly that therefore has to name every
+    member: it named four of them until
+    `#11373`'s review measured five more in `tortoise/projection/entities.py` that are in the
+    population by this same branch while holding a DIFFERENT write shape (`set_embedding_clause(…)`
+    for subject/object/document, a Cypher `n.embedding=…` property SET fed from the params dict for
+    `_upsert_point_props`, the bare CALL for `_upsert_event`) — none of them is a container-key
+    holder, which turned "every writer" into a claim wider than its
+    mechanism — the class this whole line of work exists to remove.
+
+    The list is not counted in the register on purpose (a count re-stales with every writer), so it
+    is re-derived here, from the instrument, at HEAD: a member that appears in the tree and not in
+    the sentence REDS, and so does a name in the sentence that discovery does not class `gated` by
+    CALL.
+    """
+    by_call = {
+        key for key, row in probe.embedding_writers().items()
+        if row["kind"] == "gated" and row.get("callee") == probe.SEAM_CALL
+    }
+    assert by_call, (
+        "no writer reaches the seam by CALL — the sentence this test reads has lost its subject, "
+        "or discovery stopped taking the `SEAM_CALL` branch"
+    )
+
+    doc = register.__doc__ or ""
+    anchor = "every writer that reaches the seam by CALL"
+    start = doc.find(anchor)
+    assert start != -1, (
+        "the register no longer states why the shape-holding writers are in the population: "
+        f"{anchor!r}"
+    )
+    # Read the ENUMERATION, not a paragraph: the sentence's list is the maximal run of backticked
+    # `module::symbol` tokens after the anchor, separated only by commas / `and` / whitespace. A
+    # paragraph slice would over-reach — the same docstring block names `sdk::_update_entity` and
+    # `sdk::_journal_event_raw_write` further down for different mechanisms, and neither is in this
+    # population.
+    separator = re.compile(r"[\s,:()]*(?:and\s+)?`([A-Za-z_][\w.]*)::([A-Za-z_]\w*)`")
+    stated: list[tuple[str, str]] = []
+    position = start + len(anchor)
+    while match := separator.match(doc, position):
+        stated.append((match.group(1), match.group(2)))
+        position = match.end()
+    assert stated, f"the sentence after {anchor!r} names no writer: {doc[position:position + 120]!r}"
+
+    def matches(key: str, module: str, symbol: str) -> bool:
+        """`sdk::x` and `tortoise.sdk::x` are the same writer — the register shortens the module."""
+        writer_module, writer_symbol = key.split("::", 1)
+        return writer_symbol == symbol and (
+            writer_module == module or writer_module.endswith(f".{module}")
+        )
+
+    unstated = sorted(key for key in by_call if not any(matches(key, *t) for t in stated))
+    assert not unstated, (
+        "the register says `every` writer that reaches the seam by CALL and then names a subset — "
+        f"in the population and not in the sentence: {unstated} (named: {stated})"
+    )
+    overstated = sorted(t for t in stated if not any(matches(k, *t) for k in by_call))
+    assert not overstated, (
+        "the sentence names a writer discovery does not class `gated` through the CALL branch — the "
+        f"enumeration and the instrument disagree: {overstated}"
     )
 
 
@@ -469,7 +598,12 @@ def _resolve_module(module: str) -> Path | None:
                 return candidate
         return None
     base = REPO_ROOT.joinpath(*module.split("."))
-    for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+    # ⛔ A PACKAGE wins over a same-named MODULE. `tortoise/projection.py` is a DEPRECATED shim that
+    # re-exports the package's names, so resolving `.py` first did two wrong things at once (round-17
+    # review): a dotted `tortoise.projection::<symbol>` citation passed on the shim's re-export line
+    # `_apply_one = _pkg._apply_one` — a false PASS, since deleting the symbol from the package would
+    # not red it — and a symbol only the PACKAGE defines read as moved — a false RED.
+    for candidate in (base / "__init__.py", base.with_suffix(".py")):
         if candidate.is_file():
             return candidate
     return None
@@ -514,6 +648,19 @@ def test_every_declaration_cites_a_seam_and_an_owning_issue():
                 f"{key} cites `{module}::{symbol}`, but {path.relative_to(REPO_ROOT)} does not "
                 "define it — the seam moved and the declaration's evidence went with it"
             )
+    # ⛔ The RESOLVER itself is pinned (round-18 review). `.py`-before-package ordering made a
+    # dotted citation of a PACKAGE collide with a same-named deprecated SHIM
+    # (`tortoise/projection.py` re-exports `tortoise/projection/__init__.py`), so
+    # `tortoise.projection::<symbol>` could be "defined" by the shim's re-export line — a citation
+    # that survives deleting the symbol from the package. No citation in the file resolves
+    # differently under the two orders TODAY, which is exactly why the ORDER needs its own arm:
+    # reverting it reds nothing without this.
+    assert _resolve_module("tortoise.projection") == (
+        REPO_ROOT / "tortoise" / "projection" / "__init__.py"
+    ), "a package must win over a same-named module — `tortoise/projection.py` is a shim"
+    assert _resolve_module("tortoise.config") == REPO_ROOT / "tortoise" / "config.py", (
+        "`tortoise/config/` carries no `__init__.py`, so the module is the only candidate"
+    )
 
 
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
@@ -527,7 +674,8 @@ def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
 
 # ── The discovery blind spot (pinned, not merely documented) ────────────────
 
-#: The shapes `_EMBED_WRITE` cannot spell, one scratch module each. Kept as data so the assertion
+#: The entries `_EMBED_WRITE` cannot SEE, one scratch module each — a SPELLING neither pass can
+#: decide, or a POSITION (module/class body) the walk never enters. Kept as data so the assertion
 #: below reads as the limitation it is measuring, not as hand-written cases.
 INVISIBLE_SHAPES = {
     "map_merge": 'def w(tx, p):\n    tx.query("SET n += $p", {"p": p})\n',
@@ -560,6 +708,41 @@ INVISIBLE_SHAPES = {
         '_CLAUSE = "SET n.embedding = $e"\n'
         'def w(tx):\n    tx.query(_CLAUSE)\n'
     ),
+    # A dict LITERAL carrying a constant `"embedding"` key (round-2 review): `_EMBED_WRITE` needs
+    # `embedding =` or `set_embedding_clause(`, and `_writes_an_embedding`'s AST pass inspects
+    # ASSIGNMENT targets only (`ast.Assign`/`AugAssign`/`AnnAssign` -> a `Subscript` with a
+    # `Constant` slice), so an `ast.Dict` handed to a CALL is invisible to both passes. Measured:
+    # the writer below is ABSENT from the map entirely. Two carriers keep it from being
+    # hypothetical — `sdk::_session_event_write` and `sdk::_embedding_repair_attempt` emit
+    # `**{**…, "embedding": embedding}` into the journaled payload (the first spreads `payload`,
+    # the second `props` — so the quoted stem is the shared SPELLING, not a literal to grep) — and
+    # BOTH are in the
+    # discovered map as `unresolved_write` for a DIFFERENT reason (their bodies also call
+    # `set_embedding_clause(`), which is exactly the "visible for another door" case the register
+    # draws for `sdk::_journal_event_raw_write`. They are NAMED INSTANCES, not the population: the
+    # same blind class also travels as a PARAMS dict literal carrying a constant `"embedding"` key —
+    # inline (`params={…}`) in `projection.entities::_event_plain_merge`, `_upsert_subject`,
+    # `_upsert_object` and `_upsert_document`, and built into a local then handed on by name
+    # (`params = {…}` → `params=params`) in `_upsert_point_props`; the fifth of that family,
+    # `_upsert_event`, holds no such literal (it computes the vector and hands it to
+    # `_event_plain_merge`) — so a reader must not take two as the
+    # complete set.
+    "dict_literal_embedding_key": (
+        'def w(rec, props, v):\n'
+        '    rec._emit_event("X", **{**props, "embedding": v})\n'
+    ),
+    # A container-key store at MODULE or CLASS scope (round-14 review): the walk visits `def`s only
+    # (`probe._embedding_writers` iterates `FunctionDef`/`AsyncFunctionDef`), so the literal-slice
+    # AST pass is never applied to it and `_EMBED_WRITE` has no function source to read. It is a
+    # further reason a writer can be absent while holding a perfectly DECIDABLE key, so it is
+    # pinned here rather than left to the header's prose — BOTH positions, because a widening that
+    # reached one of them alone would leave the other described rather than pinned (round-15 review).
+    "module_scope_container_key": (
+        'REC = {}\nREC["embedding"] = [0.25, 0.5]\n'
+    ),
+    "class_scope_container_key": (
+        'class C:\n    REC = {}\n    REC["embedding"] = [0.25, 0.5]\n'
+    ),
 }
 
 
@@ -575,8 +758,9 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
     """`#11274` row 1, in the direction that makes SILENCE distinguishable from coverage.
 
     The guard above discovers through `probe.embedding_writers()`, whose `_EMBED_WRITE` is a
-    source-text regex (plus the AST pass `_writes_an_embedding`). Every shape in `INVISIBLE_SHAPES`
-    stores a vector one of them cannot spell, so a writer using one is
+    source-text regex (plus the AST pass `_writes_an_embedding`). Every entry in `INVISIBLE_SHAPES` is
+    invisible to discovery — a SPELLING neither pass can decide, or a POSITION (module/class body)
+    the walk never enters — so a writer using one is
     ABSENT from the census — not unclassified, absent — and every other test in this file is green.
     That limitation is stated in the register's module docstring; this test is what keeps the
     statement from rotting:
@@ -611,4 +795,58 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
             "improvement, not a failure, but it is a CLAIM CHANGE: update the module docstring's "
             "'What the closure claim does NOT cover' block and this test together, and declare "
             "the writer(s) the widened discovery now finds."
+        )
+
+
+#: The name-collision criterion the register's `duplicate` parenthetical states, one scratch module
+#: each. `duplicate` requires BOTH defs to reach `_put`, and `_put` is only called for a def that
+#: discovery CLASSIFIES — not for every `def` the walk visits. Data, so the assertion reads as the
+#: criterion it measures rather than as three hand-written cases.
+DUPLICATE_CRITERION = {
+    # positive control: `duplicate` must remain REACHABLE, or the two arms below prove nothing
+    "both_defs_classified": (
+        'def w(tx):\n    tx.query("SET n.embedding = $e")\n'
+        '\ndef w(tx2):\n    tx2.query("SET n.embedding = $e")\n',
+        "duplicate",
+    ),
+    # the collider is a pure READER: never classified, so `_put` is not reached for it and the
+    # discovered writer's own kind survives — which is in `NEEDS_A_DECLARATION`, i.e. CAUGHT
+    "collider_is_a_reader": (
+        'def w(tx):\n    tx.query("SET n.embedding = $e")\n'
+        '\ndef w(a):\n    return a + 1\n',
+        "unresolved_write",
+    ),
+    # same pair, orders swapped — the criterion must not be read as order-dependent
+    "collider_is_a_reader_reversed": (
+        'def w(a):\n    return a\n'
+        '\ndef w(tx):\n    tx.query("SET n.embedding = $e")\n',
+        "unresolved_write",
+    ),
+}
+
+
+def test_the_duplicate_criterion_is_put_reached_not_walk_reached(tmp_path):
+    """#11373 P2 — `duplicate` needs BOTH defs to reach `_put`, not merely the walk.
+
+    The register's parenthetical read "two same-named defs in one module, BOTH of them reached by
+    the walk", which predicts `duplicate` for ANY same-named pair — `ast.walk` reaches every `def`
+    in the module, so the stated criterion was satisfied by the reader collision too. It does not
+    hold: `_put` is called only for a def discovery CLASSIFIES, so a colliding def that is a pure
+    reader never reaches it, the discovered def's own kind stays in the map, and an
+    `unresolved_write`/`ungated` sibling lands INSIDE `NEEDS_A_DECLARATION` — caught, not excused.
+
+    A `#11086` reader taking the old wording as the criterion would believe every collision lands
+    in the undeclarable `duplicate` class and miss exactly the case that IS declarable, so the
+    wording is pinned here rather than left to the next review round to re-measure by hand. The
+    both-writers arm is the control: if `duplicate` stops being reachable the two reader arms stop
+    discriminating and this test says so instead of passing vacuously.
+    """
+    for shape, (body, expected) in DUPLICATE_CRITERION.items():
+        found = probe._embedding_writers(_scratch_root(tmp_path, shape, body))
+        kinds = {name: entry.get("kind") for name, entry in found.items()}
+        assert kinds == {"tortoise.m::w": expected}, (
+            f"the {shape!r} collision measured {kinds}, not "
+            f"{{'tortoise.m::w': {expected!r}}} — discovery's collision rule changed. The "
+            "register's `duplicate` parenthetical and this file's header both state this "
+            "criterion; re-derive both before changing either."
         )
