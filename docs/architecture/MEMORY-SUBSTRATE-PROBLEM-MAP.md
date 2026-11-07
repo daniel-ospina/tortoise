@@ -1,5 +1,5 @@
 ---
-title: "The memory-substrate problem map — re-cut, 26 entries, 4 patterns, 21 fixed and 5 open"
+title: "The memory-substrate problem map — re-cut, 26 entries, 4 patterns, 20 fixed and 6 open"
 type: engineering
 domain: platform
 doc_status: live
@@ -15,12 +15,12 @@ measured_at: 2026-11-05
 
 > **What this is.** The status half of issue **#2820** — the child of **#4917**
 > (memory quality + cost). #2820 was written on 2026-09-10 as an *organizing*
-> artifact: four defect classes, six workstreams, a dependency order, and 26
+> artifact: four defect classes, five workstreams, a dependency order, and 26
 > linked issues. Its body has not changed since, and the tree has moved a very
 > long way underneath it (WS-A/WS-B/WS-C designs landed in
 > `docs/plans/2026-09-10-*.md`; ~40 of the 26 issues' fixes merged). Reading the
 > issue today therefore tells a lane the opposite of the truth about most of its
-> rows — it reads as 26 problems waiting, when it is **21 fixed and 5 open**.
+> rows — it reads as 26 problems waiting, when it is **20 fixed and 6 open**.
 >
 > **This page is the re-cut.** Same 26 entries, same four patterns, same
 > workstreams — and, for each entry, **what the tree says now** rather than what
@@ -56,12 +56,15 @@ both:
 | What the tracker said | What the tree said | Row |
 |---|---|---|
 | CLOSED **NOT_PLANNED** | the symptom no longer reproduces (`ruff check` clean on the file it named) | **#2748** |
-| CLOSED **NOT_PLANNED** (consolidated) | the mechanism it asked for landed under the root issue | **#2787** |
+| CLOSED **NOT_PLANNED** (consolidated) | ONE of its two indicators landed under the root issue; the other did not | **#2787** |
 | **OPEN, never closed** (no closure event at all) | the *representation* half shipped while the issue sat open — the tracker is right and the work is half done | **#2782** — the mirror case: closure is not a verdict in either direction |
+| CLOSED **COMPLETED** | the mechanism is unbuilt and the pin asserts the brief's wording, not the behaviour — the strongest instance on this page | **#2730** |
 
 So: a closure can lag a fix, and a fix can lag a closure. The anchor+pin pair is
-what this map trusts; the tracker state is reported beside it as a second
-opinion, never as the verdict.
+what this map trusts. Tracker state is **not** a column in the row tables — it is
+recorded only where it is the point (§1's table, §10), because a state column
+would invite exactly the reading this page exists to stop: that a closed issue is
+a fixed defect, or an open one an unfixed one.
 
 **Status vocabulary — exactly three tokens:**
 
@@ -79,25 +82,26 @@ opinion, never as the verdict.
 
 | Status | Rows |
 |---|---|
-| VERIFIED-FIXED | 21 |
-| OPEN | 5 |
+| VERIFIED-FIXED | 20 |
+| OPEN | 6 |
 | UNKNOWN | 0 |
 | **Total tracked** | **26** |
 
 | #2820 as filed (2026-09-10) | Now (2026-11-05) |
 |---|---|
 | WS-A write-path integrity — "a decision + three mechanical bugs" | **5 of 5 rows fixed**; the write contract design itself is in `docs/plans/2026-09-10-write-contract-five-doors.md` |
-| WS-B ontology substrate — "~2 design decisions + mostly mechanical bugs" | **8 of 8 rows fixed**; the property-declaration design is in `docs/plans/2026-09-10-ws-b-pack-property-declaration.md` |
+| WS-B ontology substrate — "~2 design decisions + mostly mechanical bugs" | **7 of 8 rows fixed** (#2787 OPEN: the kind-bucket rule is not implemented); the property-declaration design is in `docs/plans/2026-09-10-ws-b-pack-property-declaration.md` |
 | WS-C state & value model — "~25 open decisions, owner-gated" | **3 of 6 fixed**; the numeric-normalization design is in `docs/plans/2026-09-10-ws-c-numeric-normalization.md`; **#2730, #2782 and #2684 remain open** |
 | WS-D venture pack delivery | **2 of 4 fixed** net of #2725/#2726; **#2696 (epic) and #2728 remain open** |
 | WS-E repo / CI hygiene | **3 of 3 fixed** |
 
 **The dependency order the map proposed is spent.** It read
-`E ──► A,B ──► C ──► D`. E closed on 2026-09-10; A and B are fully closed; C is
-down to two rows, neither of which blocks D any more (D's ontology — #2725 —
-shipped in #3419 on 2026-10-06). What is left of C is **value fidelity**, not
-lifecycle plumbing, so the chain that made D wait no longer exists. Do not plan
-against it.
+`E ──► A,B ──► C ──► D`. E's three rows closed on 2026-09-10 (#2749, #2748) and
+2026-09-27 (#2734); A is fully closed; B is closed but for #2787's bucket rule; C
+is down to three rows (#2730, #2782, #2684), **none** of which blocks D (D's
+ontology — #2725 — shipped in #3419 on 2026-10-06). What is left of C is **value
+fidelity and entity binding**, not lifecycle plumbing, so the chain that made D
+wait no longer exists. Do not plan against it.
 
 ---
 
@@ -128,7 +132,7 @@ capability is documented but unavailable.*
 
 | Item | The defect (as filed) | Status | Anchor (merged, in `HEAD`) | Pin (in the current tree) |
 |---|---|---|---|---|
-| #2786 | core kind vocabularies diverge across layers — `CANONICAL_*` (pack) vs the runtime `EVENT_KINDS` / source registry, with no consistency guard | VERIFIED-FIXED | `04ecba158` | `tests/test_kind_vocabulary_consistency.py` |
+| #2786 | core kind vocabularies diverge across layers — `CANONICAL_*` (pack) vs the runtime `EVENT_KINDS` / source registry, with no consistency guard | VERIFIED-FIXED | `04ecba158`, `b88a7bf87` | `tests/test_kind_vocabulary_consistency.py` |
 | #2783 | the `subclassOf` gate rejects lowercase canonical parents (`agreement`/`standard`/`document`), blocking `fundingAgreement ⊂ agreement` | VERIFIED-FIXED | `2d7af8bfc` | `tests/test_venture_pack.py` |
 | #2767 | `milestone` is an Object kind **and** a legacy pointKind **and** a miner event kind — the bare-name collision fails cross-pack `nearMisses` validation | VERIFIED-FIXED | `142b3e7a2` | `tests/test_kind_vocabulary_consistency.py` |
 | #2727 | `CANONICAL_OBJECT_KINDS` is incomplete against ONTOLOGY §5, so packs cannot subclass commitment-state kinds | VERIFIED-FIXED | `2d7af8bfc` | `tests/test_pack_kinds.py` |
@@ -148,23 +152,28 @@ that guard's own regression test.
 | Item | The defect (as filed) | Status | Anchor (merged, in `HEAD`) | Pin (in the current tree) |
 |---|---|---|---|---|
 | #2766 | declared `relations` are declaration-only — 9 of 11 proposed predicates had no write path (allowlist vs mapping table) | VERIFIED-FIXED | `0f2f7601d` | `tortoise/pack_registry.py` |
-| #2787 | relation declarations pass shape validation but fail coherence — no IMPL/NAND kind-bucket check, and `extractable` had no runtime consumer | VERIFIED-FIXED | `0f2f7601d` | `tests/test_pack_registry_gaps.py` |
+| #2787 | relation declarations pass shape validation but fail coherence — no IMPL/NAND kind-bucket check, and `extractable` had no runtime consumer | OPEN | `0f2f7601d` | `tests/test_pack_registry_gaps.py` |
 | #2818 | no property-declaration surface in pack manifests — `VALID_KINDDEF_KEYS` was a closed 7-key set, so per-kind value fields had nowhere to live | VERIFIED-FIXED | `1c14b1ecb` | `tests/test_pack_value_declarations_2818.py` |
 | #2781 | cross-pack references silently drop the referring pack (self-hosted) and fail install (hosted) — `depends_on` was dead code | VERIFIED-FIXED | `9f01fe948` | `tests/test_pack_kinds.py` |
 
-**#2787 is the row this map is most likely to be misread on, so it is stated
-plainly.** It was closed **NOT_PLANNED**, consolidated into #2766 as the family
-root — not rejected. The half that #2766 shipped is the **write-path verdict**
-(`relation_write_verdict` → writable / declaration-only / reported, with
-`RELATION_DECLARATION_ONLY` as a first-class state), which is the "reported"
-indicator this row asked for. The **IMPL/NAND kind-bucket coherence check** named
-in the row is *not* a symbol a grep finds in the relation validator today; the
-conservative reading is that it was subsumed by the mechanism-inversion table
-(`tortoise/pack_registry.py`, the `IMPL`/`NAND` predicate map) rather than
-implemented as a separate bucket check. The row is VERIFIED-FIXED **for the
-capability it was filed about — a declared relation now carries a verdict the
-runtime and `pack validate` both report** — with that residual recorded here
-instead of being rounded away.
+**#2787 is OPEN, and this row is the page's own cautionary tale about itself.**
+It was closed **NOT_PLANNED**, consolidated into #2766 as the family root — not
+rejected. What #2766 shipped is the **write-path verdict** (`relation_write_verdict`
+→ writable / declaration-only / reported, with `RELATION_DECLARATION_ONLY` as a
+first-class state) and the runtime handling of `extractable`. What it did **not**
+ship is the issue's indicator 1: *declaring `mechanism: IMPL`/`NAND` between two
+Object kinds that violate the bucket rule is a validation error naming the rule*.
+The relation validator carries the **shape** check only (`mechanism must be IMPL or
+NAND`); no kind-bucket coherence check exists — `grep -n 'bucket'
+tortoise/pack_registry.py` returns the `storeAs` stream comment and the #2781
+reference buckets, never a relation arm.
+
+This row shipped as **VERIFIED-FIXED** on the first landing, on an inference
+("conservatively … subsumed by the mechanism-inversion table") rather than a
+measurement, while the row's own note admitted the check was absent. A fresh
+reviewer read it against #2787's indicator list and demoted it. Both halves are
+now named, which is the row's whole value: a reader can act on the shipping half
+and the missing half separately.
 
 ---
 
@@ -178,7 +187,7 @@ was never decided, so both are half-built.*
 | #2792 | configurable per-graph pipelines — packs ship default stages, each graph can customise them, stage changes are dated events | VERIFIED-FIXED | `639137d4d` | `tests/test_pipeline_2792.py` |
 | #2729 | pack-declared per-kind status folds — the hardcoded Object `status` event→status map generalised | VERIFIED-FIXED | `72e42deea` | `tests/test_status_folds_2729.py` |
 | #2782 | money has no representation — `amount`+`currency` on entities, and same-named money items must not merge across portfolio companies | OPEN | `b408d8588` | `tests/test_money_value_2782.py` |
-| #2817 | no numeric/locale normalization anywhere — PT-BR/EN amounts cannot be canonicalized (8 failure modes) | VERIFIED-FIXED | `79c13050c` | `tests/test_value_normalizer_2817.py` |
+| #2817 | no numeric/locale normalization anywhere — PT-BR/EN amounts cannot be canonicalized (8 failure modes) | VERIFIED-FIXED | `79c13050c`, `29cc564e1` | `tests/test_value_normalizer_2817.py` |
 | #2730 | entity attachment & disambiguation — binding facts to the right Subject/Object (name collisions, aliases, placeholders, recurring people) | OPEN | `6a73ea7ea` | `tests/test_entity_attachment_brief_claims.py` |
 | #2684 | verbatim value-spans on value-bearing points — a claim carries its exact value **and** the source span, and assembly surfaces it | OPEN | `` | `tests/eval/write_path/test_value_span_census_2684.py` |
 
@@ -232,7 +241,7 @@ user-facing control is the deliverable.
 
 ## 8. What is actually left
 
-Five rows, and three of them are defects:
+Six rows, and four of them are defects:
 
 1. **#2696** — an epic, not a defect. Needs `epic-workflow`, with its human gates.
 2. **#2728** — the dashboard Settings surface for installed packs (backend
@@ -242,7 +251,11 @@ Five rows, and three of them are defects:
    parents, which is why it has stayed open since 2026-09-10.
 4. **#2684** — the value-span slice: one extractor re-ingest + assembly
    surfacing. Its measurement prerequisite is built and committed.
-5. **#2730** — entity attachment. **The research is done and the mechanism is
+5. **#2787** — relation coherence: the write-path verdict shipped, the
+   **IMPL/NAND kind-bucket validation** did not (see §5). It is a *validator*
+   gap, not a runtime one, so it cannot corrupt data — it can let a pack declare
+   an incoherent relation.
+6. **#2730** — entity attachment. **The research is done and the mechanism is
    not built** (#8639 completed the brief's alias-resolution rung and states the
    surviving defects: the alias surface form is lost, so a re-ingest re-MERGEs
    into a second node, and nothing folds suffixes or honorifics). The pin on this

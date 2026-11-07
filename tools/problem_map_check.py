@@ -4,7 +4,7 @@
 `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md` is the status half of issue
 #2820 — 26 named defects, each marked VERIFIED-FIXED / OPEN / UNKNOWN. The map
 exists because the ISSUE went stale: its body was written on 2026-09-10 and still
-reads as 26 problems waiting, while the tree had fixed 22 of them. A document
+reads as 26 problems waiting, while the tree had fixed 20 of them. A document
 whose whole purpose is *"is this still broken?"* is worthless the moment nothing
 can tell that its answers have aged out — that is the drift this tool measures.
 
@@ -369,7 +369,15 @@ def check_registration(repo: Path, doc: Path, text: str | None = None) -> list[s
     summary = parse_summary(text)
     if not summary:
         return errors  # `check_summary` owns the missing-summary complaint
-    declared = _INDEX_COUNTS.search(body)
+    # ⛔ BIND THE COUNT TO THIS DOCUMENT'S OWN ROW. `_INDEX_COUNTS.search(body)`
+    # over the whole index was the first version, and a fresh reviewer broke it in
+    # one move: an EARLIER row carrying the same phrasing satisfied the check while
+    # this document's row was stale — a FALSE PASS, in the check written to stop
+    # exactly that. `docs/00_index.md` is a file of long summary rows and the
+    # sibling maps are the kind that could carry these words first, so the regex
+    # is applied to the ONE line that names this file.
+    row_line = next((line for line in body.splitlines() if doc.name in line), "")
+    declared = _INDEX_COUNTS.search(row_line)
     if declared is None:
         errors.append(
             f"{INDEX_REL}'s entry for {doc.name} states no `**N fixed · N open · "

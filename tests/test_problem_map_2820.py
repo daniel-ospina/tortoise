@@ -106,8 +106,8 @@ def test_the_taxonomy_counts_are_what_the_summary_declares():
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     counts = pmc.parse_summary(DOC.read_text(encoding="utf-8"))
-    assert counts["VERIFIED-FIXED"] == sum(1 for r in rows if r.is_fixed) == 21
-    assert counts["OPEN"] == sum(1 for r in rows if r.status == "OPEN") == 5
+    assert counts["VERIFIED-FIXED"] == sum(1 for r in rows if r.is_fixed) == 20
+    assert counts["OPEN"] == sum(1 for r in rows if r.status == "OPEN") == 6
     assert counts["UNKNOWN"] == 0
 
 
@@ -219,7 +219,7 @@ def test_a_summary_count_that_disagrees_with_the_table_is_drift(tmp_path):
     because a summary drifted from its table (the 2026-09-10 body).
     """
     copy = _doc_copy(tmp_path)
-    text = copy.read_text().replace("| VERIFIED-FIXED | 21 |", "| VERIFIED-FIXED | 25 |", 1)
+    text = copy.read_text().replace("| VERIFIED-FIXED | 20 |", "| VERIFIED-FIXED | 25 |", 1)
     copy.write_text(text, encoding="utf-8")
     errors = pmc.run(REPO, copy).errors
     assert any("summary says 25" in e for e in errors), errors
@@ -240,6 +240,28 @@ def test_an_index_entry_whose_counts_disagree_is_drift(tmp_path):
     index = repo / pmc.INDEX_REL
     index.write_text(
         "# index\n| x | `" + DOC.name + "` — **22 fixed · 4 open · 0 unknown** |\n",
+        encoding="utf-8",
+    )
+    errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
+    assert errors and "the two disagree" in errors[0], errors
+
+
+def test_a_decoy_index_ROW_cannot_satisfy_the_count_check(tmp_path):
+    """Fails if the count is read from ANY line instead of this document's row.
+
+    Reachable, and found by fresh review on the first landing: the check scanned
+    the whole index, so an EARLIER row carrying the same phrasing satisfied it
+    while this document's row was stale — a false PASS inside the check written
+    to stop stale counts. The index is a file of long summary rows, and the
+    sibling maps are the kind that could carry these words first.
+    """
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    index = repo / pmc.INDEX_REL
+    index.write_text(
+        "# index\n"
+        "| decoy map | `some-other-map.md` — **21 fixed · 5 open · 0 unknown** |\n"
+        "| ours | `" + DOC.name + "` — **22 fixed · 4 open · 0 unknown** |\n",
         encoding="utf-8",
     )
     errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
@@ -461,7 +483,7 @@ def test_the_cli_exits_one_on_drift(tmp_path):
     would be measuring the clone, not the guard).
     """
     copy = _doc_copy(tmp_path)
-    text = copy.read_text().replace("| OPEN | 5 |", "| OPEN | 4 |", 1)
+    text = copy.read_text().replace("| OPEN | 6 |", "| OPEN | 4 |", 1)
     copy.write_text(text, encoding="utf-8")
     assert pmc.main(["--repo", str(REPO), "--doc", str(copy)]) == 1
 
