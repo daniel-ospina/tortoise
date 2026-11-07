@@ -2105,16 +2105,9 @@ nothing is lost. `record-reconcile` treats a legacy cache node still carrying th
 occurrence (one property the projection declines to write), NOT as a `field_mismatches` against a record
 that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
 pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
-a DESTRUCTIVE CLEAR — a full `record-restore`, whose wipe is
-whole-graph and therefore clears a legacy copy too (⚠️ refused PRE-WIPE on a production SERVER graph name by `#2944`'s
-L2 guard — `record_restore._ask_the_wipe_guard`; an embedded `path=` DB is exempt from the name check), and the
-targeted alternative, a graph-side `REMOVE n.story_arc`, is
-in place in principle but shipped by no instrument — `#10017`'s purge is the precedent on a DIFFERENT population, legacy
-episodic turn `:Point`s (turn-shaped ones only: a non-turn episodic `:Point` refuses its sweep), and names no
-`story_arc`. ⛔ The NOT-PROJECTABLE class — and a `status` with no usable mint (§17.2, `#11296`; and a NON-STRING
-`status`, whose mint the state-op leg's `jsonb_typeof(…) = 'string'` filter DROPS rather than folds, `#11313`) — lacks a repair
-that RESTORES the value and a non-destructive one (no RECORD→CACHE projection may write the column, so no in-place route
-can put a value back — ⛔ though a targeted `REMOVE` IS in place, it is destructive); the declined pair has one, shipped —
+a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
+whole-graph and therefore clears a legacy copy too. ⛔ Only the NOT-PROJECTABLE class lacks a non-destructive repair (nothing writes
+the column, so no in-place route can exist); the declined pair has one, shipped —
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place. The classes differ in both why and which lane.
 
@@ -2143,7 +2136,9 @@ record carried the prose re-materialises it — that replay half is `#10429`'s. 
 way round: the patch stores `props.story_arc = null`, `_props_from_row` returns it, and `node_statement`'s
 `SET n += $props` REMOVES the key, so a record-sourced rebuild keeps the copy clear. The same live door is bound by
 the MCP tool `tortoise_update_point`. A `:Point` carrying the
-prose is a `graph_only` occurrence of THIS count (`:Point`'s placeable set omits `story_arc`, §17.2), so the sentence's
+prose whose record tail does NOT also carry it is a `graph_only` occurrence of THIS count (`:Point`'s placeable set
+omits `story_arc`, §17.2; ⚠️ where the tail DOES carry it, `_partition_cache_owned`'s `keep |= set(record_props)` makes
+it COMPARED, and `record-restore` then RESTORES it), so the sentence's
 unscoped "the PROPERTY" sent that operator to `tortoise_delete` — which REMOVES the node and journals the delete that
 drops its record row — when a clear-and-keep route shipped.
 
