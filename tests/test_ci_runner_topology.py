@@ -474,7 +474,11 @@ def test_a_non_linux_runner_carrying_ubuntu_latest_is_a_violation():
         }
     )
     found = topo.violations([windows])
-    assert [v.kind for v in found] == [topo.VIOLATION_FALLBACK_ON_NON_X64]
+    kinds = [v.kind for v in found]
+    # BOTH, deliberately: the carrier must be stripped (rule 1) AND the label must reach the x64
+    # pool (rule 2) — a Windows carrier satisfies neither the image promise nor the capacity, so
+    # reporting only rule 1 would leave the pool armed nowhere with the wrong remedy named.
+    assert kinds == [topo.VIOLATION_FALLBACK_ON_NON_X64, topo.VIOLATION_NO_X64_FALLBACK], kinds
     assert "platform is not Linux" in found[0].why
     assert topo.unmanaged_reason(windows) is not None, "and the tool must not silently relabel it either"
 
@@ -676,3 +680,120 @@ def test_an_offline_only_carrier_with_an_absorbing_queue_is_reported_as_starvati
     assert report["starvation_suspected"] is True, (
         "an attached label that no ONLINE runner can serve, with an absorbing queue, must be reported"
     )
+
+
+# ------------------------------ the success line, the render, and the transport guard
+def test_a_zero_record_failure_does_not_print_the_success_line(monkeypatch, capsys):
+    """REGRESSION (#10912 review round 3, P2): fix "don't print the success line on a failed run"
+    was unpinned — reverting `if not records and ok:` to `if not records:` left the suite green,
+    because the only test asserting that string ran through `--json`.
+
+    The pool: the label is attached ONLY to an OFFLINE x64 runner, so the plan is EMPTY (nothing to
+    write) and the run FAILS on the engage gate. Zero records AND a failure — the exact state.
+    """
+    pool = topo.parse_runners(
+        {
+            "runners": [
+                _runner(1, "pi-runner-vm-2", ARM64_PLAIN),
+                _runner(3, "pi-runner-x64-1", [*X64, topo.FALLBACK_LABEL], status="offline"),
+            ]
+        }
+    )
+    monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO: pool)
+    monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
+    rc = topo.main(["apply"])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "changed: 0 runner(s)" in out, out
+    assert "already at the desired topology" not in out, (
+        "a failed engage with zero records must not claim the pool is at the desired topology"
+    )
+    assert topo.VIOLATION_ENGAGE_NO_X64_SERVER in out, "and the post verdict must name the failure"
+
+
+def test_the_starvation_note_describes_an_armed_but_dead_arm_not_a_disarmed_one(capsys, tmp_path: Path):
+    """REGRESSION (#10912 review round 3, P2): after the online filter, the note still said
+    "ENGAGED NOWHERE" directly under `serving_fallback=1` — pointing a human at a disarmed gate
+    when the arm was armed-but-dead. Different fault, different remedy; the text must match.
+    """
+    fixture = tmp_path / "runners.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "runners": [
+                    _runner(1, "pi-runner-x64-1", [*X64, topo.FALLBACK_LABEL], status="offline"),
+                    _runner(2, "pi-runner-vm-2", ARM64_PLAIN, busy=True),
+                ]
+            }
+        )
+    )
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "check", "--from-fixture", str(fixture),
+         "--queued-floor-seconds", "1"],
+        capture_output=True,
+        text=True,
+    )
+    assert "ENGAGED NOWHERE" not in proc.stdout, (
+        f"the label IS armed (on an offline runner) — the note must say so: {proc.stdout}"
+    )
+
+
+def test_the_read_back_survives_a_malformed_page(monkeypatch, capsys):
+    """REGRESSION (#10912 review round 3, P2): catching only SystemExit left JSONDecodeError (a
+    truncated `--paginate` stream) and KeyError/ValueError (a malformed page) aborting AFTER the
+    writes, with a traceback instead of the record of what was written and that it is unverified.
+    """
+    pre = measured()
+    calls = {"n": 0}
+
+    def _fetch(repo=topo.REPO):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return pre
+        raise json.JSONDecodeError("Expecting value", "<truncated page>", 0)
+
+    monkeypatch.setattr(topo, "fetch_runners", _fetch)
+    monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
+    monkeypatch.setattr(
+        topo,
+        "apply_plan",
+        lambda pending, *, dry_run, repo=topo.REPO: [
+            {"runner": n, "id": rid, "before": b, "after": a, "applied": True}
+            for n, (rid, b, a) in pending.changes.items()
+        ],
+    )
+    rc = topo.main(["apply"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "UNVERIFIED" in err, f"a malformed read-back must be reported, not raised: {err}"
+
+
+def test_a_transport_failure_on_one_runner_does_not_abort_the_other_writes(monkeypatch):
+    """REGRESSION (#10912 review round 3, P2): an unguarded `subprocess.run` in the write loop
+    (gh missing, a signal, a fork failure) raised out of the loop AFTER earlier writes landed,
+    losing every record of what was written.
+    """
+    pending = topo.Plan()
+    pending.changes = {
+        "a-runner": (1, [], ["self-hosted-x64", "ubuntu-latest"]),
+        "b-runner": (2, [], ["self-hosted-x64", "ubuntu-latest"]),
+    }
+    calls = {"n": 0}
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(argv, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError(12, "Cannot allocate memory")
+        return _Proc()
+
+    monkeypatch.setattr(topo.subprocess, "run", _fake_run)
+    records = topo.apply_plan(pending, dry_run=False)
+    assert len(records) == 2, f"every planned runner must be reported, {len(records)} were"
+    by_name = {r["runner"]: r for r in records}
+    assert by_name["a-runner"]["applied"] is False and "transport" in by_name["a-runner"]["error"]
+    assert by_name["b-runner"]["applied"] is True, "one failure must not stop the reconcile"

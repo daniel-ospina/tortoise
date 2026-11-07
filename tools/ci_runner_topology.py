@@ -78,7 +78,8 @@ tool names each separately because they have different remedies:
                         queues. REMEDY: attach it to the x64 pool.
 
   UNENGAGED_WITH_STARVATION
-                        Nothing carries the fallback while `ubuntu-latest`
+                        No ONLINE runner can serve the fallback — either nothing carries it, or
+                        what carries it is offline — while `ubuntu-latest`
                         demand is queued past the floor: the pool is idle by
                         design and the queue is absorbing. This is a STATE, not
                         a violation — recorded, exit 0, because "hosted is
@@ -341,8 +342,16 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
     # `online`: an OFFLINE runner that carries the label serves nothing, so counting it
     # here would let `census` (which excludes offline capacity) and this check disagree
     # about the same question — one reporting no usable capacity, the other "engaged".
-    serving = [r for r in runners if r.serves_fallback and r.online]
-    if serving and not any(r.host == HOST_LABEL_X64 for r in serving):
+    # ⛔ A CARRIER THAT CANNOT SERVE IS NOT A CARRIER — the same predicate `apply`'s engage gate
+    # uses (online AND x64 AND Linux). Before this, a Windows/X64 online carrier satisfied
+    # "some x64 serves it", so a pool whose ONLY carrier was Windows never got rule 2's remedy
+    # (attach the label to the x64 pool) and only ever got rule 1's (strip it) — leaving it armed
+    # nowhere and the pool still red for the wrong reason.
+    serving = [
+        r for r in runners if r.serves_fallback and r.online and r.host == HOST_LABEL_X64
+        and PLATFORM_LINUX in r.labels
+    ]
+    if any(r.serves_fallback and r.online for r in runners) and not serving:
         found.append(
             Violation(
                 kind=VIOLATION_NO_X64_FALLBACK,
@@ -563,12 +572,20 @@ def apply_plan(pending: Plan, *, dry_run: bool, repo: str = REPO) -> list[dict[s
             # READ-ONLY: sending them back is a 422 ("Cannot set labels that duplicate existing
             # read-only labels: Linux, X64, self-hosted") that leaves the runner untouched.
             body = json.dumps({"labels": [label for label in after if label not in GITHUB_OWNED]})
-            proc = subprocess.run(
-                ["gh", "api", "-X", "PUT", f"repos/{repo}/actions/runners/{runner_id}/labels", "--input", "-"],
-                input=body,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                proc = subprocess.run(
+                    ["gh", "api", "-X", "PUT", f"repos/{repo}/actions/runners/{runner_id}/labels", "--input", "-"],
+                    input=body,
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError as exc:
+                # ⛔ A TRANSPORT FAILURE ON ONE RUNNER MUST NOT ABORT THE RECONCILE. An unguarded
+                # `subprocess.run` (gh missing, a signal, a fork failure) raised out of the loop
+                # AFTER earlier writes had landed, losing every record of what was written.
+                record["error"] = f"transport: {exc}"
+                records.append(record)
+                continue
             record["applied"] = proc.returncode == 0
             if proc.returncode != 0:
                 record["error"] = proc.stderr[:300]
@@ -592,8 +609,18 @@ def _print_human(report: Mapping[str, Any]) -> None:
             f"(floor {report['queued_floor_seconds']}s)"
         )
     if report.get("starvation_suspected"):
-        print("  NOTE: demand is queued past the floor while the fallback is ENGAGED NOWHERE — "
-              "idle-pool topology with an absorbing queue (#10912). Not a violation.")
+        # ⛔ THE NOTE MUST SAY WHAT WAS MEASURED. Printing "ENGAGED NOWHERE" directly under
+        # `serving_fallback=1` pointed a human at a DISARMED gate when the arm was armed-but-dead —
+        # a different fault with a different remedy (an offline carrier, not a disengaged one).
+        armed = report["census"]["serving_fallback"]
+        state = (
+            f"the label is ARMED on {len(armed)} runner(s) but NOT ONE ONLINE runner can serve it "
+            f"(an offline/unusable arm)"
+            if armed
+            else "the fallback is ENGAGED NOWHERE — idle-pool topology"
+        )
+        print(f"  NOTE: demand is queued past the floor while {state} — absorbing queue (#10912). "
+              f"Not a violation.")
     # ⛔ A SKIPPED RUNNER IS NAMED HERE TOO. `apply` printed it and `check` — the form the
     # docstring calls the tripwire — did not, so a human render could read "verdict: OK" while a
     # runner the tool never measured was still accepting `ubuntu-latest` work.
@@ -686,6 +713,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # the pool now serves anyone. So RE-READ after the write and report the POST verdict — the
     # pre-state verdict is the one thing that is certainly stale once we have written.
     post: dict[str, Any] | None = None
+    serving_post: list[Runner] = []
     ok = report["ok"]
     if not args.dry_run:
         # Every write took, AND the pool reads back clean. The PRE-state verdict is deliberately
@@ -721,35 +749,38 @@ def main(argv: Sequence[str] | None = None) -> int:
         # the label off the only carriers and attaches it where nobody online can serve it. The
         # write lands, the read-back is clean, and the queue still cannot get a runner: the same
         # false PASS the default-direction fix closed, one layer down.
-        if post is not None and engage:
-            serving = [
-                r for r in post_runners if r.online and r.serves_fallback and r.host == HOST_LABEL_X64
-                and PLATFORM_LINUX in r.labels
-            ]
-            if not serving:
-                ok = False
-                gate = {
-                    "kind": VIOLATION_ENGAGE_NO_X64_SERVER,
-                    "runner": "<pool>",
-                    "why": (
-                        f"engage attached {FALLBACK_LABEL!r} and NOT ONE online x64 runner serves it after "
-                        f"the write ({len(post_runners)} runner(s) read back) — the reconcile delivered no "
-                        f"capacity, however clean the label state looks."
-                    ),
-                }
-                # ⛔ `verdict` IS the field every other reader keys on (`ok` is never printed in the
-                # human render), so leaving it "OK" here makes the payload contradict itself.
-                post = {
-                    **post,
-                    "ok": False,
-                    "verdict": VIOLATION_ENGAGE_NO_X64_SERVER,
-                    "violations": [*post["violations"], gate],
-                }
-                print(
-                    f"❌ {VIOLATION_ENGAGE_NO_X64_SERVER}: no online x64 runner serves "
-                    f"{FALLBACK_LABEL!r} after the write — engage delivered NO capacity.",
-                    file=sys.stderr,
-                )
+        serving_post = [
+            r for r in post_runners if r.online and r.serves_fallback and r.host == HOST_LABEL_X64
+            and PLATFORM_LINUX in r.labels
+        ]
+        if post is not None and engage and not serving_post:
+            ok = False
+            gate = {
+                "kind": VIOLATION_ENGAGE_NO_X64_SERVER,
+                "runner": "<pool>",
+                "why": (
+                    f"engage attached {FALLBACK_LABEL!r} and NOT ONE online x64 runner serves it after "
+                    f"the write ({len(post_runners)} runner(s) read back) — the reconcile delivered no "
+                    f"capacity, however clean the label state looks."
+                ),
+            }
+            # ⛔ `verdict` IS the field every other reader keys on (`ok` is never printed in the
+            # human render), so leaving it "OK" here makes the payload contradict itself. But a
+            # READ FAILURE outranks a capacity reading: asserting a measured defect about a pool
+            # nobody measured inverts the doctrine this file states — "I could not look must
+            # never be the last word". So the gate's kind wins only over a real verdict.
+            already_unmeasured = post["verdict"] == VIOLATION_UNMEASURED_EMPTY_POOL
+            post = {
+                **post,
+                "ok": False,
+                "verdict": VIOLATION_UNMEASURED_EMPTY_POOL if already_unmeasured else VIOLATION_ENGAGE_NO_X64_SERVER,
+                "violations": [*post["violations"], gate],
+            }
+            print(
+                f"❌ {VIOLATION_ENGAGE_NO_X64_SERVER}: no online x64 runner serves "
+                f"{FALLBACK_LABEL!r} after the write — engage delivered NO capacity.",
+                file=sys.stderr,
+            )
 
     payload = {
         "ok": ok,
@@ -775,7 +806,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  ⚠️  {name}: left untouched — {why}")
         if post is not None:
             hosts = post["census"]["by_host"]
-            x64_serving = hosts.get(HOST_LABEL_X64, {}).get("serving_fallback", 0)
+            # ⛔ THE COUNT MUST USE THE GATE'S DEFINITION. `census`'s `serving_fallback` has no
+            # `online` filter (deliberately: it is a raw census), so printing it here produced
+            # "x64 serving=1" directly below "❌ no online x64 runner serves it". The render is what
+            # a human acts on, so it counts what the gate counts.
+            x64_serving = len(serving_post)
             others_serving = sum(
                 b.get("serving_fallback", 0) for host, b in hosts.items() if host != HOST_LABEL_X64
             )
