@@ -2316,14 +2316,35 @@ def test_both_builders_read_every_cap_from_ONE_source(monkeypatch):
     literal makes invisible: the record builder carried `[:200]` and `[:60]` beside
     `_MAX_QUOTE`, so `_MENTION_CAPS` was a cap the OTHER builder obeyed and this one
     ignored.
+
+    ⛔ AND the ceilings are the SCHEMA's, not the Point's. `Mention.quote`'s 200 is
+    an independent literal, so a cap that follows `_MAX_QUOTE` can be dragged past
+    it by a legitimate raise of the POINT's cap — and a Quote over the schema's cap
+    422s the whole payload. Both halves are pinned here (review at `d02ed2ccc`, P3):
+    the EQUALITY with `_MAX_QUOTE` (today's invariant, so moving one is a loud
+    diagnosis instead of silent cross-record drift) and the relation that actually
+    keeps the payload valid (`<= Mention.<field>.max_length`).
     """
+    from tortoise.commit_schema import Mention
     from tortoise.extractor_v2 import _MAX_QUOTE, _MENTION_CAPS
 
-    # A mention's quote cut IS the cut the point's own quote is stored with, or the
-    # mention cites bytes the point does not hold.
+    # A mention's quote cut should mean the same thing as the point's, or the same
+    # offsets index two different strings.
     assert _MENTION_CAPS["quote"] == _MAX_QUOTE, (
         "`_MENTION_CAPS['quote']` has drifted from `_MAX_QUOTE`, the cut a point's "
-        "quote is stored with")
+        "quote is stored with — move them together, and keep the mention's no "
+        "larger than `commit_schema.Mention.quote.max_length`")
+
+    # ⛔ The real ceiling: the schema owns it, and exceeding it 422s the payload.
+    for name in ("surface", "quote", "kind_guess"):
+        field = Mention.model_fields[name]
+        ceiling = [m.max_length for m in field.metadata if hasattr(m, "max_length")]
+        assert ceiling, f"`Mention.{name}` carries no max_length to mirror"
+        assert _MENTION_CAPS[name] <= ceiling[0], (
+            f"`_MENTION_CAPS['{name}']` = {_MENTION_CAPS[name]} exceeds "
+            f"`commit_schema.Mention.{name}.max_length` = {ceiling[0]} — a record "
+            "built at that cap is REJECTED by the schema and takes the whole "
+            "payload's validation down with it")
 
     cases = [
         ("quote", 100, {"surface": "the problem",
