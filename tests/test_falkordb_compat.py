@@ -337,9 +337,20 @@ class TestVersionProbeCacheKeyServerMode:
 
     def test_embedded_still_keys_on_the_path(self):
         """Regression pin: the embedded lane must not be re-keyed as a server
-        bucket by the pool fallback (an embedded client's pool carries `path`,
-        never `host`/`port`)."""
-        proj = self._proj(type("_Db", (), {"connection": object()})())
+        bucket by the pool fallback.
+
+        ⛔ The client here is deliberately a SERVER-shaped one (`_pool_only_client`,
+        whose pool kwargs DO carry host/port), not `object()`: with a pool-less
+        mock the fallback branch is never entered, so deleting the `and path is
+        None` guard leaves the key unchanged and this pin stays GREEN through the
+        mutation it advertises (#11360 review, measured). A real embedded client's
+        pool carries `path` alone, so pinning the STRONGER shape is the only
+        version whose failure is attributable to the guard: `_path` must win over
+        a resolvable pool, because `_path` is the attribute the embedded key is
+        built from.
+        """
+        proj = self._proj(
+            type("_Db", (), {"connection": self._pool_only_client()})())
         proj._path = "/tmp/embedded.db"
         proj._is_embedded = True
         assert proj._falkordb_version_cache_key() == (
