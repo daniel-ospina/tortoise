@@ -1488,6 +1488,23 @@ _RESIDUAL_CLOSED_VERDICT = (
 #: sit in a clause segment that carries a class anchor. So the arm cannot separate
 #: the honest denial from the reopening, and naming the shape here is the honest
 #: alternative to claiming coverage.
+#: ⛔ AND EVERY FILLER WINDOW IS BOUNDED, so a filler LONGER than the bound defeats
+#: that arm (#11258 review round 15 `P1`, MEASURED): the row's register supplies
+#: multi-token interpolations (`, in practice, ` / `, at this head, `), and two of
+#: them stacked exceed `[^.;]{0,25}?` / `{0,30}` / `{0,20}`. GREEN at this revision:
+#: `the ADJACENCY half is no longer, in practice and at this head, judged.`,
+#: `the units are no longer, in practice and at this head, fused.`,
+#: `the ADJACENCY half is not, in practice and at this head, closed.`,
+#: `the ADJACENCY half has, in practice and at this head, yet to be closed.`,
+#: `the ADJACENCY half remains, in practice and at this head, to be closed.`,
+#: `the ADJACENCY half is never, in practice and at this head, closed.`
+#: ⛔ THE BOUND IS NOT RAISED TO CHASE THESE, deliberately: the windows are bounded
+#: BECAUSE an unbounded filler false-blocks honest prose (a `not … closed` reaching
+#: across a clause, `is unjudged and never closed`), and each widening measured in
+#: this file traded one leak for a false block. A scan with a length limit is the
+#: artifact; the limit is stated here so a lane knows what it is buying when it
+#: writes a long interpolation. The multi-token forms would need a parser, not a
+#: regex — which is the honest boundary of this pin.
 #: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
 #: a reopening phrased with none of these words passes — MEASURED, still GREEN at
 #: this revision: "the ADJACENCY half went back to being unjudged", "`minute` is
@@ -2593,6 +2610,15 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     # the unanchored `not … closed` arm's over-block, on THIS row's own items
     "(b2) is not closed.",
     "(e) is not closed.",
+    # ⛔ AN HONEST ASSERTION OF CLOSURE, refused (#11258 review round 15 `P2`,
+    # MEASURED). The unanchored `not … closed` arm exists because `not closed`
+    # normally ASSERTS the gap is open; `not merely closed` asserts the opposite,
+    # and the arm cannot tell them apart without the parser this artifact does not
+    # have. Recorded rather than left to be discovered — the rule this ledger
+    # exists for — and it is the reason the arm is not widened to `not … fused`.
+    "the ADJACENCY half is not merely closed, it is fused.",
+    "the ADJACENCY half is not just closed but fused.",
+    "the ADJACENCY half is not closed again since the tables landed.",
 )
 
 
@@ -2785,11 +2811,11 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         _RESIDUAL_REFUSED_TRUTHFUL), (
         "the over-block ledger has duplicate entries — a duplicate pays for a "
         "dropped cost while the count stays constant")
-    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 6, (
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 9, (
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
         "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (6), i.e. ZERO SLACK: the round-11 entries are the "
+        "CURRENT LENGTH (9), i.e. ZERO SLACK: the round-11 entries are the "
         "`not … closed` cost, and slack above them is slack to delete it with")
     for required in (
             # the unit-token waiver cost — the one a lane actually meets, because
