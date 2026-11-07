@@ -70,8 +70,9 @@ claim and a slogan:
   re-derives it at HEAD and reds when this sentence loses a member or names one discovery does not
   class that way. (The sentence itself is prose a lane edits — a pin can read it, not rewrite it;
   the red is what makes the edit unavoidable, which is the whole mechanism.) It
-  had to be re-derived once already: this paragraph named four of the population (the AST pass's own
-  exemplars) while five `projection.entities` writers reach the seam by the `encode_for_row` CALL
+  had to be re-derived once already: this paragraph named four of the CALL population
+  (`api::_point`, `projection::_revise_point`, `sdk::create_point`, `sdk::update_point` — none of them
+  an AST exemplar) while the other five reach the seam by the `encode_for_row` CALL
   branch, one file over — and they do NOT hold the container-key shape (`set_embedding_clause(…)`
   for subject/object/document, a Cypher graph-property SET (`n.embedding=…`) fed from the params
   dict for `_upsert_point_props`, the CALL itself for `_upsert_event`), which is exactly why the
