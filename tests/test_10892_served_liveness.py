@@ -318,11 +318,16 @@ def test_a_blocked_loop_cannot_serve_either_endpoint(monkeypatch):
     # directly is deterministic where asserting "both timed out" was not (#10892
     # review round 4: those two branches used to forbid the 504 the messages
     # above call valid).
-    assert max(health_elapsed, liveness_elapsed) >= PROBE_BUDGET_S / 2, (
-        f"both probes returned far below their {PROBE_BUDGET_S:.0f}s bound "
-        f"(health {health_elapsed:.2f}s, liveness {liveness_elapsed:.2f}s) while "
-        f"the loop was held for {BLOCK_S:.0f}s — they never met the block, so "
-        "this run observed nothing and cannot testify")
+    # ⛔ It must be `/liveness`'s OWN elapsed time, not `max(...)`: a blocked
+    # /health always burns its whole client bound, so a max() over both is
+    # satisfied by /health alone and would pass a run where /liveness answered
+    # instantly with a fast 5xx — the state-read shape this test exists to
+    # reject (review round 6).
+    assert liveness_elapsed >= PROBE_BUDGET_S / 2, (
+        f"/liveness returned in {liveness_elapsed:.2f}s, far below its "
+        f"{PROBE_BUDGET_S:.0f}s bound, while the loop was held for {BLOCK_S:.0f}s "
+        f"(health {health_elapsed:.2f}s) — it never met the block, so an answer "
+        "that fast was not produced by being served")
 
     # …and the service is genuinely serving again afterwards: the two probes
     # above observed a REAL block, not a dead process (which would make the
@@ -432,3 +437,34 @@ def test_the_served_endpoint_is_not_transport_bound_exempt():
             "the bound themselves), and a probe that must RETURN cannot live under "
             "it: exempting the liveness route there would re-create the silent hang "
             "the 504 exists to make legible (#10892)")
+
+
+def test_the_served_endpoint_is_rate_limit_exempt():
+    """`/liveness` must stay in `RateLimitMiddleware.SKIP` (#10892 review round 6).
+
+    The prober makes ONE request per run against a route that does no I/O of its
+    own, so a per-IP bucket can only ever produce a 429 on a HEALTHY origin — and
+    a 429 is a PROD DEGRADED page, i.e. the alarm firing because the alarm was
+    rate limited. `hosted_api.py` argues that in a comment, but a comment cannot
+    fail, and `tests/conftest.py` exports `RATE_LIMIT_DISABLED=1` — so no test
+    in the suite can observe the middleware actually skipping the path. The
+    membership is therefore pinned STRUCTURALLY, and the path is resolved FROM
+    THE APP so a moved route cannot leave this green (the same pattern as the
+    transport-bound test above).
+    """
+    import tortoise.hosted_api as ha
+
+    routes = [
+        route for route in ha.app.routes
+        if getattr(route, "path", "").rstrip("/").endswith("/liveness")
+    ]
+    assert routes, (
+        "no route ending in /liveness is registered on the app — this test's "
+        "subject is gone, so it cannot certify anything (#10892)")
+
+    skip = set(ha.RateLimitMiddleware.SKIP)
+    for route in routes:
+        assert route.path in skip, (
+            f"{route.path} is NOT in RateLimitMiddleware.SKIP — the availability "
+            "prober would then spend a per-IP bucket it does not need, and a 429 "
+            "on a healthy origin would page PROD DEGRADED (#10892)")

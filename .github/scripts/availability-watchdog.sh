@@ -2660,8 +2660,13 @@ A restart is a **symptom fix** — if this recurs, the root cause is still live 
           # surface "an authenticated API route", but the runbook tells
           # operators the incident body is the primary diagnostic — and the
           # auth target is a Cloudflare Pages route, not an API route. Keyed
-          # on RESTARTABILITY (the same discriminator render_body uses), not on
-          # the presence of an expectation knob. The status example is the
+          # on NEITHER restartability NOR machine-backing — this is the THIRD
+          # arm of the same three-way split `render_body` uses (restartable →
+          # machine-backed → neither), not the second. ⛔ A future
+          # machine-backed surface added to the production set lands in the
+          # MIDDLE arm; read `render_body` before adding a branch here.
+          # Not keyed on the presence of an expectation knob. The status
+          # example is the
           # ACTUAL observed code, not a hardcoded class: `/auth/start` EXPECTS a
           # 302, so a `3xx` there is the NORMAL case and a `404` cannot occur —
           # the old `404`/`3xx` enumeration contradicted the evidence line above
