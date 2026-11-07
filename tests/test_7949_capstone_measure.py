@@ -4593,12 +4593,21 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # TWO different deltas from one commit, which is why the numbers are read
         # off the tree (`grep -n '^STEPS = ('` / `'^def _step_accounting('`) and
         # never carried forward as an offset.
+        #
+        # ⛔ AND A THIRD DELTA, from the `origin/main` carry (#11331): `#11298`'s
+        # `door` run-block key registered in `_NON_MEASUREMENT_RUN_KEYS` put 15
+        # lines above the accounting block and moved `_step_accounting`
+        # `:675` -> `:690`. Measured off the tree again, not offset: 675 now reads
+        # `block = record.get(RECORD_STEPS_KEY)` and `grep -n '^def _step_accounting('
+        # tools/capstone_verdict_check.py` -> 690. The comment block above the tuple
+        # is where that reasoning has to live, so the shift cannot be avoided by
+        # shortening it — a line count above a cite moves the cite.
         ("E1-E5-PROOFS.md", 'declares `STEPS = ("S0"', (
             ("146", 'STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", '
                     '"S5", "S6")'),
         ), "capstone_verdict_check"),
-        ("E1-E5-PROOFS.md", "_step_accounting` (`:675`) refuses a GREEN row whose", (
-            ("675", "def _step_accounting("),
+        ("E1-E5-PROOFS.md", "_step_accounting` (`:690`) refuses a GREEN row whose", (
+            ("690", "def _step_accounting("),
         ), "capstone_verdict_check"),
         # ⛔ A SECOND DOCUMENT PRINTS THE SAME DECLARATION (#10601 review round 2).
         # `docs/00_index.md`'s capstone row cites this gate too, and it moved
