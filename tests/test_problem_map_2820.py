@@ -854,6 +854,22 @@ def test_a_document_path_that_is_a_DIRECTORY_is_recorded_not_agreeable(tmp_path)
     assert pmc.check_registration(REPO, docdir, None) != [], "no-report caller saw silence"
 
 
+def test_an_UNREADABLE_document_is_recorded_for_a_direct_caller(monkeypatch):
+    """The doc arm's `unreadable` branch, which round 15 shipped with no control.
+
+    Without it, reverting that arm to `return errors` silences `report=None`
+    callers again — the whole suite stayed green (49 passed) with the arm
+    reverted, which is precisely the shape rounds 11 and 15 were about. This
+    patches the STAT, so it reaches the `unreadable` branch rather than the read
+    guard the sibling controls exercise (#11384 review round 17).
+    """
+    _refuse_stat_of(monkeypatch, DOC)
+    report = pmc.Report()
+    assert pmc.check_registration(REPO, DOC, None, report) == []
+    assert any("could not be examined" in e for e in report.state_errors), report.state_errors
+    assert pmc.check_registration(REPO, DOC, None) != [], "no-report caller saw silence"
+
+
 def test_a_MISSING_document_is_a_state_error_for_a_direct_caller(tmp_path):
     """The index arm fails closed when the index is missing; the doc arm must too.
 
