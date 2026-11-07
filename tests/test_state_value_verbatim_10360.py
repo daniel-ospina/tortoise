@@ -1426,8 +1426,21 @@ _RESIDUAL_CLOSED_VERDICT = (
     # closed` and `… is still to be closed` — the natural residual-list phrasing,
     # asserting the gap is still open — were GREEN. `remains?` is its own form
     # because it takes no auxiliary.
-    r"\b(?:has|have|had|is|are|was|were)\s+(?:yet|still)\s+to\s+be\s+closed\b",
-    r"\bremains?\s+(?:yet\s+|still\s+)?to\s+be\s+closed\b",
+    # ⛔ AND THE FILLER WINDOW, on EVERY plain form in this tuple (#11258 review
+    # round 13 `P1`, MEASURED). Round 12 unified the `no longer` arms and left
+    # these requiring strict `\s+` adjacency, so one interpolated word or comma
+    # turned a membership-pinned mutation GREEN:
+    #   RED    the time-unit half has yet to be closed
+    #   GREEN  the time-unit half has yet, in practice, to be closed.  / … fully …
+    #   RED    the ADJACENCY half remains to be closed
+    #   GREEN  the ADJACENCY half remains, for now, to be closed.
+    # The row's own register is exactly `, in practice, ` / `, after the widen, `
+    # / `, for now, `, so filling the slot is the EASY edit, not the exotic one.
+    # `never … closed` above already carried a 30-char window — the asymmetry was
+    # unintended and is what hid these.
+    r"\b(?:has|have|had|is|are|was|were)\b[^.;]{0,20}?\b(?:yet|still)\b[^.;]{0,20}?"
+    r"to\s+be\s+(?:\w+\s+)?closed\b",
+    r"\bremains?\b[^.;]{0,20}?\bto\s+be\s+(?:\w+\s+)?closed\b",
     # ⛔ THE PRESENT-TENSE VERB, not only the participle (#11258 review round 10,
     # MEASURED): `the ADJACENCY half doesn't close the gap` asserts the gap is
     # still open and was GREEN at every head before this one, because the whole
@@ -1435,9 +1448,15 @@ _RESIDUAL_CLOSED_VERDICT = (
     # NOT in `_RESIDUAL_OPENNESS` on purpose: `the tables do not close the
     # SPELLING gap` is the row's own honest disclosure, and only the anchor
     # separates the two (measured both ways).
-    r"\b(?:does|do|did|would|will|can|could)n['\u2019]?t\s+(?:yet\s+)?close[sd]?\b",
-    r"\b(?:does|do|did|would|will|can|could)\s+not\s+(?:yet\s+)?close[sd]?\b",
-    r"\b(?:far\s+from|anything\s+but)\s+(?:being\s+)?closed\b",
+    # ⛔ THREE ALTERNATIVES, because English writes the negation three ways and
+    # each round found one of them missing: the contraction on the auxiliary
+    # (`doesn't`, `didnt`, `can't`), the spaced `not` (with a window, so
+    # `does, in practice, not close` is read), and `cannot`.
+    r"(?:\b(?:does|do|did|would|will|can|could|must|should|need|ai)"
+    r"(?:n['\u2019]?t|['\u2019]t)"
+    r"|\b(?:does|do|did|would|will|can|could|must|should|need)[^.;]{0,20}?\bnot\b"
+    r"|\bcannot\b)[^.;]{0,20}?\bclose[sd]?\b",
+    r"\b(?:far\s+from|anything\s+but)\b[^.;]{0,20}?\bclosed\b",
 )
 
 #: The affirmations that something IS open / STOPPED being closed. TWO ARMS,
@@ -1454,6 +1473,17 @@ _RESIDUAL_CLOSED_VERDICT = (
 #:    requires `_RESIDUAL_CLASS_ANCHOR` somewhere in the sentence. Without that
 #:    requirement the arm's filler window read the row's own honest
 #:    "the pair is unjudgeable and fails open" as an openness claim (MEASURED).
+#: ⛔ AND THE PLAIN `not … judged` / `not … fused` SHAPE IS NOT READ (#11258
+#: review round 13 `P2`, MEASURED): only the `no longer …` form is —
+#: `the ADJACENCY half is no longer judged.` REDS, but `the ADJACENCY half is not
+#: judged.`, `… is not fused.` and `the units are still not fused.` are GREEN. That
+#: is a DISCLOSURE, not a missing arm, and the reason is measured: an anchored
+#: `not … (fused|judged)` arm false-blocks the row's OWN honest prose —
+#: `(d) … is not judged: no unit is ADJACENT`, `(h) … is not judged by the PURE
+#: function`, `(i) A k SUFFIX IS NOT JUDGED` and `miles was not fused there` all
+#: sit in a clause segment that carries a class anchor. So the arm cannot separate
+#: the honest denial from the reopening, and naming the shape here is the honest
+#: alternative to claiming coverage.
 #: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
 #: a reopening phrased with none of these words passes — MEASURED, still GREEN at
 #: this revision: "the ADJACENCY half went back to being unjudged", "`minute` is
@@ -1633,7 +1663,26 @@ _RESIDUAL_OPEN_VERBS = (
 #: explicit allowlist — `only`/`merely`/`just`/`simply`/`far` flip the polarity and
 #: are deliberately absent, while the ones here do not.
 _RESIDUAL_NEGATED_OPEN = (
-    r"(?!\s*(?:\w+\s+)?(?:not|never|no\s+longer)\s+"
+    r"(?!\s*(?:\w+\s+)?(?:not|never)\s+"
+    r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
+    r"completely|actually|wholly|truly|strictly)\s+)?(?:fail-)?open\b)"
+    # ⛔ `no longer` IS ITS OWN LOOKAHEAD, not a member of the `not|never` group
+    # (#11258 review round 13 `P2`, MEASURED): it hard-coded `no\s+longer\s+`, so
+    # `the ADJACENCY half is no longer open.` was GREEN (truthful, pinned) while
+    # `… is no longer, in practice, open.` and `… is no longer being open.` RED —
+    # an UNRECORDED over-block, and the fourth `no longer` site not using the
+    # shared primitive (three did). It takes a window and the SAME after-negator
+    # adverb allowlist, so `no longer merely open` (which ASSERTS openness) stays
+    # RED.
+    r"(?!\s*(?:\w+\s+)?\bno\s+longer\b"
+    # ⛔ THE WINDOW MUST NOT SWALLOW A POLARITY FLIPPER (#11258 review round 13,
+    # MEASURED — my own first attempt did): `no longer merely open` / `no longer
+    # only open` / `no longer far from open` ASSERT the gap is wide open, and with
+    # a bare `[^.;]{0,25}?` the filler consumed `merely ` and the veto fired,
+    # turning all three GREEN — round 2's coverage regression, re-created by the
+    # fix for the over-block. So the filler is barred from containing one.
+    r"(?![^.;]{0,25}?\b(?:merely|only|just|simply|far\s+from)\b)"
+    r"[^.;]{0,25}?"
     r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
     r"completely|actually|wholly|truly|strictly)\s+)?(?:fail-)?open\b)"
     r"(?!\s*(?:\w+\s+)?n't\s+"
@@ -2160,6 +2209,15 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half is no longer, at this head, judged.",
     "the ADJACENCY half is far from being closed.",
     "the ADJACENCY half is anything but being closed.",
+    # ⛔ ROUND 13 (#11258 review round 13 `P1`, MEASURED): the same `\s+`
+    # adjacency survived in `_RESIDUAL_CLOSED_VERDICT`, whose plain forms all
+    # pinned RED while ONE interpolated word or comma — the row's own register —
+    # turned them GREEN.
+    "the time-unit half has yet, in practice, to be closed.",
+    "the ADJACENCY half remains, for now, to be closed.",
+    "the ADJACENCY half does, in practice, not close the gap.",
+    "the ADJACENCY half cannot close the gap.",
+    "the ADJACENCY half is anything but being fully closed.",
     # ⛔ THE APOSTROPHE-LESS CONTRACTIONS (#11258 review round 10 `P1`, MEASURED):
     # these four were RED, then went GREEN when round 9 made the apostrophe
     # mandatory to avoid `point`/`count` — a REGRESSION introduced by a fix. They
@@ -2429,6 +2487,13 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     # emphatic `no longer` forms in `_RESIDUAL_REOPENING_MUTATIONS` are its
     # falsifier: `no longer merely/only/far from open` mean the OPPOSITE of closed.
     "the ADJACENCY half is no longer open.",
+    # ⛔ ROUND 13 `P2`: the veto hard-coded `no\s+longer\s+`, so these two
+    # HONEST closures were REFUSED while their window-free twin was accepted —
+    # an unrecorded over-block, and the fourth `no longer` site not using the
+    # shared primitive.
+    "the ADJACENCY half is no longer, in practice, open.",
+    "the ADJACENCY half is no longer being open.",
+    "the ADJACENCY half is no longer an open question.",   # round 13: no longer refused
 )
 
 #: ⛔ THE OVER-BLOCK LEDGER: truthful statements this pin REFUSES, each MEASURED
@@ -2445,8 +2510,11 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
 #:   reopenings through (`is not only open`, `is not merely open`, `is never far
 #:   from open` — a measured coverage REGRESSION, #11258 review round 2 `P1`).
 #: * `closed rather than open` — same slot, same trade.
-#: * `no longer an open question` — the veto admits an ADVERB between the negator
-#:   and `open`, not a noun phrase (`an`).
+#: * ⛔ `no longer an open question` WAS here and is now ACCEPTED (#11258 review
+#:   round 13): the veto took a filler window, so a noun phrase between `no longer`
+#:   and `open` no longer refuses an honest closure. It moved to
+#:   `_RESIDUAL_TRUTHFUL_STATEMENTS` — the route this ledger's own comment
+#:   prescribes when a cost stops being paid.
 #: * `the SPELLING case for \`minute\`, which is open by design` — the unit token
 #:   withholds the `spelling` waiver (that withholding is what stops one word
 #:   `the SPELLING ` from excusing every reopening), so the honest sentence and
@@ -2482,7 +2550,6 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     "the ADJACENCY half is CLOSED, not open.",
     "the ADJACENCY half is judged, not open.",
     "the ADJACENCY half is closed rather than open.",
-    "the ADJACENCY half is no longer an open question.",
     "the remaining gap is the SPELLING case for `minute`, which is open by design.",
     # the unanchored `not … closed` arm's over-block, on THIS row's own items
     "(b2) is not closed.",
@@ -2613,10 +2680,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 116, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 121, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (116 — raised with the three floor-exclusive `no longer <participle>` shapes), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (121 — raised with the three floor-exclusive `no longer <participle>` shapes), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
@@ -2643,7 +2710,7 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         _RESIDUAL_REFUSED_TRUTHFUL), (
         "the over-block ledger has duplicate entries — a duplicate pays for a "
         "dropped cost while the count stays constant")
-    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 7, (
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 6, (
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
         "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
@@ -2662,7 +2729,6 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # membership strings, and the proof stayed GREEN. A ledger where a cost
             # can be swapped out silently is the same defect one entry over.
             "the ADJACENCY half is closed rather than open.",
-            "the ADJACENCY half is no longer an open question.",
             # ⛔ AND THE UNANCHORED `not … closed` COST (#11258 review round 11
             # `P1`): without membership both entries are substitutable by
             # duplicates of the ones above — uniqueness and length survive and the
