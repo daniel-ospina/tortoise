@@ -602,3 +602,51 @@ def test_tr_complete_sessions_splices_on_the_wire_identity_10540(monkeypatch):
     assert report["applied"] is True
     # ... and landed it after sess-a's LAST base hit, not in a tail
     assert [h["content"] for h in out] == ["a0", "b0", "a1", "a2-injected"]
+
+
+def test_admission_grain_agrees_with_the_pool_authority_on_a_camel_only_pool():
+    """#10540/#11381: the #2976 admission grain must key a hit the SAME way
+    the pool authority does.
+
+    `session_key_of` gained the camel wire `sessionId` leg (#10540) because
+    the product's point fetch pops the snake prop, leaving `sessionId` as a
+    product hit's only identity. `_session_admission_key` is the OTHER
+    consumer of "what a hit's session identity is", and it had no camel leg —
+    so on the very pool #10540 makes seedable, the pool said ONE session
+    while admission built one block PER HIT, degrading the
+    whole-session-or-skip depth pass to the fragment admission #2976 exists
+    to replace.
+
+    Measured before the leg: `session_blocks` over the three hits below →
+    three blocks of one, and `assemble_session_context(item_cap=2)` admitted
+    two fragments instead of one session's first two turns.
+    """
+    from tortoise.retrieval import session_key_of
+
+    def _wire(pid: str, sid: str, text: str) -> dict:
+        # a PRODUCT turn hit: the point fetch pops the snake prop, so the
+        # camel wire key is the only identity (see #10540)
+        return {"id": pid, "sessionId": sid, "content": text}
+
+    pool = [_wire("A_t0", "sessA", "a0"), _wire("A_t1", "sessA", "a1"),
+            _wire("A_t2", "sessA", "a2")]
+    assert [session_key_of(h) for h in pool] == ["sessA"] * 3
+    blocks = session_blocks(pool)
+    assert len(blocks) == 1 and len(blocks[0]) == 3
+    # the invariant, stated against the authority rather than a literal
+    assert len(blocks) == len({session_key_of(h) for h in pool})
+
+    # the snake leg still wins where the eval grain carries it (byte-identical
+    # keys — the #8713 census cannot move), and a camel hit of another session
+    # never fuses with it
+    mixed = [_wire("B_t0", "sessB", "b0"),
+             {"id": "E_t0", "session_id": "lme_s1", "content": "e0"},
+             {"id": "E_t1", "session_id": "lme_s1", "sessionId": "sessZ",
+              "content": "e1"}]
+    assert [len(b) for b in session_blocks(mixed)] == [1, 2]
+
+    # fails CLOSED in the same direction as the authority: whitespace-only and
+    # non-str camel values are not identities, so those hits stay singletons
+    junk = [{"id": "J_t0", "sessionId": "  ", "content": "j0"},
+            {"id": "J_t1", "sessionId": 7, "content": "j1"}]
+    assert [len(b) for b in session_blocks(junk)] == [1, 1]

@@ -762,28 +762,40 @@ def session_key_of(hit: dict) -> str:
     spelling this function reads.
 
     ⛔ Not FILTERED — but the camel leg IS ``strip()``ped, and the two are
-    different questions. The reason to leave the ALLOWLIST out is NOT that
-    filtering would make a hit unseedable — the opposite: ``hit_session_id``
-    applies ``_safe_session_tag`` (strip + allowlist), so a hand-built hit
-    whose camel id is ``" sessA "`` is named ``sessA`` by the reader while
-    an unstripped pool key is the padded string, which can never equal the
-    fetch's own group key ``coalesce(p.session_id, s.id)`` — the seed is
-    spent and the injected group is then DROPPED (groups are built over
-    ``seed_order``: ``session_reinjection.reinjection_merge_order``), not
-    tailed. A whitespace-only id is worse than useless in the same
-    direction: the reader calls it UNKNOWN and the pool would seed it.
+    different questions. ⚠️ On a REAL product hit this ``strip()`` is a
+    no-op, because the wire value was already sanitised at its PRODUCER:
+    ``sdk.tortoise_fts_query`` runs the resolved id through
+    ``_safe_session_tag`` (strip + allowlist) before it lands on the hit,
+    so an id outside the allowlist arrives as ``""`` and falls through to
+    the per-hit bucket on the reader's and the pool's read alike. So the
+    strip binds the hand-built / annotation-built shapes only.
 
-    So the WHITESPACE half is closed here — ``strip()`` on this leg only,
-    which moves NO existing key (a padded or whitespace-only camel value
-    was a PHANTOM before this leg existed) and refuses nothing the reader
-    can name; a value that is only whitespace falls through to the per-hit
-    bucket, i.e. it fails closed. The ALLOWLIST half is deliberately NOT
-    applied here: folding the render sanitizer into the pool identity
-    would silently move the key of every odd-shaped id on every lane at
-    once — a backlog item, not a rider on this fix. There is no injection
-    surface to close either way: this key is a DICT KEY and a comparison
-    operand, never interpolated into Cypher and never rendered (the render
-    and the wire go through ``hit_session_id``).
+    What the strip actually closes is therefore narrow and worth stating
+    exactly: a whitespace-only camel value would otherwise key a session
+    the reader calls UNKNOWN (``hit_session_id`` → ``""``) while the pool
+    seeded it — it now falls through to the per-hit bucket, i.e. it fails
+    CLOSED. It moves NO existing key (a padded or whitespace-only camel
+    value was a PHANTOM before this leg existed) and refuses nothing the
+    reader can name. The ALLOWLIST half is deliberately NOT applied here:
+    folding the render sanitizer into the pool identity would silently
+    move the key of every odd-shaped id on every lane at once — a backlog
+    item, not a rider on this fix. There is no injection surface to close
+    either way: this key is a DICT KEY and a comparison operand, never
+    interpolated into Cypher and never rendered (the render and the wire go
+    through ``hit_session_id``).
+
+    ⛔ And it does NOT close the reverse case — do not read it as doing so.
+    The fetch groups by ``coalesce(p.session_id, s.id)``: the RAW stored
+    spelling. A stored session id carrying surrounding whitespace would
+    therefore have a group key this stripped key can never equal, so the
+    seed would be spent and its group DROPPED (groups are built over
+    ``seed_order``: ``session_reinjection.reinjection_merge_order``) — the
+    strip would CAUSE that, not prevent it. That configuration is
+    unreachable through every in-repo edge writer, because an indexed key
+    with surrounding whitespace cannot be matched (#9599), so a padded
+    ``:Session`` never carries the ``CONTAINS`` edge the fetch traverses
+    and no group key is ever produced. Normalising both sides is #9599's
+    decision, not a rider here.
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all
@@ -2283,13 +2295,26 @@ def _session_admission_key(
         h: dict, *, session_key: str = DEFAULT_SESSION_ADMISSION_KEY,
         index_key: str = DEFAULT_SESSION_ADMISSION_INDEX,
 ) -> tuple[str, object]:
-    """The session identity a hit is admitted under (#2976).
+    """The session identity a hit is admitted under (#2976, #10540).
 
     Precedence: the string session id → the ``[session N]`` integer index →
-    the hit's OWN id (a singleton). The last case is the honest fallback, not
-    a merge: two hits with no session identity must never be grouped as one
-    "session" (that would fabricate a block whose material belongs to
-    different conversations).
+    the camel wire ``sessionId`` (#10540, the spelling the product's point
+    fetch emits) → the hit's OWN id (a singleton). The last case is the
+    honest fallback, not a merge: two hits with no session identity must
+    never be grouped as one "session" (that would fabricate a block whose
+    material belongs to different conversations).
+
+    ⛔ The camel leg is here so this grain cannot disagree with the pool
+    authority (:func:`session_key_of`) — before it, a camel-only pool was
+    ONE session to ``dedup_pool``/``seeded_sessions`` and N singleton blocks
+    to ``session_blocks``, so ``assemble_session_context`` degraded to the
+    fragment admission #2976 exists to replace. Measured: three
+    ``{"id": …, "sessionId": "sessA"}`` hits → ``session_blocks`` → 3 blocks
+    of 1; with this leg → 1 block of 3. It moves no key the eval grain
+    already had (that pool carries the snake ``session_id``, which still
+    wins) and it fails CLOSED in the same direction as the authority: a
+    whitespace-only or non-``str`` camel value falls through to the
+    per-hit singleton.
     """
     sid = h.get(session_key)
     if isinstance(sid, str) and sid.strip():
@@ -2297,6 +2322,9 @@ def _session_admission_key(
     idx = h.get(index_key)
     if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
         return ("index", idx)
+    wire = h.get("sessionId")
+    if isinstance(wire, str) and wire.strip():
+        return ("session", wire.strip())
     # Object identity, NOT ``h.get("id")``: a hit with no id would otherwise
     # share the key ``("hit", None)`` with every other id-less hit, fusing
     # unrelated conversations into one "session" — exactly what this function's

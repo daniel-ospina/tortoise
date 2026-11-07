@@ -97,20 +97,29 @@ ONE bounded graph pass:
    injected group after its own base ranks.
 
    ⛔ SCOPE of the closure in this section — it is the IDENTITY, not the ARM.
-   Two facts a reader must not lose: (1) **no caller under ``tortoise/``
+   Three facts a reader must not lose: (1) **no caller under ``tortoise/``
    invokes this module** — every call site is the eval driver
    (``tools/longmem_eval/retrieve.py``) — so the arm is still OFF in the
-   product, exactly as the ASK-lane sentence above says; and (2) every pool
+   product, exactly as the ASK-lane sentence above says; (2) every pool
    the arm consumes today is built by ``_annotate_hits``, which stamps
    ``session_id`` AND ``lme_session_index`` on EVERY hit
    (``tools/longmem_eval/retrieve.py``), both of which outrank the camel leg —
-   so on today's only live path the camel branch is not reached at all. What
-   #10540 changes is what the AUTHORITY answers for a product-shaped hit; it
-   does not wire the arm, and it moves no eval-visible key. (The defensive tail is NOT the
-   pre-fix symptom and not a fallback either: a group only exists for a key
-   in ``seed_order``, whose own pool hit always supplies an anchor rank, so
-   an absent group key is DROPPED by the merge rather than tailed — see
-   :func:`source_session_chunk_pass`.) The GRAPH side is unchanged and that is
+   and it COERCES an absent index into an explicit ``-1``
+   (``p.get("lme_session_index", -1)``), which keys ``idx:-1`` and outranks the
+   camel leg the same way — so on today's only live path the camel branch is
+   not reached at all; and (3) an id OUTSIDE the render allowlist is emitted
+   by the fetch as ``sessionId: ""`` (``_safe_session_tag``, applied at the
+   producer), so the reader calls it UNKNOWN and the pool calls it a phantom —
+   they AGREE, and such a session (a caller-supplied ``"session/2026-11-05
+   10:00"``) is still unseedable. What #10540 changes is what the AUTHORITY
+   answers for a product-shaped hit; it does not wire the arm, it does not
+   widen the allowlist, and it moves no eval-visible key. (The defensive tail
+   is NOT the pre-fix symptom and not a fallback either: a group only exists
+   for a key in ``seed_order``, whose own pool hit always supplies an anchor
+   rank, so an absent group key is DROPPED by the merge rather than tailed —
+   see :func:`source_session_chunk_pass`; pinned by
+   ``tests/test_session_reinjection_rules.py::test_an_unseeded_group_key_is_``
+   ``dropped_never_tailed``.) The GRAPH side is unchanged and that is
    deliberate: the fetch still scopes by ``(s:Session)-[:CONTAINS]->(p:Point)``
    and still RETURNs ``coalesce(p.session_id, s.id)``, because the Point
    property is what a *turn Point* does not have — only the PASSAGE-side hit
