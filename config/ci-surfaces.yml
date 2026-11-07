@@ -138,8 +138,16 @@ surfaces:
   # (`test_handler_yields_to_the_loop_and_reads_no_cached_state`) is never
   # selected on a hosted_api.py-only diff — the exact change class it guards.
   # The prober half (`.github/workflows/availability-watchdog.yml`,
-  # `.github/scripts/availability-watchdog.sh`) matches no SOURCE_PATTERNS row
-  # and falls through to `core`, which is the row below.
+  # `.github/scripts/availability-watchdog.sh`) matches no SOURCE_PATTERNS row,
+  # so a `.github`-only diff fails CLOSED to the FULL matrix (measured:
+  # `--changed-files .github/scripts/availability-watchdog.sh` → `full: true`, and
+  # the selector's own unknown-path branch says so out loud). It is NOT a `core`
+  # fall-through — the same false premise `website/functions/_middleware.ts` was
+  # once registered on; see the `website/functions/_middleware.ts` record below.
+  # The `core` row below is
+  # what covers a `tests/`-only diff to this file.
+  # Pinned by
+  # tests/test_ci_selection.py::test_the_github_prober_paths_fail_closed_to_the_full_matrix.
   - test_10892_served_liveness.py
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
   # This file pins the ONBOARDING seed surfaces, and two of them live outside

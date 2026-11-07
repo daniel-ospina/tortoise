@@ -2524,6 +2524,37 @@ def test_unclassified_paths_still_fail_closed_after_the_doc_reprieve():
         assert r["test_files"] == "ALL", name
 
 
+def test_the_github_prober_paths_fail_closed_to_the_full_matrix():
+    """#11340 review (P3, finding 2): the mechanism `config/ci-surfaces.yml` cites.
+
+    That comment used to say the prober half of the availability watchdog
+    (`.github/workflows/availability-watchdog.yml`, `.github/scripts/
+    availability-watchdog.sh`) "matches no SOURCE_PATTERNS row and falls through
+    to `core`". It matches no `SOURCE_PATTERNS` row, but it does NOT fall
+    through: `.github/` is in neither `SOURCE_PATTERNS` nor `CORE_ALSO`, so an
+    unknown path takes the fail-closed branch and the WHOLE matrix runs (the
+    comment's own sibling at `ci-surfaces.yml:2301` records this exact false
+    premise being registered on once before).
+
+    This is a MECHANISM pin, not a pin on the fix: the selector is unchanged by
+    the correction, so it passes before and after. What it buys is that the
+    sentence a later lane reasons from cannot silently become false — if the
+    selector ever stops failing closed on `.github/`, this reds and whoever
+    changes it re-reads the comment.
+    """
+    for name in (".github/scripts/availability-watchdog.sh",
+                 ".github/workflows/availability-watchdog.yml"):
+        r = _sel([name])
+        assert r["full"] is True, (
+            f"{name} selected {r['surfaces']} rather than the fail-closed FULL "
+            "matrix — the ci-surfaces.yml comment that calls this "
+            "\"fail closed to the FULL matrix\" is now wrong")
+        assert r["test_files"] == "ALL", name
+        # The distinguishing half: `core` IS included, but by the full matrix.
+        # A `core`-only selection would be the `falls through to core` claim.
+        assert r["surfaces"] != ["core"], name
+
+
 def test_doc_reprieve_is_per_path_not_per_diff():
     """Mixed diffs: dropping the prose must not drop the code, and a
     docs+unknown diff must still escalate."""

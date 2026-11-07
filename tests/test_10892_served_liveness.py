@@ -45,9 +45,12 @@ one alone is a false PASS:
 
 **Blind spots, stated rather than implied** (the `docs/ops/fleet-liveness.md`
 discipline, per the issue's own scope note): this detects a loop that cannot
-serve. It does NOT detect a loop that serves SLOWLY beyond the prober's bound,
-it says nothing about a deploy that never happened (`check-deploy-staleness.sh`),
-and it is not a substitute for the TCP check that catches a dead process.
+serve, and — the prober's `--max-time` converts an answer later than the bound
+into `000` → `DOWN` (`classify_code`, harness case 93) — a loop that serves
+SLOWER than the bound too. What it does NOT detect is a loop that serves slowly
+WITHIN the bound: a 4 s answer passes a 5 s prober. It says nothing about a
+deploy that never happened (`check-deploy-staleness.sh`), and it is not a
+substitute for the TCP check that catches a dead process.
 """
 
 from __future__ import annotations

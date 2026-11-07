@@ -1708,11 +1708,14 @@ Two halves close that, and neither is a health *reading*:
    Pinned by case 97 of `.github/scripts/availability-watchdog.test.sh`.
 
 **Blind spots, stated rather than implied.** It detects a loop that cannot
-serve; it does NOT detect a loop that serves slower than the bound, it says
-nothing about a deploy that never happened (`check-deploy-staleness.sh`), and it
-is not a substitute for the TCP check that catches a dead process. Do **not**
-replace it with `loop_stale_ms`: reading the loop's own tick to decide the loop
-is fine is the exact circularity that let this outage run unattended.
+serve — and, because `curl --max-time 5` turns any answer later than the bound
+into `000` → `DOWN`, it also detects a loop that serves slower than the bound
+(a 6 s answer pages; pinned by harness case 93). What it does NOT detect is a
+loop that serves slowly *within* the bound: a 4 s answer passes a 5 s prober.
+It says nothing about a deploy that never happened (`check-deploy-staleness.sh`),
+and it is not a substitute for the TCP check that catches a dead process. Do
+**not** replace it with `loop_stale_ms`: reading the loop's own tick to decide
+the loop is fine is the exact circularity that let this outage run unattended.
 
 Operator check, one line, from anywhere:
 
