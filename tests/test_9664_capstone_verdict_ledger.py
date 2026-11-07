@@ -342,6 +342,11 @@ def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
         "cmd:I verified this by hand, screenshots are in the issue",
         "cmd:uv run pytest",
         "cmd:cat /etc/hostname",
+        # Cycle-2 attack: prose that MENTIONS a real file used to pass a token
+        # scan, including prose that says the work was NOT done.
+        "cmd:verified manually by reading pyproject.toml",
+        "cmd:NOT RUN - see tools/capstone_ledger.py for the intended command",
+        "cmd:we did not run this; the suite lives in tests/test_9664_capstone_verdict_ledger.py",
     ],
 )
 def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
@@ -356,6 +361,26 @@ def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
     # Two arms name the same defect: a one-word entry is not a command at all,
     # a sentence-shaped one simply names no file. Both are refusals.
     assert "`cmd:` evidence" in proc.stderr
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cmd:uv run python tools/test_lane.py run -- x -q",
+        # The most precise citation shape must not be a false block.
+        "cmd:uv run python -m pytest tests/test_9664_capstone_verdict_ledger.py::TestX::test_y -q",
+        "cmd:uv run pytest tests/test_9664_capstone_*.py",
+    ],
+)
+def test_a_cmd_entry_that_names_a_real_artifact_is_accepted(tmp_path, command):
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[command])]))
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("runnerless", ["cmd:npm", "cmd:verified", "cmd:look at tools/x.py"])
+def test_a_cmd_entry_must_start_with_a_runner(tmp_path, runnerless):
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[runnerless])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
 
 
 def test_a_cmd_entry_that_names_a_real_script_is_accepted(tmp_path):
@@ -394,13 +419,55 @@ def test_an_unknown_version_is_invalid(tmp_path):
     assert "version" in proc.stderr
 
 
-def test_a_sha_that_names_no_commit_is_invalid(tmp_path):
-    """Shape is not existence: a fabricated 40-hex sha rendered as provenance."""
+def test_a_sha_that_names_no_commit_is_invalid(monkeypatch):
+    """Shape is not existence: a fabricated 40-hex sha rendered as provenance.
+
+    Asserted on the WIRING, with the state machine pinned as `absent`, because a
+    fleet worktree is a SHALLOW clone and cannot tell a fabricated sha from an
+    ancestor it does not carry — see the next test. The end-to-end version of this
+    arm genuinely cannot fire here, and a test that pretended otherwise would be
+    green for the wrong reason.
+    """
+    monkeypatch.setattr(cl, "_commit_state", lambda sha: "absent")
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "deadbeef" * 5
+    with pytest.raises(cl.InvalidLedger) as excinfo:
+        cl.validate(data)
+    assert "names no commit" in str(excinfo.value)
+
+
+def test_dropping_rows_without_moving_the_pin_is_invalid(tmp_path):
+    """Deleting the uncovered rows reported CLEAN (`criteria: 9 ... uncovered: 0`).
+
+    That is the 14/18/22 drift reproduced by the very tool built to end it: the
+    denominator has to be pinned in the RECORD, or the tool computes it from the
+    file it is auditing.
+    """
+    data = _ledger([_row("A")])
+    data["criteria_expected"] = 22
     proc = _run_cli(tmp_path, data)
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "names no commit" in proc.stderr
+    assert "criteria_expected" in proc.stderr
+
+
+def test_the_committed_ledger_pins_its_denominator():
+    data = cl.load_ledger(LEDGER)
+    assert data["criteria_expected"] == 22
+    assert len(data["criteria"]) == 22
+
+
+def test_a_shallow_checkout_is_unprovable_never_absent(monkeypatch):
+    """CI test jobs check out at `fetch-depth: 1`, where an ANCESTOR sha is not in
+    the object database. Blaming the record for that reds the required check on a
+    legitimate ledger (#9075 r4 P1), so the third outcome must exist."""
+    monkeypatch.setattr(cl, "_commit_state", cl._commit_state)  # real impl, no stub
+    assert cl._commit_state("0" * 40) in {"absent", "unprovable"}
+    # The shallow probe is what decides: a missing object in a shallow clone is
+    # `unprovable`, and only a full clone may say `absent`.
+    shallow = cl._commit_state("0" * 40)
+    if shallow == "absent":
+        pytest.skip("this checkout is not shallow, so `absent` is the correct answer here")
+    assert shallow == "unprovable"
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────

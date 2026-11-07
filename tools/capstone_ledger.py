@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -171,13 +172,51 @@ def load_ledger(path: Path) -> dict[str, Any]:
     return data
 
 
-def _commit_exists(sha: str) -> bool:
-    """Is `sha` an object in THIS repository? A sha nobody can resolve is a claim.
+#: Where a `cmd:` entry is allowed to START. The first token must be a program
+#: that RUNS something, because the attack a token scan cannot see is a sentence
+#: that merely MENTIONS a file in the tree: measured, `cmd:verified manually by
+#: reading pyproject.toml` satisfied `verified` and emptied the whole uncovered
+#: list, as did `cmd:NOT RUN - see tools/capstone_ledger.py`. Requiring the
+#: command SHAPE (runner first) is what separates a command from a claim.
+#: Adding a runner is a one-line change; that is deliberate — the alternative is
+#: guessing at prose.
+RUNNERS: Final[frozenset[str]] = frozenset(
+    {
+        "uv",
+        "python",
+        "python3",
+        "pytest",
+        "node",
+        "npm",
+        "npx",
+        "bun",
+        "deno",
+        "bash",
+        "sh",
+        "make",
+        "docker",
+        "git",
+        "curl",
+        "timeout",
+        "env",
+    }
+)
+
+
+def _commit_state(sha: str) -> str:
+    """`exists` | `absent` | `unprovable` for a measured-at sha.
 
     The 40-hex shape check alone lets `measured_at.sha: deadbeef…` through, and
     `render()` then prints "measured at origin/main@deadbeef… on <date>" as fact.
-    The one claim binding 22 verdicts to a tree is therefore the cheapest thing
-    in the record to fabricate, so it is checked against the object database.
+
+    ⛔ The third outcome is the point. In a SHALLOW clone — and CI test jobs check
+    out at `fetch-depth: 1`, so that is every shard — an ancestor sha is simply not
+    in the object database, and a check that only knows `exists`/`absent` reports a
+    LEGITIMATE ledger as forged and reds the required check (measured: a depth-1
+    clone makes `git cat-file -e <ancestor>^{commit}` exit 128). The convention is
+    the sibling capstone's (`tools/capstone_preregistration_check.py`: "a verdict it
+    cannot support is never given", #9075 r4 P1): a shallow checkout CANNOT answer,
+    so it answers `unprovable` and the record is not blamed.
     """
     try:
         proc = subprocess.run(
@@ -187,9 +226,20 @@ def _commit_exists(sha: str) -> bool:
             text=True,
             check=False,
         )
+        if proc.returncode == 0:
+            return "exists"
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     except OSError:
-        return False
-    return proc.returncode == 0
+        return "unprovable"
+    if shallow.returncode != 0:
+        return "unprovable"
+    return "unprovable" if shallow.stdout.strip() == "true" else "absent"
 
 
 def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, str]:
@@ -213,18 +263,44 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
         command = entry[len(_CMD_PREFIX) :].strip()
         if not command:
             return False, "`cmd:` evidence names no command"
-        tokens = command.replace("`", " ").replace("'", " ").replace('"', " ").split()
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return False, f"`cmd:` evidence is not a parseable command: {command!r}"
         if len(tokens) < 2:
             return False, f"`cmd:` evidence must be a COMMAND, not a word: {command!r}"
+        runner = Path(tokens[0]).name
+        if runner not in RUNNERS:
+            # This is the arm that kills prose. A token scan alone does not: both
+            # `cmd:verified manually by reading pyproject.toml` and
+            # `cmd:NOT RUN - see tools/capstone_ledger.py` name a file that exists,
+            # and both satisfied `verified` — one of them saying the work was NOT
+            # done. The command SHAPE is the discriminator.
+            return False, (
+                "`cmd:` evidence must START with a program that runs something "
+                f"({sorted(RUNNERS)}), got {tokens[0]!r} in {command!r}"
+            )
         for token in tokens[1:]:
-            candidate = Path(token)
+            if token.startswith("-"):
+                continue
+            # A pytest node-id names the file MORE precisely than a bare path, so
+            # `tests/x.py::TestY::test_z` has to count as naming `tests/x.py`
+            # (refusing it is a false block on the most precise citation shape).
+            candidate_text = token.split("::", 1)[0]
+            if not candidate_text:
+                continue
+            candidate = Path(candidate_text)
             resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
             if resolved.is_file() and resolved.is_relative_to(root):
                 return True, ""
+            if any(wildcard in candidate_text for wildcard in "*?["):
+                for match in root.glob(candidate_text):
+                    if match.resolve().is_file() and match.resolve().is_relative_to(root):
+                        return True, ""
         return False, (
             f"`cmd:` evidence names no artifact of this tree: {command!r} — a command "
-            "entry must name the script or test file it ran, so prose cannot stand in "
-            "for held evidence"
+            "entry must name the script or test file it ran (a bare path, a pytest "
+            "node-id, or a glob inside the tree), so prose cannot stand in for held evidence"
         )
     candidate = Path(entry)
     resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
@@ -258,13 +334,41 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         sha = str(measured_at.get("sha") or "")
         if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
             problems.append(f"`measured_at.sha` must be a 40-hex sha, got {sha!r}")
-        elif not _commit_exists(sha):
-            # Shape is not existence: a fabricated sha renders as provenance.
-            problems.append(f"`measured_at.sha` names no commit in this repository: {sha}")
+        else:
+            state = _commit_state(sha)
+            if state == "absent":
+                # Shape is not existence: a fabricated sha renders as provenance.
+                problems.append(f"`measured_at.sha` names no commit in this repository: {sha}")
+            # `unprovable` (a shallow checkout) is NOT a defect and must not red the
+            # suite: CI shards check out at fetch-depth 1, where an ancestor sha is
+            # simply not in the object database. Blaming the record for that is the
+            # #9075 r4 P1 shape.
         if not str(measured_at.get("date") or "").strip():
             problems.append("`measured_at.date` must be set (YYYY-MM-DD)")
 
     raw_rows = data.get("criteria")
+    # The DENOMINATOR is pinned IN THE RECORD, not only in the suite. Deleting the
+    # uncovered rows was measured to report CLEAN (`criteria: 9 ... uncovered: 0`),
+    # which reproduces by hand the 14/18/22 drift this tool exists to end — the tool
+    # would compute the denominator from the very record it is auditing. Shrinking
+    # the set now takes TWO visible edits (drop the row AND move the count), which is
+    # what makes it a decision instead of an accident.
+    declared = data.get("criteria_expected")
+    declared_count: int | None = None
+    if declared is not None:
+        try:
+            declared_count = int(declared)
+        except (TypeError, ValueError):
+            problems.append(f"`criteria_expected` must be an integer, got {declared!r}")
+    if (
+        declared_count is not None
+        and isinstance(raw_rows, list)
+        and declared_count != len(raw_rows)
+    ):
+        problems.append(
+            f"`criteria_expected` is {declared_count} but the file holds "
+            f"{len(raw_rows)} rows — a row was added or dropped without saying so"
+        )
     if not isinstance(raw_rows, list) or not raw_rows:
         # An empty ledger would report an empty uncovered list — a clean exit
         # manufactured out of nothing. Refused.
