@@ -409,14 +409,20 @@ git log -1 --format=%B 316a572ce2 | grep '^Closes #10999' # arm 2's keyword, in 
 # default to `false`, and `addCloseIssueReferences` is the mutation that creates the manual kind. So a
 # NON-EMPTY field on its own does NOT prove a body/title keyword — a hand close carrying a linked PR reads
 # the same. `gh issue view` has no flag for that filter, so this is the GraphQL read that separates them.
-# Those three names are read from the SCHEMA here, not remembered: the defaults are what let a `[]` mean
+# Those names are read from the SCHEMA here, not remembered: the defaults are what let a `[]` mean
 # "auto-detected", and the mutation pair is what creates and removes the other kind. No count is quoted.
+# ⛔ The filter is NOT just the "Linked" pair — `includeClosedPrs` (default `false`) is the third switch,
+# and it is the one that decides whether a PR CLOSED WITHOUT MERGING still names the issue here. `false`
+# is why the default read is "merged-PR references only", which is a narrower claim than "no PR named it".
 gh api graphql -f query='{__type(name:"Issue"){fields{name args{name defaultValue}}}}' \
-  --jq '.data.__type.fields[]|select(.name=="closedByPullRequestsReferences")|.args[]|select(.name|test("Linked"))'
-                                                          # both default FALSE — the inverse pair, and the
-                                                          # reason an unfiltered read and a `userLinkedOnly`
-                                                          # read can differ at all: that difference is the
-                                                          # entire discriminator this block rests on
+  --jq '.data.__type.fields[]|select(.name=="closedByPullRequestsReferences")|.args[]|select(.name|test("Linked|ClosedPrs"))'
+                                                          # all three default FALSE — the inverse Linked
+                                                          # pair, and includeClosedPrs. The first two are why
+                                                          # an unfiltered read and a `userLinkedOnly` read can
+                                                          # differ at all (the discriminator this block rests
+                                                          # on); the third is why the default read UNDER-reports
+                                                          # the reference set — see arm 2 and the read below
+                                                          # the loop.
 gh api graphql -f query='{__schema{mutationType{fields{name}}}}' \
   --jq '.data.__schema.mutationType.fields[].name|select(test("CloseIssueReferences"))'
                                                           # addCloseIssueReferences /
@@ -435,8 +441,12 @@ done
 #      NULL for #11001 ([11213]) and #10997 ([11212]), and that PR's own merge sha for #10684 ([11105])
 #      and #10698 ([10738]) — the same shape, both outcomes. A non-null sha here does NOT demote it to
 #      arm 2, which is exactly why the field above is read FIRST and commit_id cannot classify alone.
-#   2. empty + commit_id = SHA => the keyword rode the COMMIT message and no PR body/title named it
-#      (#10999 -> 316a572ce2, whose message carries `Closes #10999`)
+#   2. empty + commit_id = SHA => the keyword rode the COMMIT message, and no MERGED PR named it
+#      (#10999 -> 316a572ce2, whose message carries `Closes #10999`). ⛔ "MERGED" is load-bearing, not
+#      decoration: the default read carries no reference from a PR closed WITHOUT merging, so #10812
+#      reads `[]` + a sha (c4a369b011) here while PR **10850** — CLOSED, `mergedAt: null` — opens with
+#      `Closes #10812.`. Read `includeClosedPrs:true` (the block below the loop) before calling a row
+#      arm 2, or the recipe re-creates the very mistake it exists to prevent, one arm over.
 #   3. empty + commit_id = null => a close NOT attributable to any PR (#11021: [] and null). ⚠️ "manual" is
 #      a partial label — a bot or a `not_planned` close reads the same [] + null — so the loop below prints
 #      the closed event's `actor` beside the sha: #11021's is a human (daniel-ospina), one second after
@@ -453,6 +463,22 @@ for n in 11001 10997 10684 10698 10999 11021; do
   gh api "repos/daniel-ospina/tortoise/issues/$n/timeline?per_page=100" --paginate \
     --jq '.[] | select(.event=="closed") | {created_at, commit_id, actor: .actor.login}'
 done
+                                                          # ⛔ the `closedByPullRequestsReferences` line
+                                                          # above is the DEFAULT read: MERGED-PR references
+                                                          # only. The same field with `includeClosedPrs:true`
+                                                          # is the full set — #10997 gains 11281 (CLOSED,
+                                                          # never merged) beside [11212], and #10812 goes
+                                                          # from `[]` to [10850] (CLOSED), the row whose
+                                                          # `[]` + sha would otherwise read as arm 2:
+for n in 10997 10812; do
+  echo "#$n — includeClosedPrs:true"
+  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state}}}}}" \
+    --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
+done
+gh pr view 10850 --json state,mergedAt,body \
+  --jq '{state, mergedAt, firstLine: (.body|split("\n")[0])}'   # CLOSED, null, "Closes #10812." — the
+                                                          # body keyword a closed-unmerged PR still carries,
+                                                          # and the default read above cannot see it
                                                           # ⛔ --paginate is MANDATORY: without it gh
                                                           # returns only the FIRST 100 events, and the
                                                           # closed event is one line among many — a close
