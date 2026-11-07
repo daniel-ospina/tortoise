@@ -2074,6 +2074,23 @@ class _ScanAwareList(list):
     # discovery), never "declined nothing" — same fail-closed rule as
     # `discovered_pids`, for the same reason.
     declined_pids: set[int] | None = None
+    # #11427 review P2: the PIDs `exited` above counted. `exited` is an
+    # INTEGER and the declined term is a pid SET, so "this exit is already
+    # counted, do not count it again" needs the identities, not the total —
+    # the same reason `discovered_pids` exists (#8599). Without them a pid
+    # this sweep DECLINED in one iteration and then observed DEAD at the
+    # #6984 liveness check in a LATER one is counted twice: once by
+    # `exited` here (a fresh kill budget each iteration, so the second
+    # iteration reaches the liveness check), and again by
+    # `_declined_pids_gone`, because the builder only subtracted the pids an
+    # iteration ACTED on. An inflated `exited` buys the gate's identity
+    # `reaped + exited + left >= before` exactly that much slack, so a
+    # double count is the fail-open direction #11427 itself names.
+    # `None` = NOT MEASURED, the same fail-closed rule as the two sets
+    # above: the builder then cannot tell an overlap from a disjoint pair,
+    # and must not claim the declined term at all rather than risk claiming
+    # an exit twice.
+    exited_pids: set[int] | None = None
 
 
 def _candidate_pids(records) -> set[int]:
@@ -2582,6 +2599,13 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     # alive at discovery and is dead at kill time. See the dead-pid branch
     # below for why this is measured here rather than derived as a complement.
     exited = 0
+    # #11427 review P2: WHICH pids `exited` counted. `exited` is a count and
+    # the declined term is a pid set, so the two can only be reconciled by
+    # identity — the report builder subtracts this set from the pids it
+    # accumulated as declined, or a pid declined in one iteration and
+    # observed dead in a later one is claimed twice (see
+    # `_ScanAwareList.exited_pids`).
+    exited_pids: set[int] = set()
     # #1642 perf: pre-probe the CLIENT LIST before-counts of every candidate
     # in PARALLEL (raw unix-socket probes are thread-safe and read-only).
     # The old per-record serial double-check made a sweep over hundreds of
@@ -2745,6 +2769,10 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             # A `None` pid is not a server and is never counted.
             if record.get("pid"):
                 exited += 1
+                # #11427 review P2: name it, so a pid this sweep declined in
+                # an EARLIER iteration is not claimed a second time by the
+                # report builder's declined-then-gone term.
+                exited_pids.add(record["pid"])
             logger.warning("dead pid, skipping: %s",
                            record.get("socket_path"))
             continue
@@ -2911,6 +2939,9 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     # report builder can tell a DECLINED candidate that shut itself down from a
     # server the sweep lost. See `_ScanAwareList.declined_pids`.
     out.declined_pids = set(declined)
+    # #11427 review P2: the identities behind `out.exited`, so the builder's
+    # declined term cannot claim an exit this sweep already counted.
+    out.exited_pids = set(exited_pids)
     return out
 
 
@@ -3824,6 +3855,16 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # one reading, one scope, or no reading.
     out.declined_pids = (getattr(acted, "declined_pids", None)
                          if records.complete else None)
+    # #11427 review P2: the identities behind `exited` follow the SAME
+    # fail-closed rule, and for the same reason: a truncated discovery hands
+    # `reap()` a subset of candidates, so the exits it observed were observed
+    # over that subset. Published as UNMEASURED (None) together with
+    # `declined_pids`, because the two readings are reconciled against each
+    # other — one measured over a different population than the other is what
+    # #10757 P2 refused. A missing reading makes the builder drop the declined
+    # term (fail-closed), never treat it as "no overlap".
+    out.exited_pids = (getattr(acted, "exited_pids", None)
+                       if records.complete else None)
     return out
 
 
@@ -4162,6 +4203,14 @@ def _declined_pids_gone(declined_pids, left_pids) -> int | None:
         is not claimed here — claiming it would double-count and mask a
         genuine shortfall (the fail-open direction).
 
+    The CALLER keeps that last promise: it subtracts, from the declined set it
+    accumulates, every pid an iteration already accounted for — the pids it
+    ACTED on (`reaped`) and the pids it OBSERVED as natural exits
+    (`exited_pids`, #11427 review P2). The second cancellation is not optional:
+    the #6984 dead-pid branch counts an exit and does NOT append to `acted`, so
+    an acted-only cancellation lets a pid declined in one iteration and found
+    dead in a later one be claimed twice — measured `exited` 2 for one exit.
+
     Returns None (UNMEASURED, never 0) when either observation is unavailable.
     """
     if declined_pids is None or left_pids is None:
@@ -4197,7 +4246,11 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
     (#11427). Both are natural exits observed by a DIFFERENT instrument (a
     pid-set difference against the pre- and post-sweep readings), and both are
     measured only over pids the sweep's own decisions name — so neither can
-    claim a server the sweep committed to act on.
+    claim a server the sweep committed to act on. Neither can claim one the
+    sweep already counted either: the accumulation below subtracts the pids
+    each iteration ACTED on and the pids it OBSERVED as natural exits
+    (`exited_pids`), which is what keeps a single exit from being folded into
+    `exited` twice (#11427 review P2).
 
     ``own_probe`` (#1005) is called ONCE, immediately after the post-sweep
     `left` reading, and supplies `own_left` — the count of live servers this RUN
@@ -4225,7 +4278,20 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
         elif discovered is not None:
             discovered |= set(pids)
         decline_pids = getattr(result, "declined_pids", None)
-        if decline_pids is None:
+        # #11427 review P2: the pids `exited` already counted in this
+        # iteration. Without it, "an exit is already accounted" is a COUNT and
+        # the declined set is a SET, so the cancellation below can only be
+        # done for the pids an iteration acted on.
+        exit_pids = getattr(result, "exited_pids", None)
+        if decline_pids is None or exit_pids is None:
+            # Either reading absent = the declined term is UNMEASURED for this
+            # sweep, never "nothing declined". `exit_pids` absent while
+            # `decline_pids` is present is exactly the double-count window
+            # this term must not re-open: an exit observed in a later
+            # iteration could not be told from one that was not, and the term
+            # would add an exit `exited` already counted — the fail-open
+            # direction (#11427). Claim nothing: that makes the gate STRICTER,
+            # which is the only safe side of this measurement.
             declined = None
         elif declined is not None:
             declined |= set(decline_pids)
@@ -4234,9 +4300,19 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
             # then counted by `reaped`, so keeping it in the declined set would
             # let the term claim the SAME disappearance twice — an inflated
             # `exited` masks a genuine shortfall, the fail-open direction. The
-            # union is therefore kept to pids no iteration acted on.
+            # union is therefore kept to pids no iteration acted on…
             declined -= {r.get("pid") for r in result
                          if isinstance(r, dict) and r.get("pid")}
+            # …and to pids no iteration OBSERVED as a natural exit. The two
+            # cancellations are separate because the sources are: `acted` is a
+            # decision this iteration made, `exited_pids` is a liveness
+            # reading it took. A declined server whose client went away and
+            # whose NOSAVE close then took it down reaches the #6984 dead-pid
+            # branch on the next iteration, which counts it and does NOT
+            # append to `acted` — so the acted-only cancellation left it in the
+            # set and `_declined_pids_gone` claimed the same exit again
+            # (measured: `exited` 2 for one observed exit).
+            declined -= set(exit_pids)
         return result
 
     reaped, cleared, exited = sweep_until_cleared(_watched, deadline, clock)
