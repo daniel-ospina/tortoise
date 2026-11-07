@@ -1133,15 +1133,18 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
         # same `#4454` reason — a docs-only edit of either map selects no
         # surface, and `docs` is the required, `paths:`-free context. `#2820`'s
         # needs HISTORY for its anchor-ancestry claim for the same reason its
-        # #5086 sibling above does. `test_design_map_check.py` takes no
-        # `--check` flag (it is verify-only with no other mode), so its
-        # invocation is listed without one.
+        # #5086 sibling above does.
         "python3 tools/problem_map_check.py --check\n"
-        "python3 tools/test_design_map_check.py"
+        # #11084: the surface map's guard, BOTH arms — the check, and the
+        # self-test that proves the check still catches a consistent shrink.
+        # `test_design_map_check.py` takes no `--check` flag (it is verify-only
+        # with no other mode), so its invocation is listed without one.
+        "python3 tools/test_design_map_check.py\n"
+        "python3 tools/test_design_map_check.py --self-test"
     )
     assert _code(str(step.get("run", ""))).strip() == expected, (
         "the drift step must invoke EXACTLY the installer, the five `--check` "
-        "commands and the flagless surface map guard — no shell operator, no "
+        "commands and the map guard's two arms — no shell operator, no "
         "`echo` decoy, no wrapper, no "
         f"trailing anything, or a real failure reports green (#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
