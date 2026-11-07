@@ -365,10 +365,37 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
     # 1b. The same mis-serve through the POOL MARKER. `runs-on: [self-hosted, self-hosted-x64]` is
     # an AND, so a box carrying a marker its host does not own is selected for work it cannot run —
     # and this reading was missing entirely, so such a pool reported `verdict: OK`.
+    # ⛔ THE SKIP IS FOR DERIVING THE MARKER, NOT FOR READING THE VIOLATION. This used to
+    # `continue` on `runner.host is None or PLATFORM_LINUX not in runner.labels`, which made the
+    # rule blind on exactly the boxes it should catch: a `Windows, ARM64, self-hosted-arm64,
+    # self-hosted-x64` runner and a `Linux, self-hosted-x64` runner (no arch label) BOTH reported
+    # `verdict: OK` while `runs-on: [self-hosted, self-hosted-x64]` still selects them for x64
+    # Linux work (measured). A foreign marker is a foreign marker whatever the host is; only the
+    # OWN-marker derivation needs an arch.
     for runner in sorted(runners, key=lambda r: r.name):
-        if runner.host is None or PLATFORM_LINUX not in runner.labels:
+        own = None
+        if runner.host is not None and PLATFORM_LINUX in runner.labels:
+            own = POOL_LABEL_X64 if runner.host == HOST_LABEL_X64 else POOL_LABEL_ARM64
+        if own is None:
+            # No derivable own marker: EVERY pool marker it carries is foreign to a host we could
+            # not classify — reported, never skipped, because the silence was the false PASS.
+            carried = sorted(runner.custom_labels & POOL_MARKERS)
+            if carried:
+                found.append(
+                    Violation(
+                        kind=VIOLATION_FOREIGN_POOL_MARKER,
+                        runner=runner.name,
+                        why=(
+                            f"carries pool marker(s) {carried} but its own arch/platform cannot be "
+                            f"derived ({'no X64/ARM64 label' if runner.host is None else 'not a Linux runner'}), "
+                            f"so no pool it belongs to owns them. `runs-on: [self-hosted, "
+                            f"self-hosted-x64]` is an AND, so an x64 Linux job is selected onto this "
+                            f"box and silently mis-served (#6897). "
+                            f"REMEDY: remove {carried[0]!r} from this runner."
+                        ),
+                    )
+                )
             continue
-        own = POOL_LABEL_X64 if runner.host == HOST_LABEL_X64 else POOL_LABEL_ARM64
         foreign = POOL_MARKERS - {own}
         carried = sorted(runner.custom_labels & foreign)
         if carried:
@@ -965,14 +992,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         gate = engage_gate(post, post_runners, engage=engage)
         if gate is not None:
             ok = False
-            already_unmeasured = post is not None and post.get("verdict") == VIOLATION_UNMEASURED_EMPTY_POOL
-            if already_unmeasured:
-                print(
-                    f"❌ {VIOLATION_UNMEASURED_EMPTY_POOL}: the read-back returned no runners — "
-                    f"capacity is UNMEASURED, so this reconcile is not verified.",
-                    file=sys.stderr,
-                )
-            elif post is not None:
+            # ⛔ NO `already_unmeasured` BRANCH HERE. It was UNREACHABLE: `engage_gate` returns
+            # None on `VIOLATION_UNMEASURED_EMPTY_POOL` (a read failure must outrank a capacity
+            # reading), so `gate is not None` already implies the pool WAS measured. Forcing the
+            # dead branch's condition to False left every test green — a guard that could not
+            # fail, which is the class this file keeps closing. The precedence lives in
+            # `engage_gate`, where it is reachable and where the unmeasured read is still the
+            # printed fault.
+            if post is not None:
                 post = {**post, "ok": False, "verdict": gate["kind"], "violations": [*post["violations"], gate]}
                 print(
                     f"❌ {gate['kind']}: no online x64 runner serves "

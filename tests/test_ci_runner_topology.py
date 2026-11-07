@@ -12,6 +12,7 @@ synthetic 2-runner pool would pass on the real one's defect and prove nothing.
 
 from __future__ import annotations
 
+import datetime
 import json
 import subprocess
 import sys
@@ -1020,11 +1021,17 @@ def test_the_oldest_queued_run_is_the_minimum_not_the_newest(monkeypatch):
     created`) to MAX (`one > created`) left all 38 tests green, because every other test stubs
     this function out. This one asserts the VALUE, so the flip reds.
     """
+    # ⛔ THE TIMESTAMPS ARE RELATIVE TO `now`, NOT FROZEN. A frozen payload plus an absolute
+    # threshold (`age >= 24*3600`) DECAYS: a day after the fixture was written the MAX mutant also
+    # satisfies it (every stamp is then >24h old), so the pin silently stops discriminating — the
+    # exact failure this test exists to prevent, in the test itself. With a 90-day-old head and a
+    # one-minute-old tail, MIN and MAX stay ~90 days apart no matter when this runs.
+    _now = datetime.datetime.now(datetime.UTC)
     payload = "\n".join(
         [
-            "2026-11-07T17:51:59Z",  # the NEWEST — what the buggy query returned
-            "2026-11-05T16:29:12Z",  # the OLDEST — the age the tool must report
-            "2026-11-06T09:00:00Z",
+            (_now - datetime.timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),  # NEWEST
+            (_now - datetime.timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ"),  # OLDEST
+            (_now - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         ]
     )
 
@@ -1047,9 +1054,10 @@ def test_the_oldest_queued_run_is_the_minimum_not_the_newest(monkeypatch):
     monkeypatch.setattr(topo.subprocess, "run", fake_run)
     age = topo.fetch_oldest_queued_seconds("daniel-ospina/tortoise")
     assert age is not None
-    # 2026-11-05T16:29:12Z is far more than a day before any plausible "now"; the newest is not.
-    assert age >= 24 * 3600, (
-        f"the oldest queued run must be the MINIMUM created_at, so its age is >24h; got {age}s — "
+    # ~90 days for the MIN; ~60 seconds for the MAX. The gap is 3 orders of magnitude and does not
+    # depend on the wall clock, so the mutant cannot drift into passing.
+    assert age >= 30 * 24 * 3600, (
+        f"the oldest queued run must be the MINIMUM created_at, so its age is ~90 days; got {age}s — "
         f"a small value means the NEWEST run was read (the pre-fix defect)"
     )
 
@@ -1163,3 +1171,27 @@ def test_the_apply_render_never_says_untouched_about_a_runner_it_writes(tmp_path
     assert written, proc.stdout
     assert "left untouched" not in " ".join(lines), proc.stdout
     assert "strip skipped (owner-gated)" in proc.stdout, proc.stdout
+
+
+def test_a_foreign_marker_is_a_violation_on_any_host():
+    """REGRESSION (#11435 review, fresh-context cycle 3 P2 — a FALSE PASS): rule 1b skipped any
+    runner whose arch could not be derived or that was not Linux, so a
+    `Windows, ARM64, self-hosted-arm64, self-hosted-x64` box and a `Linux, self-hosted-x64` box
+    (no arch label) both reported `verdict: OK`. `runs-on: [self-hosted, self-hosted-x64]` is a
+    pure label AND, so an x64 Linux job is still selected onto both — the #6897 mis-serve the
+    rule exists to name, reported clean.
+
+    A marker whose owner cannot be derived belongs to no pool this runner is in, so it is
+    reported; only the OWN-marker derivation needs an arch, never the violation.
+    """
+    windows = topo.parse_runner(
+        _runner(1, "win-arm", ["self-hosted", "Windows", "ARM64", "self-hosted-arm64", "self-hosted-x64"])
+    )
+    archless = topo.parse_runner(_runner(2, "linux-noarch", ["self-hosted", "Linux", "self-hosted-x64"]))
+    for runner in (windows, archless):
+        kinds = {v.kind for v in topo.violations([runner])}
+        assert topo.VIOLATION_FOREIGN_POOL_MARKER in kinds, (runner.name, kinds)
+        assert topo.check([runner])["ok"] is False, runner.name
+    # …and a host that owns the marker it carries is still clean (the rule is not blanket).
+    fine = topo.parse_runner(_runner(3, "win-x64", ["self-hosted", "Windows", "X64"]))
+    assert {v.kind for v in topo.violations([fine])} == set()
