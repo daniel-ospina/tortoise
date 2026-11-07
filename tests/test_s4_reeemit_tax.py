@@ -924,10 +924,6 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # ⛔ the operator-gap figure the residual states: `added_items` records
         # an operator's identity only inside its `key`, so the count is worth
         # stating — and worth pinning, since nothing else reads `section`.
-        gaps = [i for a in art["arms"]
-                for arm in ("legacy", "delta")
-                for i in (a[arm].get("added_items") or {}).get("items") or []
-                if i["section"] == "operators"]
         ops_legacy = sum(1 for a in art["arms"]
                          for i in (a["legacy"].get("added_items") or {}).get("items") or []
                          if i["section"] == "operators")
@@ -938,10 +934,12 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         assert (f"In the primary run {ops_legacy} of {lg['added_by_s4']} legacy gaps "
                 f"and {ops_delta} of {dl['added_by_s4']} delta gaps are operators"
                 ) in flat_doc, (ops_legacy, ops_delta)
-        # both arms' operator gaps, counted independently of the flattening
-        # above — a real pin; `assert gaps is not None` could never fail, a list
-        # comprehension is never None (#11385 review P3).
-        assert gaps and len(gaps) == ops_legacy + ops_delta
+        # ⛔ BOTH arms must actually contribute, which is the state the residual
+        # claims ("5 of 12 legacy gaps and 2 of 6 delta gaps are operators").
+        # A `len(gaps) == ops_legacy + ops_delta` equality built from the same
+        # two filters is an IDENTITY — true for any artifact — so it is not a
+        # pin; the flat_doc assertion above is the one that bites (#11385 P3).
+        assert ops_legacy > 0 and ops_delta > 0, (ops_legacy, ops_delta)
         # the delta arm's honest limitation, not a hidden one
         assert sum(a["delta"].get("s4_delta_empty") is False
                    for a in art["arms"]) == 7

@@ -233,19 +233,26 @@ artifact.
   The correction channel cannot *shrink* the real saving from here — it is
   measured at its production maximum (all 266 items offered as existing) and
   already contributes nothing (0 emitted), so production has no room to add to
-  it. The gap channel can go either way: if the input
+  it. The gap channel can only *shrink* the saving from here: if the input
   is what suppressed gap emission, production leaves more to find, the delta arm
   emits more, and the saving is **smaller**; if the contract itself suppresses
   gap-finding (a defect, not a win), production behaves like this run and the
-  saving barely moves. Settling it needs a production-geometry run.
+  saving barely moves. Neither branch enlarges it. What keeps the aggregate
+  undetermined is therefore not the delta arm but the PAIR: production changes
+  BOTH arms' input, and the legacy arm's cost is a re-emission of the whole item
+  list under that same input, so the ratio can move either way — which is why it
+  is **neither a ceiling nor a floor**. Settling it needs a
+  production-geometry run.
 
   ⚠️ **What the committed artifacts actually say.** Their `caveats[2]` ends
   "…Relabelling the session's own list as already-in-the-graph is the maximally
   gap-SUPPRESSING input for a delta contract, so the measured saving is a CEILING
   and the delta arm's `added_by_s4` / `s4_items` read as a floor." That is the
-  one-sided reading this section refutes: it names only the gap channel and
-  concludes a ceiling, when the same input makes the correction channel
-  *maximally* exercisable. The string stands as the **disclosed hand-correction**
+  one-sided reading this section replaces: it names only the gap channel and
+  concludes a ceiling, when the same input also makes the correction channel
+  *maximally* exercisable — and the legacy arm's cost moves with the input too,
+  so neither sign is established (neither a ceiling nor a floor). The string
+  stands as the **disclosed hand-correction**
   left it — word-for-word the instrument's own caveat from `10b8d52cb` until this
   change — and it is left alone now for the same reason it was corrected then:
   it is a caveat, never a measurement. Editing it again to match this section
