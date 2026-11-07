@@ -104,7 +104,9 @@ Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
       — absent GH_SECRETS_PRESENT, a payload that cannot be read, a ledger that
       is missing, malformed, indented, names a name the manifest does not
       declare, names a non-`gh-secret:` source, names one of the app's MANDATORY
-      secrets, **or a ledgered name the payload still stages**). Fail-closed: an
+      secrets, **or a ledgered name the payload still stages** — `LEDGER NOT
+      HONOURED`, which also covers a ledgered name `fly.toml [env]` assigns, since
+      the deploy applies that value whatever the secret list says). Fail-closed: an
       unreadable state is never clean.
 
       #11122: `LEDGER NOT HONOURED` is exit 2, NOT exit 1, and that distinction is
