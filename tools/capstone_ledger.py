@@ -56,9 +56,12 @@ Record format (committed at `docs/evidence/9664-capstone/verdict-ledger.yml`):
         evidence_kind: screenshot    # screenshot | trace | command | server-observation
         reason: "<required unless verified>"
 
-⛔ Every cited path must exist in the tree. A row that names a file which is not
-there is REFUSED rather than counted, so a ledger cannot be made green by
-describing evidence instead of holding it. `evidence_kind: server-observation`
+⛔ Every path cited by a `verified` row must exist in the tree. A `verified` row
+that names a file which is not there is REFUSED rather than counted, so a ledger
+cannot be made green by describing evidence instead of holding it. (A row that is
+NOT claimed as verified keeps its reason instead, and its citations are not
+validated — the record is not asserting them as held evidence.) `evidence_kind:
+server-observation`
 carries an explicit waiver (it is the shape of step 5, which is a server-side
 observation with no screenshot by nature, #9664 comment 6692766222 §D).
 
@@ -77,6 +80,7 @@ Exit codes (a CLOSED set — a caller may branch on them):
     2  UNCOVERED   valid ledger, uncovered list non-empty (the real finding)
     3  DISABLED    the off-switch was set; NO verdict was computed
     4  ADVISORY    the report was rendered and NOT enforced
+    5  USAGE       `--help` or a bad invocation; NO verdict was computed
 
 Off-switch: `TORTOISE_CAPSTONE_LEDGER=off` (kill-switch — exits 3, never 0, so
 "disabled" can never be mistaken for "clean"), or `=advisory` (prints the full
@@ -96,7 +100,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NoReturn
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
 DEFAULT_LEDGER: Final[Path] = (
@@ -128,6 +132,30 @@ EXIT_DISABLED: Final[int] = 3
 #: `EXIT_CLEAN`: a caller that branches on the exit code would then read
 #: "advisory, 11 rows uncovered" as "clean".
 EXIT_ADVISORY: Final[int] = 4
+#: Argparse's own outcomes were colliding with two verdict codes: `--help` exits 0
+#: (indistinguishable from CLEAN) and a usage error exits 2 (indistinguishable from
+#: UNCOVERED). Both mean "no verdict was computed", so both get their own code and
+#: the other four keep one meaning each.
+EXIT_USAGE: Final[int] = 5
+
+
+class _Parser(argparse.ArgumentParser):
+    """An `ArgumentParser` that never borrows a VERDICT code for a usage outcome.
+
+    Without this, `capstone_ledger.py check --nope` exits **2** — the code a caller
+    branches on to mean "valid ledger, uncovered rows exist" — and `--help` exits
+    **0**, the code that means "every row is covered". The closed set must not carry
+    two meanings for one number.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+    def exit(self, status: int = 0, message: str | None = None) -> NoReturn:
+        # `--help`/`-h` reaches here with status 0; a help screen is not a verdict.
+        super().exit(EXIT_USAGE if status == 0 else status, message)
+
 
 _CMD_PREFIX: Final[str] = "cmd:"
 
@@ -210,20 +238,24 @@ RUNNERS: Final[frozenset[str]] = frozenset(
         "curl",
         "timeout",
         "env",
-        # Declared in `_CHAIN_WORDS` below, so they must be reachable at position 0
-        # too, or the documented shape is a false block (measured: `uvx pytest …`
-        # and `poetry run pytest …` were both refused).
         "uvx",
         "poetry",
     }
 )
 
-
 #: Words that may sit BETWEEN a runner and its target: a runner CHAIN
-#: (`uv run python …`, `poetry run pytest …`) or a subcommand of one. Skipping these
-#: is what keeps `uv run python -m pytest tests/x.py` accepted without letting a
-#: scanner wander off into the rest of a sentence.
-_CHAIN_WORDS: Final[frozenset[str]] = frozenset({"run", "exec", "x", "uvx"})
+#: (`uv run python …`, `poetry run pytest …`). Skipping these is what keeps
+#: `uv run python -m pytest tests/x.py` accepted without letting a scanner wander
+#: off into the rest of a sentence.
+#:
+#: ⛔ DELIBERATELY NOT EXTENDED to subcommand verbs (`ruff check <path>`,
+#: `docker build <path>`) or to a "the next token is a program" skip. Both were
+#: tried and both reopen the hole this arm exists to close: with them,
+#: `cmd:uv run not run - see tools/capstone_ledger.py` is accepted, because every
+#: word before the path happens to be a chain/subcommand word. A false BLOCK on
+#: `ruff check <path>` is friction; a false PASS is the failure mode this whole
+#: artifact exists to refuse, and that trade is not close.
+_CHAIN_WORDS: Final[frozenset[str]] = frozenset({"run", "exec", "x"})
 
 #: A runner's own non-artifact arguments, which must not be mistaken for the target:
 #: a bare duration (`timeout 300 …`) and an environment assignment (`env FOO=1 …`).
@@ -249,6 +281,13 @@ def _glob_names_a_directory(text: str, root: Path) -> bool:
     `docs/./*` is deliberately NOT refused: it normalises to `docs/*`, so it names
     the `docs` directory and is a legitimate citation. Refusing it would be a
     false block on a shape someone types by accident.
+
+    ⛔ A `..` AT OR AFTER THE FIRST WILDCARD is refused, because the resolvable
+    prefix stops at that wildcard and the rest cannot be checked statically:
+    `docs/*/../../*` expands to 1085 files and every one is at the repo ROOT — the
+    exact vacuity above, one wildcard deep (measured: exit 0 on a one-row
+    `verified` ledger). `docs/../tests/*.py` stays legal because its `..` sits
+    inside the prefix that IS resolved.
     """
     parts = [part for part in text.split("/") if part not in ("", ".")]
     if len(parts) < 2:
@@ -259,6 +298,8 @@ def _glob_names_a_directory(text: str, root: Path) -> bool:
             break
         prefix.append(part)
     if not prefix:
+        return False
+    if any(part == ".." for part in parts[len(prefix) :]):
         return False
     base = (root / Path(*prefix)).resolve()
     return base.is_relative_to(root) and base != root and base.is_dir()
@@ -612,7 +653,7 @@ def render(rows: list[dict[str, Any]], measured_at: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         description="Compute #9664's uncovered list from the committed verdict ledger."
     )
     parser.add_argument("command", nargs="?", default="check", choices=["check"])

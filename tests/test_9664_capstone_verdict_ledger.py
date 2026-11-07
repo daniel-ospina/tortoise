@@ -370,6 +370,16 @@ def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
         "cmd:sh */../*",
         # An absolute glob cannot be resolved against the tree at all.
         "cmd:sh /tmp/*",
+        # A `..` AT OR AFTER the first wildcard climbs back out to the root: this
+        # expands to 1085 files and every one is root-level (the `./*` class, one
+        # wildcard deep).
+        "cmd:sh docs/*/../../*",
+        "cmd:sh tests/*/../../*",
+        "cmd:sh docs/[a-z]*/../../*",
+        "cmd:sh docs/evidence/*/../../../*",
+        # One NON-runner word plus a real in-tree path: only the `RUNNERS` gate
+        # refuses this, so it is the pin on that gate (without it, exit 0).
+        "cmd:see tools/capstone_ledger.py",
     ],
 )
 def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
@@ -532,6 +542,26 @@ def test_an_unresolvable_evidence_entry_is_invalid_not_a_traceback(tmp_path):
         assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
         assert "Traceback" not in proc.stderr, proc.stderr
         assert "CAPSTONE-LEDGER: INVALID" in proc.stderr, proc.stderr
+
+
+def test_usage_outcomes_never_borrow_a_verdict_code(tmp_path):
+    """`--help` exited 0 (== CLEAN) and a bad flag exited 2 (== UNCOVERED).
+
+    A caller branching on the exit status read "a help screen was printed" as "the
+    ledger is clean", and a typo'd flag as "uncovered rows exist". Both mean "no
+    verdict was computed", so both now answer EXIT_USAGE and the other four codes
+    keep one meaning each.
+    """
+    for argv in (["--help"], ["-h"], ["check", "--nope"]):
+        proc = subprocess.run(
+            [sys.executable, str(TOOL), *argv],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            check=False,
+        )
+        assert proc.returncode == cl.EXIT_USAGE, (argv, proc.returncode, proc.stderr)
+        assert proc.returncode not in {cl.EXIT_CLEAN, cl.EXIT_UNCOVERED}
 
 
 def test_the_committed_ledger_pins_its_denominator():
