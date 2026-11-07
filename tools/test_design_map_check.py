@@ -42,10 +42,17 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import would fail first (D9 shape). This tool is run from lanes and
-# from the required `docs` job, so an unattributed traceback would be read as a
-# real finding about the map.
+# #5128: refuse a <3.12 interpreter before the imports below (D9 shape).
+# ⚠️ MEASURED, and it refutes the obvious rationale: this file has no 3.11+-only
+# module-level name at all (only `argparse`/`json`/`re`/`sys`/`pathlib`) and it
+# RUNS TO COMPLETION on 3.9 — measured under real CPython 3.9.25 with the guard
+# stripped: `test-design-map-check: CLEAN — every rule holds`, rc 0. So this guard
+# trades a working 3.9 command for a refusal, and the justification is NOT a
+# repaired failure: it is CENSUS CONFORMANCE (`tests/test_entry_point_python_guard.py`
+# requires a guard on every corpus entry point) plus insurance against the next
+# 3.11+-only import landing above it. If a future reader would rather keep the 3.9
+# command, the honest route is that test's `RUNTIME_39` exclusion (which must then
+# be re-derived by its own test), not a silent deletion of this guard.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/test_design_map_check.py requires Python >= 3.12 (got "

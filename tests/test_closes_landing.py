@@ -5726,10 +5726,18 @@ def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm
     assert token_types_carrying(checkbox, "- [ ]") == {"code_block"}, checkbox
 
     # The arm must hide what the renderer puts in code — this is the assertion the fix turns.
-    for body in (closes, inflight, checkbox):
-        assert "#100" not in cl.strip_code(body, indented_code=True), body
-        assert "IN FLIGHT:" not in cl.strip_code(body, indented_code=True), body
-        assert "- [ ]" not in cl.strip_code(body, indented_code=True), body
+    # ONE NEEDLE PER BODY, deliberately. This loop used to assert every needle against every
+    # body, which made six of its nine assertions tautologies: `closes` contains no
+    # `IN FLIGHT:` and `inflight` contains no `- [ ]`, and `strip_code` only ever REPLACES a
+    # line with `""` (it never inserts text), so those six could not fail for any implementation.
+    # The companion assertion is what makes each one discriminating: an arm that blanked the
+    # whole body — the cheapest way to pass every negative above — fails on the prose line.
+    for body, needle in ((closes, "#100"), (inflight, "IN FLIGHT:"), (checkbox, "- [ ]")):
+        stripped = cl.strip_code(body, indented_code=True)
+        assert needle not in stripped, body
+        assert "Notes" in stripped, (
+            f"the arm blanked the whole body instead of the code line: {stripped!r}"
+        )
     assert cl.parse_closing_refs(closes, None, strict=True) == [], closes
 
     # REGRESSION PINS (not discriminating for this fix — see the docstring): the two consumers

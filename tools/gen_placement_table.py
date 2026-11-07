@@ -34,10 +34,18 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import would fail first (D9 shape), and the operator would read the
-# traceback as "this generator is broken" rather than "your interpreter is too
-# old".
+# #5128: refuse a <3.12 interpreter before the imports below (D9 shape).
+# ⚠️ MEASURED, because the generic rationale is only half true here: this file has
+# no module-level 3.11+-only IMPORT, but it does fail on 3.9 — reached through
+# `tortoise.cache_projection`, which dies in `tortoise/security.py` with
+# `re.error: multiple repeat at position 40` (a 3.11+ regex), i.e. a traceback
+# raised from a module this generator imports rather than from `datetime.UTC`.
+# The refusal is what turns that into an attributable message; it is also CENSUS
+# CONFORMANCE (`tests/test_entry_point_python_guard.py` requires a guard on every
+# corpus entry point).
+# Exit 1 is NOT used: `main()` returns only 0 and 1, and 1 is this tool's own
+# `STALE` verdict — an environment refusal that exited 1 would be read as
+# "regenerate the table". #11342 owns that collision; it is not repaired here.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/gen_placement_table.py requires Python >= 3.12 (got "

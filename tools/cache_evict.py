@@ -76,10 +76,15 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
-# Without it the operator sees an UNATTRIBUTED traceback and reads it as "this
-# tool is broken" rather than "your interpreter is too old".
+# #5128: refuse a <3.12 interpreter before the imports below (D9 shape).
+# ⚠️ MEASURED, because the obvious rationale is FALSE here: this file has no
+# module-level 3.11+-only import today (only `argparse`/`contextlib`/`importlib`/
+# `json`/`sys`/`pathlib`/`typing` plus `tortoise.cache_eviction`, which imports
+# cleanly on 3.9) — `--help` ran to completion under real CPython 3.9.25 with the
+# guard stripped. So this is NOT a live-failure repair: it is CENSUS CONFORMANCE
+# (`tests/test_entry_point_python_guard.py` requires a guard on every corpus entry
+# point) plus insurance against the next 3.11+-only import landing above it, which
+# would otherwise fail first with an error that blames the import.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/cache_evict.py requires Python >= 3.12 (got "
