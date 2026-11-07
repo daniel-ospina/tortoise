@@ -159,12 +159,15 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   and KEEPS the node (measured — the ``None`` passes
   ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
   and ``update_point``'s ``SET n += $props`` REMOVES a property set to ``None``;
-  ⚠️ that is a LIVE clear, NOT a durable one — the journal records the ``None``
-  but the replay fold SKIPS a ``None`` value, so a journal rebuild of a legacy
-  copy whose creation record carried the prose re-materialises it (which IS
-  ``#10429``'s replay half), and the same live door is bound by the MCP tool
-  ``tortoise_update_point``) — the targeted clear for a ``:Point`` copy exists
-  and needs no wipe. And on NO label is there a repair that
+  the journal records the ``None``, and the same live door is bound by the MCP
+  tool ``tortoise_update_point``) — ⚠️ **but that clear is LIVE-ONLY, and that is
+  the honest bound**: ``story_arc`` has no clause in the ``PointRevised`` fold
+  (``_revise_point``'s SET list is a closed set and the one open-set passthrough,
+  ``_persist_extra_props``, skips a ``None`` by design), so a journal rebuild of a
+  legacy copy whose CREATION record carried the prose RESTORES it — the live node
+  is clean and the replayed node is not, which is ``#10429``'s replay half. Do not
+  read the clear as a durable repair until that lands. And on NO label is there a
+  repair that
   RESTORES the value. ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
