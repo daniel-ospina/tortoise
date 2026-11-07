@@ -97,7 +97,8 @@ which made its numbers unfalsifiable — that is what `runs/` and
 `fingerprint-cost.json` fix, and `fingerprint_cost.py` exists because the first
 fix covered only the probe.
 
-⚠️ **The BEFORE tree is 164 commits behind THIS BRANCH'S BASE, `23d227c534`**
+⚠️ **The BEFORE tree is 164 commits behind the base this measurement was taken
+against, `23d227c534`**
 (`1730570510` is 2026-11-03; the base is 2026-11-06), and **7 of those commits touch
 the two files under measurement** (+883/−25: per-statement `param_columns`,
 `Statement.__post_init__`, a per-write `_count_write_applied()`). ⛔ The denominator is the
