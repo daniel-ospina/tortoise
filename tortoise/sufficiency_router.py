@@ -1363,7 +1363,9 @@ class WritebackRefusal:
 
 @dataclass(frozen=True)
 class WritebackPlan:
-    """The write-back's OUTPUT: units to persist, and refusals to report.
+    """The write-back's OUTPUT: THREE collections — ``units`` (write these now),
+    ``already_persisted`` (the cheap tier holds these; nothing to write), and
+    ``refusals`` (could not be written back honestly).
 
     A plan performs no I/O. Persistence is the caller's seam — no Tier-1 store
     exists yet, and §12.3's tier count is OPEN, so this module must not become
