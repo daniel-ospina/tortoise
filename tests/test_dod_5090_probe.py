@@ -4579,8 +4579,15 @@ _NEGATION_GOVERNS = re.compile(
 # own argument, one rewording away (#11437 review, P3). Measured: the inverse
 # row still reds, the honest `except when` row greens.
 # ⛔ And the NEGATED PRIVATIVE — `never unvisited`, `not unreported` — is a
-# double negative that asserts coverage. #11443 measured two of these GREEN; the
-# `un…` list closes them without touching an honest "…are never visited".
+# double negative that asserts coverage. #11443 measured these GREEN.
+# ⚠️ WHAT REFUSES THEM IS THE GOVERNANCE TEST, not the `un…` list (#11437 review,
+# P3, the same correction made beside the rows): the privative is not a coverage
+# word, so the negation governs nothing and the sentence is refused BEFORE
+# `_AFFIRMED` is consulted — measured, `_NEGATION_GOVERNS.search` is None on both.
+# The `un…` list's own executor is the dedicated
+# "inverse: privative after a governing negation" row, which goes GREEN when that
+# alternation is ablated. Saying the list "closes them" was a causal claim the
+# artifact did not verify.
 # ⛔ And a HEDGE is not a negation of the CLAIM, which is the same shape one step
 # out from finding 2's stray `not` (#11437 review, round 2, P2's class, measured
 # again here): a pseudo-negation governs a coverage verb while asserting NEITHER

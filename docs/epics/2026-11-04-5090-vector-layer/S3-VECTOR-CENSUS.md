@@ -325,9 +325,12 @@ $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 ```
 
 (115 collected before #11088's round 7; the file collects **152 in the tree this document sits in** —
-nine added by #11337, with `main` at 122, nineteen added by `#11444`'s writer-register falsifiers, one
-by `#11471`'s GATED-writer bypass arm, and one by `#11437` (`122 + 9 + 19 + 1 + 1 = 152`) — and
-reads 151 passed, 1 skipped on the docker lane. The
+nine added by #11337, nineteen by `#11444`'s writer-register falsifiers, one by `#11471`'s
+GATED-writer bypass arm, and one by `#11437`, i.e. `122 + 9 + 19 + 1 + 1 = 152` over the
+pre-#11337 baseline of 122. ⚠️ No figure here names what `main` collects TODAY: all four of those
+additions are already merged, so a "`main` at N" would itself be the moving reference this
+paragraph forbids — the total is bound to THIS TREE alone. It reads 151 passed, 1 skipped on
+the docker lane. The
 skip is the `<3.12` re-derive. ⚠️ The count is bound to THIS TREE, never to a branch head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is
 added, and `test_the_census_doc_collects_what_the_file_collects` re-derives it from the file's own
