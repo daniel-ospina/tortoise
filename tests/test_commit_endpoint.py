@@ -5031,6 +5031,30 @@ def test_the_hoisted_carry_keeps_the_gate_faults_MAPPED_on_this_lane(
     assert "allowance gate could not be loaded" in detail, detail
 
 
+def _pin_shipped_ingest_allowance(monkeypatch) -> None:
+    """Make the endpoint charge against the DOCUMENTED default, not the env knob.
+
+    `quota.py` resolves ``MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG`` from
+    ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` at import, and
+    `docs/INGEST_CONTRACT.md` §9 advertises that knob — so an operator shell or
+    CI job that exports it must not red a test asserting the default it never
+    changed. The SHIPPED default is still pinned, on the named constant the knob
+    defaults to (a silent retune of the documented figure must fail); the
+    endpoint is then opted onto that same figure, which is the shape
+    `TestCommitOrgIngestBound::test_default_allowance_admits_a_normal_commit`
+    already uses.
+
+    ⛔ It must run BEFORE any commit in a test: a LOW export throttles the test's
+    own commits, so a pin placed after them is too late to help.
+    """
+    import tortoise.quota as quota_mod
+
+    assert quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN == 10 * 1024 * 1024
+    monkeypatch.setattr(
+        quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG",
+        quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN)
+
+
 class Test4051ChargeCoversTheLoopShape:
     """#4051 §3.1 — the ingest charge is never cheaper than the write, on the
     two shapes the issue's own reproduction uses.
@@ -5109,7 +5133,7 @@ class Test4051ChargeCoversTheLoopShape:
         return declared, cls._node_total() - before, charge
 
     def test_the_points_empty_loop_shape_is_charged_for_every_node_it_mints(
-            self, client):
+            self, client, monkeypatch):
         """`points: []` — the cheapest iteration of the loop #4051 names.
 
         Its body is ~1 KB, so the payload term never wins and the declared count
@@ -5122,13 +5146,18 @@ class Test4051ChargeCoversTheLoopShape:
         constant — either makes the throttle cheaper than the write, the
         fail-OPEN direction (#4051 §3.1).
         """
-        # The first write to a graph also creates the store's one-time
-        # singletons (`:GraphEventMeta`, `:EpMeta`, `:Meta`). They are per-GRAPH
-        # constants, not per-request growth — the loop #4051 describes repeats
-        # the steady-state shape, so absorb them.
-        assert _commit(client, _raw_payload(
-            0, session_id="s4051ChargeWarm", points=[], entities=[],
-            provenance_refs=[])).status_code == 200
+        # ⚠️ NO warm-up commit here, and that is measured rather than assumed.
+        # The points-bearing legs of `TestCommitOrgIngestBound` have to absorb
+        # the store's one-time per-GRAPH singletons (`:GraphEventMeta`,
+        # `:EpMeta`, `:Meta`), so that comment was copied here at first — and it
+        # is FALSE for this shape: on a COLD graph the first `points: []` commit
+        # mints exactly the 4 chain nodes, because `:GraphEventMeta` is created
+        # only by an `event_store` GraphEvent append (a points-bearing commit)
+        # and `:EpMeta` by the SDK's episodic path — neither is on this shape's
+        # write path, and `:Meta` predates any commit. A warm-up would therefore
+        # absorb nothing while still hiding a one-node deficit, because the
+        # delta it leaves behind looks like 4 either way.
+        _pin_shipped_ingest_allowance(monkeypatch)
 
         declared, minted, charge = self._measure(client, _raw_payload(
             0, session_id="s4051ChargeEmpty", points=[], entities=[],
@@ -5149,12 +5178,13 @@ class Test4051ChargeCoversTheLoopShape:
             "let a small body under-charge the nodes it mints")
 
     def test_a_flat_collection_lane_is_charged_for_every_node_it_mints(
-            self, client):
+            self, client, monkeypatch):
         """`entities[]` / `events[]` are charged 1 node per entry — measured.
 
         `declared_commit_write_count` charges `_COMMIT_FLAT_NODE_LANES` one node
         per entry, an assumption no test covered: the existing invariant legs
-        measure `points[]`, `operators[]` and `supersessions[]` only. An entry
+        measure `points[]` and `operators[]` only (`supersessions[]` is pinned
+        against the formula, never against the graph). An entry
         that minted a node AND a durability `:GraphEvent` would make that rate a
         2× fail-open — the same defect review cycles 2 and 3 found on the points
         and operator lanes, one lane over. Measured: declared 7 / minted 7 for
@@ -5164,6 +5194,8 @@ class Test4051ChargeCoversTheLoopShape:
         leg and ONLY this leg), or let an entry start minting a second node
         without raising the rate.
         """
+        _pin_shipped_ingest_allowance(monkeypatch)
+
         assert _commit(client, _raw_payload(
             0, session_id="s4051FlatWarm", points=[], entities=[],
             provenance_refs=[])).status_code == 200
@@ -5236,24 +5268,18 @@ class Test4051ChargeCoversTheLoopShape:
         """
         import tortoise.quota as quota_mod
 
+        # Pin the SHIPPED figure FIRST — before the warm-up commit, not after it.
+        # Ordering is load-bearing: a LOW ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN``
+        # export throttles this leg's OWN commits, so a pin placed after them
+        # still fails (measured at 4096).
+        _pin_shipped_ingest_allowance(monkeypatch)
+
         assert _commit(client, _raw_payload(
             0, session_id="s4051ResidWarm", points=[], entities=[],
             provenance_refs=[])).status_code == 200
         declared, minted, charge = self._measure(client, _raw_payload(
             0, session_id="s4051ChargeResid", points=[], entities=[],
             provenance_refs=[]))
-
-        # Pin the SHIPPED figure, not the RESOLVED one: `quota.py` reads
-        # ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` at import and
-        # `docs/INGEST_CONTRACT.md` §9 advertises that knob, so an operator
-        # shell or CI job that exports it must not red a test asserting the
-        # default it never changed (the review-cycle-3 rule this file already
-        # records at `test_default_allowance_admits_a_normal_commit`). The
-        # endpoint side is opted onto the same figure for the same reason.
-        assert quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN == 10 * 1024 * 1024
-        monkeypatch.setattr(
-            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG",
-            quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN)
 
         commits_per_window = (
             quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN // charge)
