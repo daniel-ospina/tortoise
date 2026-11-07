@@ -3113,9 +3113,13 @@ def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
     # legitimate by-reference shape from reading as "the scan could not run" and
     # getting the declaration deleted (#11337 review, P1). The real tree DOES
     # declare one at this head (`volunteer_context` passes the leg itself as
-    # `_search_fn`), so only the marker SPELLING is pinned here — an exact
-    # population would red on every unrelated `sdk.py` change while proving
-    # nothing extra.
+    # `_search_fn`), so only the marker SPELLING is pinned here. The declared
+    # PASSERS are pinned by NAME, not by count, in
+    # `test_the_census_doc_states_the_same_probe_bound_the_report_does`: a
+    # declared passer the census doc does not name reds it, while a second
+    # passer whose name already appears in that doc would pass — the recorded
+    # residual of the `#11397` class, and the reason the census doc states the
+    # pin's shape instead of claiming the population is pinned.
     assert declared is not None and declared.startswith(
         "UNMEASURED(declared bound:"), declared
     # ⛔ THE LEG ITSELF must be mentionable (#11389 review, P1). `direct` excludes
