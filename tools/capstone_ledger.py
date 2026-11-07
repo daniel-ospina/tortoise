@@ -46,20 +46,29 @@ Record format (committed at `docs/evidence/9664-capstone/verdict-ledger.yml`):
 
     version: 1
     issue: 9664
+    criteria_expected: 22            # REQUIRED, TOP LEVEL: pins the denominator
     measured_at: {ref: origin/main, sha: <40 hex>, date: YYYY-MM-DD}
     criteria:
       - id: C1
         text: "<the criterion, VERBATIM from the issue>"
         verdict: verified            # verified | failed | blocked | not-covered
-        evidence: [<repo path>, "cmd:<command>"]   # required when verified
+        evidence: [<tracked repo path>, "cmd:<command>"]
+                                    # >=1 TRACKED PATH required when verified;
+                                    # a `cmd:` entry is a RECORD and confers nothing
         evidence_kind: screenshot    # screenshot | trace | command | server-observation
         reason: "<required unless verified>"
 
-⛔ Every cited path must exist in the tree. A row that names a file which is not
-there is REFUSED rather than counted, so a ledger cannot be made green by
-describing evidence instead of holding it. `evidence_kind: server-observation`
-carries an explicit waiver (it is the shape of step 5, which is a server-side
-observation with no screenshot by nature, #9664 comment 6692766222 §D).
+⛔ Every cited path must be a **TRACKED** file inside the tree. A row that names a
+path which is not there — or which exists only on the authoring box, e.g. a
+gitignored lane artifact — is REFUSED rather than counted, so a ledger cannot be
+made green by describing evidence instead of holding it.
+`evidence_kind` grants NO waiver — it is checked for membership in a closed
+vocabulary only. `server-observation` names the SHAPE of step 5's evidence, which
+is a server-side observation with no screenshot by nature (#9664 comment
+6692766222 §D); that row still needs a tracked artifact to be `verified`.
+⛔ YAML merge keys (`<<`) are refused by name: `SafeConstructor` splices a merged
+value's pairs in without constructing that node, so the duplicate-key rule cannot
+see inside it, and this record's rule is that every row states its OWN verdict.
 
 Exit codes (a CLOSED set — a caller may branch on them):
     0  CLEAN       the uncovered list is empty; every row valid
@@ -98,6 +107,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Final
@@ -116,10 +126,10 @@ VERDICTS: Final[frozenset[str]] = frozenset({"verified", "failed", "blocked", "n
 #: The only verdict that counts toward closing. Everything else is uncovered.
 CLEAN_VERDICT: Final[str] = "verified"
 
-#: `server-observation` is the declared waiver: step 5 is a server-side
-#: observation (`connection-written` / `harness-connected` do not happen
-#: on a screen), so it can never carry a screenshot. Naming the kind makes the
-#: waiver explicit and per-row instead of an unwritten convention.
+#: `evidence_kind` is checked for MEMBERSHIP ONLY — no kind grants a waiver. It
+#: names the shape of the evidence for the reader (step 5 is a server-side
+#: observation, so a screenshot can never carry it); the row still needs a TRACKED
+#: artifact to be `verified`.
 EVIDENCE_KINDS: Final[frozenset[str]] = frozenset(
     {"screenshot", "trace", "command", "server-observation"}
 )
@@ -161,8 +171,29 @@ def load_ledger(path: Path) -> dict[str, Any]:
         """A `SafeLoader` whose mappings refuse a repeated key."""
 
         def construct_mapping(self, node, deep=False):
+            # Merge keys (`<<: *anchor`) are legal YAML and a natural way to share
+            # a verdict across rows. They must be flattened BEFORE the duplicate
+            # scan, or the anchor's tag has no constructor and the file is reported
+            # as "not parseable YAML" — blaming the parser for our own check.
             seen: set[Any] = set()
             for key_node, _ in node.value:
+                # ⛔ MERGE KEYS ARE REFUSED BY NAME. `<<` is not "just another key":
+                # `SafeConstructor.construct_mapping` splices the merged pairs in
+                # WITHOUT constructing that node, so this scan never sees them and
+                # a duplicate inside a merge value is silently last-wins. Measured:
+                # a row written as `<<: { …verdict: not-covered, verdict: verified}`
+                # loaded as `verified` and emptied the uncovered list — a false PASS
+                # reached through the one place the duplicate rule could not look.
+                # Refusing the tag is also the honest reading of this ledger's rule:
+                # every row states its OWN verdict, so a shared anchor that can carry
+                # a verdict the row does not say is not a shape this record accepts.
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    raise InvalidLedger(
+                        f"{path} line {key_node.start_mark.line + 1} uses a YAML merge "
+                        "key (`<<`) — every criterion row must state its own keys "
+                        "literally, because a merged anchor can carry a verdict the "
+                        "row does not say and the duplicate-key rule cannot see inside it"
+                    )
                 key = self.construct_object(key_node, deep=deep)
                 if key in seen:
                     raise InvalidLedger(
@@ -187,13 +218,30 @@ def load_ledger(path: Path) -> dict[str, Any]:
     return data
 
 
-def _commit_exists(sha: str) -> bool:
-    """Is `sha` an object in THIS repository? A sha nobody can resolve is a claim.
+#: A `cmd:` entry may carry ANY command text. It is a RECORD of what was run, not
+#: a proof: the validator never executes it, so no shape heuristic can establish
+#: that it ran, and every heuristic this tool has tried to grade it with has been
+#: defeated by one more shell form (a quoted prose argument, an `&& echo PASS`
+#: tail, a `python` in front of a sentence, a merge-key anchor ...). The
+#: resolution is not a better heuristic — it is to stop claiming the arm proves
+#: anything: **`cmd:` evidence does not satisfy `verified`.** A verified row must
+#: hold at least one artifact IN THE TREE. `cmd:` entries stay in the record
+#: because they are useful to a reader, and they are checked only for being a
+#: recorded command rather than an empty string.
+def _commit_state(sha: str) -> str:
+    """`exists` | `absent` | `unprovable` for a measured-at sha.
 
     The 40-hex shape check alone lets `measured_at.sha: deadbeef…` through, and
     `render()` then prints "measured at origin/main@deadbeef… on <date>" as fact.
-    The one claim binding 22 verdicts to a tree is therefore the cheapest thing
-    in the record to fabricate, so it is checked against the object database.
+
+    ⛔ The third outcome is the point. In a SHALLOW clone — and CI test jobs check
+    out at `fetch-depth: 1`, so that is every shard — an ancestor sha is simply not
+    in the object database, and a check that only knows `exists`/`absent` reports a
+    LEGITIMATE ledger as forged and reds the required check (measured: a depth-1
+    clone makes `git cat-file -e <ancestor>^{commit}` exit 128). The convention is
+    the sibling capstone's (`tools/capstone_preregistration_check.py`: "a verdict it
+    cannot support is never given", #9075 r4 P1): a shallow checkout CANNOT answer,
+    so it answers `unprovable` and the record is not blamed.
     """
     try:
         proc = subprocess.run(
@@ -203,13 +251,24 @@ def _commit_exists(sha: str) -> bool:
             text=True,
             check=False,
         )
+        if proc.returncode == 0:
+            return "exists"
+        shallow = subprocess.run(
+            ["git", "rev-parse", "--is-shallow-repository"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     except OSError:
-        return False
-    return proc.returncode == 0
+        return "unprovable"
+    if shallow.returncode != 0:
+        return "unprovable"
+    return "unprovable" if shallow.stdout.strip() == "true" else "absent"
 
 
 def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, str]:
-    """A path must be a FILE inside the tree; a `cmd:` entry must name an artifact.
+    """A path must be a TRACKED FILE inside the tree; a `cmd:` entry must be non-empty.
 
     ⛔ This is the anti-forgery rule and the reason the tool is worth having: a
     row that *describes* its evidence in prose used to count. Now the file has
@@ -218,37 +277,100 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     `.` are all REFUSED, because `Path.exists()` accepted every one of them and
     a reviewer measured each returning a clean exit on a `verified` row.
 
-    The `cmd:` arm gets the same treatment, for the same reason: accepting any
-    non-empty string meant `cmd:done` — or a sentence explaining that the work
-    was done — satisfied the strongest verdict in the vocabulary, so one word
-    defeated the whole record. A command entry must now NAME an artifact of this
-    tree (the script or test file it ran); prose names nothing and is refused.
+    `cmd:` evidence is a different matter, and the difference is now a DECISION
+    rather than a shape test: it records what was run, and this tool cannot know
+    that it ran (it never executes it), so **it does not satisfy `verified`**. A
+    verified row must hold at least one artifact that is IN THE TREE. Every shape
+    heuristic tried here — a runner-first token, an existing-file token, backtick
+    and `NAME=value` prefixes — was defeated by one more shell form in review
+    (a quoted prose argument, an `&& echo PASS` tail, `python` in front of a
+    sentence), which is the signal that the arm should prove less, not parse more.
+
+    ⛔ WHAT THIS DOES NOT PROVE: a held artifact proves the file is IN the tree,
+    not that it supports the row citing it (22 rows citing one trace would
+    validate). `verified` therefore means "an artifact in this tree is named as
+    its evidence", not "the evidence was audited". The runner records a verdict
+    and stands behind it; the tool refuses a record that is malformed, ambiguous,
+    or cites what it does not hold.
     """
     root = repo_root.resolve()
     if entry.startswith(_CMD_PREFIX):
         command = entry[len(_CMD_PREFIX) :].strip()
         if not command:
             return False, "`cmd:` evidence names no command"
-        tokens = command.replace("`", " ").replace("'", " ").replace('"', " ").split()
-        if len(tokens) < 2:
-            return False, f"`cmd:` evidence must be a COMMAND, not a word: {command!r}"
-        for token in tokens[1:]:
-            candidate = Path(token)
-            resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
-            if resolved.is_file() and resolved.is_relative_to(root):
-                return True, ""
-        return False, (
-            f"`cmd:` evidence names no artifact of this tree: {command!r} — a command "
-            "entry must name the script or test file it ran, so prose cannot stand in "
-            "for held evidence"
-        )
+        # NON-EMPTY IS THE WHOLE CHECK — no token, shape or parse rule. Every rule
+        # tried here false-blocked a real record, and because exit 1 computes
+        # NOTHING it also hid the entire uncovered list: `cmd:make` beside a held
+        # artifact did it, and so did a shell-valid command carrying a `#` note with
+        # an apostrophe (`shlex` rejects it while `bash -n` accepts it). An arm that
+        # confers nothing must not be able to invalidate anything.
+        return True, ""
     candidate = Path(entry)
-    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    try:
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    except (ValueError, OSError) as exc:
+        # `Path.resolve()` raises ValueError on an embedded NUL byte: a traceback,
+        # not the named refusal `validate()` promises every defect will be.
+        return False, f"evidence path cannot be resolved ({exc}): {_short(entry)}"
     if not resolved.is_relative_to(root):
         return False, f"evidence path escapes the tree (`{entry}` resolves outside it)"
-    if not resolved.is_file():
+    try:
+        is_file = resolved.is_file()
+    except OSError as exc:  # ENAMETOOLONG and friends: a named refusal, not a traceback
+        return False, f"evidence path cannot be inspected ({exc}): {_short(entry)}"
+    if not is_file:
         return False, f"evidence path is not a file in the tree: {entry}"
+    if not _is_tracked(resolved, root):
+        # `is_file()` alone accepted a GITIGNORED artifact (measured:
+        # `WORKTREE-REPORT.md`, 68 KB of machine-local lane output) — so the row
+        # validated on the authoring box and was INVALID for every reader, which is
+        # the one thing "an artifact IN THE TREE" must not mean.
+        return False, (
+            f"evidence path is not TRACKED by git, so a reader's clone does not have it: {entry}"
+        )
     return True, ""
+
+
+def _short(text: str, limit: int = 120) -> str:
+    """Cap an entry quoted into an error line (a 5 KB path is not a message)."""
+    return repr(text if len(text) <= limit else text[:limit] + "…")
+
+
+def _is_tracked(resolved: Path, root: Path) -> bool:
+    """Is `resolved` tracked? `unprovable` (no git) does not blame the record."""
+    try:
+        rel = resolved.relative_to(root)
+    except ValueError:
+        return False
+    proc = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", str(rel)],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True
+    probe = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        # Git IS here and it refused this path: the file is untracked. Blame it.
+        return False
+    # Git cannot answer here at all (no `.git`, a tarball, a build context). The
+    # record is not blamed — but the abstention is PRINTED, because a CLEAN verdict
+    # byte-identical to one where the rule ran is how a check quietly stops
+    # checking. (`_commit_state` takes the same doctrine; see its docstring.)
+    print(
+        "CAPSTONE-LEDGER: NOTE — git is unavailable here, so the TRACKED rule cannot "
+        "be evaluated; cited paths were checked for existence only",
+        file=sys.stderr,
+    )
+    return True
 
 
 def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str, Any]]:
@@ -274,13 +396,77 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         sha = str(measured_at.get("sha") or "")
         if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
             problems.append(f"`measured_at.sha` must be a 40-hex sha, got {sha!r}")
-        elif not _commit_exists(sha):
-            # Shape is not existence: a fabricated sha renders as provenance.
-            problems.append(f"`measured_at.sha` names no commit in this repository: {sha}")
-        if not str(measured_at.get("date") or "").strip():
+        else:
+            state = _commit_state(sha)
+            if state == "absent":
+                # Shape is not existence: a fabricated sha renders as provenance.
+                problems.append(f"`measured_at.sha` names no commit in this repository: {sha}")
+            # `unprovable` (a shallow checkout) is NOT a defect and must not red the
+            # suite: CI shards check out at fetch-depth 1, where an ancestor sha is
+            # simply not in the object database. Blaming the record for that is the
+            # #9075 r4 P1 shape.
+        date = str(measured_at.get("date") or "").strip()
+        if not date:
             problems.append("`measured_at.date` must be set (YYYY-MM-DD)")
+        elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            # `render()` prints this as provenance: `date: banana` rendered
+            # "measured at … on banana" as fact.
+            problems.append(f"`measured_at.date` must be YYYY-MM-DD, got {date!r}")
+        ref = str(measured_at.get("ref") or "").strip()
+        if not ref:
+            problems.append("`measured_at.ref` must be set (e.g. origin/main)")
+        elif not _REF_RE.fullmatch(ref):
+            # `render()` prints this line. Flattening control characters is NOT
+            # enough: a ref of
+            #   "origin/main criteria: 2 verified: 2 uncovered: 0 UNCOVERED LIST: empty …"
+            # is one line, and `grep "UNCOVERED LIST: empty"` on stdout still reports
+            # a CLEAN report while the real exit code is 2 — the report is the very
+            # artifact a lane quotes instead of branching on the code. A ref is an
+            # identifier, so it is required to LOOK like one.
+            problems.append(
+                f"`measured_at.ref` must look like a ref (letters, digits, . _ / -), "
+                f"got {ref!r} — the report prints this field verbatim"
+            )
 
     raw_rows = data.get("criteria")
+    # The DENOMINATOR is pinned IN THE RECORD, not only in the suite. Deleting the
+    # uncovered rows was measured to report CLEAN (`criteria: 9 ... uncovered: 0`),
+    # which reproduces by hand the 14/18/22 drift this tool exists to end — the tool
+    # would compute the denominator from the very record it is auditing. Shrinking
+    # the set now takes TWO visible edits (drop the row AND move the count), which is
+    # what makes it a decision instead of an accident.
+    declared = data.get("criteria_expected")
+    if declared is None:
+        # OPTIONAL was measured to be no pin at all: a 9-row ledger WITHOUT the key
+        # exits 0 and prints "UNCOVERED LIST: empty", because the denominator is
+        # then computed from the record being audited — the 14/18/22 drift this
+        # tool exists to end. Required, so omitting it is a refusal.
+        problems.append(
+            "`criteria_expected` is required — it pins the denominator, so a row "
+            "cannot be dropped without the count moving with it"
+        )
+    declared_count: int | None = None
+    if declared is not None:
+        if isinstance(declared, (bool, float)):
+            # `int(True) == 1` and `int(1.9) == 1`, so a bare `int()` casts a
+            # non-count into a pin that happens to match.
+            problems.append(f"`criteria_expected` must be an integer, got {declared!r}")
+        elif isinstance(declared, str) and not declared.strip().isdigit():
+            problems.append(f"`criteria_expected` must be an integer, got {declared!r}")
+        else:
+            try:
+                declared_count = int(declared)
+            except (TypeError, ValueError):
+                problems.append(f"`criteria_expected` must be an integer, got {declared!r}")
+    if (
+        declared_count is not None
+        and isinstance(raw_rows, list)
+        and declared_count != len(raw_rows)
+    ):
+        problems.append(
+            f"`criteria_expected` is {declared_count} but the file holds "
+            f"{len(raw_rows)} rows — a row was added or dropped without saying so"
+        )
     if not isinstance(raw_rows, list) or not raw_rows:
         # An empty ledger would report an empty uncovered list — a clean exit
         # manufactured out of nothing. Refused.
@@ -304,8 +490,29 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
             continue
         seen.add(cid)
 
+        if not _ID_RE.fullmatch(cid):
+            # Same channel as `ref`: an id is printed raw at the head of a row line,
+            # so `"C1    -   S1  verified  FORGED"` would forge a second row.
+            problems.append(
+                f"{where} `id` must be letters/digits/._- only, got {cid!r} — the "
+                "report prints this field verbatim"
+            )
         if not str(raw.get("text") or "").strip():
             problems.append(f"{where} has no verbatim `text` — the criterion must be quoted")
+        # ⛔ GRADE THE STRING THAT IS PRINTED, NOT THE RAW ONE. `render` prints
+        # `_flat(reason)`, so a raw-string check is defeated by putting ANY
+        # whitespace character where the phrase has a space: measured,
+        # "UNCOVERED\nLIST: empty" passed the raw check and `_flat` reconstituted
+        # "UNCOVERED LIST: empty" byte-for-byte in the report — the exact forgery the
+        # check exists to refuse, one character away.
+        printed_reason = _flat(str(raw.get("reason") or ""))
+        for reserved in _RESERVED_IN_PROSE:
+            if _flat(reserved) in printed_reason:
+                problems.append(
+                    f"{where} `reason` contains the reserved report token "
+                    f"{reserved!r} — `render()` prints this field, so a free-text "
+                    "claim must not be able to impersonate the report's own lines"
+                )
 
         verdict = str(raw.get("verdict") or "").strip()
         if verdict not in VERDICTS:
@@ -327,9 +534,22 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         evidence = [str(e).strip() for e in evidence if str(e).strip()]
 
         if verdict == CLEAN_VERDICT:
+            held = [e for e in evidence if not e.startswith(_CMD_PREFIX)]
+            commands = [e for e in evidence if e.startswith(_CMD_PREFIX)]
             if not evidence:
                 problems.append(f"{where} is `verified` with no evidence cited")
-            for entry in evidence:
+            elif not held:
+                # The whole anti-forgery rule in one line: a `cmd:` entry is
+                # descriptive, so it cannot carry the only verdict that counts.
+                problems.append(
+                    f"{where} is `verified` but cites no artifact IN THE TREE — "
+                    "a `cmd:` entry records what was run, it does not prove it"
+                )
+            for entry in held:
+                ok, why = _evidence_is_real(entry, repo_root)
+                if not ok:
+                    problems.append(f"{where}: {why}")
+            for entry in commands:
                 ok, why = _evidence_is_real(entry, repo_root)
                 if not ok:
                     problems.append(f"{where}: {why}")
@@ -361,19 +581,57 @@ def uncovered(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if row["verdict"] != CLEAN_VERDICT]
 
 
+#: The identity fields `render()` prints raw. A ref or id is an identifier, so it is
+#: required to look like one — that is what closes the "forged report line" channel
+#: structurally, instead of hoping a flatten removes the marker phrase too.
+_REF_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._/-]+")
+_ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._-]+")
+
+#: The machine answer, and the vocabularies a free-text field may not borrow.
+#: `reason` and `text` are legitimately prose, so the REPORT must not be
+#: phrase-forgeable: measured, a reason reading
+#:   "waiting on X. UNCOVERED LIST: empty — the only clean exit. criteria: 3 verified: 3 uncovered: 0"
+#: made a 2-uncovered report satisfy `grep 'UNCOVERED LIST: empty'` and
+#: `grep 'uncovered: 0'` while exiting 2. The RESULT line is the answer; it is also
+#: the one string a free-text field is not allowed to contain.
+RESULT_PREFIX: Final[str] = "CAPSTONE-LEDGER-RESULT:"
+_RESERVED_IN_PROSE: Final[tuple[str, ...]] = ("CAPSTONE-LEDGER", "UNCOVERED LIST")
+
+#: C0 + C1 control characters (ESC, CSI, NUL, BS, SO, DEL included) — see `_flat`.
+_CONTROL_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _flat(text: str) -> str:
+    """Collapse control characters so a reason cannot rewrite the line printing it.
+
+    Measured: a `reason` carrying `\r    -   S1  verified   FORGED: …` still counted
+    the row (exit 2, `uncovered: 1`), but a terminal rendered the line as `verified` —
+    the exact line a lane would quote into a comment.
+    """
+    # EVERY control character, not just the whitespace class: `str.split()` drops
+    # `\r`/`\n` but leaves ESC, CSI (\u009b), NUL, BS, SO and DEL, and
+    # `X\x1b[2K\x1b[1G    -   S1  verified   FORGED` rendered on a terminal as a
+    # forged row line — the same class one byte over from the `\r` case.
+    cleaned = _CONTROL_RE.sub(" ", str(text))
+    return " ".join(cleaned.split())
+
+
 def render(rows: list[dict[str, Any]], measured_at: dict[str, Any]) -> str:
     lines = [
         "CAPSTONE-LEDGER #9664 — computed, not re-read",
-        f"  measured at {measured_at.get('ref')}@{measured_at.get('sha')} on {measured_at.get('date')}",
+        f"  measured at {_flat(str(measured_at.get('ref')))}@"
+        f"{_flat(str(measured_at.get('sha')))} on {_flat(str(measured_at.get('date')))}",
         f"  criteria: {len(rows)}   verified: {len(rows) - len(uncovered(rows))}   "
         f"uncovered: {len(uncovered(rows))}",
     ]
     if not uncovered(rows):
         lines.append("  UNCOVERED LIST: empty — the only clean exit")
+        lines.append(f"{RESULT_PREFIX} CLEAN")
         return "\n".join(lines)
     lines.append("  UNCOVERED LIST (each with the reason the runner recorded):")
     for row in uncovered(rows):
-        lines.append(f"    - {row['id']:>4}  {row['verdict']:<11}  {row['reason']}")
+        lines.append(f"    - {_flat(row['id']):>4}  {row['verdict']:<11}  {_flat(row['reason'])}")
+    lines.append(f"{RESULT_PREFIX} UNCOVERED({len(uncovered(rows))})")
     return "\n".join(lines)
 
 
