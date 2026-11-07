@@ -478,6 +478,30 @@ def test_an_ancestor_anchor_passes_on_the_same_repo(tmp_path):
     assert report.unverified == []
 
 
+def test_a_shallow_clone_HOLDING_the_anchor_still_reports_unverified(monkeypatch):
+    """Fails if the `shallow is True` arm of `check_anchors` is deleted.
+
+    Reachable, and found by the MUTATION-ATTRIBUTION round: the test above patches
+    `is_shallow` only, with an anchor object that is ABSENT, so it leaves via the
+    "not in this clone" branch — a `raise` inside the `shallow is True` arm left the
+    whole suite green. In a real `--depth 1` clone that DID fetch the anchor, the
+    arm is the one that runs, and deleting it flips a shallow clone from UNVERIFIED
+    (2) to DRIFT (1) — a false red on a document that is not known to be wrong.
+    The three patches are the only state that enters the arm.
+    """
+    monkeypatch.setattr(pmc, "is_shallow", lambda repo: True)
+    monkeypatch.setattr(pmc, "commit_exists", lambda repo, sha: True)
+    monkeypatch.setattr(pmc, "is_ancestor", lambda repo, sha: False)
+    report = pmc.Report()
+    row = pmc.Row(issue=1, defect="d", status="VERIFIED-FIXED",
+                  anchors=["deadbeefdeadbeef"], pins=[], line=1)
+    errors = pmc.check_anchors(REPO, [row], report)
+    assert errors == []
+    assert report.unverified and "shallow" in report.unverified[0]
+    report.errors = []
+    assert report.code == 2
+
+
 def test_a_shallow_clone_reports_unverified_never_drift(monkeypatch):
     """Fails if a shallow clone is allowed to call a TRUE claim drift.
 
