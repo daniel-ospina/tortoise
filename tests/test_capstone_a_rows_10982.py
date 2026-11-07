@@ -11,7 +11,7 @@ Three properties are pinned here, and each names the mutation that makes it FAIL
    `[E1, E2, E3, E4, E5]`, because a required row cannot be inferred from the rest (`V2`) and making
    them required would red every verdict table that predates their scoring runs, the committed
    `capstone-measured-9152448d.log` included;
-2. **the amendment is an amendment** — §10.10 quotes the superseded pins line verbatim, so the change
+2. **the amendment is an amendment** — §10.11 quotes the superseded pins line verbatim, so the change
    is findable rather than a quiet overwrite (`#9736` is the model, not a new registration);
 3. **the census reports, and where it cannot measure it says so** — a population no instrument has
    counted emits `UNMEASURED(<what would measure it>)`, never a `0`, because a zero is a NUMBER and
@@ -179,16 +179,23 @@ def test_the_amendment_quotes_the_superseded_pins_line_verbatim():
     ⛔ The slice is bounded by the A-rows heading's own TEXT, not by `text.index("### 10.8")`. The
     branch first wrote a §10.8 and then merged `origin/main`, which brought `#10997`'s own §10.8 —
     so an ordinal first-match resolved to the WRONG section and the slice spanned both, letting this
-    arm pass on a document whose §10.10 was `#10997`'s cite re-point (#10982 review round 2).
+    arm pass on a document whose §10.11 was `#10997`'s cite re-point (#10982 review round 2).
+
+    ⛔ AND THE NUMBER IS PINNED FROM BOTH SIDES, because it has now been taken TWICE. §10.9 was
+    claimed by `main`'s `#11292` cite re-point (round 2), so this amendment moved to §10.10; then
+    `main`'s `#11368` cite re-point landed its own §10.10 (#11331 rebase), so it moved to §10.11.
+    Each time, the failure mode is identical and silent: a forward merge leaves TWO sections
+    claiming one number, every pointer to it becomes ambiguous, and a bare `count(...) == 1` is
+    satisfied by `main`'s section while this one has vanished. So every number this branch has had
+    to step over is asserted present exactly once, and the amendment's own number exactly once.
     """
     text = PREREG.read_text()
-    heading = "### 10.10 — five `A`-rows added to the criteria table"
-    assert heading in text, "the A-rows amendment is not a §10.10 with its own heading"
-    # ⛔ §10.9 was TAKEN by the time this branch met `main`: `#11292` landed its own §10.9 (the §11
-    # cite re-point) and a forward merge left two sections claiming one number. This branch's
-    # amendment takes the next free number, and BOTH halves are asserted — a count of 1 alone
-    # would now be satisfied by `main`'s section while this one had vanished.
-    assert text.count("### 10.10") == 1, "two sections claim §10.10 — a pointer to it is ambiguous"
+    heading = "### 10.11 — five `A`-rows added to the criteria table"
+    assert heading in text, "the A-rows amendment is not a §10.11 with its own heading"
+    assert text.count("### 10.11") == 1, "two sections claim §10.11 — a pointer to it is ambiguous"
+    assert text.count("### 10.10") == 1, (
+        "`main`'s §10.10 (`#11368`'s cite re-point) must survive the forward merge — if it is "
+        "gone, this amendment has taken a number `main` owns instead of the next free one")
     assert text.count("### 10.9") == 1, "`main`'s §10.9 must survive the forward merge"
     section = text[text.index(heading):]
     section = section[: section.index("## 11.")]
@@ -196,7 +203,7 @@ def test_the_amendment_quotes_the_superseded_pins_line_verbatim():
         "the superseded pins line is not quoted — a reader cannot see what changed")
     assert "required_criteria_rows" in section, (
         "the section does not say the required set is unchanged")
-    # ⛔ §10.10 is where the next child reads its FLOORS from, and it said **Seven** while listing
+    # ⛔ §10.11 is where the next child reads its FLOORS from, and it said **Seven** while listing
     # seven plus two and while §3.7 and the record both carried nine (#10982 review round 4, F3).
     # Checked against the ACTUAL count, not against a word: a re-wording that restores the
     # understatement reds here rather than going stale beside `test_every_pinned_A_floor_…`,
@@ -204,7 +211,7 @@ def test_the_amendment_quotes_the_superseded_pins_line_verbatim():
     a_floors = [k for k in check.parse_pins(text)["denominator_floors"] if k.startswith("a")]
     assert len(a_floors) == 9, a_floors
     assert re.sub(r"\s+", " ", "**Nine** floors are pinned") in re.sub(r"\s+", " ", section), (
-        "§10.10 understates how many A-floors the record pins — a reader scoring A1 from this "
+        "§10.11 understates how many A-floors the record pins — a reader scoring A1 from this "
         "section would miss two of them")
 
 
@@ -804,11 +811,11 @@ def test_the_floor_exemption_binds_the_WHOLE_unit_phrase_not_a_PREFIX_of_it():
         cell = f"UNMEASURED(#10988 decides) floor of `>= 30` typed statements{ending}"
         assert failures(cell) == [], (cell, failures(cell))
 
-    # (4) The PINNED cell is written so its floor clause ENDS it: reverting §10.12 turns the record
+    # (4) The PINNED cell is written so its floor clause ENDS it: reverting §10.13 turns the record
     #     itself RED, so the document edit is load-bearing rather than tidying.
     cell = a4["threshold"]
     assert cell.rstrip().endswith("`>= 30` typed statements)"), (
-        f"A4's pinned cell must END at its floor clause's unit (§10.12): {cell!r}")
+        f"A4's pinned cell must END at its floor clause's unit (§10.13): {cell!r}")
     plain = check._plain(cell)
     assert check._strip_the_rows_own_floor(plain, 30.0, "typed statements") != plain, (
         "A4's own cell is not exempted at all — the gate would refuse the shipped record")

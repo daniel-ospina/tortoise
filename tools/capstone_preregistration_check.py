@@ -427,8 +427,8 @@ FLOOR_CLAUSE = re.compile(
 #: input-validation control (C5) names that as the reason allowlisting is the required minimum. This
 #: arm is what keeps §7 item 1's "a record-only edit cannot give `A4` a bar" true, so the safe
 #: direction is to accept ONLY closing punctuation and refuse every word: over-blocking here costs a
-#: re-punctuated cell (the pinned `A4` cell is written so its clause ends it, §10.12), while failing
-#: open settles the owner-gated `A4`-vs-`D3` decision (§3.7, §10.10).
+#: re-punctuated cell (the pinned `A4` cell is written so its clause ends it, §10.13), while failing
+#: open settles the owner-gated `A4`-vs-`D3` decision (§3.7, §10.11).
 FLOOR_CLAUSE_END = re.compile("[" + r"\s)\]}>.,;:!?—–\-" + "\"'" + "]*" + r"\Z")
 
 
@@ -451,7 +451,7 @@ class FloorMap(dict):
     `criteria[A4].floor` untouched, while the identical bar with the words `floor of` removed was
     refused at `exit=1`. `A4` is the row the record registers as having NO bar, and this is the
     owner-gated `A4`-vs-`D3` decision (`#10988` BLOCKED, `#1022` carries it), so excusing it
-    settles an owner decision this registration has no authority over (§3.7, §10.10).
+    settles an owner decision this registration has no authority over (§3.7, §10.11).
 
     A plain `dict` still works, but it carries no units, so its floor clauses cannot be classified
     and are NOT exempted — fail CLOSED.
@@ -492,7 +492,7 @@ def _strip_the_rows_own_floor(text: str, value: float | None, unit: str | None =
     word there can re-scope the number into a rate and that is the `A4`-vs-`D3` bar `#10988`/`#1022`
     have not ruled on. `, per claim` is refused for the same reason as ` per claim`: the delimiter
     does not license a following denominator phrase. The pinned record's own `A4` cell is written so
-    its floor clause ends it (`#11331` §10.12).
+    its floor clause ends it (`#11331` §10.13).
 
     The no-record caller (a unit test on a bare row list) is the CHECKER's concern, not this
     function's: `check_completeness` strips by shape alone only when it was handed no map at all.
@@ -3977,13 +3977,13 @@ def check_completeness(rows: list[dict[str, str]],
             # empty finding list while the same bar placed after the marker was refused. A4 is
             # the one row whose registration is that it has NO bar, and its threshold cell is
             # what the run/scoring child reads, so a bar surviving here is the owner-decision
-            # bypass this arm exists to close (§7 item 1, §3.7, §10.10).
+            # bypass this arm exists to close (§7 item 1, §3.7, §10.11).
             # ⛔ AND THE EXEMPTION IS THE PINNED VALUE **AND ITS UNIT**, not the phrase (#11331
             # review rounds 8 and 10): stripping any `floor of <comparator> <number>` let the two
             # words launder a bar (`floor of >= 0.5 typed_share` exited OK), and binding on the
             # bare NUMBER still excused `floor of >= 30 % typed` — the same 30 as `A4`'s count
             # floor, spent as a RATE. `A4` is the row whose registration is that it has NO bar, so
-            # either variant is an owner-decision bypass (§7 item 1, §3.7, §10.10).
+            # either variant is an owner-decision bypass (§7 item 1, §3.7, §10.11).
             remainder = (
                 # ⛔ NO MAP AT ALL is a unit test on a bare row list: strip by shape, the legacy
                 # behaviour. A map that is PRESENT but does not name this row is the absent-row

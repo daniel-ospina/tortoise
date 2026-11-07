@@ -73,7 +73,7 @@ argument should treat E1's bar as **unconfirmed**, which is exactly how `#9110` 
 | **E3** | **no at registration** — no measurement existed when this record was written (§10.1, §10.3: a POST-registration run measures it) | a genuine pre-registration, prior to its first run; E3's class set re-registered to follow #5199 (§10.1) |
 | **E4** | **no measurement was *visible* at registration** — ⛔ not "no measurement existed": the operator audit **ran** `2026-10-19T01:39:26Z`, two days BEFORE this record, and its **artefact** landed after it (`d50217273`, 2026-10-22), so nothing it measured was in the tree this row's author wrote (§10.3, §10.4) | a genuine pre-registration, prior to its first run — and the visibility claim states WHICH of the two facts makes it `false` |
 | **E5** | **yes** — `#7947`: `EXTRACTOR-V4-ARCHITECTURE.md` §10, committed `ecc7bc8ca` (2026-10-19) | a threshold for the **re-run**, disclosed as post-visible (§10.2): the measurement predates this record and sits BELOW the bar |
-| **A1**, **A3**, **A4**, **A5** | **no at registration** — the field asks whether a measurement of the row was visible to the registration's author **at `a6085af84`** (§10.3, the same anchor E3 uses), and every reading of these metrics postdates it. ⛔ **The ground is NOT "no measurement exists anywhere"**: the owner's 2026-11-04 `live-v4` hand reading is a prior of A1/A3/A4/A5 (it is quoted as each row's `threshold_basis`), and `capstone-measured-9152448d.log` — committed `31f996f91`, 2026-11-04, **in this directory** — carries A1's object population and a COMPLETE edge-type enumeration on the pinned corpus, plus A5's `Subject` count. Both postdate `a6085af84`, so `false` holds; what a reader must apply is the discount that the bar's author HAD seen those figures (§10.10) | a threshold for the **scoring run** (`#10984`–`#10988`), disclosed as post-visible |
+| **A1**, **A3**, **A4**, **A5** | **no at registration** — the field asks whether a measurement of the row was visible to the registration's author **at `a6085af84`** (§10.3, the same anchor E3 uses), and every reading of these metrics postdates it. ⛔ **The ground is NOT "no measurement exists anywhere"**: the owner's 2026-11-04 `live-v4` hand reading is a prior of A1/A3/A4/A5 (it is quoted as each row's `threshold_basis`), and `capstone-measured-9152448d.log` — committed `31f996f91`, 2026-11-04, **in this directory** — carries A1's object population and a COMPLETE edge-type enumeration on the pinned corpus, plus A5's `Subject` count. Both postdate `a6085af84`, so `false` holds; what a reader must apply is the discount that the bar's author HAD seen those figures (§10.11) | a threshold for the **scoring run** (`#10984`–`#10988`), disclosed as post-visible |
 | **A2** | **no** — no S3 RESOLVE attach/mint census has ever been taken on any graph, committed or not | a genuine pre-registration, prior to its first run |
 
 **⇒ §0's table was wrong about E5, and had been since this file was written.** The struck row above
@@ -428,7 +428,7 @@ reporting one is the defect, not the small number.
 ⚠️ The **step set** these rows are measured over is not all-unconditional: §11 records which of §4.1's
 eight steps are required and which is conditional on the pipeline having work for it (`#10215`).
 
-⚠️ **The five `A`-rows were added on 2026-11-06 by `#10982` (§10.10) and are NOT required rows.**
+⚠️ **The five `A`-rows were added on 2026-11-06 by `#10982` (§10.11) and are NOT required rows.**
 `pins.required_criteria_rows` stays `[E1, E2, E3, E4, E5]`: the `A`-rows name criteria whose scoring runs
 `#10984`–`#10988` own, and a registration may not turn a row into a gate before anyone has measured it.
 A verdict table that omits them is not refused; a table that carries one is held to the same rules as
@@ -678,7 +678,7 @@ under the population it is drawn from: a floor that guards a population the bar 
 is a floor a one-of-one decision clears. The other two are **not population counts**, which is why
 they are not `30`: `a1_rollup_queries: 1` and `a3_event_root_coverage: 0.5` are the second refusal
 boundary each of those rows registers, and `#10984`/`#10986` must clear them before their bars are
-meaningful (§10.10). They live in the same block on purpose — they were prose-only until `#10982`
+meaningful (§10.11). They live in the same block on purpose — they were prose-only until `#10982`
 round 2, and a child reading the pins missed them, scoring `A1` with zero rollup queries and `A3`
 at 0.05 coverage: rows the record REFUSES. Below a floor a row is **REFUSED**, which §3 defines as
 neither a pass nor a fail.
@@ -788,7 +788,7 @@ Exit 0 only when **all** of these hold:
      `tools/capstone_preregistration_check.py` enforces both halves: it strips the comparator THE
      FLOOR OWNS and refuses any comparator left outside it, and it requires a `#NNNN` reference.
      ⛔ **The exemption is the row's PINNED value AND its own floor unit, and the clause must END
-     the cell at that unit** (§10.12): `` floor of `>= 30` typed statements `` is `A4`'s floor,
+     the cell at that unit** (§10.13): `` floor of `>= 30` typed statements `` is `A4`'s floor,
      while a rate spelled after the same unit (`typed statements per claim`, `…, share`, `… ratio`)
      re-scopes the number and is a BAR, refused exactly as `>= 30 % typed` is. Only closing
      punctuation may follow the unit, to the end of the cell — an allowlist rather than a denylist
@@ -1118,16 +1118,16 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11098-11120` (`_collect_classify_items`, the collector's item set), `:12908` and `:13057` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11098-11120` (`_collect_classify_items`, the collector's item set), `:12982` and `:13131` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
 | **5,314 Objects** and `object→object edges []` (A1 basis) | ⚠️ **RECORDED READING** — the owner's 2026-11-04 `live-v4` reading at `#7949` comment `6645275147`; the tree-derivable half is only the vocabulary (`packs/dev/manifest.yaml:142` `decomposesInto`, `:148` `hasPart`) |
 | **9,910 / 15,534** statements (63.8%) carrying neither `IMPL` nor `NAND`; 36.2% cheap (A3 basis) | ⚠️ **RECORDED READING** — the same comment |
 | **typed 109 (0.6 %)** · `NULL` **3,658 (19 %)** · `statement` **15,534 (80 %)** (A4 basis) | ⚠️ **RECORDED READING** — the same comment's `pointKind` census. This is the figure A4's threshold turns on (`0.6 % typed is the ceiling the capstone must beat`), so a reader auditing that threshold must be able to find its provenance here |
-| **26 Subjects** against **19,300 points** (A5 basis) | ⚠️ **RECORDED READING** — the same comment. The PINNED corpus measures a different population: `"Subject": 19` at `capstone-measured-9152448d.log:275`, which §10.10 reports beside it rather than substituting |
+| **26 Subjects** against **19,300 points** (A5 basis) | ⚠️ **RECORDED READING** — the same comment. The PINNED corpus measures a different population: `"Subject": 19` at `capstone-measured-9152448d.log:275`, which §10.11 reports beside it rather than substituting |
 | **6,533 / 2,614 / 402** on **7,870** Objects and **27,324** reference edges (A2 basis) | `tortoise/definite_description_backfill.py:15-23` — re-derivable |
-| **64** Objects / **19** Subjects / **21** `aboutSubject` (the A-row figures §10.10 discloses) | `capstone-measured-9152448d.log:271` (`"Object": 64`), `:275`, `:299-309` — re-derivable |
+| **64** Objects / **19** Subjects / **21** `aboutSubject` (the A-row figures §10.11 discloses) | `capstone-measured-9152448d.log:271` (`"Object": 64`), `:275`, `:299-309` — re-derivable |
 | the **nine** A-row floors (§3.7) | `pins.denominator_floors` in this file, cross-checked against `preregistration.json` **both ways** by `tools/capstone_preregistration_check.py` |
 | §1.6.4's censuses — v2 `Object 1 / Point 27 / Event 2 / Session 1 / Operator 0`, m2 `0 / 149 / 1 / 1 / 0` — and the `5.5×` ratio | `tests/test_7949_c2_door.py` (`test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE`), measured on `wp01_quarry_debug` under `TORTOISE_SESSION_LLM_MOCK=1`, one embedded graph per arm |
 | 5 of 15 operator edges (§1.6.3, E4) | `tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json` — the receipt `select_e4_receipt()` selects at the frozen `fixtures_hash` `dd7e8520…` (`operator_audit.edge_correct = 5`, extractor `tortoise.extractor_v2::extract_session_v2`) |
@@ -1374,7 +1374,7 @@ place a machine reads it.
   at the pre-registration commit; a run log may not declare it.
 - **Why it is not a relaxation**: `S2.3` structurally cannot run on a corpus whose S2 map types every
   candidate — `_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only
-  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:12908`, `:13057`).
+  kind-missing/`unclassified` candidates and both passes sit behind `if items:` (`:12982`, `:13131`).
   The old rule therefore could not be satisfied by **any** legitimate run of the registered corpus,
   so the gate could not return a verdict at all (§11.2's four ordered refusals). Every one of the
   eight still has to be accounted for, and an idle claim needs the run's own four facts — flag ON,
@@ -1503,7 +1503,39 @@ place a machine reads it.
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
-### 10.10 — five `A`-rows added to the criteria table, none of them required (`#10982`, 2026-11-06)
+### 10.10 — the §11 cite block re-pointed after `#11368`'s mention-builder consolidation (2026-11-07, `#11368`)
+
+- **Original value (as §10.9 left it):** `_collect_classify_items` at `:11098`, its extent
+  `:11098-11120`, the two `if items:` gates at `:12908`/`:13057`, and the two fail-open `except`
+  arms at `:12921`/`:13068`.
+- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12982`/`:13131` and
+  `:12995`/`:13142`.
+- **Why:** `#11368` gave the declared-span verdict ONE home (`_verified_span_source`) and routed
+  both mention builders through it, a net **+74** lines (`126` inserted / `52` deleted) confined to
+  the mention-builder region (`:12128`–`:12628` — the last hunk is `+12607,22`, so `:12607` is its
+  START, and the bound is `:12628`; it must contain BOTH calls the section claims, `:12273` in
+  `_mention_record` and `:12624` in `_clamped_mention`). Every cite **below** that region therefore moves
+  by exactly `+74` — `:12908`→`:12982`, `:13057`→`:13131`, `:12921`→`:12995`, `:13068`→`:13142` —
+  while `_collect_classify_items` (`:11098`), which sits **above** it, does not move at all. The
+  `+0` on the collector and the `+74` on the four cites below it are one measurement, and quoting
+  only one of them is how the next re-derivation anchors on the wrong number.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
+⚠️ §10.8's own **New value** is deliberately left at `:10397`/`:11849`/`:11862` — the state
+`#10997` left — because it is the ANCHOR §10.9 re-derives from ("must anchor on the measured
+`:10398`, never on the recorded value plus 700"). Rewriting it to a later head's numbers leaves
+§10.9 citing an Original value its predecessor never stated, and contradicts §10.8's own stated
+insert size. Each §10.N entry freezes ONE move; the moves after it are §10.N+1's to record.
+⛔ NOT corrected here, and deliberately so: §10.7's New value gives `_collect_classify_items` as
+`:10020` with its extent as `:10169-10191`, while §10.8's Original states `:10193`/`:10193-10215`
+— three values for one symbol, and §10.8's "inserts **36** lines" reconciles with none of them
+(`:10193`→`:10397` is `+204`). Both entries are `main`'s BYTES, unmodified by this commit; fixing
+them in place is exactly what this note forbids, and the correction is tracked as **#11425**
+rather than smuggled into a cite re-derivation.
+
+### 10.11 — five `A`-rows added to the criteria table, none of them required (`#10982`, 2026-11-06)
 
 **Old value (verbatim).** The record registered **seven** rows and two places said so:
 
@@ -1592,7 +1624,7 @@ record-only edit (§7 item 1), and `document_sha256` is re-cut in this same comm
 carries an `A`-row is checked by the same `V1`–`V12` rules as an `E`-row, including `V12`'s refusal of
 a row whose `blocked_by` has **CLOSED**.
 
-### 10.11 — the `A`-corpus qualifier retired, because `#10983` (C2) landed (`#11331`, 2026-11-07)
+### 10.12 — the `A`-corpus qualifier retired, because `#10983` (C2) landed (`#11331`, 2026-11-07)
 
 **Old value (verbatim).** `preregistration.json`'s `a_corpus.status` read
 `"PROVISIONAL — #10983 (C2) owns the reconciliation"`, `a_corpus.requires` ended *"Until `#10983`
@@ -1621,7 +1653,7 @@ if it were a measurement of the fleet graph it was written to reverse.
 register changes; `required_criteria_rows` stays `[E1, E2, E3, E4, E5]`; no committed verdict is
 re-scored. `document_sha256` is re-cut from the resolved document (§8), never picked from a side.
 
-### 10.12 — the `A4` floor clause is exempted as a WHOLE unit phrase that ENDS the cell (`#11331`, 2026-11-07)
+### 10.13 — the `A4` floor clause is exempted as a WHOLE unit phrase that ENDS the cell (`#11331`, 2026-11-07)
 
 **Old value (verbatim).** §3.1's `A4` threshold cell (and its `criteria[A4].threshold` restatement in
 `preregistration.json`, which agrees character for character) ended:
@@ -1669,7 +1701,7 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 `_collect_classify_items` (`tortoise/extractor_v2.py:11098-11120`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:12908` (the S2 pass) and `:13057` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:12982` (the S2 pass) and `:13131` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -1713,7 +1745,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:12921`, `classify(S2) failed` / `:13068`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:12995`, `classify(S2) failed` / `:13142`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends

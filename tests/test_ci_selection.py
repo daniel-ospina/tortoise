@@ -19517,6 +19517,23 @@ def test_runner_label_gate_runs_on_a_tools_only_change():
     assert "test_ci_runner_label_coverage.py" in r["test_files"], r
 
 
+def test_runner_topology_tool_change_selects_core_not_tier1():
+    # #11435 review P1: `tests/test_ci_runner_topology.py` (registered `core`) is the ONLY
+    # thing that pins this PR's guards — the engage-capacity gate, the dry-run projection,
+    # the fixture refusal, and the owner-gated (never default) ARCH strip. `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and `tools/ci_runner_topology.py` matches no SOURCE_PATTERNS
+    # row, so before the CORE_ALSO entry a tool-only diff returned `surfaces: []` and the pin
+    # was ABSENT: a PR that reverted any of those gates would run `python-ci-gate` GREEN with
+    # none of its own pins (the #1349/#3332/#3616 silent-drop class).
+    # MEASURED at the reviewed head: `select(["tools/ci_runner_topology.py"])` ->
+    # `{"surfaces": [], ...}` with `test_ci_runner_topology.py` missing from `test_files`.
+    # Mutation check: removing the CORE_ALSO entry fails both arms below.
+    r = _sel(["tools/ci_runner_topology.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_ci_runner_topology.py" in r["test_files"], r
+
+
 def test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it():
     # #10976: `tests/test_cache_eviction_census.py` pins the egress census —
     # `tortoise/cache_eviction.py` (an unproven population may not be swept) and its
@@ -19667,6 +19684,30 @@ def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
         assert r["full"] is False, (changed, r)
         assert r["surfaces"] == ["core"], (changed, r)
         assert "test_journal_growth.py" in r["test_files"], (changed, r)
+
+
+def test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change():
+    # #11385 (review P1): `tests/test_s4_reeemit_tax.py` (registered `core`) pins
+    # the instrument that produces the PR's headline number — a vacuous A/B (both
+    # arms rendering the same prompt), a PARTIAL cost total published with a
+    # total-looking basis, an error path that discards the spend of the expensive
+    # arm, a corrections channel an items-not-in-S2 filter silently drops, and an
+    # empty test whose scope diverged from production's. BOTH guarded paths are
+    # flat NON_PYTHON_PREFIXES entries (`tools/`, `docs/`) matching no
+    # SOURCE_PATTERNS row, so without the CORE_ALSO entries a tool-only or
+    # artifact-only diff was filtered out BEFORE the "not matched -> core"
+    # fallback and the pins never ran on the files they hold (the
+    # #1349/#3332/#3616 silent-drop class, same shape as
+    # `tools/journal_growth.py` above). The evidence path is listed because the
+    # suite re-derives the committed `ab-*.json` artifacts' headline figures, so
+    # an artifact-only edit must select the pins that read it.
+    for changed in ("tools/s4_reeemit_tax.py",
+                    "docs/evidence/1789-s4-reeemit-tax/README.md",
+                    "docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_s4_reeemit_tax.py" in r["test_files"], (changed, r)
 
 
 def test_dashboard_deploy_script_change_selects_core_not_tier1():

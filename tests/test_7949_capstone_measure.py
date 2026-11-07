@@ -4528,22 +4528,23 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("12893", "if vet_enabled and embed_list:"),
-            ("12894", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("13032", "if vet_enabled and complete_list:"),
-            ("13033", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("12967", "if vet_enabled and embed_list:"),
+            ("12968", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("13106", "if vet_enabled and complete_list:"),
+            ("13107", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its three lines of keys (13257-13259) close on
-        # line 13260 — DERIVED by content, not by arithmetic: `result["vet"] = {`
-        # opens at 13256 and the block's `}` is 13260. ⚠️ The base head's number
-        # was 9446, which pointed at an unrelated comment about
-        # `_value_verbatim_span`, so a mechanical +1101 lands on `try:`; a COMMENT
-        # is not an asserted number and nothing reds on it, which is why the two
-        # sides' bump disagreed here and why every ASSERTED number in this table
-        # is verified by content instead.
+        # the VET block's start; its three lines of keys (13331-13333) close on
+        # line 13334 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 13330 and the block's `}` is 13334. ⚠️ A conflict resolution
+        # here once kept main's numerals (13256/13257-13259/13260 — correct on
+        # main, but in THIS tree 13256 is the `"hold"` key and 13257-13260 is
+        # the whole `chain_enforcer` block) next to the branch's post-refactor
+        # asserts; a comment is not an asserted number and nothing reds on it,
+        # which is why every ASSERTED number in this table is verified by
+        # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("13246", 'result["classify_later"] = {'),
-            ("13256", 'result["vet"] = {'),
+            ("13320", 'result["classify_later"] = {'),
+            ("13330", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY PASS'S OWN FAIL-OPEN PAIR (#10833 review, P2). The
         # `+33` shift the fold applied to this row moved the first member to
@@ -4557,25 +4558,25 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # a reader following `:10620` must land in the `classify_later and
         # complete_list` block, which the row below holds at `:10599`.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("12921", "except Exception as e:  # never block capture (P1)"),
-            ("13068", "except Exception as e:  # never block capture (P1)"),
+            ("12995", "except Exception as e:  # never block capture (P1)"),
+            ("13142", "except Exception as e:  # never block capture (P1)"),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
-            ("12783", "if not edus:"),
-            ("12803", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("12857", "if not edus:"),
+            ("12877", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         # ...and the same claim in the rule's own docstring
         ("probes/capstone_measure.py", "with the flag ON", (
-            ("12803", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
+            ("12877", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
         )),
         ("probes/capstone_measure.py", "follows at", (
-            ("12782", "edus = _edus_from_conversation(conversation)"),
+            ("12856", "edus = _edus_from_conversation(conversation)"),
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("13256", 'result["vet"] = {'),
-            ("13260", ("exact", "}")),
+            ("13330", 'result["vet"] = {'),
+            ("13334", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4630,10 +4631,10 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # return it names, while every gate reported OK. Two rows because the
         # claim wraps over two lines and a row scopes to ONE line.
         ("README.md", "i.e. BEFORE the", (
-            ("12779", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
+            ("12853", "vet_enabled = (vet_arbiter is not None or _vet_enabled()"),
         )),
         ("README.md", "early return (`", (
-            ("12783", "if not edus:"),
+            ("12857", "if not edus:"),
         )),
         # ⛔ The #2684 row's cite (#10833 review, P2): the fold rewrote a CORRECT
         # `5042-5043` into `4948-4949` — inside `_refuse_rewritten_value`, an
@@ -4647,20 +4648,37 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the bare one sat in no row, which is how a `+N` insert left it on a
         # docstring in an unrelated helper while every neighbour moved.
         ("README.md", "on its fail-open path", (
-            ("12658", "except Exception as e:  # noqa: BLE001, RUF100"),
-            ("12661", '"(fail-open)"], {}'),
+            ("12732", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("12735", '"(fail-open)"], {}'),
         )),
         # ⛔ AND THE PROBE'S OWN COPY (#10997 review round 5, P2): the same range
         # is baked into `_IDLE_CITES["vet"]`, i.e. into the cause a future run
         # PRINTS to a reader — and it sat on a line the neighbouring row does not
         # scope to, so a move would ship a stale number in machine-emitted prose.
         ("probes/capstone_measure.py", "on its fail-open path", (
-            ("12658", "except Exception as e:  # noqa: BLE001, RUF100"),
-            ("12661", '"(fail-open)"], {}'),
+            ("12732", "except Exception as e:  # noqa: BLE001, RUF100"),
+            ("12735", '"(fail-open)"], {}'),
         )),
         ("docs/00_index.md", "refuses a value-free point at", (
             ("5286", "if not _carries_value(content, quote):"),
             ("5287", "return None"),
+        )),
+        # ⛔ THE S5 CONNECT CALL, IN BOTH DOCUMENTS (#11368 rebase review, P2). The
+        # `+74` re-derivation matched `execute_embed` by SYMBOL and landed on its
+        # `def` 3,849 lines ABOVE the caller, while the table's own column header is
+        # "call site" and every sibling row in it cites a call inside
+        # `extract_session_v2`. Nothing red-ed: the cite is BARE, so `_BUNDLE_CITE`
+        # cannot see it, and no row scoped to it — which is exactly the invisibility
+        # this pin exists for. Both rows hold the CALL, not the definition.
+        ("README.md", "gap filler", (
+            ("13237", "result = execute_embed(complete_list, search, "
+                      "session_id=session_id,"),
+        )),
+        # ...and the probe's own copy of the same number, which sits in prose a
+        # reader is sent to rather than in a table.
+        ("probes/capstone_run.py", "ONE cite per symbol", (
+            ("13237", "result = execute_embed(complete_list, search, "
+                      "session_id=session_id,"),
         )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a
