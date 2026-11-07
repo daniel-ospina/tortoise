@@ -12415,13 +12415,35 @@ _MENTION_FIELDS: tuple[str, ...] = (
 #: line, so an unarmed run copies no channel entry at all (the earlier comment
 #: here claimed the opposite — a docstring describing behaviour the code does not
 #: have, review P2).
-#: ⛔ ONE literal for the quote cap: `quote` is DERIVED from `_MAX_QUOTE`, the
-#: write's own cut (`_write_span(str(q).strip(), _MAX_QUOTE)`), so a mention's quote
-#: cannot cite bytes the point does not store (#11368). Both mention builders read
-#: every cap from THIS dict — a builder-local `200`/`60` is how the two builders
-#: drifted while a green suite reported parity.
-_MENTION_CAPS: dict[str, int] = {"surface": 200, "quote": _MAX_QUOTE,
-                                "kind_guess": 60}
+#: ⛔ EVERY cap either mention builder applies, and the ONLY place they read one
+#: from (#11368 — a builder-local `200`/`60` is how the two builders drifted while a
+#: green suite reported parity).
+#:
+#: ⛔ These ceilings are ``commit_schema.Mention``'s, NOT the Point's. The schema
+#: pins them independently (`surface`/`quote` max_length 200, `kind_guess` 60) and a
+#: value above one 422s the WHOLE payload, so `quote` is deliberately NOT derived
+#: from `_MAX_QUOTE`: deriving it made a legitimate raise of the POINT's cap
+#: (`tests/test_extractor_v2.py::test_point_quote_cap_matches_its_mirrors` tells a
+#: lane to move `_MAX_QUOTE` and `Point.quote.max_length` together) drag this
+#: builder past `Mention.quote`'s own 200 and lose the session (review at
+#: `d02ed2ccc`, P3 — measured: that raise left the clamp emitting a 250-char quote
+#: `Mention` rejects, where the pre-refactor independent 200 kept the payload
+#: valid). Today the two caps are EQUAL, and
+#: `tests/test_referentiality_11021.py::test_both_builders_read_every_cap_from_ONE_source`
+#: pins BOTH halves — the equality (so moving one is a loud diagnosis, never silent
+#: cross-record drift) and `<= Mention.<field>.max_length` (the relation the payload
+#: actually needs).
+#:
+#: ⚠️ Equal CEILINGS are not the same string: this module holds the mention's `quote`
+#: VERBATIM (`str(q)[:_MENTION_CAPS["quote"]]`) while the point stores
+#: `_write_span(str(q).strip(), _MAX_QUOTE)` — STRIPPED. So for a padded carrier
+#: quote the two cuts are the same length and different strings, and a `"quote"` pair
+#: verified here resolves to other bytes in the point's quote. **Pre-existing** (both
+#: builders cut it that way before #11368) and deliberately out of scope: fixing it
+#: belongs with #11239, the projection that must know which haystack it resolves
+#: against. Recorded on #11376's review; the issue is still OWED (the tracker's
+#: write API was rate-limited for this lane, so nothing was filed from it).
+_MENTION_CAPS: dict[str, int] = {"surface": 200, "quote": 200, "kind_guess": 60}
 #: The only values ``commit_schema.Mention.span_source`` accepts.
 _MENTION_SPAN_SOURCES = ("quote", "narrative", "model")
 #: Mirrors ``commit_schema.SPAN_OFFSET_MAX`` (the store's int64 ceiling). ONE
