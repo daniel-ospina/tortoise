@@ -1117,7 +1117,7 @@ def test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it() -> 
 # `already_written` raises `TypeError: unexpected keyword argument` there, and the
 # one that reads the new field reddens on the missing `already_persisted`. So the
 # red-first evidence is the whole set, not a sample — measured by loading
-# `origin/main`'s module in place of this one: 13 failed, 212 passed (225 total).
+# `origin/main`'s module in place of this one: 14 failed, 212 passed (226 total).
 # (`settled`'s own SEMANTICS are not proved by that run — none of these tests
 # reaches it pre-fix; they are held by the `settled = not units` revert, which
 # reddens three of them.)
@@ -1269,6 +1269,29 @@ def test_a_store_that_contradicts_itself_is_refused_not_decided_by_row_order() -
         with pytest.raises(ValueError, match="contradicts itself"):
             plan_writeback([_finding(claim="acme corp signed")],
                            already_written=store)
+
+
+def test_a_contradictory_store_is_refused_even_when_the_batch_never_touches_it() -> None:
+    """EVERY unit handed in is graded — not only the keys this batch happens to hit.
+
+    The sibling test above passes a batch containing the contradicted identity, so
+    it is satisfied by BOTH an eager pre-pass and a lazy grade-at-lookup. Only this
+    one distinguishes them: a store that contradicts itself on an identity the
+    batch never references must still abort. Without it the natural optimisation
+    (grade at lookup) stays green while silently narrowing the guard back to the
+    batch — the documented-but-unpinned class this file keeps having to close.
+    """
+    elsewhere = SourceSpan(source_id="source:raw-9", turn=9, start=0, end=10)
+    episodic = plan_writeback([_finding(claim="a finding the batch never asks about",
+                                       span=elsewhere,
+                                       claim_class="episodic")]).units[0]
+    semantic = plan_writeback([_finding(claim="a finding the batch never asks about",
+                                       span=elsewhere,
+                                       claim_class="semantic")]).units[0]
+    assert episodic.unit_key == semantic.unit_key
+    with pytest.raises(ValueError, match="contradicts itself"):
+        # The batch's own finding is untouched by the contradiction.
+        plan_writeback([_finding()], already_written=[episodic, semantic])
 
 
 def test_an_empty_plan_is_neither_ok_nor_settled() -> None:
