@@ -65,6 +65,16 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
+# #1005: this module boots the REAL hosted app in-process, and the lifespan opens
+# embedded (redislite) clients it never closes (the process exit does, in
+# production). The shared helper reproduces the closing half; see
+# `tests/_live_utils.py::close_embedded_clients_opened_since`.
+from tests._live_utils import (
+    close_embedded_clients_opened_since as _close_embedded_clients_opened_since,
+)
+
 REPO = Path(__file__).resolve().parent.parent
 HOSTED_API = REPO / "tortoise" / "hosted_api.py"
 
@@ -96,6 +106,7 @@ def _live_hosted_service(monkeypatch):
     import uvicorn
 
     import tortoise.hosted_api as ha
+    from tortoise import embedded_lifecycle as embedded_lifecycle
 
     monkeypatch.setattr(ha, "_health_probe_interval", lambda: 3600.0)
     ha._HEALTH_PROBE.reset()
@@ -111,6 +122,11 @@ def _live_hosted_service(monkeypatch):
 
     server = uvicorn.Server(
         uvicorn.Config(ha.app, host="127.0.0.1", port=0, log_level="error"))
+    # #1005: the real lifespan opens embedded (redislite) clients for the boot
+    # sweeps and the DB-probe SDK and never closes them — in production the
+    # process exit does. Snapshot before the boot so the teardown closes only
+    # what THIS boot opened (a co-tenant's clients are left alone).
+    embedded_before = set(embedded_lifecycle._embedded_clients)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     try:
@@ -125,6 +141,25 @@ def _live_hosted_service(monkeypatch):
         server.should_exit = True
         thread.join(timeout=60)
         ha._HEALTH_PROBE.reset()
+        _close_embedded_clients_opened_since(embedded_before)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _close_embedded_clients_this_module_opened():
+    """Race guard: close any embedded client the app's boot sweeps open late.
+
+    The per-boot close above cannot see a client a wedged boot worker registers
+    AFTER its own teardown (``monitoring.run_on_daemon_worker`` abandons rather
+    than delays shutdown), and the next boot's snapshot would count it as
+    pre-existing. This module-scoped sweep closes everything opened since the
+    module started, before the suite's #1005 orphan-hygiene gate runs.
+    Idempotent for every client the per-boot close already handled.
+    """
+    from tortoise import embedded_lifecycle as embedded_lifecycle
+
+    before = set(embedded_lifecycle._embedded_clients)
+    yield
+    _close_embedded_clients_opened_since(before)
 
 
 def _get(base_url: str, path: str, *, timeout: float):
