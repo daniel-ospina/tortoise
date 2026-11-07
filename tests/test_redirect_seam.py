@@ -575,8 +575,11 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
         "test-module attribution #1686 depends on. A SECOND occurrence is not "
         "reachable here and so is not claimed: `install_thread_stamp` ASSIGNS "
         "(`Thread.start = _thread_start_inherit_stem`) rather than chaining, and "
-        "the walk cuts a cycle — the idempotence arm below is the one that "
-        "detects a re-wrap"
+        "the walk cuts a cycle. This call site cannot see a re-wrap either — "
+        "the session flag above is off, so the installer returns before any "
+        "assignment; the marker guard itself is pinned by "
+        "`test_the_marker_guard_stops_the_installer_replacing_a_third_party_"
+        "wrapper`"
     )
     _assert_reinvocation_is_a_no_op(installed)
 
@@ -605,12 +608,19 @@ def test_the_install_idempotence_arm_has_teeth(monkeypatch):
     """Drive the arm that SHIPS with a CHAINING installer and require it to red.
 
     The real installer only ever ASSIGNS, so on an unwrapped tree re-running it
-    is an identity no-op even with the marker guard deleted — the arm cannot fire
-    there. What it CAN and must catch is the shape a "guard removed" repair
-    actually takes once a third-party wrapper exists: wrapping whatever is
-    installed, every time, which grows the chain and changes the installed
-    callable. Without this the arm is unproven, and an unproven pin is a rubber
-    stamp (#2656's class).
+    is an identity no-op even with the marker guard deleted — THIS arm cannot fire
+    there, and it does not claim to. What it CAN and must catch is the shape a
+    "guard removed" repair actually takes once a third-party wrapper exists:
+    wrapping whatever is installed, every time, which grows the chain and changes
+    the installed callable. Without this the arm is unproven, and an unproven pin
+    is a rubber stamp (#2656's class).
+
+    ⛔ The MARKER GUARD in `install_thread_stamp` is a different property and is
+    pinned elsewhere — by
+    `test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper`,
+    which drives the REAL installer with the session flag live. Nothing here
+    exercises it (#11373 P2: the two were conflated, and the guard was
+    unfalsifiable).
 
     ⛔ This drives `_assert_reinvocation_is_a_no_op` — the function the real test
     calls — never a local copy of the installer. A mutation that makes the arm
@@ -688,4 +698,79 @@ def test_a_third_party_wrapper_on_top_cannot_hide_the_stamp(monkeypatch):
     assert proj_mod._thread_start_inherit_stem not in _installed_start_chain(), (
         "the chain reading claims the stamp is installed on a start that never "
         "carries it"
+    )
+
+
+def test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper(
+        monkeypatch):
+    """#11373 P2: the marker clause in `install_thread_stamp` is pinned by EFFECT.
+
+    The idempotence arm (`_assert_reinvocation_is_a_no_op`) cannot see this
+    guard: its one real call site disables `_TEST_SESSION_ACTIVE` first, and the
+    installer returns before it ever reads the marker — so the arm asserts an
+    identity that holds with the guard deleted as well. That was measured, not
+    supposed: deleting
+    `and not getattr(threading.Thread, "_tortoise_stamp_installed", False)`
+    left the whole suite green before this test existed.
+
+    The state the guard exists for is the one a third-party wrapper creates. The
+    installer ASSIGNS `Thread.start`, so an unguarded re-invocation does not
+    "double-wrap" — it REPLACES the wrapper (`functools.wraps` links our stamp as
+    `__wrapped__`; `sentry_sdk.integrations.threading` wraps exactly like the
+    fixture below) with the bare stamp, silently un-installing that integration.
+    That is the reload path the installer's own docstring names as the reason the
+    marker exists.
+
+    Two arms, so neither can be satisfied by an installer that does nothing:
+
+      (a) marker PRESENT → the third-party wrapper survives the re-invocation;
+      (b) marker ABSENT  → the SAME call DOES install (non-vacuity, and it is
+          exactly the harm (a) prevents).
+    """
+    from tortoise import projection as proj_mod
+
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, (
+        "precondition: conftest's installer must have run in this session"
+    )
+    # The installer's other two clauses, made explicit so this pin does not
+    # depend on ambient env: TORTOISE_TEST_MODE is the test-session signal and
+    # the flag is a RE-INVOCATION, so it must read as live.
+    monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", True)
+
+    inner = threading.Thread.start
+
+    def _third_party_start(self, *args, **kwargs):  # pragma: no cover - delegated
+        return inner(self, *args, **kwargs)
+
+    wrapped = functools.wraps(inner)(_third_party_start)
+    monkeypatch.setattr(threading.Thread, "start", wrapped)
+
+    # (a) the marker is present (conftest set it) → no assignment: the
+    # third-party wrapper must still be what `Thread.start` IS.
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapped, (
+        "re-invoking the installer while its marker is set REPLACED a "
+        "third-party `Thread.start` wrapper with the bare stamp — the marker "
+        "guard is what makes a reload idempotent once an integration has "
+        f"wrapped on top (installed {threading.Thread.start!r})"
+    )
+
+    # (b) non-vacuity: with the marker gone the same call must install — which is
+    # precisely the replacement arm (a) requires the guard to prevent. An
+    # installer made inert (e.g. `if False`) satisfies (a) trivially; this reds.
+    monkeypatch.delattr(threading.Thread, "_tortoise_stamp_installed",
+                        raising=False)
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, (
+        "with the session live and the marker absent the installer must install "
+        "the stamp — otherwise arm (a) above proves nothing about the guard"
+    )
+    # …and it must RECORD the marker, which is what makes the NEXT re-invocation
+    # idempotent; an installer that assigns without marking is not idempotent at
+    # all, and (a) alone would not notice.
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, (
+        "the installer installed the stamp but did not record "
+        "`_tortoise_stamp_installed`, so the guard arm (a) relies on can never "
+        "fire on a second re-invocation"
     )
