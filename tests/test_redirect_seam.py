@@ -1115,13 +1115,23 @@ def test_the_installer_guard_clauses_each_decline_by_effect(monkeypatch):
     ⛔ What each mutation reds, measured — so the next mutation-tester is not sent
     down a wrong path: deleting `and _TEST_SESSION_ACTIVE` reds (d); deleting
     `TORTOISE_TEST_MODE == "1"` reds (e); relaxing it to a truthiness test reds
-    (f). ⛔ An installer that never installs — made inert, or with its
-    `Thread.start =` assignment removed — does NOT reach (0)-(f) at all: conftest
-    installs through the same function, so the session-level install never
-    happens and the PRECONDITION above reds first (measured: it and the
-    worker-thread probes beside it). Arm (0) is a non-vacuity row for an
-    installer that still runs and still records the marker; it is not where an
-    absent install lands.
+    (f). ⛔ Where an ABSENT install lands depends on WHICH statement is deleted,
+    because the guard is three clauses but the install is two statements — so
+    "the installer is broken" is not one mutation and has not one landing point,
+    measured:
+
+      delete the guard (`if False:`)      -> the PRECONDITION above reds first
+                                             (conftest installs through this same
+                                             function, so nothing is ever
+                                             installed or marked) and (0)-(f)
+                                             never run
+      delete the marker-RECORDING line    -> the PRECONDITION again, same reason
+      delete only `Thread.start = …`      -> the marker IS still recorded (separate
+                                             statement), so the precondition
+                                             PASSES and the red lands at arm (0)
+
+    That last row is why (0) exists: it is the non-vacuity row that catches an
+    installer which runs, records, and installs nothing.
     """
     from tortoise import projection as proj_mod
 
