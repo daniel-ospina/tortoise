@@ -1983,6 +1983,47 @@ def _test_still_runs_the_guard(wrapper: ast.AST, runs_arg: ast.AST) -> bool:
             and test.id == runs_arg.id)
 
 
+_LOOP_NODES = (ast.For, ast.AsyncFor, ast.While)
+_SCOPE_BOUNDARY_NODES = (ast.FunctionDef, ast.AsyncFunctionDef,
+                         ast.Lambda, ast.ClassDef)
+
+
+def _finally_discards_the_refusal(suite: list[ast.stmt]) -> bool:
+    """Does this `finally` suite DISCARD a pending exception?
+
+    A pending exception — `SystemExit` included — is temporarily saved while
+    `finally` runs and then re-raised, **unless** the suite executes `return`,
+    `break` or `continue`, which discards it (language reference §8.4.4;
+    corroborated by OpenSSF `pyscg-0028`). Verified by EXECUTION, not from the
+    prose: a function whose `raise SystemExit(...)` is followed by
+    `finally: return 0` returns `0`, and one whose `finally` runs a
+    `for …: break` still raises. So `try: require_door_entered(runs)` +
+    `finally: return 0` never propagates the refusal the witness exists for,
+    while the shipped arm called it harmless (#10983 review at `4fa9c91d`).
+
+    Two boundaries make this a *derivation* rather than a keyword scan:
+
+    * `return` inside a nested `def`/`lambda`/`class` defined in the suite
+      transfers nothing out of it — the same own-scope rule `_own_scope` states;
+    * a `break`/`continue` only discards the exception when it LEAVES the
+      suite, so one targeting a loop INSIDE the `finally` stays put (measured:
+      the exception still propagates). Loop nesting is therefore tracked as
+      the walk descends — `_own_scope` cannot be reused here, because that
+      walk flattens exactly the nesting this rule depends on.
+    """
+    def walk(node: ast.AST, loops: int) -> bool:
+        if isinstance(node, _SCOPE_BOUNDARY_NODES):
+            return False
+        if isinstance(node, ast.Return):
+            return True
+        if isinstance(node, (ast.Break, ast.Continue)):
+            return loops == 0
+        inner = loops + (1 if isinstance(node, _LOOP_NODES) else 0)
+        return any(walk(child, inner) for child in ast.iter_child_nodes(node))
+
+    return any(walk(statement, 0) for statement in suite)
+
+
 def _wrapper_can_hide_the_guard(wrapper: ast.AST, child: ast.AST,
                                 runs_arg: ast.AST) -> bool:
     """Can this wrapper SKIP the call, or SUPPRESS the refusal it raises?
@@ -1996,10 +2037,18 @@ def _wrapper_can_hide_the_guard(wrapper: ast.AST, child: ast.AST,
     it": over-block is fail-closed, but it is a false red with a false
     diagnosis, and it teaches the next reader to edit the probe until the pin
     is quiet.
+
+    ⛔ And a `Try` is not only its HANDLERS (review at `4fa9c91d`): the guard's
+    `SystemExit` is pending when `finally` starts, so a `finally` that reroutes
+    control — `return`, or a `break`/`continue` leaving the suite — discards
+    the refusal just as completely as `except SystemExit: pass`, and reading
+    `handlers` alone called that a CORRECT implementation. That is the second
+    question in this docstring's own first line.
     """
     if isinstance(wrapper, _TRY_NODES):
-        return any(_handler_swallows_the_refusal(handler)
-                   for handler in wrapper.handlers)
+        return (any(_handler_swallows_the_refusal(handler)
+                    for handler in wrapper.handlers)
+                or _finally_discards_the_refusal(wrapper.finalbody))
     if isinstance(wrapper, (ast.If, ast.IfExp, ast.While)):
         return not _test_still_runs_the_guard(wrapper, runs_arg)
     return isinstance(wrapper, (ast.For, ast.AsyncFor, ast.Match,
@@ -2059,6 +2108,18 @@ DOOR_GUARD_MUTANTS = (
      "    except (ValueError, SystemExit):\n        pass\n"),
     ("a `while False:` arm never runs the guard",
      ["While"], "    while False:\n        require_door_entered(runs)\n"),
+    # Review at `4fa9c91d`: the arm read a `Try`'s HANDLERS and never its
+    # `finalbody`, so these two — measured on the pre-fix arm as `[]`, i.e.
+    # "CORRECT implementation" — are the discriminating pair it was missing.
+    ("`finally: return` discards the refusal instead of propagating it",
+     ["Try"],
+     "    try:\n        require_door_entered(runs)\n"
+     "    finally:\n        return 0\n"),
+    ("`except Exception:` + `finally: return` still discards the refusal",
+     ["Try"],
+     "    try:\n        require_door_entered(runs)\n"
+     "    except Exception:\n        pass\n"
+     "    finally:\n        return 0\n"),
     # ── the over-block class: CORRECT implementations, pinned GREEN ─────────
     ("`try/finally` runs the guard on every pass and propagates its refusal",
      [],
@@ -2067,6 +2128,17 @@ DOOR_GUARD_MUTANTS = (
      [],
      "    try:\n        require_door_entered(runs)\n"
      "    except Exception:\n        pass\n"),
+    # The two boundaries `_finally_discards_the_refusal` derives rather than
+    # guesses: neither transfers control OUT of the suite, and both were
+    # measured to still propagate the `SystemExit`.
+    ("a `break` targeting a loop INSIDE `finally` never leaves the suite",
+     [],
+     "    try:\n        require_door_entered(runs)\n"
+     "    finally:\n        for _ in ():\n            break\n"),
+    ("a `return` inside a def DEFINED in `finally` transfers nothing out",
+     [],
+     "    try:\n        require_door_entered(runs)\n"
+     "    finally:\n        def _fmt(value):\n            return value\n"),
     ("`if runs:` is a no-op guard — an empty run list refuses nothing",
      [], "    if runs:\n        require_door_entered(runs)\n"),
     ("`while True:` runs the guard on every pass",
@@ -2085,6 +2157,14 @@ def test_the_unconditional_door_arm_reds_on_guards_and_not_on_no_op_wrappers():
     table: the GREEN rows fail on the pre-fix arm (they reported `['Try']` /
     `['If']` where `[]` is correct) and the RED rows pin what the arm must never
     stop catching.
+
+    The `finally:` rows exist because the arm then read a `Try`'s HANDLERS and
+    never its suite (review at `4fa9c91d`): `finally: return 0` still executes
+    the guard and then DISCARDS the refusal it raised (§8.4.4), which the
+    pre-fix arm called a correct implementation — measured `[]` where `['Try']`
+    is right. That is the fail-open direction, so it is the pair that had to
+    become RED; the two GREEN suite rows pin the boundaries the derivation must
+    not over-reach to (an inner-loop `break`, a `return` in a nested def).
     """
     src = _source(PROBE)
     assert src.count(DOOR_GUARD_LINE) == 1, (
