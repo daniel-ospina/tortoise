@@ -686,14 +686,20 @@ def _cited_seams(reason: str) -> list[tuple[str, str]]:
             for m in _SEAM_CITATION.finditer(reason)]
 
 
-def _resolve_module(module: str) -> Path | None:
-    """The file a dotted module (or a repo-relative `.py` path) names, or None."""
+def _resolve_module(module: str, root: Path | None = None) -> Path | None:
+    """The file a dotted module (or a repo-relative `.py` path) names, or None.
+
+    `root` exists so the resolution RULES can be pinned against synthesized trees — a real repo
+    path can only exhibit the case that happens to exist in this tree, and two of the three rules
+    below have no live instance.
+    """
+    root = REPO_ROOT if root is None else root
     if module.endswith(".py"):
-        for candidate in (REPO_ROOT / module, REPO_ROOT / "tortoise" / module):
+        for candidate in (root / module, root / "tortoise" / module):
             if candidate.is_file():
                 return candidate
         return None
-    base = REPO_ROOT.joinpath(*module.split("."))
+    base = root.joinpath(*module.split("."))
     # ⛔ A PACKAGE wins over a same-named MODULE. `tortoise/projection.py` is a DEPRECATED shim that
     # re-exports the package's names, so resolving `.py` first did two wrong things at once (round-17
     # review): a dotted `tortoise.projection::<symbol>` citation passed on the shim's re-export line
@@ -703,6 +709,51 @@ def _resolve_module(module: str) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def test_the_module_resolver_rules_are_pinned_against_synthesized_trees(tmp_path):
+    """The resolver's three rules, each driven by a scratch tree — not by repo paths.
+
+    ⛔ WHY THIS EXISTS (round-19 review). Round 17 deleted an arm asserting
+    `_resolve_module("tortoise.config") == tortoise/config.py` on the grounds that no resolver edit
+    could move it. That was FALSE — an edit dropping the module candidate moves it — and round 18's
+    replacement reason ("every such edit reds the citation loop first") was false too: a resolver
+    edit that drops the `.py` fallback *only where a same-named non-package directory exists* moves
+    `tortoise.config` and reds NOTHING, because nothing in `_DECLARATIONS` cites it. Driving the
+    rules from scratch trees makes each one killable by construction, and removes the dependence on
+    which paths this repo happens to contain (the reason `tortoise/config/__init__.py` cannot be
+    added: `tests/conftest.py` fails at import, `cannot import name 'RELATIVE_PATH_ERROR'`).
+    """
+    root = tmp_path / "root"
+    (root / "tortoise" / "pkg").mkdir(parents=True)
+    (root / "tortoise" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "tortoise" / "pkg.py").write_text("", encoding="utf-8")            # the deprecated shim
+    (root / "tortoise" / "mod.py").write_text("", encoding="utf-8")
+    (root / "tortoise" / "bare").mkdir()                                        # dir, NO `__init__.py`
+    (root / "tortoise" / "bare.py").write_text("", encoding="utf-8")
+
+    # (1) a PACKAGE wins over a same-named module — the shim must not answer for the package
+    assert _resolve_module("tortoise.pkg", root) == root / "tortoise" / "pkg" / "__init__.py", (
+        "a package must win over a same-named module — resolving `.py` first lets a deprecated shim's "
+        "re-export line satisfy a citation that the package no longer defines")
+    # (2) a module-only name resolves to the module
+    assert _resolve_module("tortoise.mod", root) == root / "tortoise" / "mod.py", (
+        "a dotted name with no package must resolve to its module")
+    # (3) a DIRECTORY that is not a package (no `__init__.py`) does not shadow the module, and is
+    # not itself resolvable — this is the `tortoise.config` shape, which round 17's deleted arm was
+    # the only thing exercising. Pinned here so the rule survives an edit that special-cases a
+    # non-package directory, which is exactly the edit that used to move `tortoise.config` alone.
+    assert _resolve_module("tortoise.bare", root) == root / "tortoise" / "bare.py", (
+        "a directory without `__init__.py` is not a package, so the module of the same name must "
+        "still answer")
+    # (4) …and a name with neither a package nor a module is None, not a directory
+    assert _resolve_module("tortoise.absent", root) is None, (
+        "a dotted name with nothing behind it must be None — a non-package directory is not a module")
+    # (5) the `.py`-path form resolves under the root, and under `tortoise/`
+    assert _resolve_module("tortoise/mod.py", root) == root / "tortoise" / "mod.py", (
+        "a repo-relative `.py` citation must resolve as written")
+    assert _resolve_module("mod.py", root) == root / "tortoise" / "mod.py", (
+        "a bare `x.py` citation must also be tried under `tortoise/`")
 
 
 def test_every_declaration_cites_a_seam_and_an_owning_issue():
@@ -754,16 +805,17 @@ def test_every_declaration_cites_a_seam_and_an_owning_issue():
     assert _resolve_module("tortoise.projection") == (
         REPO_ROOT / "tortoise" / "projection" / "__init__.py"
     ), "a package must win over a same-named module — `tortoise/projection.py` is a shim"
-    # ⛔ NO second arm on `tortoise.config` (round-17 review, reason corrected round-18). It was
-    # written as "the module is the only candidate", and the round-17 justification for dropping it
-    # was wrong: a resolver edit CAN move it (`for candidate in (base / "__init__.py",)` makes it
-    # return None). The true reason is REDUNDANCY, not unkillability: every such edit reds the
-    # citation loop above FIRST, with a coarser message (`tortoise.sdk is not a module in this
-    # tree`, :728), so this row could never be the FAILING row a reader attributes a break to —
-    # measured. And the question it was actually written for, the `.py`-vs-package ORDER, is pinned
-    # by the `tortoise.projection` arm above, the only arm with TWO candidates. (The tree change it
-    # also named is unreachable in this repo: gaining `tortoise/config/__init__.py` fails
-    # `tests/conftest.py` at import, `cannot import name 'RELATIVE_PATH_ERROR'`.)
+    # ⛔ NO second arm on `tortoise.config` (round-17 review; reason corrected round-19). It was
+    # written as "the module is the only candidate", and both earlier justifications were FALSE:
+    # round 17 said "no edit to the resolver can move it" (an edit dropping the module candidate
+    # moves it), and round 18 said "every such edit reds the citation loop above first" (an edit that
+    # drops the `.py` fallback only where a same-named NON-package directory exists moves
+    # `tortoise.config` and reds nothing — nothing in `_DECLARATIONS` cites it). The true reason the
+    # arm is gone is that the RESOLUTION RULES are now pinned directly, against synthesized trees, by
+    # `test_the_module_resolver_rules_are_pinned_against_synthesized_trees` — so an arm tied to which
+    # paths this repo happens to contain adds no killability. (That path cannot be added here in any
+    # case: gaining `tortoise/config/__init__.py` fails `tests/conftest.py` at import,
+    # `cannot import name 'RELATIVE_PATH_ERROR'`.)
 
 
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
@@ -852,6 +904,25 @@ INVISIBLE_SHAPES = {
         'class C:\n    REC = {}\n    REC["embedding"] = [0.25, 0.5]\n'
     ),
 }
+
+#: The blind shapes `tortoise/embed_writer_register.py` cites BY NAME as "pinned as
+#: `INVISIBLE_SHAPES`' …". Coupled in BOTH directions against the table: every name here must be an
+#: entry (so a pin deleted while the prose keeps citing it reds), and every name here must still
+#: appear in the register's docstring (so a citation dropped from the prose reds too).
+#:
+#: ⛔ A DECLARED list, not one parsed out of the prose, and the reason is MEASURED: two attempts at a
+#: derivation each FALSE-BLOCKED correct prose. Selecting on a `*_key` suffix left 6 of the table's
+#: 10 names uncoupled (`map_merge`, `container_helper`, `module_constant_clause`, …) and stayed green
+#: on a docstring citing `phantom_scope_shape`; selecting on POSITION (a window after the mention)
+#: reds when the same true sentence also names the `class_inside_a_def` control, or when the names
+#: precede the word, and a 400-char window silently misses a citation past it — measured round-19.
+#: Prose admits no shape a pattern can pin without also rejecting correct English, so what this pins
+#: is exactly the two names the register claims. A shape named in the prose and absent from this
+#: tuple is NOT covered — stated, not implied.
+REGISTER_CITED_SHAPES = (
+    "class_scope_container_key",
+    "module_scope_container_key",
+)
 
 #: The shape names `INVISIBLE_SHAPES` must hold — pinned by NAME SET, not by size. A size pin is
 #: replaced by substitution (drop one shape, duplicate another, `len` unchanged), and the loop in
@@ -955,29 +1026,24 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
         "add or remove the shape HERE and in the register's 'What the closure claim does NOT "
         "cover' block together; the register cites two of these by name as pinned"
     )
-    # The register cites shapes BY NAME ("pinned as `INVISIBLE_SHAPES`' `module_scope_container_key`
-    # and `class_scope_container_key`"), so READ the citation out of the artifact and require each
-    # name it cites to land on an entry. The window is the CLAUSE under `INVISIBLE_SHAPES`, not the
-    # whole docstring and not a `*_key` suffix filter: 6 of the table's 10 names do not end in `_key`
-    # (`map_merge`, `container_helper`, `module_constant_clause`, …), so a suffix filter leaves most
-    # of the name space uncoupled — measured round-18, a docstring citing `phantom_scope_shape`
-    # stayed green under it — while scanning the whole docstring would sweep in the hundreds of
-    # writer and function symbols it legitimately names. A name added to that clause with no pin
-    # reds this row, and so does a pin deleted while the prose keeps citing it.
-    _CITATION_TOKEN = re.compile(r"`([a-z][a-z0-9_]*)`")
-    cited: set[str] = set()
-    for _mention in re.finditer(r"INVISIBLE_SHAPES", register.__doc__):
-        _tail = register.__doc__[_mention.end() : _mention.end() + 400]
-        _stop = re.search(r"\.\s", _tail)
-        cited |= set(_CITATION_TOKEN.findall(_tail[: _stop.start() + 1] if _stop else _tail))
+    # ⛔ The citation the register makes ("pinned as `INVISIBLE_SHAPES`' `module_scope_container_key`
+    # and `class_scope_container_key`") is coupled in BOTH directions against `REGISTER_CITED_SHAPES`
+    # — see that tuple's comment for the two prose-derivations this replaced, and why each of them
+    # false-blocked correct prose. What it does NOT catch, stated rather than implied: a shape named
+    # in the prose but absent from the tuple.
+    cited = set(REGISTER_CITED_SHAPES)
     assert cited, (
-        "the register's docstring no longer cites a blind shape by name in its `INVISIBLE_SHAPES` "
-        "clause — if that citation was removed deliberately, remove this row with it; leaving it "
-        "means nothing couples the prose to `INVISIBLE_SHAPES`"
+        "`REGISTER_CITED_SHAPES` is empty, so nothing couples the register's citation to the table"
     )
-    assert cited <= set(INVISIBLE_SHAPES), (
-        f"the register cites {sorted(cited - set(INVISIBLE_SHAPES))} as pinned by "
-        "`INVISIBLE_SHAPES` and no such entry exists — the claim would outlive its pin"
+    _missing_pins = sorted(cited - set(INVISIBLE_SHAPES))
+    assert not _missing_pins, (
+        f"the register cites {_missing_pins} as pinned by `INVISIBLE_SHAPES` and no such entry "
+        "exists — the claim would outlive its pin"
+    )
+    _missing_citation = sorted(n for n in cited if n not in register.__doc__)
+    assert not _missing_citation, (
+        f"`tortoise/embed_writer_register.py` no longer cites {_missing_citation} — if that citation "
+        "was dropped deliberately, drop it from `REGISTER_CITED_SHAPES` too"
     )
     for shape, body in INVISIBLE_SHAPES.items():
         found = probe._embedding_writers(_scratch_root(tmp_path, shape, body))
