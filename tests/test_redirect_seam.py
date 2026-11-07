@@ -1062,3 +1062,117 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
     two_stack = _stamp_problems(second)
     assert any("double wrap" in p for p in two_stack), two_stack
     assert len(two_stack) == len(set(two_stack)), f"duplicate violations: {two_stack}"
+
+
+def _arm_the_installer(monkeypatch, *, session: bool, mode: str | None):
+    """Put `install_thread_stamp` in ONE clause's state; return the third-party
+    `Thread.start` wrapper the arm starts from.
+
+    The wrapper is a `functools.wraps` layer over whatever is installed — exactly
+    `sentry_sdk.integrations.threading`'s shape — so "the installer declined" and
+    "the installer replaced the integration" are distinguishable by identity.
+    """
+    from tortoise import projection as proj_mod
+
+    inner = threading.Thread.start
+
+    def _third_party_start(self, *a, **k):  # pragma: no cover - delegated
+        return inner(self, *a, **k)
+
+    wrapper = functools.wraps(inner)(_third_party_start)
+    monkeypatch.setattr(threading.Thread, "start", wrapper)
+    monkeypatch.delattr(threading.Thread, "_tortoise_stamp_installed", raising=False)
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", session)
+    if mode is None:
+        monkeypatch.delenv("TORTOISE_TEST_MODE", raising=False)
+    else:
+        monkeypatch.setenv("TORTOISE_TEST_MODE", mode)
+    return wrapper
+
+
+def test_the_installer_guard_clauses_each_decline_by_effect(monkeypatch):
+    """#11373: `install_thread_stamp`'s two NON-marker clauses, and its `== "1"`
+    spelling, each pinned by the state it must REFUSE.
+
+    The MARKER clause already has a by-effect pin (`test_stem_registry_prod_parity_and_patch_idempotence`'s
+    sentinel falsifier: a re-invocation must not rerun the installer body). The other
+    two clauses had none. Measured on `dbbf5d874c`: deleting `and
+    _TEST_SESSION_ACTIVE` from the installer left this module green, deleting
+    `TORTOISE_TEST_MODE == "1"` left it green, and relaxing that clause to a
+    truthiness test (`os.environ.get(...)` alone) left it green too — `"0"` is a
+    non-empty string, so it is truthy.
+
+    The property behind the two clauses is the one the installer's own docstring
+    names: a leaked `TORTOISE_TEST_MODE=1` in a PROD process must not patch
+    stdlib, which is why the install is a function conftest calls and never a
+    module-body side effect. A guard no test can fail is not a guard, and both of
+    these could be deleted with a fully green suite.
+
+    Every arm is by EFFECT on `Thread.start`, never by reading a flag, and arm (0)
+    is the NON-VACUITY row the other three need: an installer that assigns nothing
+    satisfies every "declines" arm below.
+
+    ⛔ What each mutation reds, measured — so the next mutation-tester is not sent
+    down a wrong path: deleting `and _TEST_SESSION_ACTIVE` reds (d); deleting
+    `TORTOISE_TEST_MODE == "1"` reds (e); relaxing it to a truthiness test reds
+    (f); making the installer inert (or removing its assignment) reds (0), not
+    (d)-(f).
+    """
+    from tortoise import projection as proj_mod
+
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, (
+        "precondition: conftest's installer must have run in this session")
+
+    # (0) NON-VACUITY — all three clauses satisfied, marker absent: the installer
+    # MUST install. Without this row each "declines" assertion below is
+    # satisfiable by an installer that never assigns anything at all.
+    _arm_the_installer(monkeypatch, session=True, mode="1")
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, (
+        "with the session live, the test-mode signal set and the marker absent, "
+        "the installer must install the stamp — otherwise the decline arms below "
+        "prove nothing about the guards that are supposed to fire")
+    # …and it must RECORD the marker, which is what makes the NEXT re-invocation
+    # idempotent. Asserted here rather than inferred: the marker clause's own pin
+    # reads only the marker's PRESENCE, so an installer that assigns without
+    # recording would leave that clause unable to fire on a second call.
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, (
+        "the installer installed the stamp but did not record "
+        "`_tortoise_stamp_installed`, so the marker clause can never fire on a "
+        "re-invocation")
+
+    # (d) the SESSION-FLAG clause: marker absent (so the marker clause would let
+    # the install through) and `_TEST_SESSION_ACTIVE` off. This is the signal a
+    # prod process can never satisfy, and it must decline — AND must not record
+    # the marker, or a later in-session call would skip the real install.
+    wrapper = _arm_the_installer(monkeypatch, session=False, mode="1")
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapper, (
+        "the installer patched `Thread.start` with `_TEST_SESSION_ACTIVE` off — "
+        "that flag is the one a prod process cannot satisfy, and it is why even a "
+        "leaked `TORTOISE_TEST_MODE=1` cannot stamp stdlib")
+    assert not getattr(threading.Thread, "_tortoise_stamp_installed", False), (
+        "the installer recorded `_tortoise_stamp_installed` while declining to "
+        "install — a later in-session call would then skip the real install")
+
+    # (e) the TEST-MODE clause: session live, marker absent, env signal gone →
+    # still declines. One of the two signals alone is not enough.
+    wrapper = _arm_the_installer(monkeypatch, session=True, mode=None)
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapper, (
+        "the installer patched `Thread.start` with `TORTOISE_TEST_MODE` unset — "
+        "the env clause is one of two signals that must BOTH be live")
+    assert not getattr(threading.Thread, "_tortoise_stamp_installed", False), (
+        "the installer recorded the marker while the test-mode signal was unset")
+
+    # (f) …and the clause is `== "1"`, not a truthiness test. `"0"` is a
+    # non-empty (hence truthy) string, so a relaxed spelling installs here; the
+    # strict one must not, or any session that sets a non-"1" value arms the
+    # stdlib patch.
+    wrapper = _arm_the_installer(monkeypatch, session=True, mode="0")
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapper, (
+        'the installer patched `Thread.start` with `TORTOISE_TEST_MODE="0"` — the '
+        'guard must compare against the literal `"1"`, not test truthiness')
+    assert not getattr(threading.Thread, "_tortoise_stamp_installed", False), (
+        'the installer recorded the marker for `TORTOISE_TEST_MODE="0"`')
