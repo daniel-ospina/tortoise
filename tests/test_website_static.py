@@ -4969,7 +4969,17 @@ class TestSiteIconAndSocialPreviewContract:
         file check, and an early `continue` that did so let a page link a nonexistent
         vector icon while this guard reported green (measured: the only format that did).
         """
-        path_part = urlsplit(urljoin("https://site.invalid/", link.get("href", ""))).path
+        # ⛔ THE ORIGIN IS CHECKED, NOT DROPPED — via `_icon_ref`, the one helper that
+        # already does it. `urlsplit("//evil.example/favicon.png").path` is
+        # `/favicon.png`, so a netloc-discarding read grades an off-host icon as this
+        # site's own file and reports green on a tab that draws someone else's image.
+        # Measured before this fix: `_icon_target_violation("page.html", {"rel": "icon",
+        # "href": "//evil.example/favicon.png"})` returned None.
+        path_part = cls._icon_ref(link.get("href", ""))
+        if not path_part:
+            return (f"{page_name} links an icon this site does not serve "
+                    f"(rel={link.get('rel')!r} href={link.get('href')!r}) — the tab "
+                    "draws an image from a host this site does not control")
         assert "/logo.png" not in path_part, (
             f"{page_name} uses the wordmark as an icon: rel={link.get('rel')!r} "
             f"href={link.get('href')!r}")

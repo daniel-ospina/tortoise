@@ -2005,28 +2005,28 @@ console.log("the blog's link preview and icon");
   // both passed), while the Python twin reds on the identical edit. A guard whose
   // failure path never runs cannot be told apart from no guard.
   assert(FLAT_CARD_BYTES < CARD_MIN_BYTES,
-    `the card floor (${CARD_MIN_BYTES} B) is not above the flat 1200x630 JPEG it exists ` +
-    `to reject (${FLAT_CARD_BYTES} B), so a flat card passes`);
+    `the card floor (${CARD_MIN_BYTES} B) sits above the flat 1200x630 JPEG it exists ` +
+    `to reject (${FLAT_CARD_BYTES} B)`);
   const flatCard = Buffer.alloc(FLAT_CARD_BYTES);
   flatCard[0] = 0xff; flatCard[1] = 0xd8;
   flatCard[FLAT_CARD_BYTES - 2] = 0xff; flatCard[FLAT_CARD_BYTES - 1] = 0xd9;
   assert(cardFloorViolation(flatCard) !== null,
-    "a card the size of a measured flat JPEG cleared the floor");
+    "a card the size of a measured flat JPEG is rejected by the floor");
   // ...and PADDING IS NOT PAINT: the same flat image with trailing bytes past the
   // floor is still rejected, because the floor reads the encoded image.
   const paddedFlat = Buffer.concat([flatCard, Buffer.alloc(CARD_MIN_BYTES + 1000 - FLAT_CARD_BYTES)]);
-  assert(paddedFlat.length > CARD_MIN_BYTES, "the padding fixture is not past the floor");
+  assert(paddedFlat.length > CARD_MIN_BYTES, "the padding fixture is past the floor");
   assert(cardFloorViolation(paddedFlat) !== null,
-    "a flat card PADDED past the floor cleared it — the floor is measuring the file, " +
-    "not the encoded image, and trailing bytes are not paint");
+    "a flat card PADDED past the floor is still rejected — the floor measures the " +
+    "encoded image, not the file, so trailing bytes are not paint");
   // ...and a trailer that LOOKS like an EOI must not re-open it, which is exactly what a
   // `lastIndexOf(FF D9)` measure lets through.
   const trailingEoi = Buffer.concat([
     flatCard, Buffer.alloc(CARD_MIN_BYTES + 1000 - FLAT_CARD_BYTES), Buffer.from([0xff, 0xd9]),
   ]);
   assert(cardFloorViolation(trailingEoi) !== null,
-    "a flat card padded and CLOSED WITH FF D9 cleared the floor — the measure is taking " +
-    "the last EOI in the file instead of the one that ends the image");
+    "a flat card padded and CLOSED WITH FF D9 is still rejected — the measure takes " +
+    "the EOI that ends the image, not the last in the file");
   assertEq(encodedJpegLength(card), card.length,
     "the shipped card's stream ends at its own EOF, so the floor measures all of it");
 

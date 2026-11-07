@@ -1204,7 +1204,7 @@ class B(BaseTestCase):
 def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     """#11318: the ICON SET and the shared CARD are binaries, and they must select.
 
-    `website/` is in NON_PYTHON_PREFIXES, so `_keep_changed` dropped all four new
+    `website/` is in NON_PYTHON_PREFIXES, so `_keep_changed` dropped every one of them
     assets *before* the SOURCE_PATTERNS pass and a binary-only diff took the
     docs-only tier-1 early return. MEASURED before the entries, with the CI's own
     selector: `select(["website/favicon.png"], "pull_request", load_manifest())` →
@@ -1265,6 +1265,24 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     # honest page edit and tell its author to "re-derive" an assertion that is simply
     # redundant the moment they do, which pushes them to delete the witness half.
     assert opened, "the opened-file derivation found nothing — the ratchet's other half is vacuous"
+    # ⛔ AND THE SECOND WITNESS, WHICH NO DERIVATION ABOVE CAN REACH. The guard's shape
+    # rule is driven with `/assets/premiselabs-logo.png` by
+    # `test_the_icon_target_guard_reads_existence_and_shape`, so that test DEPENDS on
+    # the file's 160x98 bytes — but no page links it as an icon and the guard names it
+    # only inside a dict literal, so neither `derived` nor `opened` contains it.
+    # MEASURED before the entry: `select(["website/assets/premiselabs-logo.png"])` →
+    # `surfaces: []`, so re-exporting the wordmark SQUARE merged green with the guard
+    # absent and REDed the NEXT onboarding diff, billing its author for a file they
+    # never touched — the same pair of failures the `logo.png` entry above documents.
+    _witness = "website/assets/premiselabs-logo.png"
+    assert (REPO / _witness).is_file(), f"the asset this test guards is gone: {_witness}"
+    r = _sel([_witness])
+    assert r["surfaces"] == ["onboarding"], (
+        f"{_witness} selects {r['surfaces']} — the guard reads its bytes, so a change "
+        "to it must select the guard (#1349 silent-drop class)")
+    assert "test_website_static.py" in r["test_files"], (
+        f"{_witness} does not select test_website_static.py")
+    assert r["slow_run"] is False, f"{_witness} must not pull a slow leg"
     for changed in sorted(derived | opened):
         assert (REPO / changed).is_file(), f"the asset this test guards is gone: {changed}"
         r = _sel([changed])
@@ -1278,11 +1296,22 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
         )
         assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
 
-    # ...and every PAGE, because the guard globs them rather than naming them: a new
-    # page is read the day it lands, so a change to it must select the guard. MEASURED
-    # before this loop: `select(["website/zz-new.html"])` → `surfaces: []`, 79 tier-1
-    # files, guard absent — a page that ships with no icon trio and no og:image merged
-    # green and only a full run reded.
+    # ...and every PAGE IN THE TREE, because the guard globs them rather than naming
+    # them. MEASURED before this loop: `select(["website/zz-new.html"])` → `surfaces:
+    # []`, 79 tier-1 files, guard absent — a page that ships with no icon trio and no
+    # og:image merged green and only a full run reded.
+    #
+    # ⛔ WHAT THIS LOOP CANNOT DO (review P3): it is a TRIPWIRE OVER THE EXISTING TREE,
+    # not a gate on the page's own PR. `website/` selects `onboarding`, this file is
+    # `core`-registered, and a named-surface match REPLACES the core fallback — so a
+    # diff that adds `website/newpage.html` together with its
+    # `config/pages-upload-classification.txt` row (which `deploy-pages.yml` forces)
+    # selects `onboarding` and NOT this file, and the `website/newpage.html selects []`
+    # red lands on the NEXT unrelated `core` diff instead. The page's head is still
+    # guarded on its own PR — the classification row is what selects `onboarding` — so
+    # the exposure is a delayed red, not an unguarded page. Closing it means moving
+    # these two ratchets into `tests/test_website_static.py` (onboarding) or
+    # registering this file on `onboarding` in `config/ci-surfaces.yml`.
     pages = sorted(p.name for p in (REPO / "website").glob("*.html"))
     assert pages, "no pages found — this ratchet would pass vacuously"
     for page in pages:

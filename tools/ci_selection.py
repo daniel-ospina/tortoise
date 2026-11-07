@@ -403,7 +403,7 @@ SOURCE_PATTERNS = {
                    "website/docs.html", "website/faq.html",
                    # #11318: the SITE ICON SET and the shared link-preview card.
                    # These are binaries, and `website/` is in NON_PYTHON_PREFIXES,
-                   # so `_keep_changed` dropped all four and a binary-only PR took
+                   # so `_keep_changed` dropped every one of them and a binary-only PR took
                    # the docs-only early return — measured: `select(
                    # ["website/favicon.png"])` → surfaces=[] and
                    # `test_website_static.py` was NOT in the selected set, so a PR
@@ -447,6 +447,22 @@ SOURCE_PATTERNS = {
                    # (guard never runs on its own subject; a red that arrives after the
                    # merge) those entries were added to end.
                    "website/logo.png",
+                   # #11387 review P2: the SECOND witness, and it is a file the guard
+                   # reads rather than a page-linked asset — `test_the_icon_target_guard_
+                   # reads_existence_and_shape` drives `/assets/premiselabs-logo.png`
+                   # (160x98) through the shape rule and requires the "non-square"
+                   # violation, so the test DEPENDS on those bytes. It is invisible to
+                   # both derivations (no page links it as an icon — that is what
+                   # `test_the_wordmark_is_never_used_as_an_icon` forbids — and it
+                   # appears in the guard only as a dict literal, so neither the
+                   # `(self.WEB / "…")` nor the `self.CONSTANT = "…"` shape resolves
+                   # it). Measured before this entry:
+                   # `select(["website/assets/premiselabs-logo.png"])` ->
+                   # `surfaces: []`, so re-exporting the wordmark SQUARE merged green
+                   # with the guard absent and then REDed the next onboarding diff —
+                   # billing its author for a file they never touched, exactly the
+                   # failure the `logo.png` entry above describes.
+                   "website/assets/premiselabs-logo.png",
                    # #3673: the served skill documents and the installer belong to
                    # this surface. The parity contract between
                    # `tortoise/onboarding/SKILL.md` and its served mirror is
