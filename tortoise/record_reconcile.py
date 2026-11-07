@@ -142,7 +142,9 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
   legacy copy — ⛔ and that route is itself BLOCKED on a production graph:
   ``rebuild_from_record`` runs ``_assert_test_graph`` (#2944), which refuses every
-  ``org_<org_id>`` graph name, so on a live deployment the clear is an explicit
+  name not prefixed ``test_``/``tortoise_test`` — every ``org_*`` production name,
+  the gid-suffixed ``org_<org_id>_<graph_id>`` included — and is EXEMPT in embedded
+  mode, so on a live server deployment the clear is an explicit
   ``REMOVE n.story_arc`` on the anchor. It has NO route that RESTORES the value.
   ⛔ BOUND THAT CLAIM,
   because two populations reach this class and a clear costs them different
