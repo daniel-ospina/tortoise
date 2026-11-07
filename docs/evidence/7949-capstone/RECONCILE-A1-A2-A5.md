@@ -68,11 +68,18 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
 `hasPart` (`tortoise/extractor_v2.py:1720`). It does **not** discharge A1: it is **transport only** —
-nothing in the tree consumes `result["relations"]` (`extractor_v2.py:10702`), and materialising them as
-Object→Object edges is **`#11237`** (OPEN). What it *does* change is this record's evidence surface: the
-bare token count of the three edge-creating verbs prints **4** on `origin/main` and **0** at the base,
-because #11205's own explanation names `sdk.create_operator` in four comments
-(`extractor_v2.py:8892/8910/8917/9231`). The **calls** are still absent, so §1's second reason stands
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:10815`, and
+`git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
+materialising them as Object→Object edges is **`#11237`** (OPEN). ⚠️ **The scope is `tortoise/`, and it is
+load-bearing:** tree-wide the channel HAS a reader — `tests/test_10999_batch_story_relations.py` names
+`result["relations"]` **56 times**, pinning the contract against model output — so "no consumer at all"
+would be false of the tree. What is missing is a producer, not a reader; the two greps in §5 print both
+sides. What it *does* change is this record's
+evidence surface: the bare token count of the three edge-creating verbs prints **4** on `origin/main`
+and **0** at the base, because #11205's own explanation names `sdk.create_operator` in four comments —
+`git grep -n 'create_operator' -- tortoise/extractor_v2.py` prints exactly four, `:8938`, `:8956`,
+`:8963` and `:9343` at the head this record was last re-pointed at, and none of them is a call. The
+**calls** are still absent, so §1's second reason stands
 unchanged; §1 and §5 therefore now carry the call-shaped command, which a comment cannot satisfy. That
 is §7's lesson one merge later: **a count is only as good as the base it was taken at.**
 
@@ -255,8 +262,12 @@ four-suite run below is 254).
 ⛔ **But the HOLD that landed is not the gate A2 needs, and an earlier revision of this record read it as
 if it were.** The HOLD has exactly **one** kind (`identity_hold.py:125` `HOLD_ENDPOINT =
 "operator_endpoint"`, and `KINDS = (HOLD_ENDPOINT,)`) and exactly **one** call site —
-(`extractor_v2.py:9617`), inside `_mint_endpoint`, which fabricates a `statement` **Point** from an
-operator ref. A2's population is the **Object** mint: every emitted entity is appended unfiltered at `extractor_v2.py:8880`
+(`extractor_v2.py:9617` at `80c912244`; **`:10172` at `d69faaf38`**, the sole `_hold_endpoint(...)` call —
+inside `def _mint_endpoint`, `:10052` at `d69faaf38` / `:9497` at `80c912244`, while `_hold_endpoint`'s OWN
+def is `:3104` at `d69faaf38`; `git grep -n '_hold_endpoint(' -- tortoise/extractor_v2.py` prints that
+def and the one call), which fabricates a `statement` **Point** from an operator ref. A2's population is
+the **Object** mint: every emitted entity is appended unfiltered at the
+`payload_entities.append({` site (`extractor_v2.py:8880` at `80c912244`; **`:9433` at `d69faaf38`**)
 (`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16414-16428`. Nothing
 filters it, and the tree's own registry says so in `#10997`'s own words —
 `config/v4-mechanisms.yml`'s `failure_policy` row is still **`state: not-implemented`**, its note reads
@@ -266,15 +277,24 @@ So `#10985`'s own premise — *"the **MINT** half does not — 'nothing suppress
 true for Objects**, and the 0.0 pp above is explained by the arm that *did* run (Rule 2 re-KEEPs every
 referenced entity), not by a HOLD the probe's arms never reach. Its other premise blocker, `#10996`, is
 CLOSED, and S2.2's
-mechanical half now defaults ON — the composition is `extractor_v2.py:11731-11732`
-(`vet_enabled = (vet_arbiter is not None or _vet_enabled() or _value_gate_enabled())`), and the
-default-ON itself lives at `tortoise/value_gate.py:81` (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
+mechanical half now defaults ON — the composition is the `vet_enabled = (vet_arbiter is not None or
+_vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-11732` at `80c912244`;
+**`:12302-12303` at `d69faaf38`**), and the default-ON itself lives at `tortoise/value_gate.py:81`
+(`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
 `extractor_v2.py:1154` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
-nothing else. ⚠️ Both cites are line numbers **at `80c912244`**: the forward merge that brought `#11212`
-in inserted ~381 lines above them, and the two cites moved by **different** amounts —
-`:11351-11352` → `:11731-11732` (**+380**) and `:1153` → `:1154` (**+1**) — so a bare "re-anchor on merge"
-is not one arithmetic. That is the class of defect §0 exists to catch: a number true at one base and false
-at the base the record claims. Which is why the 0.0 pp above is the **armed** result, not an unarmed one.
+nothing else. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
+named by the sha it is true at, so every delta has a reproducible operand: `:11351-11352` / `:1153` at
+**`aa414b4d5`** (the `#11211` landing — ⚠️ the immediate parent of the next point, `80c912244^`, holds
+`:11358`, i.e. **+373**, so the delta depends on which pre-merge base you pick) → `:11731-11732` / `:1154`
+at **`80c912244`** (**+380** / **+1**) → `:12302-12303` / `:1154` at **`d69faaf38`** (**+571** / **+0**).
+So a bare "re-anchor on merge" is not
+one arithmetic, and an arithmetic that is right for one base is already wrong for the next: **cite the
+symbol and let the line number be a convenience printed beside it** (`git grep -n 'vet_enabled = '
+-- tortoise/extractor_v2.py`, `git grep -n 'payload_entities.append' -- tortoise/extractor_v2.py` —
+the path matters: unscoped, both patterns also match THIS record and its quoted lines, which is the
+count-of-mentions trap §0 documents). That is the class of defect §0 exists to catch: a number true at
+one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
+not an unarmed one.
 
 **Exact remaining gap for `#10985`:** (a) the attach rate must be a reported census number, per candidate,
 with HOLD as a third bucket; (b) E1/E1b must be scored against the registered arithmetic rather than
@@ -425,6 +445,12 @@ git grep -nE '\.(create_edge|create_about_edge|create_operator)\(' tortoise/extr
                                                           # origin/main since #11205 (four COMMENTS naming
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
+git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :10815 — no production
+                                                          # consumer of #11205's channel (⚠️ the `-- tortoise/`
+                                                          # scope is the claim: unscoped it also matches the
+                                                          # reader below)
+git grep -c 'result\["relations"\]' -- tests/          # tree-wide reader: tests/test_10999_batch_story_
+                                                          # relations.py — 56, a contract pin, not a producer
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
 tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer (2 holders on a
                                                           # clean checkout); exit 2 = a surface could not
@@ -444,8 +470,9 @@ git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-caps
     > /tmp/e1e2.log 2>&1                                   # exits 3 = UNPREREGISTERED, by design
 grep -E '^e1 |metric=objects|vet-downgrades|metric=real_facts' /tmp/e1e2.log
 grep -n -E 'after_share <= 0.50|>= 90 of 90' docs/evidence/7949-capstone/PRE-REGISTRATION.md
-sed -n '11731,11732p' tortoise/extractor_v2.py; sed -n '81p' tortoise/value_gate.py   # the default-ON composition
-sed -n '1154p' tortoise/extractor_v2.py                      # the `TORTOISE_VET` toggle (OFF by default)
+git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py   # the default-ON composition (symbol, not a line)
+git grep -n 'ENV_FLAG, "1"' -- tortoise/value_gate.py      # the default-ON itself (value_gate.py:81)
+git grep -n 'os.environ.get("TORTOISE_VET")' -- tortoise/extractor_v2.py   # the toggle (OFF by default)
 # the 62.3 % share is QUOTED from a research record, re-read (not re-derived):
 sed -n '192p;314p' docs/research/2026-09-24-4333-node-volume-storage-cost/research-brief.md
 sed -n '45p' docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md   # "#4894 is the mechanism audit"
@@ -453,7 +480,9 @@ sed -n '45p' docs/epics/2026-11-05-5087-extractor-v4/02-research-brief.md   # "#
 # A5 (§3) — Subject 19, three of four families at zero
 grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
-sed -n '16414,16428p' tortoise/sdk.py        # the kind→label routing at the write seam (#5230/#1370's fix)
+git grep -n -A 14 '_ekind = _payload_entity_kind(e)' -- tortoise/sdk.py   # the kind→label routing at the
+                                                          # write seam (#5230/#1370's fix); symbol, not a
+                                                          # line — the -A 14 reproduces sdk.py:16414-16428
 for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 # #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
 gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'
