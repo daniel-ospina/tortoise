@@ -48,7 +48,7 @@ recorded, because each one on its own is a trap:
 | `#11213` | `#11001` | **MERGED** 2026-11-06T19:13:23Z | `e918f3d6d` | ✅ `merge-base --is-ancestor` → 0 |
 | `#11211` | (part of `#11021` — **not** a PR close) | **MERGED** 2026-11-06T20:27:05Z | `aa414b4d5` | ✅ `merge-base --is-ancestor` → 0 |
 | `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` IS the `origin/main` tip** — but ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
-| `#11205` | `#10999` (manual close — `closingIssuesReferences` is empty) | **MERGED** 2026-11-06T22:40:32Z — **after the base, before this record merged** | `316a572ce2` | ✅ `merge-base --is-ancestor` → 0; and it is the landing that moved one of §5's own counts (below) |
+| `#11205` | `#10999` (closed by its own merge commit — `Closes #10999` rode `316a572ce2`'s message; ⛔ `closingIssuesReferences` is empty because the keyword rode the commit, **not** the PR body, so the empty field is **not** evidence of a manual close) | **MERGED** 2026-11-06T22:40:32Z — **after the base, before this record merged** | `316a572ce2` | ✅ `merge-base --is-ancestor` → 0; and it is the landing that moved one of §5's own counts (below) |
 
 ⛔ **`git merge-base --is-ancestor` is a ONE-SIDED landing test: exit `1` is not a landing test, and
 `0` is.** Exit **0** is sound — the commit is in `origin/main`'s history, so it landed, and that is what
@@ -123,7 +123,8 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:353` the definition,
    `:447` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner). The producer is
-   a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999`.
+   a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999` (now
+   **CLOSED**; its remainder is **`#11237`**, OPEN).
 2. **`extractor_v2.py` calls none of the three edge-creating verbs**, so it cannot be the producer of any
    Object→Object edge, including the declared `hasPart` pairs:
    `git grep -nE '\.(create_edge|create_about_edge|create_operator)\(' tortoise/extractor_v2.py` → **no
@@ -394,6 +395,15 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
 gh pr view 11213 --json state,mergeCommit,mergedAt
 gh pr view 11211 --json state,mergeCommit,mergedAt,closingIssuesReferences
 gh pr view 11212 --json state,mergeCommit,mergedAt        # MERGED 21:33:54Z, mergeCommit 80c912244
+# How an issue was actually CLOSED — the discriminator an empty closingIssuesReferences cannot give:
+gh api "repos/daniel-ospina/tortoise/issues/10999/timeline?per_page=100" \
+  --jq '.[] | select(.event=="closed") | {created_at, commit_id}'
+                                                          # a SHA => a commit's closing keyword closed it
+                                                          #   (#10999 -> 316a572ce2, message `Closes #10999`)
+                                                          # null => a MANUAL close (#11021 reads null)
+                                                          # ⛔ An empty closingIssuesReferences does NOT mean
+                                                          # "manual": the keyword can ride the squash COMMIT,
+                                                          # which never populates that PR-body-derived field
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
