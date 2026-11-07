@@ -713,9 +713,9 @@ def session_key_of(hit: dict) -> str:
       ``n.sessionId`` / the snake prop / the ``:Session`` ``CONTAINS`` edge
       and then POPs the snake key, so a TURN hit carries the CAMEL key
       ALONE (:func:`hit_session_id` names the same two sources). Before
-      this the authority read neither camel spelling, so every product
-      TURN hit — the grain the C4 arm EXPANDS — keyed as a phantom and
-      ``seeded_sessions`` dropped it, so no turn hit could seed its own
+      this the authority read the snake ``session_id`` only, so every
+      product TURN hit — the grain the C4 arm EXPANDS — keyed as a phantom
+      and ``seeded_sessions`` dropped it, so no turn hit could seed its own
       session, and ``reinjection_merge_order`` could not find a turn-seeded
       session's own base ranks (the injected group fell to the defensive
       tail). The arm #8713 measured was therefore inert on the grain it

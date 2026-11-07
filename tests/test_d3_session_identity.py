@@ -222,8 +222,10 @@ def test_captured_turn_hits_seed_their_own_session_10540():
     ``retrieval.hit_session_id`` → ``SID_A`` for both hits, while
     ``session_key_of`` → ``idx:point:{sid}_t0`` / ``idx:point:{sid}_t1`` and
     ``seeded_sessions`` → ``[]``. ``_is_real_session_id`` refuses an
-    ``idx:`` bucket, so source-session re-injection could not fire on any
-    PRODUCT graph — only on eval graphs, whose hits carry the snake id.
+    ``idx:`` bucket, so no TURN hit could seed its own session — the arm
+    fired only where a hit already carried an id the authority read (an
+    extracted point's snake ``session_id``, an ``annotate_ask_hits`` Event
+    join, or an eval hit).
     """
     from tortoise.session_reinjection import seeded_sessions
 

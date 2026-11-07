@@ -970,9 +970,11 @@ def test_wire_session_identity_keys_the_pool_and_seeds_the_session():
     i.e. the identity WAS on the retrieved answer (the reader rendered
     ``[session sessA]``) and the pool authority one layer below it dropped
     it, so ``seeded_sessions`` rejected every turn hit as a phantom
-    (``_is_real_session_id`` refuses ``idx:*``) and source-session
-    re-injection could not fire on ANY product graph — only on eval graphs,
-    whose hits carry the snake ``session_id``."""
+    (``_is_real_session_id`` refuses ``idx:*``) and no TURN hit could seed
+    its own session — the arm fired only on a pool whose hits already
+    carried an id in a spelling the authority read (an extracted point's
+    snake ``session_id``, an ``annotate_ask_hits`` Event join, or an eval
+    hit)."""
     pool = [_wire_turn("A_t0", "sessA"), _wire_turn("B_t0", "sessB"),
             _wire_turn("A_t1", "sessA"), _wire_turn("B_t1", "sessB")]
 

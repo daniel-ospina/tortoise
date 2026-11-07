@@ -446,10 +446,12 @@ def _session_of(hit: dict, session_key: Callable[[dict], str] | None = None) -> 
 
     The camel ``sessionId`` leg is #10540: without it a product turn hit —
     whose only identity is that camel key — censused as a phantom, so for a
-    captured-session pool of TURN hits this window census counted zero real
-    sessions (the same blindness #10632's instrument removed one layer up;
-    a hit whose session is present in a spelling the authority reads was
-    never affected).
+    captured-session pool of TURN hits this census counted zero real
+    sessions. #10632's own instrument INHERITED that blindness rather than
+    covering it (``reader_window_displacement`` keys through this same
+    function and filters the ``idx:*`` namespace, so it reported
+    ``sessions_before = 0`` for such a pool); a hit whose session was
+    present in a spelling the authority read was never affected.
     """
     if session_key is not None:
         return session_key(hit)
