@@ -133,6 +133,14 @@ _ROW = re.compile(r"^\|\s*#(\d+)\s*\|")
 _SHA = re.compile(r"`([0-9a-f]{7,40})`")
 _PATH = re.compile(r"`([^`]+)`")
 _SUMMARY = re.compile(r"^\|\s*(VERIFIED-FIXED|OPEN|UNKNOWN)\s*\|\s*(\d+)\s*\|")
+#: §2 owns the counts. Parsing the WHOLE document and keeping the LAST match let a
+#: later `| OPEN | 5 |` row substitute for §2's own number: measured — corrupt
+#: §2's `| OPEN | 5 |` to `| OPEN | 3 |` and append
+#: `## Appendix` + `| OPEN | 5 |`, and the check returned NO errors while §2
+#: contradicted its own table (the index count check was fooled with it, because
+#: it compares against the same parse). Every count is read from §2's body and
+#: nowhere else — a decoy outside it cannot be a count at all.
+_SUMMARY_SECTION = "## 2."
 #: The TOTAL row. It is a fourth count and nothing read it, so a document could
 #: state "Total tracked 30" over a 26-row table and this tool still said CLEAN —
 #: found by review on the version that already guarded the other three counts, so
@@ -248,9 +256,24 @@ def parse_rows(text: str) -> tuple[list[Row], list[str]]:
     return rows, bad
 
 
+def _section(text: str, marker: str) -> str:
+    """The text from `marker` up to the next `## ` heading at column 0.
+
+    Same rule as `tools/substrate_map_check.py::_section` — one definition of
+    "which section owns these numbers", so the two guards cannot disagree.
+    """
+    start = text.find(marker)
+    if start < 0:
+        return ""
+    rest = text[start + len(marker):]
+    nxt = re.search(r"^## ", rest, re.MULTILINE)
+    return rest[: nxt.start()] if nxt else rest
+
+
 def parse_summary(text: str) -> dict[str, int]:
+    """§2's `| STATUS | n |` rows — ONLY §2's, so a later row cannot substitute."""
     counts: dict[str, int] = {}
-    for line in text.splitlines():
+    for line in _section(text, _SUMMARY_SECTION).splitlines():
         m = _SUMMARY.match(line)
         if m:
             counts[m.group(1)] = int(m.group(2))
@@ -522,7 +545,7 @@ def check_summary(text: str, rows: list[Row]) -> list[str]:
             errors.append(
                 f"summary says {declared} {status} row(s); the tables contain {actual}"
             )
-    total = _TOTAL.search(text)
+    total = _TOTAL.search(_section(text, _SUMMARY_SECTION))
     if total is None:
         errors.append("summary is missing its `| **Total tracked** | **n** |` row")
     elif int(total.group(1)) != len(rows):

@@ -11,10 +11,12 @@ No network, no DB, no `gh`: the TRACKER half of the map is deliberately not
 guarded (a status is a dated fact — §9 of the document says so), so nothing here
 depends on GitHub.
 
-EVERY NEGATIVE CONTROL MUTATES A COPY OF THE REAL DOCUMENT, and each test's
-docstring states (a) the exact value/state that makes it fail and (b) why that
-state is reachable. A guard whose negative case cannot be reached is a test that
-cannot fail — it proves the code ran, not that the tree agrees with the document.
+EVERY NEGATIVE CONTROL MUTATES A COPY OF THE ARTIFACT IT GRADES, DRIVES A
+THROWAWAY REAL GIT REPO, OR PATCHES ONE SEAM THE ARM REQUIRES — never a fixture
+that could not fail — and each test's docstring states (a) the exact value/state
+that makes it fail and (b) why that state is reachable. A guard whose negative
+case cannot be reached is a test that cannot fail — it proves the code ran, not
+that the tree agrees with the document.
 
 Registered in `config/ci-surfaces.yml` (`manifest-integrity` fails on an
 unregistered test file; a docs-only edit runs `tier1` only, which is why the file
@@ -340,6 +342,33 @@ def test_a_summary_count_that_disagrees_with_the_table_is_drift(tmp_path):
     copy.write_text(text, encoding="utf-8")
     errors = pmc.run(REPO, copy).errors
     assert any("summary says 25" in e for e in errors), errors
+
+
+def test_a_decoy_summary_ROW_outside_section_2_cannot_satisfy_the_check(tmp_path):
+    """Fails if §2's counts are read from ANYWHERE instead of §2's own body.
+
+    Reachable, and found by fresh review at the post-merge head: `parse_summary`
+    scanned the whole document and kept the LAST `| OPEN | n |` match, so an
+    ordinary table appended after §2 ("## Appendix") SUBSTITUTED for §2's number.
+    Measured before the fix: §2 corrupted to `| OPEN | 3 |` plus
+    `## Appendix` / `| OPEN | 5 |` returned NO summary errors, and the index count
+    check — which compares against the same parse — agreed with the decoy, so a
+    document contradicting its own table read CLEAN. Pages like this grow
+    appendixes; the counts belong to one section.
+    """
+    copy = _doc_copy(tmp_path)
+    text = copy.read_text(encoding="utf-8")
+    corrupted = text.replace("| OPEN | 5 |", "| OPEN | 3 |", 1)
+    assert corrupted != text, "fixture no longer finds §2's OPEN row"
+    copy.write_text(
+        corrupted + "\n## Appendix\n\n| Status | Rows |\n|---|---|\n| OPEN | 5 |\n",
+        encoding="utf-8",
+    )
+    assert pmc.parse_summary(copy.read_text(encoding="utf-8"))["OPEN"] == 3, (
+        "the decoy outside §2 was read as §2's count — the parse is not scoped"
+    )
+    errors = pmc.check_summary(copy.read_text(encoding="utf-8"), pmc.parse_rows(text)[0])
+    assert any("summary says 3" in e for e in errors), errors
 
 
 def test_an_index_entry_whose_counts_disagree_is_drift(tmp_path):

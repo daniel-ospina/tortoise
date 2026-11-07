@@ -52,21 +52,30 @@ both:
    itself. A test module is preferred, because a symbol can survive a fix being
    reverted out from under it.
 
-**Issue closure is not evidence, and this map has five rows that prove it:**
+**Issue closure is not evidence, and this map has four rows where the tracker's state and the row's status disagree:**
 
 | What the tracker said | What the tree said | Row |
 |---|---|---|
 | CLOSED **NOT_PLANNED** | the symptom no longer reproduces (`ruff check` clean on the file it named) | **#2748** |
 | CLOSED **NOT_PLANNED** (consolidated) | ONE of its two indicators landed under the root issue; the other did not | **#2787** |
-| **OPEN, never closed** (no closure event at all) | the *representation* half shipped while the issue sat open — the tracker is right and the work is half done | **#2782** — the mirror case: closure is not a verdict in either direction |
 | CLOSED **COMPLETED** | the mechanism is unbuilt and the pin asserts the brief's wording, not the behaviour — the strongest instance on this page | **#2730** |
 | **OPEN**, never closed | both halves shipped — `08a6b0288` (2026-10-18) added the Settings home and the per-graph modal, pinned in the tree — so the TRACKER is the stale half: the issue never closed over a finished job | **#2728** |
 
 So: a closure can lag a fix, and a fix can lag a closure. The anchor+pin pair is
-what this map trusts. Tracker state is **not** a column in the row tables — it is
-recorded only where it is the point (§1's table, §10), because a state column
-would invite exactly the reading this page exists to stop: that a closed issue is
-a fixed defect, or an open one an unfixed one.
+what this map trusts.
+
+The other direction is not a tracker error and is deliberately NOT in that table:
+`#2782` and `#2684` are **OPEN** in the tracker and **OPEN** here, and that
+verdict is right in both cases — what an OPEN does not tell you is how much
+landed. `#2782`'s representation half shipped (§6; `#8641`, `#8976`, pinned by
+`tests/test_money_value_2782.py`) while its cross-company identity half did not,
+and `#2684`'s mechanism landed (`#8659`'s stamp, `#8966`'s address, pinned by
+`tests/test_extractor_v2.py::TestValueVerbSpan2684`) while the slice its title
+names has not run. So an OPEN is a claim that needs its own anchor+pin, exactly
+like a fix — which is why both rows carry one. Tracker state is **not** a column
+in the row tables: it is recorded only where it is the point (§1, §10), because
+a state column would invite exactly the reading this page exists to stop — that a
+closed issue is a fixed defect, or an open one an unfixed one.
 
 **Status vocabulary — exactly three tokens:**
 
@@ -411,11 +420,12 @@ rounding:**
   `docs/plans/2026-09-10-write-contract-five-doors.md`,
   `docs/plans/2026-09-10-ws-b-pack-property-declaration.md`,
   `docs/plans/2026-09-10-ws-c-numeric-normalization.md`.
-- Tracker reads: `gh issue view <n>` for each of the 26 on 2026-11-06. Five are
-  not what their state suggests: two closed NOT_PLANNED (**#2787** with one
-  indicator landed, **#2748** fixed in effect), one **never closed at all**
-  (**#2782**, open since 2026-09-10 with half its work shipped), one **OPEN**
-  whose fix outran it (**#2728**, both halves landed in `08a6b0288` on
-  2026-10-18 and pinned in the tree, with the issue still open), and one closed
-  COMPLETED with the mechanism unbuilt (**#2730**) — the five cases §1 exists to
-  keep honest.
+- Tracker reads: `gh issue view <n>` for each of the 26 on 2026-11-06. Four are
+  not what their state suggests, and those are exactly the four where state and
+  status disagree: two closed NOT_PLANNED (**#2787** with one indicator landed,
+  **#2748** fixed in effect), one closed COMPLETED with the mechanism unbuilt
+  (**#2730**), and one **OPEN** whose fix outran it (**#2728** — both halves
+  landed in `08a6b0288` on 2026-10-18 and are pinned in the tree) — the four
+  cases §1 exists to keep honest. `#2782` and `#2684` are OPEN in both places and
+  are therefore NOT in that census: their state is right, it is just silent
+  about how much landed, which §1's paragraph after the table records.
