@@ -11,7 +11,7 @@ Three properties are pinned here, and each names the mutation that makes it FAIL
    `[E1, E2, E3, E4, E5]`, because a required row cannot be inferred from the rest (`V2`) and making
    them required would red every verdict table that predates their scoring runs, the committed
    `capstone-measured-9152448d.log` included;
-2. **the amendment is an amendment** — §10.9 quotes the superseded pins line verbatim, so the change
+2. **the amendment is an amendment** — §10.10 quotes the superseded pins line verbatim, so the change
    is findable rather than a quiet overwrite (`#9736` is the model, not a new registration);
 3. **the census reports, and where it cannot measure it says so** — a population no instrument has
    counted emits `UNMEASURED(<what would measure it>)`, never a `0`, because a zero is a NUMBER and
@@ -179,19 +179,24 @@ def test_the_amendment_quotes_the_superseded_pins_line_verbatim():
     ⛔ The slice is bounded by the A-rows heading's own TEXT, not by `text.index("### 10.8")`. The
     branch first wrote a §10.8 and then merged `origin/main`, which brought `#10997`'s own §10.8 —
     so an ordinal first-match resolved to the WRONG section and the slice spanned both, letting this
-    arm pass on a document whose §10.9 was `#10997`'s cite re-point (#10982 review round 2).
+    arm pass on a document whose §10.10 was `#10997`'s cite re-point (#10982 review round 2).
     """
     text = PREREG.read_text()
-    heading = "### 10.9 — five `A`-rows added to the criteria table"
-    assert heading in text, "the A-rows amendment is not a §10.9 with its own heading"
-    assert text.count("### 10.9") == 1, "two sections claim §10.9 — a pointer to it is ambiguous"
+    heading = "### 10.10 — five `A`-rows added to the criteria table"
+    assert heading in text, "the A-rows amendment is not a §10.10 with its own heading"
+    # ⛔ §10.9 was TAKEN by the time this branch met `main`: `#11292` landed its own §10.9 (the §11
+    # cite re-point) and a forward merge left two sections claiming one number. This branch's
+    # amendment takes the next free number, and BOTH halves are asserted — a count of 1 alone
+    # would now be satisfied by `main`'s section while this one had vanished.
+    assert text.count("### 10.10") == 1, "two sections claim §10.10 — a pointer to it is ambiguous"
+    assert text.count("### 10.9") == 1, "`main`'s §10.9 must survive the forward merge"
     section = text[text.index(heading):]
     section = section[: section.index("## 11.")]
     assert "criteria: [E1, E1b, E2a, E2b, E3, E4, E5]" in section, (
         "the superseded pins line is not quoted — a reader cannot see what changed")
     assert "required_criteria_rows" in section, (
         "the section does not say the required set is unchanged")
-    # ⛔ §10.9 is where the next child reads its FLOORS from, and it said **Seven** while listing
+    # ⛔ §10.10 is where the next child reads its FLOORS from, and it said **Seven** while listing
     # seven plus two and while §3.7 and the record both carried nine (#10982 review round 4, F3).
     # Checked against the ACTUAL count, not against a word: a re-wording that restores the
     # understatement reds here rather than going stale beside `test_every_pinned_A_floor_…`,
@@ -199,7 +204,7 @@ def test_the_amendment_quotes_the_superseded_pins_line_verbatim():
     a_floors = [k for k in check.parse_pins(text)["denominator_floors"] if k.startswith("a")]
     assert len(a_floors) == 9, a_floors
     assert re.sub(r"\s+", " ", "**Nine** floors are pinned") in re.sub(r"\s+", " ", section), (
-        "§10.9 understates how many A-floors the record pins — a reader scoring A1 from this "
+        "§10.10 understates how many A-floors the record pins — a reader scoring A1 from this "
         "section would miss two of them")
 
 
