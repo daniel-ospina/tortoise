@@ -910,8 +910,12 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
     max_rer = max(a[arm].get("out_tokens") or 0
                   for a in rer["arms"] for arm in ("legacy", "delta"))
     assert max_rer > max_pri, (max_pri, max_rer)   # else the cell's claim is moot
-    assert _thousands(max_rer) in flat_all, max_rer
-    assert _thousands(max_pri) in flat_all, max_pri
+    # ⛔ ANCHORED, not bare: `_thousands(521) == "521"` is a SUBSTRING of the
+    # document's own "6 521", so a bare `in` stays green when a regeneration
+    # collapses the maximum and the stale figure keeps its place — the same
+    # prefix defect as the largest-list pin (#11385 review P3).
+    assert f"**{_thousands(max_rer)}** tokens, the re-run's" in flat_all, max_rer
+    assert f"tops out at **{_thousands(max_pri)}**" in flat_all, max_pri
     # ⛔ "the largest list is 17" is a published figure too: pinning only
     # `cap_hit`/`cap_dropped` left it stale-proof — a regeneration with a larger
     # recorded list keeps 17 in the document and every test green (#11385 review P3).
@@ -930,12 +934,19 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         lg, dl = comp["legacy"], comp["delta"]
         assert _thousands(s["sum_legacy_out_tokens"]) in readme
         assert _thousands(s["sum_delta_out_tokens"]) in readme
-        assert f"{s['token_weighted_reduction'] * 100:.2f}" in readme \
-            or f"{s['token_weighted_reduction'] * 100:.1f}" in readme
+        # ⛔ TWO decimals only. The 1-dp fallback matched the title/verdict `93.8`,
+        # so a reduction anywhere in [93.80, 93.89] left the 2-dp figure at the
+        # summary line free to go stale — a window half the observed run-to-run
+        # spread, i.e. a legitimate re-run can land in it (#11385 review P3).
+        assert f"−{s['token_weighted_reduction'] * 100:.2f} %" in readme, s
         assert f"{s['min_session_reduction'] * 100:.2f}" in readme
         # composition: the legacy tax vs the delta arm's zero
         assert lg["verbatim_reemissions"] > 0 and dl["verbatim_reemissions"] == 0
-        assert _thousands(lg["s4_items"] - dl["s4_items"]) in readme
+        # ⛔ anchored on its clause: a bare `272` is satisfied by the document's
+        # own `merged_items` 272, so a computed 27 would pass (#11385 review P3).
+        few = _thousands(lg["s4_items"] - dl["s4_items"])
+        assert (f"{few} fewer items per 7 sessions" in readme
+                or f"i.e. {few} fewer items" in " ".join(readme.split())), few
         # ⛔ EVERY channel figure, pinned IN ITS TABLE CELL: a substring check
         # stays green when the wrong cell changes, because `201`, `12` and `62`
         # each occur several times in the document (#11385 review P2). The
