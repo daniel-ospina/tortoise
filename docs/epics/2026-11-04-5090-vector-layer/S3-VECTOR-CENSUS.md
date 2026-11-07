@@ -320,10 +320,10 @@ assertion measures.
 
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
-121 passed, 1 skipped in 42.50s   # at #11088's head; at #11337's head: 127 passed, 1 skipped
+121 passed, 1 skipped in 42.50s   # at #11088's head; at #11337's head: 128 passed, 1 skipped
 ```
 
-(115 collected before #11088's round 7; the file collects 128 at #11337's head — six added by that change — and reads 127 passed, 1 skipped on the docker lane. The skip is the `<3.12` re-derive.)
+(115 collected before #11088's round 7; the file collects 129 at #11337's head — seven added by that change — and reads 128 passed, 1 skipped on the docker lane. The skip is the `<3.12` re-derive.)
 
 **Row 2 — an unreadable catalogue exits non-zero and does not report an empty population.**
 Three routes, all `2`, none reporting a population. ⚠️ These are **excerpts**, not full transcripts:
