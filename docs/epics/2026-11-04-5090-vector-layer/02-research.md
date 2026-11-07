@@ -12,7 +12,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
 
 # Epic research brief — the vector layer (#5090)
 
-**Stage:** 2 of 6 (`epic-workflow` → `epic-research`). **Head `641e5f1b37`.** **Review gate:** verifier.
+**Stage:** 2 of 6 (`epic-workflow` → `epic-research`). **Head `641e5f1b37`; §*Extractor-v4 alignment* measured at `28d13ccc8`** — a LATER commit than that pin, and the section says so where it matters, because at the pin two of its claims are false and at `28d13ccc8` they are true. **Review gate:** verifier.
 
 > **What this brief is, and is not.** It does **not** re-derive what the repo already holds — the 35 KB
 > `docs/research/2026-09-23-vector-index-ram-model/research-brief.md` (issue `#4333`) and the paid
@@ -224,7 +224,7 @@ This section first repeated v4's wiring note as an open defect. At the branch he
 ### What this changes for the epic
 
 - **S1 / #11086** — arms `TORTOISE_EMBED_GATE` (the second enforcement point) and gives the EMBED decision a home in the step list (**G2**). It does **not** need `TORTOISE_VALUE_GATE` set: that is already ON by default since `#10996` (`03-scope.md`, S1).
-- **S3 / #11088** — states that it removes **vectors**, never rows, and cites the 48%-precision measurement as the reason that distinction is not negotiable (`03-scope.md`, S3; the issue body carries the same). ⚠️ `#11088` is **CLOSED** and no successor carries the removal/surface-approval call, so that acceptance item has no tracking surface today — see below.
+- **S3 / #11088** — states that it removes **vectors**, never rows, and cites the 48%-precision measurement as the reason that distinction is not negotiable (`03-scope.md`, S3; the issue body carries the same). ⚠️ `#11088` is **CLOSED** and no successor carried the removal/surface-approval call, so that acceptance item had no tracking surface — **`#11395` was opened to carry it** (a tracking surface only: it authorises nothing, and its own DoD is Daniel's recorded ruling).
 - **V1 stays out of scope** and unaffected: v4 is silent on where the index lives, and §14.3 remains the decision's home.
 
 ### ⚠️ The stale premises have already propagated into the child issues
@@ -232,12 +232,27 @@ This section first repeated v4's wiring note as an open defect. At the branch he
 This doc can only stop the NEXT copy; each issue body is what a lane building that slice reads as its brief.
 
 - **`#11086`** carries **four** superseded premises, not one: the value gate is no longer off by default; a `DISCARD` no longer reaches `S2.3`/`execute_embed`; its ordering table *and* its checklist both require **both** gates to stay subordinate to VET — the invented subordination this section disclaims; and that same table still carries the **`EMBED` before `execute_embed`** row, the invented placement refuted above. Correcting all four is part of S1, not a follow-up.
-- **`#11088`** — now **CLOSED**, and it carries the stale v4 §4.2 wiring note (*"`S2.3 — CLASSIFY` collects from `embed_list`, and `classify_consolidation` does not remove items from it — so anything this issue stops embedding must also be skipped there, or it is classified and embedded anyway"*). The "embedded anyway" half is false: the gate is at `encode_for_row`, so a row that is not embedded gets no vector whatever the classifier does. No successor issue carries the removal/surface-approval call, so this one needs checking before it is read as settled.
+- **`#11088`** — now **CLOSED**, and it carries the stale v4 §4.2 wiring note (*"`S2.3 — CLASSIFY` collects from `embed_list`, and `classify_consolidation` does not remove items from it — so anything this issue stops embedding must also be skipped there, or it is classified and embedded anyway"*). The "embedded anyway" half is false: the gate is at `encode_for_row`, so a row that is not embedded gets no vector whatever the classifier does. No successor issue carries the removal/surface-approval call (that is now **`#11395`**), so this one needs checking before it is read as settled. ⚠️ It carries a **second** stale premise this inventory must not omit: *"Removing those two labels' vectors makes those queries return **zero rows** — that is the surface consequence"*. Both halves of that are superseded — the population is **FOUR labels / FIVE `entity_type` values**, and a lexically-matching query keeps answering, so what is lost is **semantic recall** and only a meaning-only query goes to zero rows (`03-scope.md` S3; `S3-VECTOR-CENSUS.md` §3.1). Do **not** quote the closed body's consequence statement; quote §3.1.
 
 ## Review gate
 
 **Cycle 1** — 2 P1 + 2 P2 + 2 P3, all incorporated below. The two P1s were cases of the same defect: **the
 brief presented the favourable half of its own evidence without the unfavourable half.**
+
+**Cycles 2–8 — the §Extractor-v4 alignment section, added after the gate log above was written.** Recorded
+for the same reason `03-scope.md` §7.5 records its own rounds: a log that stops at round 1 while seven more
+landed fixes is the *"each cycle's issues and fixes documented"* exit condition failing quietly. Each finding
+was verified against its primary source before being applied, and **one was falsified and marked ⛔ DO NOT
+APPLY rather than applied** (a claim that `#11088`'s body lacks the 48%/52% material — it carries all of it).
+The load-bearing corrections, in order: **2** the census population is the **union**, not the graph labels
+alone; **3** the EMBED gate is **not** subordinate to VET; **4** this document was **right at its own `Head`
+pin** and went stale, and the `EMBED before execute_embed` row was an invention; **5** `execute_embed`
+performs no commit, and `#5059`'s dispositions are the owner's; **6** the never-classified half is
+flag-dependent; **7** the pin clause's polarity was inverted; **8** `NO ISSUES FOUND` at `28d13ccc8` — at
+which point the PR-level review (rounds 1–2, two fresh-context reviewers) added the G2 verifiable-target
+clause to `03-scope.md` S1, the qualification that a flag-only S1 is correct on the **configuration half**
+*only*, `#11395` as S3's tracking surface, this inventory's second `#11088` premise, and the measured-head
+sha in the header above.
 
 ### P1-a — `iterative_scan` was reported without its documented failure at correlated filters
 
