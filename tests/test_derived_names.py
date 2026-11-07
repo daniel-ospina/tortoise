@@ -679,6 +679,74 @@ def _journal_calls(code: str) -> int:
     return calls
 
 
+#: The `falkordb` IMPORT statements — a file-level GATE (`_raw_client_call_positions`),
+#: never the anchor: the census's SITE is the construction CALL.
+_RAW_CLIENT_IMPORT = re.compile(
+    r"^[ \t]*from[ \t]+falkordb[ \t]+import[ \t]+(?P<names>[^\n]+)"
+    r"|^[ \t]*import[ \t]+falkordb\b",
+    re.MULTILINE)
+
+
+def _raw_client_call_positions(source: str) -> list[int]:
+    """Offsets of every raw-client CONSTRUCTION CALL in `source`.
+
+    The IMPORT is a file-level GATE only: it says this file *can* build a raw
+    client, and a file with no `falkordb` import constructs none. The SITE is the
+    CALL, and the enclosing block must be resolved from the CALL's offset.
+
+    ⛔ Anchoring on the IMPORT's offset made the census BLIND in the ordinary
+    spelling (#11217 merge review P2, measured). A module-level
+    `from falkordb import FalkorDB` sits at indent 0, where
+    `_enclosing_block_span` returns the statement run up to the next
+    `def`/`class`/`@` — which contains no `DETACH DELETE` — so `continue` skipped
+    the site and an unowned, un-journaled DETACH read **CLEAN**. The one live
+    corpus site was covered only because its import happened to be
+    function-local, and nothing enforced that: hoisting it to module level (a
+    routine tidy) would have switched the arm off for that file with a green
+    census and a leaked graph. Same for an import in a helper whose caller does
+    the DETACH — the split rendered the DETACH invisible.
+
+    The call is matched on the MASKED source so a fixture that merely *contains*
+    the text `FalkorDB(host="h")` inside a string is not a construction site
+    (this file's own batteries are full of them), while the block it resolves to
+    is taken from the RAW source, because `os.urandom` and `DETACH DELETE`
+    legitimately live inside string MATERIAL. `_mask_strings_and_comments` is
+    length-preserving, so an offset from one is valid in the other.
+
+    An alias (`from falkordb import FalkorDB as Client`) and the dotted form
+    (`import falkordb` -> `falkordb.FalkorDB(...)`) both resolve, so neither
+    aliasing nor hoisting can turn the arm off.
+    """
+    masked = _mask_strings_and_comments(source)
+    names: set[str] = set()
+    for m in _RAW_CLIENT_IMPORT.finditer(masked):
+        imported = m.group("names")
+        if imported is None:  # `import falkordb` — the dotted construction form
+            names.add("falkordb.FalkorDB")
+            continue
+        for part in imported.replace("(", " ").replace(")", " ").split(","):
+            bits = part.split()
+            if not bits:
+                continue
+            if bits[0] == "*":
+                # A star import brings the conventional `FalkorDB` name into
+                # scope, and it cannot be enumerated from the statement. Gate
+                # OPEN on it — an unreadable import must not be the way the arm
+                # is switched off (the same fail-CLOSED rule the value fold
+                # follows).
+                names.add("FalkorDB")
+                continue
+            if bits[0] != "FalkorDB":
+                continue
+            names.add(
+                bits[2] if len(bits) >= 3 and bits[1] == "as" else "FalkorDB")
+    if not names:
+        return []
+    pattern = "|".join(re.escape(n) for n in sorted(names))
+    return [m.start()
+            for m in re.finditer(rf"(?<![\w.])(?:{pattern})\s*\(", masked)]
+
+
 def _raw_detach_violations(root=None):
     """Every raw-client bulk-DETACH site that lacks a per-test-unique
     handle + journal in its own block, over `root` (default: the tests
@@ -703,13 +771,12 @@ def _raw_detach_violations(root=None):
         # Nested-scope boxes, computed once per file the first time a block's
         # ownership half is actually examined (`_nested_scope_boxes`).
         scope_boxes = None
-        # every raw-client CONSTRUCTION site (from falkordb import /
-        # import falkordb / falkordb.FalkorDB( form) whose enclosing block
-        # bulk-DETACHes must carry per-test-unique + journal in the SAME block
-        for m in re.finditer(
-                r"from falkordb import FalkorDB|import falkordb|"
-                r"falkordb\.FalkorDB", src):
-            block, block_start, block_end = _enclosing_block_span(src, m.start())
+        # The IMPORT is a file-level gate; the SITE is the construction CALL —
+        # anchored on the CALL's offset, never the import's (#11217 merge review
+        # P2: a module-level import made every site in the file invisible, see
+        # `_raw_client_call_positions`).
+        for pos in _raw_client_call_positions(src):
+            block, block_start, block_end = _enclosing_block_span(src, pos)
             if not block or "DETACH DELETE" not in block:
                 continue
             # `DETACH DELETE` and the uniqueness half are matched on the RAW
@@ -725,7 +792,7 @@ def _raw_detach_violations(root=None):
             # (`_sites_in_file`) and #11182 measured here. (The old text matcher,
             # `_journal_calls`, was removed from the failure decision in round 9:
             # it also FALSE-BLOCKED a legal `_journal_append (name)`.)
-            lineno = src.count(chr(10), 0, m.start()) + 1
+            lineno = src.count(chr(10), 0, pos) + 1
             # The journal is an ownership RECORD only for a name the sweep's
             # vocabulary accepts — see `_non_owned_handles`. Resolved over the
             # whole file (the AST needs whole-file context) and restricted to the
@@ -1834,6 +1901,102 @@ def test_a_comment_NAMING_the_journal_does_not_satisfy_the_raw_detach_census(tmp
     )
     assert _raw_detach_violations(root=tmp_path), \
         "a local DEF of _journal_append was accepted as the record"
+
+
+def test_the_census_anchors_on_the_CALL_not_the_import(tmp_path):
+    """#11217 merge review P2: the import's POSITION must not decide visibility.
+
+    The census matched the `falkordb` IMPORT and resolved the enclosing block
+    from the import's offset. A module-level import sits at indent 0, where
+    `_enclosing_block_span` returns the statement run up to the next `def` — a
+    run containing no `DETACH DELETE` — so the site was skipped and an unowned,
+    un-journaled DETACH read CLEAN. Measured before the fix: `[]` for all three
+    shapes below. The live corpus site was covered only because its import
+    happened to be function-local, which nothing enforced.
+
+    Anchored on the CALL, all three red — and the fourth case proves the gate
+    still opens (an owned, journaled site stays clean, so this is not a blanket
+    red on any file that mentions `FalkorDB`).
+    """
+    unowned = (
+        '\n    name = f"test_g_{os.urandom(4).hex()}"'
+        '\n    c = FalkorDB(host="h")'
+        '\n    c.query("MATCH (n) DETACH DELETE n")'
+        "\n"
+    )
+
+    # 1. `from falkordb import FalkorDB` at MODULE level.
+    site = tmp_path / "test_module_import.py"
+    site.write_text(
+        "from falkordb import FalkorDB\n"
+        "\n"
+        "\n"
+        "def test_unowned():\n"
+        "    import os" + unowned
+    )
+    assert _raw_detach_violations(root=tmp_path), \
+        "a module-level `from falkordb import FalkorDB` hid the construction"
+
+    # 2. `from falkordb import *`.
+    site.write_text(
+        "from falkordb import *\n"
+        "\n"
+        "\n"
+        "def test_unowned():\n"
+        "    import os" + unowned
+    )
+    assert _raw_detach_violations(root=tmp_path), \
+        "a star-import of falkordb hid the construction"
+
+    # 3. The import in a HELPER, the DETACH in its caller — the split that made
+    #    the whole site invisible.
+    site.write_text(
+        "from falkordb import FalkorDB\n"
+        "\n"
+        "\n"
+        "def _mk():\n"
+        '    return FalkorDB(host="h")\n'
+        "\n"
+        "\n"
+        "def test_unowned():\n"
+        "    import os"
+        "    c = _mk()" + unowned
+    )
+    assert _raw_detach_violations(root=tmp_path), \
+        "an import in a helper hid the construction its caller DETACHes"
+
+    # 4. THE GATE STILL OPENS WITHOUT A FALSE BLOCK: the same module-level
+    #    import, alias included, on a site that IS owned and journaled.
+    site.write_text(
+        "from falkordb import FalkorDB as Client\n"
+        "from tests._embedded import _journal_append\n"
+        "\n"
+        "\n"
+        "def test_owned():\n"
+        "    import os\n"
+        '    name = f"test_g_{os.urandom(4).hex()}"\n'
+        "    _journal_append(name)\n"
+        '    c = Client(host="h")\n'
+        '    c.query("MATCH (n) DETACH DELETE n")\n'
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        "an aliased, owned, journaled site must stay clean — got "
+        f"{_raw_detach_violations(root=tmp_path)}")
+
+    # 5. A file that only MENTIONS the construction inside a string is not a
+    #    site: this very file's batteries are full of that shape, and matching
+    #    the call on raw text would false-BLOCK them.
+    site.write_text(
+        "def test_fixture_text():\n"
+        "    doc = (\n"
+        '        "c = FalkorDB(host=\\"h\\")\\n"\n'
+        '        "c.query(\\"MATCH (n) DETACH DELETE n\\")\\n"\n'
+        "    )\n"
+        "    assert doc\n"
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        "a construction spelled inside a STRING became a site: "
+        f"{_raw_detach_violations(root=tmp_path)}")
 
 
 def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
