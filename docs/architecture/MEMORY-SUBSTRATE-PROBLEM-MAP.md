@@ -18,9 +18,10 @@ measured_at: 2026-11-06
 > artifact: four defect classes, five workstreams, a dependency order, and 26
 > linked issues. Its body has not changed since, and the tree has moved a very
 > long way underneath it (WS-A/WS-B/WS-C designs landed in
-> `docs/plans/2026-09-10-*.md`; 20 of the 26 rows' fixes merged). Reading the
-> issue today therefore tells a lane the opposite of the truth about most of its
-> rows — it reads as 26 problems waiting, when it is **20 fixed and 6 open**.
+> `docs/plans/2026-09-10-*.md`; 21 of the 26 rows' fixes merged, across ≈40
+> separate changes). Reading the issue today therefore tells a lane the opposite of
+> the truth about most of its rows — it reads as 26 problems waiting, when it is
+> **21 fixed and 5 open**.
 >
 > **This page is the re-cut.** Same 26 entries, same four patterns, same
 > workstreams — and, for each entry, **what the tree says now** rather than what
@@ -82,8 +83,8 @@ a fixed defect, or an open one an unfixed one.
 
 | Status | Rows |
 |---|---|
-| VERIFIED-FIXED | 20 |
-| OPEN | 6 |
+| VERIFIED-FIXED | 21 |
+| OPEN | 5 |
 | UNKNOWN | 0 |
 | **Total tracked** | **26** |
 
@@ -92,7 +93,7 @@ a fixed defect, or an open one an unfixed one.
 | WS-A write-path integrity — "a decision + three mechanical bugs" | **5 of 5 rows fixed**; the write contract design itself is in `docs/plans/2026-09-10-write-contract-five-doors.md` |
 | WS-B ontology substrate — "~2 design decisions + mostly mechanical bugs" | **7 of 8 rows fixed** (#2787 OPEN: the kind-bucket rule is not implemented); the property-declaration design is in `docs/plans/2026-09-10-ws-b-pack-property-declaration.md` |
 | WS-C state & value model — "~25 open decisions, owner-gated" | **3 of 6 fixed**; the numeric-normalization design is in `docs/plans/2026-09-10-ws-c-numeric-normalization.md`; **#2730, #2782 and #2684 remain open** |
-| WS-D venture pack delivery | **2 of 4 fixed** net of #2725/#2726; **#2696 (epic) and #2728 remain open** |
+| WS-D venture pack delivery | **3 of 4 fixed** net of #2725/#2726/#2728; **#2696 (epic) remains open** |
 | WS-E repo / CI hygiene | **3 of 3 fixed** |
 
 **The dependency order the map proposed is spent.** It read
@@ -113,7 +114,7 @@ graph — or is lost later. No error is raised.*
 | Item | The defect (as filed) | Status | Anchor (merged, in `HEAD`) | Pin (in the current tree) |
 |---|---|---|---|---|
 | #2813 | v2 product capture silently drops the E3 fields (`quote`/`when`/`search_keys`/`source_turn_id`) while the eval lane passes them, so benchmarks look healthy and the product persists none | VERIFIED-FIXED | `0643bba86` | `tests/test_capture_session.py` |
-| #2795 | `rebuild_all` drops live-only props (`amount`, `currency`, `search_keys`, `content_hash`) — the live writer and the replay writer keep different field lists | VERIFIED-FIXED | `37d5ef00c` | `tests/test_ingest_rebuild_durability.py` |
+| #2795 | `rebuild_all` drops live-only props (`amount`, `currency`, `search_keys`, `content_hash`) — the live writer and the replay writer keep different field lists | VERIFIED-FIXED | `37d5ef00c` | `tests/test_projection.py` |
 | #2814 | `rebuild_all` wipes **all** nodes including config (`:PackManifest`/`:PackInstall`), so per-graph config cannot survive the recovery path | VERIFIED-FIXED | `b586fab83` | `tests/test_rebuild_config_preservation.py` |
 | #2788 | the Event arbitrary-prop lane advertises event-carried state (as filed: "that nothing reads"; the tree's answer, recorded in the anchor, is that `name` has **one** reader — `sdk.backfill_about_entities` — while `eventStatus`/`createdAt` have none) and the commit path forbids the keys | VERIFIED-FIXED | `ed02cfbb2` | `tests/test_event_state_carrier_2788.py` |
 | #2742 | `CORE_SOURCE_KINDS` snapshots `SOURCE_KIND_DEFAULTS` at import, so a runtime `register_source_kind_default()` is invisible to the Layer-1 gate | VERIFIED-FIXED | `2b2156f3f` | `tests/test_source_kind_runtime_registration.py` |
@@ -219,7 +220,7 @@ deliberately built first".
 |---|---|---|---|---|
 | #2725 | the `venture` domain pack itself — fund/portfolio kinds, relation logic, lifecycle chains (owner approval gate) | VERIFIED-FIXED | `e9ac7b637` | `tests/test_venture_pack.py` |
 | #2696 | epic: meeting-ingestion pipeline for venture-builder customers — meeting-attuned extraction, per-startup segregation, HTTP ingest surface | OPEN | `` | `` |
-| #2728 | per-graph pack selection — backend enforcement **plus** the dashboard Settings modal | OPEN | `` | `tortoise/extractor_v2.py` |
+| #2728 | per-graph pack selection — backend enforcement **plus** the dashboard Settings modal | VERIFIED-FIXED | `08a6b0288` | `website/apps/dashboard/src/packs.test.js`, `tests/test_pack_selection_by_graph.py` |
 | #2726 | register `meeting_transcript` + `meeting_minutes` sourceKinds (tier decision per #398) and allow them in pack `sourceTypes` | VERIFIED-FIXED | `24a640f2c` | `tests/test_source_credibility.py` |
 | #2749 | `main` is red — `test (b)` fails on a clean `origin/main`, blocking `python-ci-gate` for every PR | VERIFIED-FIXED | `f84daa169c`, `4c4eb7ddd7` | `tests/test_sdk_props_coercion.py`, `tests/test_uri_env_mutations_declared.py` |
 | #2748 | `tests/test_delivery_tenancy.py` carries 2 pre-existing ruff I001 import-sort errors on `main` | VERIFIED-FIXED | `cc72a9151` | `tests/test_delivery_tenancy.py` |
@@ -230,33 +231,63 @@ product epic whose first prerequisite (meeting source kinds, #2726) landed on
 2026-09-24 and whose remainder needs its own `epic-workflow` run with its own
 human gates. Nothing in this map approves it.
 
-**#2728 — OPEN, and the split is real.** The *backend* half is partly live: the
-graph's installed packs are consumed by the classifier and the extractor when a
-graph has `:PackInstall` records (`tortoise/extractor_v2.py`,
-`tortoise/kind_classifier.py`). The half that is not built is the one the issue
-titles second: a dashboard Settings surface where a user can see and change the
-installed set. Do not read "the vocabulary is per-graph" as "#2728 is done" — the
-user-facing control is the deliverable.
+**#2728 — VERIFIED-FIXED, and this row was the page's second wrong status until a
+reviewer re-measured it.** Both halves the issue titles exist, and so do all four
+of its own indicators:
+
+1. **Backend enforcement.** `pack_state.graph_installed_namespaces` returns the
+   graph's approval set (`#2714` layer 1) and the compile path narrows to it:
+   `extractor_v2._build_master_from_brief(installed_namespaces=…)` gates the
+   master list's `pack_kinds`, and `KindClassifier(installed_namespaces=…)`
+   (`tortoise/kind_classifier.py`) gates the candidate index by the same set —
+   "the same `compile_value_brief`/`compile_vocab` gate, so the classifier can
+   never assign a kind the graph does not install".
+2. **The dashboard surface, the half this row said was unbuilt.** `08a6b0288`
+   (2026-10-18, *"feat(packs): the Configured-packs surface — Settings home +
+   per-graph modal (#2728)"*) added the Settings home and the per-graph modal —
+   read/toggle/save over the FULL desired set, the honest empty/loading/failed
+   states, and the consequence copy — in `website/apps/dashboard/src/packs.js` +
+   `main.jsx`, pinned by the cases in `packs.test.js`, the modal tripwire file and
+   the server state model in `tests/test_pack_selection_by_graph.py`.
+3. **Per-graph, not team-wide.** `test_changes_are_isolated_to_their_graph` and
+   `test_cross_graph_isolation_through_the_api` pin it; a disabled namespace keeps
+   its kinds writable from data while new mints stop
+   (`test_data_union_keeps_a_disabled_namespaces_kinds_writable`).
+4. **Self-hosted parity** — the one indicator no single test names, and the reason
+   this paragraph is longer than the row. It holds *structurally*: both readers
+   behind the view go to the SAME on-disk registry, `domain_loader._get_registry()`,
+   read at call time — `pack_state._resolve_catalog()` for the graph's own rows and
+   `hosted_api._pack_catalog_rows()` (":25840") for the add-list — so there is no
+   hosted-only catalogue path and a pack dropped in the directory appears in both
+   deployments' views. `test_get_offers_catalog_packs_the_graph_does_not_have`
+   and the degraded-catalog arms (`test_a_degraded_catalog_is_reported_not_papered_over`,
+   `test_an_unavailable_registry_is_not_reported_as_a_readable_catalog`) pin the
+   behaviour that matters here: the view reports what the registry actually holds,
+   and an unreadable one is reported as unread (`catalog_ok`), never as "nothing
+   left to add".
+
+This row said OPEN for eighteen days *after* that merge, on the reasoning that
+"the user-facing control is the deliverable" — it is, and it shipped. The lesson
+is the page's own: **an OPEN is a claim that has to be re-measured exactly like a
+fix**, and nobody had re-read this one against the tree.
 
 ---
 
 ## 8. What is actually left
 
-Six rows, and four of them are defects:
+Five rows, and four of them are defects:
 
 1. **#2696** — an epic, not a defect. Needs `epic-workflow`, with its human gates.
-2. **#2728** — the dashboard Settings surface for installed packs (backend
-   consumption already exists).
-3. **#2782** — the cross-company identity half of money. Blocked on nothing
+2. **#2782** — the cross-company identity half of money. Blocked on nothing
    mechanical; it is a decision about what "the same money item" means across
    parents, which is why it has stayed open since 2026-09-10.
-4. **#2684** — the value-span slice: one extractor re-ingest + assembly
+3. **#2684** — the value-span slice: one extractor re-ingest + assembly
    surfacing. Its measurement prerequisite is built and committed.
-5. **#2787** — relation coherence: the write-path verdict shipped, the
+4. **#2787** — relation coherence: the write-path verdict shipped, the
    **IMPL/NAND kind-bucket validation** did not (see §5). It is a *validator*
    gap, not a runtime one, so it cannot corrupt data — it can let a pack declare
    an incoherent relation.
-6. **#2730** — entity attachment. **The research is done and the mechanism is
+5. **#2730** — entity attachment. **The research is done and the mechanism is
    not built** (#8639 completed the brief's alias-resolution rung and states the
    surviving defects: the alias surface form is lost, so a re-ingest re-MERGEs
    into a second node, and nothing folds suffixes or honorifics). The pin on this
@@ -266,8 +297,8 @@ Six rows, and four of them are defects:
 Ordering, if anyone asks: **#2782, #2684 and #2730 are the ones with a customer
 consequence** (a wrong total is a wrong answer; an unsurfaced span is an
 unverifiable one; a re-MERGEd entity is two customers' facts becoming one).
-`#2728` is a UX completion. `#2696` is a pipeline with its own process. That is
-a priority statement, not a schedule.
+`#2696` is a pipeline with its own process. That is a priority statement, not a
+schedule.
 
 ---
 
@@ -292,14 +323,20 @@ The checker re-measures, offline and without network access:
    shallow clone this is reported as UNVERIFIED rather than drift: the document is
    not wrong, the clone is shallow.
 4. **Pins resolve** — every pin path exists, resolves to a **file** (a directory
-   satisfies `exists()` and pins nothing), and a pin that is a test module actually
-   contains a `def test_` (a pin whose file survives but whose assertions were
-   deleted pins nothing).
+   satisfies `exists()` and pins nothing), and a pin that is a `tests/*.py`
+   module actually contains a `def test_` (a pin whose file survives but whose
+   assertions were deleted pins nothing). A pin outside that shape — a JS test
+   module, a shipped symbol, a document — is checked for existence, NOT content.
 5. **Summary counts** — the numbers in §2 equal the rows that follow. A summary
    that drifts from its own table is the same defect class as the missing
    `content_hash` this map's Pattern 1 names.
 6. **Registration** — this page is listed in `docs/00_index.md`, so it is
-   reachable rather than merely committed.
+   reachable rather than merely committed — **and that entry's own
+   `**N fixed · N open · N unknown**` headline must equal §2's**, read from the
+   ONE index row whose LAST cell is this file's path (a mention of the filename
+   elsewhere is a cross-reference, not a registration). The index is the half
+   most readers meet first, and it said `22 fixed · 4 open` on this page's first
+   landing while §2 said something else.
 
 **What is deliberately NOT guarded — and each one is a real residual, not a
 rounding:**
@@ -334,6 +371,16 @@ rounding:**
   workstreams and 26 entries are unchanged here.
 - The statuses, anchors and pins were re-measured against `23d227c53` (2026-11-06)
   by reading the tree, the history, and the tracker — never the issue's own body.
+  A review pass then re-measured the two rows this page had got wrong in the
+  *other* direction: `#2728` (marked OPEN although its dashboard surface merged on
+  2026-10-18) and `#2795` (whose pin asserted only the `content_hash` half of the
+  row's defect — the prop-drop indicators the row names were unpinned, because the
+  regressions for them are in `tests/test_projection.py`, not in the A10 suite the
+  row pointed at). Every fact those two corrections rest on is present at
+  `23d227c53` — `git cat-file -e 23d227c53:website/apps/dashboard/src/packs.js`,
+  and `#2795`'s own regression tests in `tests/test_projection.py` — so the page's
+  `measured_at_commit` did not move; that is the point of an OPEN being a claim
+  with evidence behind it too.
 - The three WS design documents this re-cut assumes are already committed:
   `docs/plans/2026-09-10-write-contract-five-doors.md`,
   `docs/plans/2026-09-10-ws-b-pack-property-declaration.md`,

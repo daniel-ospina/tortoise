@@ -144,13 +144,19 @@ class Row:
 class Report:
     errors: list[str] = field(default_factory=list)
     unverified: list[str] = field(default_factory=list)
+    #: "The run could not ask the question at all" — a missing document, no git.
+    #: Kept apart from `errors` (DRIFT, a claim the document is WRONG) for the
+    #: reason the shallow-clone arm exists: a tool that cannot read its input has
+    #: not measured it, so the verdict it owes is "no answer" (exit 2) — never
+    #: "the map disagrees with the tree", which is the diagnosis a reader acts on.
+    state_errors: list[str] = field(default_factory=list)
     rows: list[Row] = field(default_factory=list)
 
     @property
     def code(self) -> int:
         if self.errors:
             return 1
-        if self.unverified:
+        if self.state_errors or self.unverified:
             return 2
         return 0
 
@@ -203,17 +209,45 @@ def parse_summary(text: str) -> dict[str, int]:
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, timeout=60
-    )
+    """A git call that cannot CRASH the run out of its documented exit contract.
+
+    `git` absent (a scratch image, a box whose PATH was replaced) and a hung call
+    both used to raise (`FileNotFoundError`, `TimeoutExpired`) straight out of
+    `main()`, so python's own traceback exit — **1** — was returned: the DRIFT
+    code, over a document that was never read. Both are state errors. The rc used
+    here (127, the shell's "command not found") makes every caller's existing
+    "could not answer" arm fire.
+    """
+    try:
+        return subprocess.run(
+            ["git", *args], cwd=repo, capture_output=True, text=True, timeout=60
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        # FileNotFoundError (no git), PermissionError, TimeoutExpired, ...
+        return subprocess.CompletedProcess(
+            args=["git", *args], returncode=127, stdout="", stderr=str(exc)
+        )
 
 
 def commit_exists(repo: Path, sha: str) -> bool:
     return _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
 
 
-def is_ancestor(repo: Path, sha: str) -> bool:
-    return _git(repo, "merge-base", "--is-ancestor", sha, "HEAD").returncode == 0
+def is_ancestor(repo: Path, sha: str) -> bool | None:
+    """True/False, or **None** when git could not answer.
+
+    `merge-base --is-ancestor` exits 1 for "not an ancestor" and 128 for "that is
+    not a commit / HEAD is unborn / the repo is unreadable". Collapsing both to
+    `False` reported a git FAILURE as `the fix did not land on this branch` — a
+    drift claim with a wrong cause — so the unanswerable case is separated and
+    routed to UNVERIFIED, the same direction `is_shallow`'s `None` is.
+    """
+    res = _git(repo, "merge-base", "--is-ancestor", sha, "HEAD")
+    if res.returncode == 0:
+        return True
+    if res.returncode == 1:
+        return False
+    return None
 
 
 def is_shallow(repo: Path) -> bool | None:
@@ -319,14 +353,21 @@ def check_anchors(repo: Path, rows: list[Row], report: Report) -> list[str]:
                     f"shallow clone"
                 )
                 continue
-            if shallow is None and not is_ancestor(repo, sha):
+            ancestor = is_ancestor(repo, sha)
+            if ancestor is None:
+                report.unverified.append(
+                    f"#{row.issue}: anchor {sha} — git could not answer the ancestry "
+                    f"question, so the drift verdict is withheld"
+                )
+                continue
+            if shallow is None:
                 # An unreadable shallow answer must not certify drift: report it.
                 report.unverified.append(
                     f"#{row.issue}: anchor {sha} — could not read the clone's "
                     f"completeness, so the drift verdict is withheld"
                 )
                 continue
-            if not is_ancestor(repo, sha):
+            if not ancestor:
                 errors.append(
                     f"#{row.issue}: anchor {sha} is NOT an ancestor of HEAD — the fix "
                     f"did not land on this branch"
@@ -439,9 +480,25 @@ def check_registration(repo: Path, doc: Path, text: str | None = None) -> list[s
 def run(repo: Path, doc: Path) -> Report:
     report = Report()
     if not doc.exists():
-        report.errors.append(f"{doc} does not exist")
+        # A state error, not drift: the document was not read, so nothing about it
+        # has been measured. Reported as DRIFT, a renamed page reads as "the map
+        # disagrees with the tree" — the wrong diagnosis, on the exit code a
+        # reader is told means "the document is wrong".
+        report.state_errors.append(f"{doc} does not exist — nothing was measured")
         return report
-    text = doc.read_text(encoding="utf-8")
+    try:
+        text = doc.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        # The SAME channel as a missing document, because it is the same state:
+        # the run could not READ what it measures. Reachable with `--doc` pointed
+        # at a directory (`IsADirectoryError`), an unreadable file
+        # (`PermissionError`) or a non-UTF-8 file (`UnicodeDecodeError`) — each
+        # raised straight out of here, so python's traceback exit (**1**) was the
+        # answer: "the map disagrees with the tree", about a file never parsed.
+        report.state_errors.append(
+            f"{doc} could not be read ({exc}) — nothing was measured"
+        )
+        return report
     rows, bad = parse_rows(text)
     report.rows = rows
     report.errors.extend(bad)
@@ -480,6 +537,7 @@ def main(argv: list[str] | None = None) -> int:
                     "code": report.code,
                     "rows": len(report.rows),
                     "errors": report.errors,
+                    "state_errors": report.state_errors,
                     "unverified": report.unverified,
                 },
                 indent=2,
@@ -489,10 +547,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{doc} — {len(report.rows)} row(s) parsed")
         for err in report.errors:
             print(f"  DRIFT     {err}")
+        for err in report.state_errors:
+            print(f"  NO ANSWER {err}")
         for note in report.unverified:
             print(f"  UNVERIFIED {note}")
         if report.code == 0:
             print("VERDICT: CLEAN — the map and the tree agree")
+        elif report.state_errors:
+            print("VERDICT: NO ANSWER — the run could not read what it measures")
         elif report.code == 2:
             print("VERDICT: UNVERIFIED — no drift found, but history could not answer")
         else:

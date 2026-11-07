@@ -845,6 +845,18 @@ jobs:
         # checklist for the #5090 capstone (#11089), and a checklist that silently
         # loses a row is the failure the artifact was written to prevent. The tool
         # is stdlib only, reads one file, touches no DB and no network.
+        # #2820: the memory-substrate problem map's drift guard
+        # (`tools/problem_map_check.py`, pinning
+        # `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`) joins for the SAME
+        # reason as its #5086 sibling above — a docs-only edit of the map selects
+        # NO surface, so its own test reaches it only through the curated `tier1`
+        # list, and `docs` is the required, path-filter-free context that cannot
+        # inherit that skip — plus the ancestry reason stated there: its third
+        # claim is that every row's anchor commit is reachable from `HEAD`, which
+        # the depth-1 `test` job cannot answer at all (it reports exit 2
+        # UNVERIFIED rather than blaming the document). This job checks out at
+        # `fetch-depth: 0`, so this is where that claim is actually proved.
+        # Stdlib only, so it needs nothing from the `pip install` above.
         run: |
           pip install -e . --quiet
           python3 tools/bridge_table.py --check

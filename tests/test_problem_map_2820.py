@@ -3,7 +3,7 @@
 The memory-substrate problem map (`docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`)
 answers *"is this still broken?"* for 26 named defects. The issue it re-cuts went
 stale for eight weeks — its body read as 26 problems waiting while the tree had
-fixed 20 — so the map is only worth having if something can tell when its answers
+fixed 21 — so the map is only worth having if something can tell when its answers
 age out. This file pins the guard that makes its machine-checkable half
 falsifiable.
 
@@ -106,8 +106,8 @@ def test_the_taxonomy_counts_are_what_the_summary_declares():
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     counts = pmc.parse_summary(DOC.read_text(encoding="utf-8"))
-    assert counts["VERIFIED-FIXED"] == sum(1 for r in rows if r.is_fixed) == 20
-    assert counts["OPEN"] == sum(1 for r in rows if r.status == "OPEN") == 6
+    assert counts["VERIFIED-FIXED"] == sum(1 for r in rows if r.is_fixed) == 21
+    assert counts["OPEN"] == sum(1 for r in rows if r.status == "OPEN") == 5
     assert counts["UNKNOWN"] == 0
 
 
@@ -234,7 +234,7 @@ def test_a_summary_count_that_disagrees_with_the_table_is_drift(tmp_path):
     because a summary drifted from its table (the 2026-09-10 body).
     """
     copy = _doc_copy(tmp_path)
-    text = copy.read_text().replace("| VERIFIED-FIXED | 20 |", "| VERIFIED-FIXED | 25 |", 1)
+    text = copy.read_text().replace("| VERIFIED-FIXED | 21 |", "| VERIFIED-FIXED | 25 |", 1)
     copy.write_text(text, encoding="utf-8")
     errors = pmc.run(REPO, copy).errors
     assert any("summary says 25" in e for e in errors), errors
@@ -547,6 +547,137 @@ def test_an_absent_anchor_object_in_a_shallow_clone_is_unverified(monkeypatch):
 # ── the CLI contract ────────────────────────────────────────────────────────
 
 
+def test_a_missing_document_is_a_state_error_not_drift(tmp_path, capsys):
+    """Fails if a document the run could not READ is reported as a document that is WRONG.
+
+    Reachable: `--doc` pointed at a renamed or mistyped path (the docstring's own
+    example), or a checkout where the page was moved. The old behaviour appended
+    to `errors`, so the run answered DRIFT (exit 1) over a file it never opened —
+    the diagnosis that sends a reader to fix a document that is not the problem.
+    The docstring publishes exit 2 for exactly this state, so the code must too.
+    """
+    missing = tmp_path / "renamed-away.md"
+    assert pmc.main(["--repo", str(REPO), "--doc", str(missing)]) == 2
+    out = capsys.readouterr().out
+    assert "NO ANSWER" in out
+    assert "DRIFT" not in out
+
+
+def test_a_document_that_cannot_be_READ_is_a_state_error_not_drift(tmp_path):
+    """The other half of the same contract: present but unreadable.
+
+    Reachable three ways, and all three used to raise out of `run()` into python's
+    traceback exit — **1**, the DRIFT code, about a file nothing ever parsed:
+    `--doc` pointed at a DIRECTORY (`IsADirectoryError`), at an unreadable file
+    (`PermissionError`), or at a non-UTF-8 file (`UnicodeDecodeError`).
+    """
+    assert pmc.main(["--repo", str(REPO), "--doc", str(tmp_path)]) == 2
+
+    binary = tmp_path / "binary.md"
+    binary.write_bytes(b"\xff\xfe not utf-8")
+    assert pmc.main(["--repo", str(REPO), "--doc", str(binary)]) == 2
+
+    report = pmc.run(REPO, binary)
+    assert report.errors == []
+    assert report.state_errors and "could not be read" in report.state_errors[0]
+
+
+def test_git_absent_is_a_state_error_not_a_traceback(monkeypatch):
+    """Fails if a `git` that cannot be EXECUTED escapes as python's exit 1.
+
+    Reachable: a scratch image, a container without git, a PATH replaced by a
+    wrapper. `subprocess.run(["git", …])` then raises `FileNotFoundError`, which
+    used to propagate out of `main()` — python's traceback exit is **1**, which in
+    this tool's vocabulary means "the document disagrees with the tree". A tool
+    that could not run git has measured nothing, so the answer is 2.
+    """
+    def _no_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(pmc.subprocess, "run", _no_git)
+    report = pmc.run(REPO, DOC)  # must not raise
+    assert report.errors == [], report.errors
+    assert report.code == 2
+
+
+def test_an_unanswerable_ancestry_answer_withholds_the_verdict(monkeypatch):
+    """Fails if a git FAILURE is reported as "the anchor did not land".
+
+    Reachable: `merge-base --is-ancestor` exits 128 (not 1) for "that is not a
+    commit", "HEAD is unborn", or an unreadable object store. Collapsing 128 into
+    `False` attributed a git failure to the DOCUMENT — `the fix did not land on
+    this branch` — a drift claim with a wrong cause. The arm is entered only with
+    the object PRESENT (an absent object `continue`s earlier) and history
+    readable, which is what the three patches below set.
+
+    ⚠️ This one patches `is_ancestor` itself, which is the CONSUMER half. The
+    rc→`None` mapping is proved separately and against the real function in
+    `test_the_real_is_ancestor_maps_rc_128_to_no_answer` — without that case,
+    reverting `is_ancestor` to `return rc == 0` left every test green.
+    """
+    monkeypatch.setattr(pmc, "is_shallow", lambda repo: False)
+    monkeypatch.setattr(pmc, "commit_exists", lambda repo, sha: True)
+    monkeypatch.setattr(pmc, "is_ancestor", lambda repo, sha: None)
+    report = pmc.Report()
+    row = pmc.Row(issue=1, defect="d", status="VERIFIED-FIXED",
+                  anchors=["deadbeefdeadbeef"], pins=[], line=1)
+    errors = pmc.check_anchors(REPO, [row], report)
+    assert errors == []
+    assert report.unverified and "could not answer the ancestry" in report.unverified[0]
+    assert report.code == 2
+
+
+def test_the_real_is_ancestor_maps_rc_128_to_no_answer(monkeypatch):
+    """The PRODUCER half: a real `_git` answering 128 must become `None`, not `False`.
+
+    Fails if `is_ancestor` is written as `return _git(...).returncode == 0` — the
+    shape this tool shipped with. That version maps EVERY non-zero rc to "not an
+    ancestor": rc 1 ("not an ancestor", a real answer) and rc 128 ("that is not a
+    commit" / unborn HEAD / unreadable object store, NO answer) become the same
+    thing, and the document is blamed for a git failure.
+
+    The run is driven through the REAL `_git` with only `subprocess.run` faked, so
+    the mapping — not a monkeypatched collaborator — is what is measured.
+    """
+    real_run = pmc.subprocess.run
+
+    def _fake_run(argv, **kwargs):
+        if "merge-base" in argv:
+            return pmc.subprocess.CompletedProcess(
+                args=argv, returncode=128, stdout="", stderr="fatal: bad object"
+            )
+        if "--is-shallow-repository" in argv:
+            return pmc.subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="false\n", stderr=""
+            )
+        return pmc.subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(pmc.subprocess, "run", _fake_run)
+    assert pmc.is_ancestor(REPO, "deadbeefdeadbeef") is None
+
+    report = pmc.Report()
+    row = pmc.Row(issue=1, defect="d", status="VERIFIED-FIXED",
+                  anchors=["deadbeefdeadbeef"], pins=[], line=1)
+    errors = pmc.check_anchors(REPO, [row], report)
+    assert errors == [], errors
+    assert report.unverified and "could not answer the ancestry" in report.unverified[0]
+    assert report.code == 2
+
+    # The REAL rc-1 arm still answers `False` (a genuine "not an ancestor"), so the
+    # tri-state cannot be satisfied by sending every non-zero rc to `None`.
+    monkeypatch.setattr(
+        pmc.subprocess,
+        "run",
+        lambda argv, **kw: pmc.subprocess.CompletedProcess(
+            args=argv, returncode=1, stdout="", stderr=""
+        ),
+    )
+    assert pmc.is_ancestor(REPO, "deadbeefdeadbeef") is False
+    assert real_run is not None
+
+
 def test_the_cli_agrees_or_declares_itself_unverified(capsys):
     """The rail-facing contract: 0 = agree, 2 = cannot answer, and the line says which.
 
@@ -572,7 +703,7 @@ def test_the_cli_exits_one_on_drift(tmp_path):
     would be measuring the clone, not the guard).
     """
     copy = _doc_copy(tmp_path)
-    text = copy.read_text().replace("| OPEN | 6 |", "| OPEN | 4 |", 1)
+    text = copy.read_text().replace("| OPEN | 5 |", "| OPEN | 3 |", 1)
     copy.write_text(text, encoding="utf-8")
     assert pmc.main(["--repo", str(REPO), "--doc", str(copy)]) == 1
 
