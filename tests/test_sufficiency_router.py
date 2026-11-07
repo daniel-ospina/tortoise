@@ -47,8 +47,11 @@ RED:
   ``test_a_finding_without_a_span_is_refused_not_downgraded`` RED.
 * **Promote an episodic fact** — drop the ``promote_to`` refusal →
   ``test_the_write_back_refuses_to_promote_a_claim_class`` RED.
-* **Drop the attribution loop** — remove the ``seen`` dedupe →
-  ``test_the_same_verified_finding_writes_back_once`` RED.
+* **Drop the within-call dedupe** — remove the ``seen`` dedupe →
+  ``test_the_same_verified_finding_writes_back_once_within_ONE_CALL`` RED.
+  (That test pins ONLY the within-call half: a second CALL re-mints unless the
+  caller passes the store's units, which is what the ACROSS-CALL bullets below
+  are for.)
 * **Drop the ACROSS-CALL attribution loop** — ignore ``already_written`` (re-mint
   what the cheap tier holds) → ``test_a_second_escalation_of_the_same_question_writes_nothing``,
   ``test_a_repeat_escalation_writes_nothing_and_the_loop_closed``,
@@ -1062,12 +1065,23 @@ def test_the_write_back_refuses_to_promote_a_claim_class() -> None:
     assert same.units[0].claim_class == "episodic"
 
 
-def test_the_same_verified_finding_writes_back_once() -> None:
-    """The attribution loop: a repeated escalation must not pay for a duplicate."""
+def test_the_same_verified_finding_writes_back_once_within_ONE_CALL() -> None:
+    """WITHIN one call the dedupe holds — and that is all this pins.
+
+    ⚠️ A repeat ESCALATION is a SEPARATE call, and it re-mints one unit per call
+    unless the caller hands over the store's units (`already_written`): the
+    ``again`` assertion below IS that re-mint, deliberately, because the planner
+    owns no store and cannot know what was written back. This test used to be
+    named for "the attribution loop" while proving only the within-call half,
+    which read as if the across-call loop were pinned here. It is not —
+    `test_a_repeat_escalation_writes_nothing_and_the_loop_closed` and its
+    siblings are.
+    """
     first = plan_writeback([_finding()])
     again = plan_writeback([_finding()])
     both = plan_writeback([_finding(), _finding()])
     assert len(first.units) == 1
+    # NOT the across-call loop: a second call with no store re-mints by design.
     assert len(again.units) == 1
     assert len(both.units) == 1
     assert both.units[0].unit_key == first.units[0].unit_key
