@@ -922,7 +922,7 @@ holds for a label named there. Re-measure `actions/runners` before pinning anyth
 ### Residual: the #10237 canary is a POOL-ONLY pin — and it is non-required on purpose
 
 **OVERRIDES:** the "any POOL-ONLY label" rule recorded above — `repo-harnesses`
-(`ci.yml:1473`) now reads `runs-on: [self-hosted, self-hosted-x64]`. Its accepted cost is a WAIT with
+(`ci.yml:1556`) now reads `runs-on: [self-hosted, self-hosted-x64]`. Its accepted cost is a WAIT with
 no hosted half — and ⛔ that IS a landing cost: the rail (`admin-merge.sh`) merges with `--admin`, so
 required-ness decides nothing, every code-measuring red on the PR's tree BLOCKS, and this job is on
 that tree. `.mergify.yml` names it in neither `queue_conditions` nor `merge_conditions` and
@@ -948,7 +948,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:4963`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:4975`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a
