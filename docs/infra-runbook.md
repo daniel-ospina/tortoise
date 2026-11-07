@@ -1684,6 +1684,106 @@ before grace expires) ⇒ no clamp. `fly config show` only echoes the local
 config and cannot answer this. Nobody has run this test yet — it is listed in
 §6.9.
 
+#### 6.4.2 A check that can only pass by BEING SERVED — `/liveness` (#10892)
+
+The two checks in §6.4 are **liveness-shaped**: the TCP check's handshake is
+served by the kernel, and `9090 /healthz` answers from **state the loop last
+wrote**, with a verdict that errs to 200 by design. On 2026-11-04 `api.`
+was unusable for ~2 h (and again for ~6 h the same day) while **both reported
+`2 total, 2 passing`** — `loop_lag_max_ms: 483685` and `passing` in the same
+payload. Neither check can distinguish "answering" from "not answering at all",
+and nothing we RAN bounded the absence.
+
+Two halves close that, and neither is a health *reading*:
+
+1. **`GET /liveness`** (`hosted_api.liveness`) — the handler yields to the loop
+   once, then increments a per-process counter **for this request** and reports
+   the age of the PREVIOUS one, stamped on handler entry (not on delivery, so a
+   request that ran the loop and never delivered still counts). If the loop
+   cannot run, the coroutine never resumes, so there is no answer to mistake for
+   health. By construction it does no I/O of its own (one loop yield, one
+   counter increment — no DB and no network); with the loop blocked, `/health`
+   and `/liveness` both answer **nothing** inside a 5 s client budget
+   (`tests/test_10892_served_liveness.py`, which pins that shape and the
+   "handler must not become a state read" regression).
+2. **The prober that fails on absence** — `.github/workflows/availability-watchdog.yml`
+   probes it as a THIRD step with `PROBE_TIMEOUT_S='5'` (the API probe keeps its
+   generous 25 s), `PROBE_EXPECT_STATUS='200'`, its own incident label, and no
+   Fly token. `curl --max-time 5` is what turns *no answer* into a DOWN verdict
+   and a page — during the outage the app took 9–12 s to `000` from outside and
+   ~45 s to the eventual 504, so a 5 s bound alarms within one cycle. The URL is
+   in the script's production set (an unrecognised URL is a **DRILL**: `[DRILL]`-titled,
+   **never restartable** — but it still PAGES, with a `[DRILL]` label; a drill is
+   not silent, it is only non-production. Cases 88b and the e2e(l) arm pin both
+   halves) and deliberately NOT restartable — the primary API probe owns restarting the
+   machine, and a second restart arm would spend `MAX_RESTARTS_PER_HOUR` twice.
+   Pinned in BOTH directions by cases 99 (the step, its label, its production-set
+   membership and its 5 s bound), 88b (`000` → `PROD DOWN` + the machine-backed
+   prose) and 100 (`200` → UP, exit 0, no incident) of
+   `.github/scripts/availability-watchdog.test.sh`; case 101 covers the
+   `404` → `PROD DEGRADED` arm, and case 100b the `200`-with-an-INCOMPLETE-body
+   arm (a status line is not an answer).
+
+**Blind spots, stated rather than implied.** It detects a loop that cannot
+serve — and it also detects a loop that serves slower than the bound, by TWO
+mechanisms, because curl's behaviour differs by where the answer stalls:
+
+- an answer that never starts (no status line inside the bound) comes back as
+  `000` with a non-zero curl exit → `DOWN` (harness case 93);
+- an answer whose **headers** arrive inside the bound but whose **body** never
+  does comes back as a healthy `200` with a non-zero curl exit (28 timeout, 18
+  partial transfer, 56 recv error — measured: `"200 3.002614"`, `curl: (28) …
+  10 out of 40 bytes received`). `probe()` therefore grades an `UP` from the
+  status code **only when curl completed the transfer**; an incomplete transfer
+  falls through to the same `DOWN`/retry class as `000` (harness case 100b pins
+  it for both the liveness arm and the restartable API arm). Without that rule
+  a process that flushed headers and wedged mid-body would have read UP — a
+  false PASS on exactly the property this arm exists to prove.
+
+What it does NOT detect is a loop that serves slowly *within* the bound: a 4 s
+answer passes a 5 s prober. It says nothing about a deploy that never happened
+(`check-deploy-staleness.sh`), and it is not a substitute for the TCP check that
+catches a dead process. Do **not** replace it with `loop_stale_ms`: reading the
+loop's own tick to decide the loop is fine is the exact circularity that let this
+outage run unattended.
+
+> **OVERRIDES:** the industry-default liveness shape — a background heartbeat or
+> event-loop-lag gauge whose timestamp a health handler reads and reports back
+> (`loop_stale_ms` here; `toobusy-js`, `event-loop-lag` or a scheduler-lag probe
+> in comparable stacks) — this section's answer is a **served-request counter**
+> instead, because the default is the shape that failed on 2026-11-04:
+> `loop_liveness`'s predicate is `503 if (stale AND idle) else 200`, and
+> `workload_idle` is `False` for any box serving traffic, so it reported
+> `loop_lag_max_ms: 483685` and `passing` in the same payload (#10892). A guard
+> that errs to 200 whenever the box is serving cannot fail on the outage it
+> exists for, and a gauge the loop itself writes is not evidence the loop ran.
+> The marker is repeated on #10892, where a lane adopts or replaces this design.
+
+⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
+`control_ok()` runs only on the restartable path — the restart decision's own
+`if ! control_ok` guard, inside `if [ "$restart_mode" = "DOWN" ]` — because the
+disruptive action it guards — a machine restart — cannot happen on a
+disarmed arm. So a TOTAL
+runner-side egress failure pages `PROD DOWN` from THIS step instead of
+`INCONCLUSIVE`, even though nothing is wrong with the machine. See §7.8 (the
+INCONCLUSIVE bullet there is scoped to the restartable target) and #11401, which
+tracks consulting the control probe for every production arm.
+
+Operator check, one line, from anywhere:
+
+```bash
+curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
+# {"status":"ok","served":<N>,"last_served_age_ms":<ms|null>}
+# <N> counts requests THIS PROCESS has served, so it must be a NEW number for
+# this process. It is NOT monotonic across a restart: the counter resets to 1 on
+# a redeploy/machine restart, and that reset is itself the evidence of a restart
+# (`tortoise/hosted_api.py`: "a restart starting again at 1 is itself the
+# evidence of a restart"). A SMALLER N right after a deploy is healthy, not a
+# replayed/cached body. `<ms|null>` is `null` on the FIRST answer this process
+# gives and a number from the SECOND on (the age is the pre-increment value, so
+# one served request has no previous tick to measure against).
+```
+
 ### 6.5 Cost reference (what "one machine warm" actually costs)
 
 > ⚠️ **LIST-PRICE ESTIMATES — not a quote — and DATED (snapshot 2026-09-10).**
@@ -1970,12 +2070,15 @@ on a `*/5 * * * *` cron **intent** (measured delivery is ~15 min; see §7.5a).
   `*/30`) + `.github/scripts/availability-liveness.sh`, harness `bash .github/scripts/availability-liveness.test.sh`
   (the `Availability pager liveness check (#4573)` step of the same CI job). It is a separate workflow on purpose — see §7.8a.
 
-**Two production targets (#3628).** The watchdog now drives TWO surfaces, as two
-steps of the same job: the Fly API probe (§7.1a) and the Cloudflare Pages auth
-surface probe (§7.1b). They alert **independently** (the auth step runs even if
-the API step failed) and each files its **own** incident, keyed by its own host
-label — the two never share an issue. Only the Fly API target is restartable;
-the auth target is **hard-disarmed** from the restart leg (§7.4).
+**Three production targets (#3628, #10892).** The watchdog drives THREE
+surfaces, as three steps of the same job: the Fly API probe (§7.1a), the
+Cloudflare Pages auth surface probe (§7.1b) and the served-request liveness
+probe (§7.1c). They alert **independently** (each step runs even if another
+failed) and each files its **own** incident, keyed by its own host label — no
+two share an issue. Only the Fly API target is restartable; the auth target is
+**hard-disarmed** from the restart leg because it has no Fly machine (§7.4), and
+the liveness target is hard-disarmed because it IS that machine — a second
+restart arm would spend `MAX_RESTARTS_PER_HOUR` twice on one wedged machine.
 
 > **The `PROD DOWN` path has never fired; `PROD DEGRADED` fired once.**
 > `gh issue list --state all --search '"[monitor] PROD DOWN" in:title'` returns
@@ -2035,7 +2138,7 @@ The auth target's UP contract is **narrower and stronger** than the API's:
 |---|---|---|
 | `PROBE_EXPECT_STATUS` | `302` | A healthy `/auth/start` is a redirect, not a 200. The watchdog's built-in arms classify 3xx as UNEXPECTED, so **without this allow-list a healthy site would page** — the #1 way to get this wrong |
 | `PROBE_REQUIRE_HEADER` | `code_challenge_method=s256` | Proof the PKCE flow row was actually written to D1. A 302 **without** it is an *answered-but-wrong* (UNEXPECTED → `PROD DEGRADED`) verdict, not an outage — “the site is up but nobody can sign in”, the entire lesson of #3616 |
-| `PROBE_HOST_LABEL` | `app.premiselabs.co` | The **session-bearing origin** the probe actually hits (the BFF moved here in #4054/#4104). The incident **title is built from this label** and the dedupe is an **exact-title match**, so it must agree with the host actually probed; renaming it **orphans incidents filed under the old title** (closed by hand, not auto-resolved). Two production targets must not share one label, or they fight over a single issue |
+| `PROBE_HOST_LABEL` | `app.premiselabs.co` | The **session-bearing origin** the probe actually hits (the BFF moved here in #4054/#4104). The incident **title is built from this label** and the dedupe is an **exact-title match**, so it must agree with the host actually probed; renaming it **orphans incidents filed under the old title** (closed by hand, not auto-resolved). Production targets must not share one label, or they fight over a single issue |
 
 The allow-list replaces **only** the UP arms: `000`/`5xx` are checked **first**
 and stay **DOWN** even if listed, and any other status stays **UNEXPECTED**. A
@@ -2058,6 +2161,35 @@ restartable set; on a **DOWN** verdict the run log / incident body say
 (**DEGRADED**) verdict logs `disarmed:unexpected` — the restart leg is off the
 table either way.
 
+#### 7.1c The served-request liveness target (#10892)
+
+The third step probes `GET https://api.premiselabs.co/liveness`. It exists
+because neither Fly check could see the outage: `servicecheck-00-tcp-8000` is a
+kernel handshake (a hung app passes it) and `loop_liveness` reads the loop's own
+last tick from a listener on **another thread**, so on 2026-11-04 `api.` was
+unusable for ~2 h, and again for ~6 h the same day, while both read `passing`.
+`/health` itself cannot be answered while the loop is blocked — nothing we RAN
+bounded the **absence**.
+
+| | Value | Why |
+|---|---|---|
+| `PROBE_EXPECT_STATUS` | `200` | Healthy is `200` and nothing else: `000`/`5xx` are DOWN (checked before the list), and an answered `404`/`3xx` is UNEXPECTED → `PROD DEGRADED`, which is the honest reading for a deploy that lacks the route |
+| `PROBE_TIMEOUT_S` | `5` | **The bound IS the instrument.** The handler does no I/O of its own (one loop yield, one counter increment — no DB, no network), so 5 s cannot fire on a healthy origin while it does fire on the outage shape (measured 9–12 s to `000`, 45 s to the eventual 504). Do not widen it to the API probe's 25 s: that is the status-only probe this target replaces |
+| `PROBE_HOST_LABEL` | `api.premiselabs.co (served request)` | Own dedupe key, so a green primary probe cannot close a red liveness incident |
+| `HEARTBEAT_EMIT` | `0` | Exactly one step per job emits the rolling heartbeat (two writes seconds apart race GitHub's search index into a duplicate issue) |
+
+**Machine-backed, but never restartable.** This surface is the **same Fly
+machine** as the primary API probe, so its incident is disarmed from the restart
+leg on purpose: each probe's incident issue is its own restart ledger, and a
+second arm would let one wedged machine spend `MAX_RESTARTS_PER_HOUR` **twice**.
+`disarmed:no_machine` here therefore does **NOT** mean "no machine" — check the
+machine (`flyctl checks list`, `flyctl logs`, `flyctl machine list`) and
+cross-check the primary API incident, and do **not** go looking for a Cloudflare
+Pages deploy. The residual this bound accepts — a TRUE but duplicate DOWN page
+during a machine restart or a deploy rollout, because this arm's 35 s tolerance
+fires before the primary probe's 95 s budget — is stated under §7.8 Known
+limits.
+
 ### 7.2 How to read a failure
 
 1. **The workflow run goes RED** — that is the alert (enable GitHub Actions
@@ -2065,9 +2197,18 @@ table either way.
 2. **One GitHub issue** appears (or an existing one gets a comment):
    `[monitor] PROD DOWN — api.premiselabs.co is not answering the availability
    probe` (or `PROD DEGRADED` for the UNEXPECTED class), labelled `auto-filed`.
-   The auth target files a **separate** incident with its own host in the title
-   (`[monitor] PROD DOWN — app.premiselabs.co is not answering the
-   availability probe`). An external page (Telegram) also fires on the
+   Each of the **three** production targets files its **own** incident, titled by
+   its own host — so read the title before you conclude anything about the API:
+
+   | target | title host | what a DOWN means |
+   |---|---|---|
+   | API (default) | `api.premiselabs.co` | the API machine is not answering (§7.1a) |
+   | Pages auth | `app.premiselabs.co` | the Pages auth surface is not answering (§7.1b) |
+   | served-request liveness | `api.premiselabs.co (served request)` | the API accepts TCP but a request that must be **served** did not answer inside 5 s (§7.1c) |
+
+   ⚠️ The liveness incident is the one that fires when the API's Fly checks are
+   still green — that combination is the whole point of #10892, so do not dismiss
+   it because `/health` answers. An external page (Telegram) also fires on the
    transition when the paging secrets are set.
 3. The issue **body** is machine-managed and carries the verdict, the first
    observation time, the failing-run count, the raw probe evidence, and the
@@ -2130,7 +2271,11 @@ restart leg, and a production URL that is **not** restartable (the Pages auth
 surface — no Fly machine behind it, so a restart of the API app cannot repair a
 missing binding and would restart an unrelated service) is hard disarmed
 regardless of the failure class (`disarmed:no_machine` on a DOWN verdict,
-`disarmed:unexpected` on a DEGRADED one); (c) when the failure is
+`disarmed:unexpected` on a DEGRADED one); `no_machine` names the ARM, not the
+absence of a machine: the Pages auth target has no Fly machine, while the
+**served-request liveness** target IS the primary probe's machine and is
+disarmed so one wedged machine cannot spend the hourly restart budget twice
+(cross-check the primary incident for that one); (c) when the failure is
 one a restart cannot fix — `classify_failure()` maps curl's exit code to a
 class, and **DNS**
 (6) and **TLS/certificate** (35, 51, 58–60, 66, 77, 80, 82–83, 90–91) failures
@@ -2171,7 +2316,7 @@ Three further safeguards worth knowing:
 | Secret | Needed for | If missing |
 |---|---|---|
 | `FLY_API_TOKEN` | the automated restart of the **Fly API** target — **not** the Pages auth step, which is hard-disarmed regardless | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | transition paging (**optional**) **and** the sustained-incident escalation leg (**required once an incident is sustained**) | A transition page is skipped with a log line. A **sustained** incident's escalation is **fail-closed**: the run FAILS with `escalation REQUIRED and NOT DELIVERED`, nothing is stamped as delivered, and the incident body records `escalate_state=failed` — a broken pager is never rendered as “all clear”. Both probe steps get them at STEP level |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | transition paging (**optional**) **and** the sustained-incident escalation leg (**required once an incident is sustained**) | A transition page is skipped with a log line. A **sustained** incident's escalation is **fail-closed**: the run FAILS with `escalation REQUIRED and NOT DELIVERED`, nothing is stamped as delivered, and the incident body records `escalate_state=failed` — a broken pager is never rendered as “all clear”. Every one of the three probe steps gets them at STEP level |
 | `ESCALATION_CHAT_ID` | **optional** recipient override for the sustained-escalation leg only (restart / failed-restart / cap / INCONCLUSIVE pages keep going to `TELEGRAM_CHAT_ID`) | Defaults to `TELEGRAM_CHAT_ID`, so point it at an on-call group without moving any existing page |
 
 `GITHUB_TOKEN` is supplied by Actions and needs `issues: write` (granted in the
@@ -2197,7 +2342,7 @@ per `CAP_RENOTIFY_MINUTES` while it stays failing.
 
 | Knob | Derived default | Meaning |
 |---|---|---|
-| `ESCALATE_ENABLED` | `1` | `0` is an operator **kill switch**: no sustained page, no stamp, logged loudly and stated in the incident body (a kill, never an “all clear”). **Wired in CI** — both probe steps read the repository variable `ESCALATE_ENABLED` (step-level, `vars.ESCALATE_ENABLED`), so the switch is usable *without editing the workflow*; an unset variable expands to empty, which is the enabled default. Only a **byte-exact** `0` disables escalation: a padded value (`" 0"`, `"0\n"`, a YAML block/folded scalar) warns and **keeps paging** |
+| `ESCALATE_ENABLED` | `1` | `0` is an operator **kill switch**: no sustained page, no stamp, logged loudly and stated in the incident body (a kill, never an “all clear”). **Wired in CI** — every probe step reads the repository variable `ESCALATE_ENABLED` (step-level, `vars.ESCALATE_ENABLED`), so the switch is usable *without editing the workflow*; an unset variable expands to empty, which is the enabled default. Only a **byte-exact** `0` disables escalation: a padded value (`" 0"`, `"0\n"`, a YAML block/folded scalar) warns and **keeps paging** |
 | `ESCALATE_SUSTAINED_MINUTES` | `3 × SUSTAINED_DOWN_MINUTES` = **30** | Wall-clock floor for the SUSTAINED page. Derived from the (normalized) sustained pair, and **clamped UP to `SUSTAINED_DOWN_MINUTES`** if set below it: the human page must never fire before the automated action it escalates. (The clamp floor is the restart gate, not the derived 30 — an explicit value in `[SUSTAINED_DOWN_MINUTES, 30)` is honoured). **Not wired in CI** — a script default; to override it (or `ESCALATE_MIN_RUNS`) in CI you must add it to the probe step's `env:` (same caveat as `.env.example`) |
 | `ESCALATE_MIN_RUNS` | `SUSTAINED_MIN_RUNS + 1` = **3** | Observed failing runs. One bad probe satisfies neither leg. **Not wired in CI** — a script default, overridable only by adding it to the probe step's `env:` |
 | `CAP_RENOTIFY_MINUTES` (shared) | `60` | For this leg: the minimum gap between a **confirmed** human page and the next sustained page, **and** the reminder interval while an incident stays failing — so this leg cannot re-page inside a window a confirmed page already covered. **One-directional, and not “of any kind”:** the pre-existing `cap` / `INCONCLUSIVE` re-notify gates still throttle on their own `cap_notified_ts` **attempt** stamp, which a failed send also consumes — that divergence is #4575 |
@@ -2268,9 +2413,11 @@ in §7.8a (#4573), on a channel independent of this leg's Telegram page.
 The watchdog stops after `MAX_RESTARTS_PER_HOUR` and asks for a human — treat
 that as “this is not a wedged process”. Four disarm reasons also land here
 without the cap being reached, and all are named in the incident body and the
-run log: **`disarmed:no_machine`** (a production surface with no Fly machine —
-the Pages auth target on a **DOWN** verdict: repair the binding/route, there is
-nothing to restart; the same target logs `disarmed:unexpected` on a DEGRADED
+run log: **`disarmed:no_machine`** (a production surface whose restart leg is
+disarmed — the **Pages auth** target on a **DOWN** verdict, where the repair is
+the binding/route and there is nothing to restart, and the **served-request
+liveness** target, which IS the primary probe's Fly machine: check the machine
+and cross-check the primary incident, not a Pages deploy; the same target logs `disarmed:unexpected` on a DEGRADED
 verdict, because a restart is off the table before the no-machine guard is even
 reached),
 **`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
@@ -2344,14 +2491,26 @@ machinery (§7, §7.7). Two consequences:
    `is_prod` set would make every production run a silent drill (no PROD page),
    and nothing in the live path would tell you — the drill is where you notice.
 2. **Widening the production set must not let a drill arm self-heal.** The set
-   (`PROD_PROBE_URLS`) and the restartable set (`RESTARTABLE_PROBE_URLS`) are
-   separate; only exact members of the production set are PROD, and only exact
-   members of the restartable set may restart. An unrecognised URL stays a
+   (`PROD_PROBE_URLS`), the restartable set (`RESTARTABLE_PROBE_URLS`) and the
+   machine-backed set (`FLY_MACHINE_PROBE_URLS`) are three SEPARATE sets; only
+   exact members of the production set are PROD, and only exact members of the
+   restartable set may restart. An unrecognised URL stays a
    DRILL with self-heal disarmed — never add a flag, never loosen this to a
    prefix/wildcard match, and never let a drill URL appear in either set.
+   ⛔ **`FLY_MACHINE_PROBE_URLS` must be kept in step with `PROD_PROBE_URLS`.**
+   It decides whether an incident body says "served by Cloudflare Pages" or
+   "served by the same Fly machine". The ONLY production target it may omit is
+   the auth probe (`/auth/start`, served by Pages); every other production
+   target is machine-backed and must be listed. Omitting one does not degrade to
+   a cautious message — the body then positively claims there is no Fly machine
+   and sends on-call to check a Pages deploy during a machine outage, which is
+   the #10892 misdirection itself.
 
-**Both targets are probed on every run**, drills included: the auth step always
-uses its production URL and is hard-disarmed from the restart leg. Note the auth
+**All three targets are probed on every run**, drills included: the auth and
+liveness steps always use their production URLs and are hard-disarmed from the
+restart leg — the auth one because it has no Fly machine behind it, the
+liveness one because it IS that machine and a second restart arm would spend
+`MAX_RESTARTS_PER_HOUR` twice on one wedged machine (§6.4.2). Note the auth
 probe is **not** side-effect-free — asserting the PKCE header means the GET must
 reach `/auth/start`, which **writes an `auth_flows` row** (one per run). That row
 used to leak: the table's only deletion paths ran on flow *completion*, which an
@@ -2463,15 +2622,36 @@ tracked as **#5798**.
 
 ### 7.8 Known limits
 
-- **Two probes, still narrow.** The API probe checks ONE route
+- **Three probes, still narrow.** The API probe checks ONE route
   (`/v1/organizations`) and only its no-auth branch; the auth probe checks ONE
-  route (`/auth/start`) and asserts 302 + the PKCE header. An outage that leaves
-  either route answering as expected while other routes fail reads as UP
-  (green) — and so does an auth-leg break that rejects every *real* token (the
-  probe sends none). Together they cover the two paths where a silent outage is
-  worst, not the whole surface.
+  route (`/auth/start`) and asserts 302 + the PKCE header; the liveness probe
+  checks ONE route (`/liveness`) and asserts only that a request which does no
+  I/O of its own returns `200` inside 5 s. An outage that leaves a probed route
+  answering as expected while other routes fail reads as UP (green) — and so
+  does an auth-leg break that rejects every *real* token (the probe sends none).
+  Together they cover the paths where a silent outage is worst, not the whole
+  surface.
+- **The liveness arm's 35 s tolerance can file a TRUE but DUPLICATE page**
+  during a machine restart (`fly.toml` `kill_timeout = 30` plus a cold boot) or
+  a ~85 s deploy rollout (§6, cold boot): the primary API probe runs first and
+  owns both, and its 95 s budget absorbs them while this arm's 3×5 s + 2×10 s =
+  35 s does not, so it pages for a window in which nothing is serving. Left in on
+  purpose — the alternative, a longer bound here, is exactly the status-only
+  probe with a generous timeout this target replaces — and the two arms own
+  separate incident titles, so the operator sees “one machine restarting” rather
+  than a merged, unattributable alert. The same reasoning is stated beside the
+  step in `.github/workflows/availability-watchdog.yml`.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
-  `CONTROL_URL` check). Alerting still fires; no restart is issued. The
+  `CONTROL_URL` check) — **on the restartable Fly API target only.** The control
+  probe is consulted inside the restart decision
+  (its own `if ! control_ok` guard), so the TWO hard-disarmed arms — the Pages
+  auth surface and the served-request liveness surface — never reach it: a total
+  runner-side egress failure pages them as `PROD DOWN`/`PROD DEGRADED` (a TRUE
+  alert about the runner, not the app), and the case is disambiguated by the
+  primary probe's OWN verdict and by the run being RED. The control probe is not
+  run there because the action it guards (a machine restart) cannot happen on a
+  disarmed arm; #11401 tracks consulting it for every production arm. Alerting
+  still fires; no restart is issued. The
   INCONCLUSIVE page is throttled to at most once per `CAP_RENOTIFY_MINUTES`,
   measured from its own **attempt** stamp — so an *undelivered* inconclusive
   page also consumes the window (pre-existing; #4575) — and the per-run record is
