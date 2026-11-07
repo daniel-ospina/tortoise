@@ -636,9 +636,10 @@ def test_a_third_party_wrapper_on_thread_start_is_not_a_double_wrap(monkeypatch)
     42362934147 initialised the REAL Sentry SDK (tests/test_11092_sentry_loop_stall.py's
     `live_sentry_client`), whose `ThreadingIntegration` puts a `@functools.wraps`
     layer on `Thread.start`, and the old identity assertion read that healthy
-    state as "double-wrapped". The other two arms are the verdict's TEETH — an
-    absent stamp, and an installer that is not idempotent — so arm 1 cannot pass
-    by being blind.
+    state as "double-wrapped". The other three arms are the verdict's TEETH — an
+    absent stamp, a wiped install MARKER, and an installer that is not
+    idempotent — so arm 1 cannot pass by being blind, and no branch of the
+    helper can be deleted without reddening a row here (agent-infra#3442).
     """
     import functools
     import threading
@@ -682,6 +683,20 @@ def test_a_third_party_wrapper_on_thread_start_is_not_a_double_wrap(monkeypatch)
     assert any("re-wrapped" in v for v in _thread_start_stamp_violations()), (
         "a non-idempotent installer passed the census — the idempotence "
         "assertion is vacuous")
+
+    # TEETH 3: the MARKER wiped while our wrapper is still reachable — the one
+    # state the reachability check cannot see (a leaked TEST_MODE env that got
+    # the wrapper installed without conftest's marker), so the marker branch is
+    # the census's only witness. The installer is stubbed to a no-op for this
+    # arm: calling the REAL one with the marker off would legitimately re-wrap,
+    # and that re-wrap is TEETH 2's subject, not this one's — isolating it here
+    # is what makes the row attributable to the marker branch alone.
+    monkeypatch.setattr(proj_mod, "install_thread_stamp", lambda: None)
+    monkeypatch.setattr(threading.Thread, "_tortoise_stamp_installed", False)
+    monkeypatch.setattr(threading.Thread, "start", _sentry_style_start)
+    assert any("not installed" in v for v in _thread_start_stamp_violations()), (
+        "a WIPED install marker passed the census — a leaked TEST_MODE env that "
+        "installed the wrapper without conftest's marker would go unreported")
 
 
 def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
