@@ -531,9 +531,38 @@ def test_dense_parity_reembeds_and_surfaces_the_other_session(
     # the composition is bounded (the issue's own budget claim)
     from tortoise.sdk import _ENTITY_DENSE_ALIAS_CHARS
     assert len(composed) <= len(QUESTION) + _ENTITY_DENSE_ALIAS_CHARS + 2
-    # two distinguishable VECTOR trace entries: the shipped leg's and the
-    # expansion's — the evidence that a second dense pass ran.
-    assert [e.get("leg") for e in trace].count("vector") == 2
+    # Two VECTOR trace entries: the shipped leg's and the expansion's — the
+    # evidence that a second dense pass ran. And they are distinguishable by
+    # PROVENANCE, not by position: the two entries are otherwise shape-identical
+    # (same leg/ran/degraded/reason AND the same mechanism), so a count alone
+    # could never attest that THIS arm's leg engaged (review round 3, PR
+    # #11459). The shipped leg carries no provenance key at all.
+    from tortoise.search_engine import LEG_PROVENANCE_KEY, PROVENANCE_ENTITY_KEY_EXPANSION
+    vec_entries = [e for e in trace if e.get("leg") == "vector"]
+    assert len(vec_entries) == 2
+    assert vec_entries[0].get(LEG_PROVENANCE_KEY) is None, (
+        "the shipped dense leg must stay unlabelled — a provenance value there "
+        "would relabel every existing dense read")
+    assert vec_entries[1].get(LEG_PROVENANCE_KEY) == (
+        PROVENANCE_ENTITY_KEY_EXPANSION), (
+        "the expansion's entry must name its pass, or the trace cannot say "
+        "which of the two identical-shaped entries it was")
+
+
+def test_vector_provenance_defaults_to_absent(monkeypatch):
+    """FAIL VALUE: an unlabelled caller's trace entry gaining a provenance key
+    (every existing dense read's trace would change shape for a lever it did
+    not arm). Reachable: ``run_vector_query``'s ``provenance=None`` default."""
+    import inspect
+
+    from tortoise.search_engine import _trace_entry, run_vector_query
+
+    assert inspect.signature(run_vector_query).parameters["provenance"].default is None
+    assert "provenance" not in _trace_entry(
+        "vector", ran=True, degraded=False, reason="ok", count=1)
+    assert _trace_entry(
+        "vector", ran=True, degraded=False, reason="ok", count=1,
+        provenance="x")["provenance"] == "x"
 
 
 def test_dense_switch_off_keeps_the_shipped_path_byte_identical(

@@ -37331,7 +37331,9 @@ class TortoiseSDK:
             entity anchors (ALL sessions, via the ``aboutObject`` edges) become
             ADDITIVE OR terms for a second sparse pass, so subject-matching
             points from sessions the one-shot top-k starves can join the pool.
-            Fail-open (any fetch/query failure keeps the original fts leg),
+            Fail-open (any fetch/query failure keeps the original legs — the
+            harvest is SHARED with the dense half below, so a failure cancels
+            whichever half was about to run),
             additive-only, bounded (3 anchors; the A4 expansion-term cap 8),
             deterministic. Default False = byte-identical (single pass).
             OFF by default in the product (the #1745 fail-safe decision — the
@@ -39578,9 +39580,13 @@ class TortoiseSDK:
                 # only the surfaced search legs hide them by default.
                 excluded_statuses=())
         except Exception:
+            # Same shared-harvest rule as the key join below: this message is
+            # inside the ONE harvest both halves consume, so on a dense-armed
+            # read with an empty sparse leg the leg preserved is the DENSE one
+            # and there is no fts leg in play (review round 3, PR #11459).
             _logger.warning(
-                "C2 anchor resolution failed — keeping the original fts "
-                "leg", exc_info=True)
+                "C2 anchor resolution failed — keeping the original legs",
+                exc_info=True)
             return None
         if not anchor_rows:
             return None
@@ -39602,7 +39608,11 @@ class TortoiseSDK:
             ).result_set
         except Exception:
             _logger.warning(
-                "C2 key harvest failed — keeping the original fts leg",
+                # The harvest feeds BOTH halves (sparse AND dense), so the
+                # message names the LEGS, not the fts one: on a dense-armed read
+                # whose sparse leg was empty, a harvest failure cancels the
+                # dense expansion and there is no fts leg in play at all.
+                "C2 key harvest failed — keeping the original legs",
                 exc_info=True)
             return None
         aliases: list[str] = []
@@ -39805,7 +39815,10 @@ class TortoiseSDK:
                 "dense leg", exc_info=True)
             return None
         proj = self._get_proj()
-        from .search_engine import run_vector_query
+        from .search_engine import (
+            PROVENANCE_ENTITY_KEY_EXPANSION,
+            run_vector_query,
+        )
         _exp_trace: list[dict] = []
         try:
             expanded = run_vector_query(
@@ -39829,6 +39842,12 @@ class TortoiseSDK:
                 # (the #8488 arm's ``meter=False`` precedent — the trace still
                 # records the second pass, so a measurement can see it ran).
                 meter=False,
+                # …and the trace says WHICH pass. Without this the second entry
+                # is shape-identical to the shipped one — same leg, ran,
+                # degraded, reason AND the same ``mechanism`` — so a measurement
+                # could only assert "two vector entries", never "the expansion's
+                # leg engaged" (review round 3, PR #11459).
+                provenance=PROVENANCE_ENTITY_KEY_EXPANSION,
             )
         except Exception:  # noqa: BLE001, RUF100
             _logger.warning(
