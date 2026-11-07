@@ -6508,8 +6508,26 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 # The class therefore stays OPEN and DOCUMENTED (a characterisation test
                 # pins the current behaviour so a future fix cannot move it silently).
                 return (
-                    _TRUE_TREE.startswith(_ref)
-                    or _ref.startswith(_TRUE_TREE)
+                    (
+                        (
+                            _TRUE_TREE.startswith(_ref)
+                            or _ref.startswith(_TRUE_TREE)
+                        )
+                        # ⛔ A TRUE REFERENT MAY NOT EXEMPT A THIRD TREE IN THE PHRASE'S OWN
+                        # CLAUSE (#11191 review r27, P1 — MEASURED fail-open on the pin
+                        # itself). Tier 3 of the cascade reads the WHOLE SENTENCE, so a true
+                        # tree named in an EARLIER clause answered for the phrase and the
+                        # phrase's own clause could then name any tree as the pre-#9548 tree:
+                        #   "Measured at `047c91f7a`. The tree immediately before #9548 is
+                        #    `c5cbcbb4f`."                                  -> ACCEPTED
+                        # `c5cbcbb4f` IS the doc's own retired pre-#9548 attribution, so the
+                        # pin reported the cell verified while the cell asserted the decay it
+                        # exists to catch. `_third_sha_in_clause` is the guard the arming-sha
+                        # branch below already applies (r12); this is the same guard on the
+                        # branch it was missing from, NOT a new spelling list. Deleting it
+                        # REDDENS the `_true_referent_third` control block.
+                        and not _third_sha_in_clause(clause)
+                    )
                     # ⛔ THE ARMING COMMIT'S OWN SHA IS NOT A TREE REFERENT (#11191
                     # review r11, P1 — MEASURED false RED, and a regression against
                     # `origin/main`). `preceding[-1]` takes the NEAREST sha, and the doc
@@ -8526,6 +8544,38 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             "denying the doc's stale `c5cbcbb4f` attribution is the CORRECTION "
             "(#11191 review r13, P1)"
         )
+    # ⛔ …AND THE REFERENT CASCADE MAY NOT EXEMPT A THIRD TREE IN THE PHRASE'S OWN CLAUSE
+    # (#11191 review r27, P1 — MEASURED fail-open on the pin itself). Tier 3 of the referent
+    # cascade reads the WHOLE SENTENCE, so a TRUE tree named in an earlier clause answered
+    # for the phrase and the phrase's own clause could then name ANY tree as the pre-#9548
+    # tree. All four shapes below were ACCEPTED at `198ed21b8c`; the contract's referent row
+    # ("any tree other than `047c91f7a` as that referent is the defect … naming a THIRD tree
+    # is the same defect (A1)") and `origin/main`'s predicate both refuse them.
+    # `_third_sha_in_clause` is the guard the arming-sha branch already applies; the fix
+    # applies it to the true-tree branch. Mutation-tested: deleting that guard REDDENS this
+    # block (verified at `198ed21b8c` before the fix).
+    for _true_referent_third in (
+        "`047c91f7a` is not it; the tree immediately before #9548 is `c5cbcbb4f`.",
+        "Measured at `047c91f7a`. The tree immediately before #9548 is `c5cbcbb4f`.",
+        "At `047c91f7a` the census is 10, and the tree immediately before #9548 is "
+        "`c5cbcbb4f`.",
+        "`047c91f7a` is here; the tree before #9548 is `deadbeef1`.",
+    ):
+        assert _refuses_before_9548(_true_referent_third), (
+            f"ACCEPTED: {_true_referent_third!r}\n"
+            "the TRUE tree named in an EARLIER clause exempts the phrase, so the phrase's "
+            "own clause names a THIRD tree as the pre-#9548 tree and the pin goes GREEN on "
+            "the real §A8 cell (#11191 review r27, P1)"
+        )
+    # …and the mirror order, where the phrase comes FIRST and the true tree is named after
+    # it, stays REFUSED — the same defect one word order over. It is the control that tells
+    # this guard apart from a bare "the true tree appears somewhere in the sentence" test.
+    assert _refuses_before_9548(
+        "The tree immediately before #9548 is `c5cbcbb4f`; `047c91f7a` is a later reading."
+    ), (
+        "the phrase-first spelling of the same third tree is ACCEPTED — the verdict must "
+        "not key on word order (#11191 review r27, P1)"
+    )
     # …and the TRUE copula, including the arming commit or an aside between the copula and
     # its object, must stay green in every spelling.
     for _true_copula in (
