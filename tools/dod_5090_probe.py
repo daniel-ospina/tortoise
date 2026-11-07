@@ -133,10 +133,13 @@ version of this paragraph was false for the case that matters.**
   route through the gate, so a declaration does not quietly accumulate: delete
   it then, because an unused exemption is a stale one. It is NOT what naming a
   LIVE outside-gate writer is — that is the next bullet, and it greens the row.
-* A `bypass` class, or any class outside the vocabulary, HOLDS the row as a
-  DEFECT; an unreadable or malformed register holds it as `UNMEASURED`.
+* A `bypass` class, any class outside the vocabulary, or a declaration carrying
+  no owning issue (`#<n>`) HOLDS the row: the first two are a DEFECT, and an
+  acceptance with no owner behind it is not an acceptance. An unreadable or
+  malformed register holds it as `UNMEASURED`.
 * A `recognised_producer` claim is CORROBORATED against the writer's own body
-  (the seams `route_calls()` reads from the register), and every `reason` must
+  (the seams `route_calls()` reads from the register, matched **by callee
+  NAME** — the register exports names, not objects), and every `reason` must
   cite the writer ITSELF rather than another function's evidence.
 * ⛔ **Naming a LIVE writer that discovery DOES find outside the gate greens the
   row — `exempt` included.** That is reading (b) doing its job: *"a named,
@@ -745,10 +748,13 @@ def embedding_writers() -> dict[str, dict]:
 
     ``{writer: {"callee", "at", "kind", "label", "callees"}}`` where ``kind`` is
     ``gated`` (reaches ``encode_for_row``), ``ungated`` (produces a vector the
-    gate never sees) or ``producer`` (a function that computes a vector a
+    gate never sees), ``producer`` (a function that computes a vector a
     DIFFERENT function writes — `encode_for_store`'s read/backfill callers, and
-    the journal stampers). ``writer`` is ``<dotted module>::<function>``, so two
-    writers in different modules can never share a key.
+    the journal stampers), ``unresolved_write`` (writes one with no recognised
+    producer call), ``duplicate`` (two same-named defs in one module) or
+    ``unparsed`` (the module would not parse — keyed by PATH, one per module).
+    ``writer`` is ``<dotted module>::<function>``, so two writers in different
+    modules can never share a key.
 
     **The label is derived from the Cypher, not from the writer's name.** That
     matters: a name-derived map draws from the same small vocabulary as the
@@ -1217,15 +1223,17 @@ def flag_in_shipped_configs(flag: str) -> dict:
 #:
 #: * A name with **no writer behind it in the scored population** is STALE and HOLDS the row
 #:   (same contract ESLint's *Bulk Suppressions* enforces with a non-zero exit on an unused
-#:   suppression). A name for a writer **the product does not have** is stale, and so is a
-#:   name whose writer has since been FIXED to route through the gate — delete it then, an
-#:   unused exemption is a stale one. Naming a LIVE outside-gate writer is the NEXT bullet,
-#:   and that one does green the row.
+#:   suppression). A name for a writer **the product does not have** is stale; so is a name
+#:   whose writer has since been FIXED to route through the gate, or that discovery classes
+#:   `gated`/`producer`/`duplicate` — all of them outside the population a declaration is OWED
+#:   for, so delete the entry then: an unused exemption is a stale one. Naming a LIVE
+#:   outside-gate writer is a different case — the LAST bullet — and that one greens the row.
 #: * A name with **no admissible class** (``bypass``, or a class outside the vocabulary) HOLDS
-#:   the row as a DEFECT.
+#:   the row as a DEFECT, and so does one carrying no owning issue.
 #: * A `recognised_producer` claim is CORROBORATED: the writer's own body must reach one of the
-#:   seams the register exports (`route_calls()`), or the claim is refused and the writer stays
-#:   unrecognised.
+#:   seams the register exports (`route_calls()`), matched **by callee NAME** — the register
+#:   exports names, not objects, the same qualifier the register's own docstring carries for its
+#:   `gated` class — or the claim is refused and the writer stays unrecognised.
 #: * A `reason` must cite the writer ITSELF, not another function's evidence.
 #: * ⛔ **Naming a LIVE writer that discovery does find outside the gate DOES green the row — by
 #:   class choice, `exempt` included.** That is reading (b): *"a named, accepted exception in
@@ -1247,6 +1255,11 @@ def flag_in_shipped_configs(flag: str) -> dict:
 #: This row measures the WRITER population; it never claims every stored vector was decided by
 #: the rule. `ROW_SCOPE_NOTE` carries that sentence into the row's own evidence.
 REGISTER_MODULE = "tortoise.embed_writer_register"
+
+#: An owning issue reference — the register's `load()` enforces `^#\d+$`; `fullmatch` here accepts
+#: the same set minus a trailing newline, i.e. it is STRICTER (fail-closed: the entry is simply not
+#: credited), and the instrument re-checks it rather than inheriting an invariant it does not test.
+_OWNER_ISSUE_RE = re.compile(r"#\d+")
 
 #: The residual a `MET` on this row does NOT absorb — emitted with the row, so a reader quoting
 #: the verdict cannot read it as "no vector is stored that the rule did not decide".
@@ -1378,12 +1391,14 @@ def register_audit(outside_gate: dict[str, dict]) -> dict:
     `ungated`). Three sets partition it and cannot overlap; a fourth is disjoint from it:
 
     * ``undeclared`` — outside the gate, not named (HOLDS);
-    * ``violations`` — named, but a claim that does not re-derive (HOLDS);
+    * ``violations`` — named, but a claim it does not support (HOLDS): an inadmissible class, no
+      owning issue, a `reason` that does not cite the writer, or a route the body does not make;
     * ``credited`` — named and corroborated, or named as `exempt` (reading (b));
-    * ``stale`` — named but NOT outside the gate at all (HOLDS: the writer is gone or
-      renamed, its module is one the walk skips, or it now ROUTES THROUGH THE GATE — the fix
-      landing — in which case the declaration must be deleted, because an unused exemption
-      is a stale one).
+    * ``stale`` — named but NOT in the outside-gate population at all (HOLDS: the writer is
+      gone or renamed, its module is one the walk skips, its module would not parse, or it now
+      ROUTES THROUGH THE GATE — the fix landing, or `gated`/`producer`/`duplicate` to discovery —
+      any of which means the declaration is no longer owed and must be deleted, because an
+      unused exemption is a stale one).
 
     A malformed register raises rather than answering, so the caller can hold the row as
     UNMEASURED; the alternative — a partial answer — reads as the product declaring nothing.
@@ -1413,7 +1428,7 @@ def declaration_violations(
 ) -> list[str]:
     """Why ``writer``'s declaration is NOT credited — empty list = credited.
 
-    ⛔ The register's entries are HAND-WRITTEN names (`_DECLARATIONS`). Three things are
+    ⛔ The register's entries are HAND-WRITTEN names (`_DECLARATIONS`). Four things are
     checked, and it is worth being exact about what each one buys, because the loose version of
     this docstring claimed corroboration for an `exempt` entry that nothing corroborates:
 
@@ -1423,15 +1438,20 @@ def declaration_violations(
        LOOKED at this writer, not that the claim is true.
     2. **route corroboration, `recognised_producer` ONLY** — that class claims the writer reaches
        the canonical clause builder or the `#5008` session producer (`route_calls()`). If its own
-       body makes no such call the claim is contradicted and the writer stays unrecognised.
+       body makes no such call **by callee NAME** (the register exports names, not objects — the
+       same qualifier its own docstring carries for the `gated` class), the claim is contradicted
+       and the writer stays unrecognised.
        ⛔ There is NO equivalent for `exempt`, by construction: "stores no live vector" or
        "stores one under a ruling" is a product judgement that needs data flow to falsify, which
        this instrument refuses to guess at (`UNDECIDABLE_WRITE_SHAPES`). An `exempt` declaration
        is accepted BY NAME — that is reading (b), and the reason the register is product code.
     3. **an admissible class** — `bypass` (or anything outside the vocabulary) is a defect the
-       instrument can NAME, never an exemption. `#11085`'s `load()` refuses to build one, so
-       this fires on an injected or tampered register: the row must not assume the register is
-       well-formed.
+       instrument can NAME, never an exemption. `#11085`'s `load()` refuses to build one.
+    4. **an owning issue** — a declaration with no `#<n>` is an acceptance with nothing behind it
+       (reading (b) says *"a named, accepted exception"*; the `owner_issue` is the recorded
+       acceptance). `load()` enforces the shape too.
+       ⛔ Checks 3 and 4 fire on an injected or tampered register as well: the row must not assume
+       the register is well-formed.
     """
     out: list[str] = []
     cls = entry.get("cls")
@@ -1439,6 +1459,11 @@ def declaration_violations(
         out.append("declares `bypass` — a DEFECT, never an exemption")
     elif cls not in CENSUS_CLASSES:
         out.append(f"class {cls!r} is outside {CENSUS_CLASSES}")
+    if not _OWNER_ISSUE_RE.fullmatch(entry.get("owner_issue") or ""):
+        out.append(
+            "carries no owning issue (`#<n>`) — an acceptance with no owner behind it is "
+            "not an acceptance"
+        )
     module, _, symbol = writer.partition("::")
     if (_normalise_seam(module), symbol) not in _cited_seams(entry.get("reason") or ""):
         out.append("does not cite its own `module::symbol` seam in `reason`")
@@ -1448,7 +1473,7 @@ def declaration_violations(
         if not callees.intersection(seams):
             out.append(
                 "claims a route to a recognised producer "
-                f"({', '.join(seams)}) that its own body does not make"
+                f"({', '.join(seams)}) that its own body does not call, by callee NAME"
             )
     return out
 
@@ -1581,7 +1606,10 @@ def score_rule_bullet() -> Row:
         # PATH. Whether the writer holds the row is decided below, from the register,
         # and says so in its own note (`undeclared` / `credited`).
         + (" — path(s) the gate never sees; each holds this row unless the "
-           "product register names it" if ungated else ""),
+           "product register CREDITS it (a name alone is not enough: the class must "
+           "be admissible, the entry must carry an owning issue `#<n>`, the `reason` must "
+           "cite the writer, and a `recognised_producer` claim must be corroborated)"
+           if ungated else ""),
         f"gate enabled by default: {on_by_default} (ambient "
         f"{embed_gate.ENV_FLAG}={os.environ.get(embed_gate.ENV_FLAG, '')!r}; "
         f"shipped config surface walked: {len(shipped['surfaces'])} "
@@ -1596,9 +1624,10 @@ def score_rule_bullet() -> Row:
         f"unparseable modules (hold this row): {sorted(unparsed) or 'none'}",
         # ⛔ A function that writes an embedding with NO recognised producer
         # call is STILL reported: the register is a SUPPLEMENT to this
-        # enumeration, never a replacement (`#11444` *What the fix must
-        # preserve*, third bullet). The register answers *which class* each one
-        # is in — it does not remove the population from the evidence.
+        # enumeration, never a replacement (`#11444`: *What the fix must
+        # preserve*, third bullet — counted/classified, not replaced — and its
+        # third Verification checkbox). The register answers *which class* each
+        # one is in; it does not remove the population from the evidence.
         f"functions writing an embedding with no recognised producer call: "
         f"{len(unresolved_writes)} — deliberately OVER-INCLUSIVE (it also lists "
         f"repair/backfill helpers and the clause builder itself, because a "
@@ -1616,13 +1645,12 @@ def score_rule_bullet() -> Row:
         )
     if stale:
         notes.append(
-            "stale declarations (hold this row at PARTIAL — a name with no writer "
-            "behind it in the population this row scores: the writer is gone or "
-            "renamed, its module is one the walk skips (`tortoise/embeddings.py`), "
-            "or its module would not parse; OR the writer now ROUTES THROUGH THE "
-            "GATE, which is the fix landing and means the declaration must be "
-            "deleted — an unused exemption is a stale one): "
-            f"{stale}"
+            "stale declarations (hold this row at PARTIAL — a name the outside-gate "
+            "population no longer contains: the writer is gone or renamed, its module "
+            "is one the walk skips (`tortoise/embeddings.py`), its module would not "
+            "parse, or it now ROUTES THROUGH THE GATE (the fix landing) / discovery "
+            "classes it `gated`/`producer`/`duplicate` — an unused exemption is a "
+            f"stale one, so delete the entry): {stale}"
         )
     if bypass_declarations:
         notes.append(
@@ -1631,8 +1659,10 @@ def score_rule_bullet() -> Row:
         )
     if violations:
         notes.append(
-            "uncorroborated declarations (hold this row at PARTIAL — a claim that "
-            "does not re-derive at the writer's own seam): "
+            "uncorroborated declarations (hold this row at PARTIAL — a claim the "
+            "entry does not support: an inadmissible class, no owning issue, a "
+            "`reason` that does not cite the writer, or a route the body does not "
+            "make): "
             f"{violations_at}"
         )
     if register_error:
@@ -1657,8 +1687,10 @@ def score_rule_bullet() -> Row:
         # undeclared writer (as `exempt`, or as `recognised_producer` when its body
         # really does route) DOES green the row — that naming IS the acceptance
         # reading (b) asks for. What a register edit CANNOT do is green it with a
-        # name that has no writer behind it (`stale`), with an inadmissible class
-        # (`bypass`), or with a claim the writer's own seam contradicts (`violations`).
+        # name that has no writer behind it (`stale`). Everything else that can be
+        # wrong with a name lands in `violations` and holds too: an inadmissible class
+        # (`bypass`), no owning issue, a `reason` that does not cite the writer, or a
+        # route the body does not make.
         verdict = "PARTIAL"
     else:
         verdict = "MET"

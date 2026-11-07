@@ -3169,13 +3169,13 @@ def test_a_bypass_declaration_holds_row_one_at_PARTIAL(tmp_path, monkeypatch):
 
 def test_the_over_inclusive_enumeration_is_still_printed_when_everything_is_named(
         tmp_path, monkeypatch):
-    """Requirement 5: the register CLASSIFIES the population, it never REPLACES it.
+    """`#11444`: the register CLASSIFIES the population, it never REPLACES it (*What the fix must
+    preserve*, third bullet — counted/classified, not replaced — and its third Verification item).
 
-    With every writer credited — the `MET` state — the AST enumeration and the
-    discovery location of each writer are still in the evidence. A change that swaps
-    the enumeration for the register would green this row while making the measured
-    population invisible, which is the failure mode the register exists to fix rather
-    than to commit.
+    With every writer credited — the `MET` state — the AST enumeration and the discovery
+    location of each writer are still in the evidence. A change that swaps the enumeration for
+    the register would green this row while making the measured population invisible, which is
+    the failure mode the register exists to fix rather than to commit.
     """
     _row_one_fixture(tmp_path, monkeypatch)
     writers = {
@@ -3205,9 +3205,9 @@ def test_a_STALE_declaration_holds_row_one_at_PARTIAL(tmp_path, monkeypatch):
 
     ⛔ This is the falsifier answer, stated exactly and not more broadly than the code
     supports: it makes adding a name for a writer **the product does not have**
-    insufficient. While the product is unchanged, every added name is that, so a
-    naming-only edit moves the row toward `PARTIAL` rather than toward `MET`. Same
-    contract ESLint's suppressions file enforces (*"There are suppressions left that do
+    insufficient. On this tree every visible outside-gate writer is already named, so an
+    added name can only be stale and a naming-only edit moves the row toward `PARTIAL`.
+    Same contract ESLint's suppressions file enforces (*"There are suppressions left that do
     not occur anymore … re-run with `--prune-suppressions`"*, a non-zero exit).
 
     ⛔ What it does NOT claim (and an earlier draft of this docstring overclaimed): naming
@@ -3367,6 +3367,79 @@ def test_a_malformed_entry_is_NAMED_not_a_crash(tmp_path, monkeypatch):
     assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
     assert "outside" in row.observed, row.observed
     assert "uncorroborated declarations" in row.observed, row.observed
+
+
+def test_a_declaration_with_NO_owning_issue_is_not_credited(tmp_path, monkeypatch):
+    """Reading (b) says *"a named, accepted exception"* — the owning issue IS the acceptance.
+
+    The register's `load()` enforces an `#<digits>` owner, but the instrument re-checks it rather than
+    inheriting an invariant in a module it does not test: a tampered or injected entry with an
+    empty owner used to be credited and printed `owners: <writer>=` with nothing after it.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.b::_unowned")}
+    declarations = {
+        "tortoise.b::_unowned": _declared(
+            "tortoise.b::_unowned", probe.CENSUS_EXEMPT, owner=""),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    assert "carries no owning issue" in row.observed, row.observed
+
+
+def test_a_seam_REMOVED_from_the_export_holds_the_declarations_that_need_it(
+        tmp_path, monkeypatch):
+    """The FALSE-HOLD direction: dropping a seam must HOLD, not silently stop corroborating.
+
+    `route_calls()` reads the register's export, so a lane that trims the tuple changes what the
+    probe can corroborate. This pin makes that consequence MEASURED — every declaration whose body
+    reached only the dropped seam becomes uncorroborated and the row holds — instead of silent.
+    It is the direction the register-suite test's `any(...)` check cannot see (a reason citing two
+    seams stays green when one is dropped), which is why the behaviour is pinned here too.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.b::_routes", "set_embedding_clause")}
+    declarations = {
+        "tortoise.b::_routes": _declared(
+            "tortoise.b::_routes", probe.CENSUS_RECOGNISED,
+            reason="`tortoise.b::_routes` reaches `set_embedding_clause`"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    assert probe.score_rule_bullet().verdict == "MET"
+    # ── the mutation: the seam this declaration relies on is no longer exported ──
+    monkeypatch.setattr(probe, "route_calls", lambda: ("_session_embedding",))
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        f"a declaration whose only route is not exported must HOLD: {row.verdict!r} {row.observed}")
+    assert "claims a route to a recognised producer" in row.observed, row.observed
+
+
+def test_a_declaration_for_a_GATED_writer_is_stale_and_says_WHY(tmp_path, monkeypatch):
+    """A `gated` writer is outside the population a declaration is OWED for — and the note says so.
+
+    ⛔ Measured before this: declaring `tortoise.sdk::create_point` produced a `stale` note listing
+    only "gone or renamed", "module the walk skips", "module would not parse" — so the row named
+    the writer in one note (it reaches the gated seam) and declared it nonexistent in the next.
+    That writer is exactly the one `ROW_SCOPE_NOTE` is about, i.e. what a future `#11086` lane is
+    most likely to try to declare, and it was told the writer was gone.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {"tortoise.sdk::create_point": {
+        "callee": probe.SEAM_CALL, "at": "tortoise/sdk.py:1",
+        "kind": "gated", "label": "Point",
+        "callees": frozenset({probe.SEAM_CALL}),
+    }}
+    declarations = {"tortoise.sdk::create_point": _declared("tortoise.sdk::create_point")}
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    stale = next(n for n in row.notes if n.startswith("stale declarations"))
+    assert "tortoise.sdk::create_point" in stale, stale
+    assert "discovery classes it `gated`" in stale, (
+        f"the note must name the `gated`/`producer` cause, not only 'gone or renamed': {stale}")
 
 
 def test_a_ROUTE_claim_its_body_does_not_make_is_not_credited(tmp_path, monkeypatch):

@@ -81,7 +81,8 @@ means **four further resident HNSW structures**, not three. ⚠️ `STORAGE-ARCH
   owned is motion, not progress.
 
 **The counter-case, and why it wins:** two of the four DoD rows are PARTIAL on *the same population*
-(the 15 embedding writers with no recognised producer call), `#10541` — the issue that was to resolve
+(the embedding writers with no recognised producer call — **15 when this was written** (2026-11-04);
+**19 measured 2026-11-07**, of a 20-writer outside-gate population), `#10541` — the issue that was to resolve
 them — closed **COMPLETED** on 2026-11-04T00:49Z and **both rows are still PARTIAL at this head**. That is
 a genuine, currently-unfiled gap: an issue closed as complete whose own remainder outlived it. Proceeding
 is justified **only** to the extent the work either (a) makes V1 answerable, or (b) closes a genuinely
@@ -251,8 +252,8 @@ labels; *4 surfaces exist / 6 walked*.
 ### 7.1 Why REPOINT rather than PROCEED
 
 PROCEED would have implied the epic's existing acceptance still describes its work. It does not: one of
-four DoD rows is MET, one is an owner decision, and **both PARTIAL rows hold on the 15 embedding writers
-with no recognised producer call** (§1.3) — row 1 additionally on the gate being `set ON in: none` on the
+four DoD rows is MET, one is an owner decision, and **both PARTIAL rows hold on the embedding writers
+with no recognised producer call** (§1.3 — 15 when this was written, 19 measured 2026-11-07) — row 1 additionally on the gate being `set ON in: none` on the
 shipped default and one write path embedding outside it. ⚠️ **Corrected 2026-11-07 (`#11444`, measured):
 the row-1 half of that sentence is superseded.** Row 1's scorer reads the product register, so the writer
 population and the one ungated path are **credited** (#5008) and row 1 is `PARTIAL` on the shipped gate

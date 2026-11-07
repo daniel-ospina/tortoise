@@ -340,8 +340,12 @@ def test_the_exported_ROUTE_seams_are_the_ones_the_class_claims_are_used():
     reads as uncorroborated (a false HOLD, the opposite of the gate that made it reachable).
 
     ⛔ Pinned from the ENTRIES' side, not by copying the docstring: every `recognised_producer`
-    reason must NAME one of the exported seams. A seam added to the tuple but used by no entry is
-    harmless; a seam an entry relies on and the tuple omits is the drift this catches.
+    reason must NAME at least one exported seam. What this CANNOT see — because a reason usually
+    cites more than one seam, so `any(...)` stays satisfied when a co-named seam is dropped — is the
+    FALSE-HOLD direction (a writer whose body reached only the dropped seam stops being credited).
+    That direction is pinned where it is observable, in `tests/test_dod_5090_probe.py::
+    test_a_seam_REMOVED_from_the_export_holds_the_declarations_that_need_it`, so this test's claim
+    is the weaker one it actually asserts.
     """
     seams = register.RECOGNISED_PRODUCER_SEAMS
     assert seams, "an empty seam set would corroborate every route claim"
