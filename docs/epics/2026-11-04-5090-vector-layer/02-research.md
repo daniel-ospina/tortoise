@@ -264,8 +264,9 @@ which is false — the five correctness constraints sit before the resulting-ord
 preconditions and the Jev note after it — corrected at the `#11088` bullet above.
 
 **Round 4 (PR level, fresh context, `0fe67cf486`)** — 4 P2: **two** were defects the round-3 fix itself
-introduced (the `:883` attribution; the §4.2 ordering), one pre-dated round 3 (`embeddings.py:1268`, from
-`3f31bbcade`), and one was a claim in this log that nothing backed (`468bbf8c10`). All four were verified
+introduced (the `:883` attribution; the §4.2 ordering), one pre-dated round 3 (the S1 row's `path:line`
+pointer into `encode_for_row`'s module, from `3f31bbcade`), and one was a claim in this log that nothing
+backed (`468bbf8c10`). All four were verified
 against their primary source first: **(1)** the round-3 sentence attached `#11088`'s paraphrase to `:883` — that section is
 the Jev/`llm_tail` note and §4.2 contains no `EMBED` text at all, so the quote is now attributed to
 `#11088`'s body where it actually lives; **(2)** "past the ordering block" misordered §4.2 — the five
@@ -274,6 +275,21 @@ correctness constraints (`:827`) precede the resulting-order block (`:849`), not
 `416adf603191`, a peer commit on this branch, so this round records rather than repeats it; **(4)** this log
 claimed a falsified finding *"was marked ⛔ DO NOT APPLY"*, and **no such mark existed anywhere** — the
 correction is the mark itself, inline at the claim above, which is what that rule exists to leave behind.
+
+**Round 5 (PR level, fresh context, `efac75e92a`)** — 1 P2: the Round 4 entry's summary sentence miscounted
+its own findings, saying three of the four were introduced by the round-3 fix while the enumeration directly
+beneath it conceded that item (3) was a peer commit's. Measured before correcting —
+`git log -S` on the two tokens and `git show --stat 0fe67cf486` — the accurate partition is two introduced
+by round 3, one pre-dated it (`3f31bbcade`), and one a log claim with no mark behind it (`468bbf8c10`), and
+the sentence was corrected in place.
+
+**Round 6 (PR level, fresh context, `dc524f02e7`)** — 2 P2, both defects the round-5 edit introduced, and
+both the same class this log keeps recording: **the fix repeats the fault it fixes.** **(1)** the corrected
+sentence spelled the pre-existing citation as a code `path:line` — in an added line, in a paragraph that then
+claims the diff carries none, and against `01-align.md:15-19`; replaced with a symbol-level identification
+that carries no line number. **(2)** the round-5 correction was made *in place* with no round of its own, so
+the artifact's log stopped at round 4 while a fifth round's fixes landed — the precise divergence this log's
+own opening paragraph says it exists to prevent. Both fixed here, and the two rounds recorded.
 
 ### P1-a — `iterative_scan` was reported without its documented failure at correlated filters
 
