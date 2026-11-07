@@ -4536,7 +4536,22 @@ _COVERAGE = re.compile(r"\b(?:walk|visit|reach|report)(?:s|es|ed)?\b")
 _NEGATION_GOVERNS = re.compile(
     r"\b(?:not|never|outside)\b(?:\s+\w+){0,2}?\s+"
     r"(?:walk|visit|reach|report)(?:s|es|ed)?\b")
-# The positive readings. The first three are the literal phrases the doc used;
+# ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
+# is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
+# one of the same four verbs AFTER the negation, so on all 85 candidate sentences
+# (every row, plus every sentence of the real §3) there is no case where the
+# governance test hits and this one does not — dropping the term from
+# `_residual_sentences` changes no verdict. It stays because it is the INDEPENDENT
+# check of the "the sentence must carry coverage vocabulary" fact: if a later
+# change loosens the governance window (a 0-2 word window, and the comment above
+# records that window 3 re-opens "are not missed by the walk"), the coverage
+# requirement must not vanish with it. ⚠️ It cannot cause a false PASS — an AND
+# term can only reject — so this is belt-and-braces, not the inert guard this
+# file reds elsewhere.
+# The positive readings. The first three are the INVERSE phrasings that §3's own
+# clause is the NEGATION of — the doc says "outside the walk, and therefore NOT
+# reported" (measured: `inside the walk` and `therefore reported` appear **0**
+# times in the doc), so these three name the sentence that would CONTRADICT it;
 # the rest refuse the INVERSE stated in other vocabulary (#11437 review, P1).
 # The first cut listed four literals (`not outside` / `not exempt` / `not left`
 # / `except`) and the next review measured four MORE that it let through —
@@ -4931,8 +4946,10 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
         # privative is not a coverage word — the negation governs nothing, so the
         # sentence never reaches the affirm test. The earlier wording, "the `un…`
         # alternation in `_AFFIRMED` closes them", was therefore a causal claim
-        # the artifact did not verify. The rows that DO exercise that alternation
-        # are the three that follow it.
+        # the artifact did not verify. The rows that DO exercise those three
+        # previously-unexercised alternations are the three that follow it — one
+        # per arm: `\btherefore reported\b` (row 1), `\bskipped\b` (row 2), and
+        # the `un…` privative (row 3).
         "inverse: never unvisited":
             "a nested `def`'s decorators and parameter defaults are never "
             "unvisited: the closure walk visited them",
@@ -5227,12 +5244,21 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
     assert owner is not None, (
         "the mutation arms' own test is not findable by name, so the guard below "
         "would silently check nothing")
+
+    # ⛔ `raises` BOTH WAYS (#11437 review, P3). Matching only the attribute form
+    # (`pytest.raises`) left the guard FAILING OPEN on the same regression written
+    # with a directly imported `raises`: measured, `with raises(AssertionError):`
+    # around a nested `_mutate(...)` reported `[]`, i.e. "no nesting", and the arm
+    # went back to passing while proving nothing. A guard that cannot see the
+    # shape it exists for is the defect this whole test is about.
+    def _is_raises(func: ast.expr) -> bool:
+        return ((isinstance(func, ast.Attribute) and func.attr == "raises")
+                or (isinstance(func, ast.Name) and func.id == "raises"))
     nested = [
         node.lineno for node in ast.walk(owner)
         if isinstance(node, ast.With)
         and any(isinstance(item.context_expr, ast.Call)
-                and isinstance(item.context_expr.func, ast.Attribute)
-                and item.context_expr.func.attr == "raises"
+                and _is_raises(item.context_expr.func)
                 for item in node.items)
         and any(isinstance(inner, ast.Call)
                 and isinstance(inner.func, ast.Name)
