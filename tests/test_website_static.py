@@ -69,6 +69,7 @@ import ast
 import json
 import os
 import re
+import struct
 import sys
 import tempfile
 from html import unescape
@@ -3957,3 +3958,411 @@ class TestARenderedCodeElementGetsAMonoFace:
             "element a mono family inside the emitter, or declare the file in `ROOTS` "
             "and extend the ratchet, so the exclusion stays deliberate:\n  "
             + "\n  ".join(grew))
+
+
+class TestSiteIconAndSocialPreviewContract:
+    """Every page must carry a real icon and a real preview image (PR #11092 era).
+
+    THE DEFECT THIS PINS. Both live origins answered `/favicon.ico` with **404**,
+    and the two pages that matter most (`index.html` for premiselabs.co,
+    `product.html` for tortoise.premiselabs.co — the host that serves it at `/`)
+    declared **no icon at all and no `og:image`**: a browser showed a blank tab,
+    and a link pasted into Slack/X/WhatsApp rendered as a bare title with no
+    card. Five other pages did declare an icon — `/logo.png`, a 400x244 WORDMARK
+    — which a tab renders as a squashed bar, so "there is a `rel=icon`" was
+    never the property that mattered.
+
+    So the contract is stated in the three parts a human actually sees, and each
+    part is checked against the file on disk rather than against the tag:
+
+    1. **The icon resolves.** `/favicon.ico`, `/favicon.png` and
+       `/apple-touch-icon.png` exist in the served tree, the PNG is SQUARE and
+       at least 180px (the apple-touch size), and the ICO is a real icon
+       container holding an embedded PNG — not a renamed image.
+    2. **The preview resolves and is the size it claims.** `og:image` maps to a
+       file in the tree, and `og:image:width`/`height` match the JPEG's actual
+       SOF header. A card whose declared size disagrees with the bytes is
+       cropped by the scraper that trusts the tag.
+    3. **No page re-uses the wordmark as an icon.** `/logo.png` is a wordmark;
+       it may appear in page content, never in a `rel=icon`.
+
+    The dimensions are read with `struct`/`re` over the SVG-free formats we
+    ship (PNG IHDR, JPEG SOF, ICO directory) — stdlib only, no imaging library,
+    so the guard runs in the fast lane.
+
+    ⛔ WHAT THIS CANNOT SEE, said plainly so a green run is not read as more:
+    it cannot judge the card's CONTENT. A valid 1200x630 JPEG of a solid colour
+    passes every assertion here. It also cannot see the blog, whose head is
+    emitted by `website/functions/blog/_lib.ts` — that surface has its own guard
+    in `tests/test_blog_seo_meta.mjs`, which executes the real renderer.
+    """
+
+    WEB = REPO_ROOT / "website"
+    ICON_ICO = "favicon.ico"
+    ICON_PNG = "favicon.png"
+    ICON_APPLE = "apple-touch-icon.png"
+    # Declared once: every page's preview image is 1200x630 (the 1.91:1 the
+    # scrapers crop to), and the two bespoke pages below ship their own.
+    OG_SIZE = (1200, 630)
+    # The two hosts this site is served from. Declared once because every page's
+    # preview URL is checked against it — see the og:image assertions.
+    SITE_ORIGINS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
+
+    # --- format readers -------------------------------------------------
+
+    @staticmethod
+    def _png_size(data: bytes) -> tuple[int, int]:
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+        return struct.unpack(">II", data[16:24])
+
+    @staticmethod
+    def _jpeg_size(data: bytes) -> tuple[int, int]:
+        assert data[:2] == b"\xff\xd8", "not a JPEG"
+        i = 2
+        while i < len(data) - 9:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xC0, 0xC1, 0xC2):  # SOF0/SOF1/SOF2 carry the frame size
+                height, width = struct.unpack(">HH", data[i + 5:i + 9])
+                return width, height
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            length = struct.unpack(">H", data[i + 2:i + 4])[0]
+            i += 2 + length
+        raise AssertionError("no SOF marker in JPEG")
+
+    @classmethod
+    def _ico_entries(cls, data: bytes) -> list[dict]:
+        """One dict per icon: the DIRECTORY's claim and what its PAYLOAD really is.
+
+        The directory and the payload are two independent statements about the
+        same image, and only the payload is what a renderer draws. A file whose
+        second entry declares 48x48 while pointing at the 32x32 payload renders
+        blank in Edge and fine in Chrome — so both are read here and compared.
+        """
+        reserved, kind, count = struct.unpack("<HHH", data[:6])
+        assert (reserved, kind) == (0, 1), "not an icon container"
+        assert count >= 1, "an .ico with no entries"
+        out = []
+        for n in range(count):
+            base = 6 + 16 * n
+            w, h, _cols, _res, planes, bpp, length, offset = struct.unpack(
+                "<BBBBHHII", data[base:base + 16])
+            assert offset + length <= len(data), (
+                f"favicon.ico entry {n} runs past the end of the file "
+                f"(offset {offset} + length {length} > {len(data)} bytes)")
+            assert length > 0, f"favicon.ico entry {n} declares an empty payload"
+            payload = data[offset:offset + length]
+            is_png = payload[:8] == b"\x89PNG\r\n\x1a\n"
+            out.append({
+                "declared": (w or 256, h or 256),
+                "planes": planes,
+                "bpp": bpp,
+                "is_png": is_png,
+                "actual": cls._png_size(payload) if is_png else None,
+            })
+        return out
+
+    # --- helpers --------------------------------------------------------
+
+    def _pages(self):
+        pages = sorted(self.WEB.glob("*.html"))
+        assert pages, "no pages found — the guard would pass vacuously"
+        return pages
+
+    @classmethod
+    def _head(cls, html: str) -> str:
+        """The head's MARKUP: comments and inline `<style>`/`<script>` bodies removed.
+
+        ⛔ This is not tidying — it is the fix for a fail-open the first cut had. The
+        value readers below are regexes over this text, and an HTML comment is
+        invisible to a browser: wrapping `og:image` in `<!-- -->` shipped a page with
+        NO preview image at all while all eight assertions passed, because the regex
+        happily matched the commented-out tag. A guard that reads what a browser
+        ignores reports green on a page a scraper sees as empty. Stripping first makes
+        the value readers and `test_the_head_is_well_formed_markup` answer about the
+        SAME text, which is the text a scraper parses.
+
+        Comments are also where this repo QUOTES tags (the noindex rationale on
+        `design-partners-intro.html` quotes a `<meta name="robots">`), and
+        `404.html` carries its whole stylesheet in the head — counting either as
+        markup is the opposite error.
+        """
+        start = html.index("<head")
+        return cls._head_markup(html[start:html.index("</head>", start)])
+
+    @staticmethod
+    def _og(head: str, prop: str) -> str | None:
+        m = re.search(
+            rf'<meta property="og:{re.escape(prop)}" content="([^"]*)"', head)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _twitter(head: str, name: str) -> str | None:
+        m = re.search(
+            rf'<meta name="twitter:{re.escape(name)}" content="([^"]*)"', head)
+        return m.group(1) if m else None
+
+    # --- 1. the icon resolves ------------------------------------------
+
+    def test_every_page_declares_the_icon_trio(self):
+        """Two `rel=icon` rows (ICO + PNG) plus the apple-touch icon, every page."""
+        for page in self._pages():
+            head = self._head(page.read_text())
+            for href in (f"/{self.ICON_ICO}", f"/{self.ICON_PNG}", f"/{self.ICON_APPLE}"):
+                assert f'href="{href}"' in head, (
+                    f"{page.name} does not declare {href} — a page with no icon "
+                    "shows a blank tab and, on a share, no avatar")
+
+    def test_the_icon_files_exist_and_are_usable(self):
+        """Every icon a page points at exists, and has the shape the tag implies."""
+        for name in (self.ICON_ICO, self.ICON_PNG, self.ICON_APPLE):
+            assert (self.WEB / name).is_file(), f"website/{name} is missing — every page links it"
+
+        png_w, png_h = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        assert png_w == png_h, f"favicon.png is {png_w}x{png_h} — a tab icon must be square"
+        assert png_w >= 180, (
+            f"favicon.png is {png_w}px; the apple-touch slot needs >=180 and a "
+            "smaller source is upscaled blurry by the OS")
+
+        apple_w, apple_h = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
+        assert (apple_w, apple_h) == (180, 180), (
+            f"apple-touch-icon.png is {apple_w}x{apple_h}; iOS reads 180x180")
+
+        icons = self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())
+        assert len(icons) >= 2, f"favicon.ico holds {len(icons)} image(s) — ship 32 and 48"
+        assert all(i["is_png"] for i in icons), (
+            "favicon.ico carries a raw DIB image — this repo's builder writes PNG "
+            "payloads, and a DIB rewrite means the container was replaced by hand")
+        assert {i["declared"][0] for i in icons} >= {32, 48}, (
+            f"favicon.ico sizes are {sorted(i['declared'][0] for i in icons)}; Windows uses 32 and 48")
+        for i in icons:
+            assert i["declared"] == i["actual"], (
+                f"favicon.ico declares {i['declared']} but the payload is {i['actual']} — "
+                "the directory's size is what a renderer reserves, so a mismatch draws "
+                "a blank or clipped icon in some browsers and looks fine in others")
+            assert (i["planes"], i["bpp"]) == (1, 32), (
+                f"favicon.ico entry declares planes={i['planes']} bpp={i['bpp']}; "
+                "a PNG payload is 1 plane / 32bpp and anything else is a hand-edited directory")
+
+    def test_the_wordmark_is_never_used_as_an_icon(self):
+        """`/logo.png` is a 400x244 wordmark — a tab renders it as a squashed bar."""
+        for page in self._pages():
+            head = self._head(page.read_text())
+            for tag in re.findall(r"<link[^>]*rel=\"(?:apple-touch-)?icon\"[^>]*>", head):
+                assert "/logo.png" not in tag, (
+                    f"{page.name} uses the wordmark as an icon: {tag}")
+
+    # --- 2. the preview resolves and is the size it claims ---------------
+
+    @staticmethod
+    def _head_markup(head: str) -> str:
+        """The head with its two non-markup regions removed: comments and CSS/JS bodies.
+
+        Both legitimately CONTAIN angle brackets — this repo's own noindex rationale
+        quotes `<meta name="robots" content="noindex">` inside an HTML comment, and
+        404.html inlines its whole stylesheet — so counting raw `<meta` occurrences
+        in the document would flag prose as a broken tag.
+
+        `<noscript>` and `<template>` are stripped for the same reason `<script>` is:
+        their contents are not live head metadata. A scraper does not read an
+        `og:image` that only exists inside a `<noscript>` fallback, so a guard that
+        did would report green on a page with no preview — measured, before this
+        list was complete.
+        """
+        text = re.sub(r"<!--.*?-->", "", head, flags=re.S)
+        stripped = re.sub(r"<(style|script|noscript|template)\b.*?</\1>", "", text,
+                          flags=re.S | re.I)
+        # An UNCLOSED wrapper defeats the strip above, and CPython's parser treats
+        # `noscript`/`template` as ordinary elements, so the metas inside are still
+        # counted and still found — while a browser puts them in the inert fragment
+        # and renders no card. Measured: an unclosed `<template>` before the metas read
+        # green. `style`/`script` are CDATA to that parser and already fail closed, so
+        # they are listed here only to keep one rule rather than two.
+        leftover = re.findall(r"<(style|script|noscript|template)\b", stripped, flags=re.I)
+        assert not leftover, (
+            f"an unclosed <{leftover[0]}> in the head — the strip cannot remove a "
+            "wrapper with no end tag, so the tags after it read as live markup here "
+            "while a browser treats them as inert content (and a scraper sees no card)")
+        return stripped
+
+    @staticmethod
+    def _head_metas(head: str) -> tuple[list[dict[str, str]], list[str]]:
+        """Parse the head: one dict per `<meta>` element, plus any text that leaked.
+
+        Used instead of the regexes above wherever STRUCTURE is the question. A
+        regex answers "does this substring appear", which a malformed tag also
+        satisfies; only a parser tells you the substring became an element.
+        """
+
+        # Elements whose TEXT is legitimate head content: a `title`, an inlined
+        # `style` (404.html carries all of its CSS in the head), a `script`.
+        # Their data is not the remnant of an unclosed tag, so it is not stray.
+        TEXT_ELEMENTS = frozenset({"title", "style", "script", "noscript"})
+
+        class Collector(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.metas: list[dict[str, str]] = []
+                self.stray: list[str] = []
+                self.in_head = False
+                self.text_depth = 0
+
+            def handle_starttag(self, tag: str, attrs) -> None:
+                if tag == "head":
+                    self.in_head = True
+                elif not self.in_head:
+                    return
+                elif tag == "meta":
+                    self.metas.append({k: (v or "") for k, v in attrs})
+                elif tag in TEXT_ELEMENTS:
+                    self.text_depth += 1
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag == "head":
+                    self.in_head = False
+                elif tag in TEXT_ELEMENTS and self.text_depth:
+                    self.text_depth -= 1
+
+            def handle_data(self, data: str) -> None:
+                if self.in_head and not self.text_depth and data.strip():
+                    self.stray.append(data.strip())
+
+        collector = Collector()
+        collector.feed(head)
+        collector.close()
+        return collector.metas, collector.stray
+
+    def test_the_head_is_well_formed_markup(self):
+        """A meta tag that lost its `>` swallows the next one — and the regexes still pass.
+
+        MEASURED ON THIS VERY CHANGE, which is why this test exists. Two pages were
+        edited to add `twitter:image:alt`; the edit dropped the closing `>` of the
+        `og:image:alt` line, so the file read
+
+            <meta property="og:image:alt" content="…"
+            <meta name="twitter:image:alt" content="…">>
+
+        Every value assertion in `test_every_page_declares_a_social_preview` passed on
+        both pages (`_og`/`_twitter` match `name="twitter:…"` anywhere in the head,
+        including inside text another tag swallowed). A browser instead parsed ONE
+        element, found no `twitter:image:alt` at all, and leaked a bare `>` into the
+        head as visible text. A guard whose verdict is unchanged by a broken tag is
+        not measuring the tag.
+
+        So the structure is asserted from the parsed tree: every `<meta` the source
+        spells must arrive as its OWN element (a swallowed one loses the count), and
+        no non-whitespace text may appear in the head at all.
+        """
+        for page in self._pages():
+            text = page.read_text()
+            assert "<head" in text and "</head>" in text, f"{page.name} has no head"
+            markup = self._head(text)
+
+            metas, stray = self._head_metas(markup)
+            assert not stray, (
+                f"{page.name} emits text into <head>: {stray[:3]} — almost always the "
+                "remnant of a tag that was not closed, which a browser renders as a "
+                "stray character and a scraper ignores")
+            assert markup.count("<meta") == len(metas), (
+                f"{page.name} spells {markup.count('<meta')} '<meta' occurrences in the head "
+                f"but only {len(metas)} parse as elements — a tag lost its '>' and "
+                "swallowed the next one")
+
+            # A swallowed tag, a stray quote or a doubled `"` all show up as an
+            # attribute that has no business being there — a bare `"` parses as an
+            # attribute whose KEY is a quote character. An all-or-nothing key check
+            # is what catches the shape; no value assertion can, because the value
+            # the regex reads is the one before the damage.
+            allowed = {"property", "name", "content", "charset", "http-equiv"}
+            for meta in metas:
+                assert meta, f"{page.name} has a <meta> element with no attributes"
+                odd = set(meta) - allowed
+                assert not odd, (
+                    f"{page.name} parsed a <meta> with attribute key(s) {sorted(odd)!r} "
+                    f"({meta}) — a stray or doubled quote leaves a quote character "
+                    "where an attribute name should be, and a swallowed tag leaves tag "
+                    "text there")
+                assert "<" not in " ".join(meta.values()) and ">" not in " ".join(meta.values()), (
+                    f"{page.name} parsed a <meta> whose attributes contain tag text "
+                    f"{meta} — the following tag was swallowed by an unclosed one")
+
+    def test_every_page_declares_a_social_preview(self):
+        """`og:image` + its size + alt, and the Twitter mirror, on every page."""
+        for page in self._pages():
+            head = self._head(page.read_text())
+            image = self._og(head, "image")
+            assert image, f"{page.name} declares no og:image — a shared link renders no card"
+            assert image.startswith("https://"), (
+                f"{page.name} og:image is {image!r}; a link-preview scraper does NOT "
+                "resolve a relative URL, so a same-origin path silently renders no card "
+                "at all while the page looks configured (the failure mode the bespoke "
+                "preview pages already document)")
+            assert image.split("/")[2] in self.SITE_ORIGINS, (
+                f"{page.name} og:image points at {image.split('/')[2]}, not one of "
+                f"{sorted(self.SITE_ORIGINS)} — the card must be served by us or the "
+                "scraper fetches it from a host we do not control")
+            assert self._og(head, "image:width") and self._og(head, "image:height"), (
+                f"{page.name} declares og:image without its dimensions; scrapers that "
+                "trust the tag then request an assumed size")
+            alt = (self._og(head, "image:alt") or "").strip()
+            assert alt, (
+                f"{page.name} declares no usable og:image:alt — the card is unreadable to "
+                "a screen reader and to any client that suppresses remote images (a "
+                "whitespace-only value is not alt text)")
+            assert (self._twitter(head, "image:alt") or "").strip() == alt, (
+                f"{page.name} twitter:image:alt ({self._twitter(head, 'image:alt')!r}) "
+                f"disagrees with og:image:alt ({alt!r}) — one platform then describes a "
+                "different picture than the other")
+            assert self._twitter(head, "card") == "summary_large_image", (
+                f"{page.name} twitter:card is {self._twitter(head, 'card')!r}; without "
+                "summary_large_image the 1200x630 image is cropped to a square thumbnail")
+            assert self._twitter(head, "image") == image, (
+                f"{page.name} twitter:image ({self._twitter(head, 'image')}) disagrees "
+                f"with og:image ({image}) — one of the two platforms gets the wrong picture")
+
+    def test_the_declared_preview_size_matches_the_file(self):
+        """The tag is a promise about bytes; check it against the bytes."""
+        for page in self._pages():
+            head = self._head(page.read_text())
+            image = self._og(head, "image")
+            declared_w = int(self._og(head, "image:width"))
+            declared_h = int(self._og(head, "image:height"))
+
+            path = self.WEB / image.split("//", 1)[-1].split("/", 1)[-1]
+            assert path.is_file(), (
+                f"{page.name} points og:image at {image}, which is not in the served "
+                f"tree (looked for {path}) — the scraper fetches a 404 and shows no card")
+
+            raw = path.read_bytes()
+            declared_type = self._og(head, "image:type")
+            assert declared_type, (
+                f"{page.name} declares no og:image:type — a scraper that has to sniff "
+                "the format is a scraper that can guess wrong")
+            assert declared_type == "image/jpeg" and raw[:2] == b"\xff\xd8", (
+                f"{page.name} declares og:image:type {declared_type!r} but {path.name} "
+                "is not a JPEG — the declared type and the bytes must agree")
+
+            actual = self._jpeg_size(raw)
+            assert (declared_w, declared_h) == actual, (
+                f"{page.name} declares {declared_w}x{declared_h} but {path.name} is "
+                f"{actual[0]}x{actual[1]}")
+
+    def test_the_shared_preview_is_the_agreed_size(self):
+        """1200x630 is the size the scrapers crop to; the shared image must be it."""
+        shared = self.WEB / "assets" / "og-tortoise.jpg"
+        assert shared.is_file(), "the shared preview image is missing"
+        assert self._jpeg_size(shared.read_bytes()) == self.OG_SIZE, (
+            f"assets/og-tortoise.jpg is not {self.OG_SIZE[0]}x{self.OG_SIZE[1]}")
+
+    def test_both_origins_root_pages_carry_the_preview(self):
+        """The two URLs that get pasted into a chat: premiselabs.co and the product root."""
+        for name, expected_origin in (("index.html", "https://premiselabs.co/"),
+                                      ("product.html", "https://tortoise.premiselabs.co/")):
+            head = self._head((self.WEB / name).read_text())
+            assert self._og(head, "image").startswith(expected_origin), (
+                f"{name} serves {expected_origin} but points its preview at "
+                f"{self._og(head, 'image')} — the card must come from the host it is on")

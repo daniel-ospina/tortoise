@@ -16777,10 +16777,13 @@ def test_real_manifest_has_no_duplicate_entries():
     # GATE FAILURE, not a note: `--integrity` reds on it, emitting BOTH shapes in
     # ONE report — a `duplicate entry '<name>' at .surfaces.<surface>[] (lines N,
     # M)` element (via `duplicate_mapping_key_issues`, the walk shared with
-    # `tools/registry_integrity.py`) AND a trailing `<surface>: <name>` element
+    # `tools/registry_integrity.py`) AND a `<surface>: <name>` element
     # (via `_manifest_contract_issues` -> `duplicate_entries`) — because `main()`
-    # composes all of them into `problems`. (`integrity()` ITSELF does not: it
-    # returns only the `missing` list, which is why that distinction is spelled
+    # composes all of them into `problems`, and that element is not last in the
+    # composition (`carve_shard_issues`, `slow_shard_issues` and
+    # `watchdog_headroom_issues` follow it, then `wf_issues`, then
+    # `workflow_halves_issues` on both branches). (`integrity()` ITSELF does not:
+    # it returns only the `missing` list, which is why that distinction is spelled
     # out here. The same job's separate `registry_integrity` step reports the
     # duplicate-entry form as well, so neither step is the only place it appears.)
     # See `duplicate_entries`' own docstring (#5373), the authority here. Pin
