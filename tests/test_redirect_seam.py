@@ -597,3 +597,51 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
     assert threading.Thread.start is installed, \
         "a re-invoked installer re-wrapped Thread.start despite the marker"
+
+
+def test_a_RELOAD_keeps_the_REAL_Thread_start():
+    """#11217 round-4 review P2: the reload arm must be OBSERVED, not asserted.
+
+    `importlib.reload` re-executes the module body into its EXISTING dict. If the
+    body captures `_ORIG_THREAD_START = threading.Thread.start` unconditionally,
+    then on a reload that name is rebound to the STAMP — which the stamp reads at
+    CALL time, so it calls itself and every `Thread.start()` raises
+    `RecursionError`. The module now captures once (`globals().get(...) or …`).
+
+    Nothing else in the tree reloads `tortoise.projection`, so without this test
+    reverting the guard leaves the ENTIRE suite green while reload breaks all
+    thread creation — measured (#11217 round-4 review: an import hook that
+    restored the bare assignment passed every assertion in this file).
+
+    Runs in a SUBPROCESS on purpose: a reload resets `_TEST_SESSION_ACTIVE` and
+    re-executes module state, which must not leak into the parent session.
+    """
+    script = (
+        "import importlib, os, threading\n"
+        "os.environ['TORTOISE_TEST_MODE'] = '1'\n"
+        "import tortoise.projection as proj\n"
+        "real = threading.Thread.start\n"
+        "proj._TEST_SESSION_ACTIVE = True\n"
+        "proj.install_thread_stamp()\n"
+        "assert threading.Thread.start is not real, 'installer did not run'\n"
+        "importlib.reload(proj)\n"
+        "if proj._ORIG_THREAD_START is not real:\n"
+        "    raise SystemExit('RELOAD_REBOUND_THE_ORIGINAL')\n"
+        "t = threading.Thread(target=lambda: None)\n"
+        "t.start(); t.join()\n"
+        "print('RELOAD_OK')\n"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ)
+    env.pop("TORTOISE_TEST_DB", None)
+    env.pop("TORTOISE_DB_URI", None)
+    proc = subprocess.run(
+        [sys.executable, "-c", script], cwd=root, env=env,
+        capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, (
+        "a reload of tortoise.projection broke thread creation — the module body "
+        "must KEEP the captured original, not rebind it to the stamp. "
+        f"stdout={proc.stdout!r} stderr={proc.stderr[-800:]!r}")
+    assert "RELOAD_OK" in proc.stdout, (
+        f"the reload probe did not reach its assertion: {proc.stdout!r} "
+        f"{proc.stderr[-800:]!r}")

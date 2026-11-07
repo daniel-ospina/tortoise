@@ -689,7 +689,8 @@ def _journal_calls(code: str) -> int:
 _RAW_CLIENT_IMPORT = re.compile(
     r"^[ \t]*from[ \t]+falkordb(?:\.[A-Za-z_]\w*)*[ \t]+import[ \t]*"
     r"(?:\((?P<paren>[^)]*)\)|(?P<bare>[^\n\\]*))"
-    r"|^[ \t]*import[ \t]+falkordb\b(?:[ \t]+as[ \t]+(?P<alias>\w+))?",
+    r"|^[ \t]*import[ \t]+(?P<spec>falkordb(?:\.[A-Za-z_]\w*)*)"
+    r"(?:[ \t]+as[ \t]+(?P<alias>\w+))?",
     re.MULTILINE | re.DOTALL)
 
 
@@ -742,8 +743,17 @@ def _raw_client_call_positions(source: str) -> list[int]:
     names: set[str] = set()
     for m in _RAW_CLIENT_IMPORT.finditer(masked):
         paren, bare = m.group("paren"), m.group("bare")
-        if paren is None and bare is None:  # `import falkordb [as alias]`
-            names.add(f"{m.group('alias') or 'falkordb'}.FalkorDB")
+        if paren is None and bare is None:  # `import <spec> [as alias]`
+            spec, alias = m.group("spec"), m.group("alias")
+            if alias:
+                names.add(f"{alias}.FalkorDB")
+            else:
+                # A dotted import binds the TOP-LEVEL name, so both spellings
+                # are possible: `falkordb.falkordb.FalkorDB(...)` and
+                # `falkordb.FalkorDB(...)`. Add both — a missing one is a file
+                # the census cannot see (round-4 P2).
+                names.add(f"{spec}.FalkorDB")
+                names.add(f"{spec.split('.')[0]}.FalkorDB")
             continue
         group = paren if paren is not None else bare
         resolved = False
@@ -769,8 +779,30 @@ def _raw_client_call_positions(source: str) -> list[int]:
             # returning no sites for the whole file.
             names.add("FalkorDB")
     if not names:
-        return []
-    pattern = "|".join(re.escape(n) for n in sorted(names))
+        # NO import statement resolved a name — but the file may still construct a
+        # raw client, because `falkordb` can arrive by a route the parser does not
+        # read: `import falkordb.falkordb` (a dotted statement),
+        # `fdb = pytest.importorskip("falkordb")`, a `try:`/`except ImportError:`
+        # pair, a star-import alias, or any future spelling. Returning `[]` here
+        # made such a file INVISIBLE while the census reported clean — the same
+        # gate-off class rounds 2 and 3 closed (#11217 review P2s). So: if the
+        # masked source mentions `falkordb` at all, gate OPEN on the conventional
+        # name and let the ownership decision judge the sites it finds.
+        #
+        # Cost measured before taking it: over the corpus this newly judges ZERO
+        # sites (no non-exempt file mentions `falkordb` without also matching an
+        # import statement), so it adds no false BLOCK.
+        if not re.search(r"\bfalkordb\b", masked):
+            return []
+        # A QUALIFIED construction must be matchable too when the gate opened this
+        # way: the route that brings `falkordb` in also decides the spelling used
+        # to construct from it — `fdb.FalkorDB` after
+        # `import falkordb.falkordb as fdb`, or `falkordb.falkordb.FalkorDB` after
+        # the plain dotted import. A bare `FalkorDB` alone left each of those at
+        # `sites=0` (round-4 P2).
+        pattern = r"(?:[A-Za-z_]\w*\.)*FalkorDB"
+    else:
+        pattern = "|".join(re.escape(n) for n in sorted(names))
     return [m.start()
             for m in re.finditer(rf"(?<![\w.])(?:{pattern})\s*\(", masked)]
 
@@ -2079,6 +2111,16 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         # round-3 fix, so the whole file was invisible (#11217 round-3 P2).
         "dotted submodule": (
             "from falkordb.falkordb import FalkorDB\n", "FalkorDB"),
+        # Round-4 P2: `falkordb` arriving by a route no import STATEMENT matches.
+        # Each yielded `sites=0` (whole file invisible) before the gate-open
+        # fallback; all three are valid in this venv.
+        "dotted import-as": (
+            "import falkordb.falkordb as fdb\n", "fdb.FalkorDB"),
+        "dotted import, dotted construct": (
+            "import falkordb.falkordb\n", "falkordb.falkordb.FalkorDB"),
+        "importorskip": (
+            "import pytest\nfalkordb = pytest.importorskip(\"falkordb\")\n",
+            "falkordb.FalkorDB"),
     }
     site = tmp_path / "test_spelling.py"
     for label, (header, construct) in spellings.items():
