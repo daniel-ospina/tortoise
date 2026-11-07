@@ -22,9 +22,27 @@ extends: docs/research/2026-08-24-1657-retrieval-levers/research.md
 
 ## 0. Status
 
-Scope proposal — child issues created under #2513; **one product-owner decision open**
-(§8: how the coverage-incomplete honesty signal surfaces). Doc is `draft` until that
-decision and the Phase-0 baseline run land. Worktree: `opt/2513-retrieval-scope`.
+`doc_status: draft` — of the two exit conditions stated here since 2026-09-07, **one is met and
+one is not**:
+
+- **§8 product-owner decision — DECIDED (c), 2026-09-22** (owner ruling, issue comment 5787468112),
+  with its `OVERRIDES:` line carried in §8. This section said "one product-owner decision open" for
+  six weeks *after* the ruling landed; corrected 2026-11-07.
+- **Phase-0 sealed baseline receipt (#2516 indicator 1) — NOT RUN.** Evals are parked on the owner's
+  ruling, and the eval lane's embedder preflight fails **under load** on our hosts: the blocker receipt
+  (`docs/scoping/receipts/2026-09-22-2513-embedder-preflight-blocker.json`, PR #4679) records three
+  consecutive `--mock` preflights timing out at 30.0–30.1 s at load ~250 on 10 CPUs, and #2518 recorded
+  the same failure at `--workers 6` — after which `--mock` continues keyword-only, i.e. it measures a
+  degraded instrument. Note the constraint is **load-dependent, not absolute**: the 2026-09-17 capsweep
+  and #2518's 2026-09-24 run both loaded the real embedder (`BAAI/bge-small-en-v1.5`, hybrid FTS+vector+RRF),
+  so a host that can load it under its own load can take the run. So the doc stays `draft`.
+- **No unlanded work exists on any #2513 branch** — by two different proofs, stated per branch because
+  they are not the same proof (§10.1). The worktree this section named until 2026-11-07 —
+  `opt/2513-retrieval-scope` — is a branch whose content is on `main`; naming it as this doc's worktree
+  is what sent rescue lanes after work that had already landed.
+- **Landing state per scope unit, with evidence: §10.**
+
+Scope proposal — child issues created under #2513 (§9).
 
 ## 1. The measured problem (the numbers this scopes from)
 
@@ -106,7 +124,8 @@ product-cohesion audit rule).
 ## 5. Phased child-issue plan
 
 Phase order = evidence-to-cost, with the measurement gate first (every lever is gated on
-the §6 deltas; nothing ships on QA-acc movement alone).
+the §6 deltas; nothing ships on QA-acc movement alone). **This table is the plan, not a status
+board** — per-row landing state and its evidence are in §10.
 
 | # | Phase | Issue | Complexity | Why here |
 |---|---|---|---|---|
@@ -200,3 +219,93 @@ Authoritative record: the owner ruling on #2513 (comment 5787468112), 2026-09-22
 
 See the summary comment on #2513: C1–C6 (titles verb-first, O/I/T + complexity +
 relates-to #2513/#1509 in each body).
+
+## 10. Landing state and evidence — reconciled 2026-11-07
+
+Every row below was re-measured at `origin/main` = `de72cfd455a`. A unit is **landed** only when a
+merged PR's squash/merge commit is an ancestor of that commit (`git merge-base --is-ancestor`), and
+"live" means the mechanism's own tests pass there (§10.3). Nothing here is inferred from an
+open/closed issue state — that is how this epic was read as "unopened work" three times.
+
+### 10.1 The branches carry no unlanded work — per-branch proof
+
+`git reachability` is useless for these branches: they are stale by months and `git merge-tree`
+returns conflict-marker trees for all of them (main rewrote the same regions since). Two tests are
+**authoritative** — `headRefOid` identity (tip == a MERGED PR's head), or, where that fails, blob
+identity of the files the branch adds against the commit that landed them:
+
+| branch | tip | merged PR | merged at | why the tip carries no unlanded work |
+|---|---|---|---|---|
+| `fix/2513-retrieval-evidence` | `b862d2320cb` | #3577 | 2026-09-22T13:41:54Z | tip **is** the PR's `headRefOid` (identity) |
+| `docs/2513-guard-reach` | `78db0426e52` | #4679 | 2026-09-22T19:29:28Z | tip **is** the PR's `headRefOid` (identity) |
+| `opt/2513-retrieval-scope` | `9b822b9accd` | #4720 | 2026-09-24T15:24:56Z | identity does **not** hold: the tip is neither #4720's head (`fbc17b8bb34`) nor its parent (`a96663969e0`), and is not an ancestor of `main`. Its **content** is landed: `git rev-parse 9b822b9accd:<doc>` == `git rev-parse a96663969e0:<doc>` == `00ab6062465` (same 182-line doc, landed on a different base; #4720 then added the §8 ruling on top) |
+
+⇒ **zero unlanded work**, but the proof differs per branch — two are `headRefOid` identities and the
+third is a byte-identical blob plus a content commit lineage. Do not quote "all three are merged PR
+heads" as the identity claim: it is false for row 3.
+
+The gate agrees: `uv run python tools/collision_preflight.py 2513 --repo .` exits **0** (CLEAN, 7/8
+surfaces, 2026-11-07 00:18 UTC) — the `--repo .` pin is required, because an unpinned `#2513` resolves
+in both `tortoise` and `agent-infra` and the tool refuses it as AMBIGUOUS (exit 2). `tools/who-is-on.sh
+2513 --repo .` reported **"nobody"** on the same run with 7/8 surfaces queried; that answer is only as
+complete as the surfaces it could query, and a later replay by the reviewer of this change saw 3 surfaces
+unqueried and exit 2 (`ANSWER INCOMPLETE`) — re-run it and read the surface count, not just the verdict.
+
+### 10.2 Per-unit landing state
+
+The mapping to the issue's own **candidate scope** (the #2513 body, items 1–4) — the units a lane
+must be able to name:
+
+| # | Candidate-scope unit | Mechanism (child) | Landing evidence on `de72cfd455a` | Where it is armed | Graded movement |
+|---|---|---|---|---|---|
+| 1 | Query expansion / time-aware retrieval | **C6 #2520**; C2 #2518 | #5297 sq `0b3e4a90240`; #10549 sq `2f2582a2720` (DATE-RANGE widens candidates by session); C2's key expansion #2557 sq `0b00b40c274` | eval lane (`tools/longmem_eval/retrieve.py`) | **UNMEASURED** — #10538 open; C2 measured and **not adopted**, fail-safe OFF stands (#2518) |
+| 2 | Source-session re-injection | **C4 #2517** | #3577 sq `26207c42905` (`tortoise/session_reinjection.py`, 714 L); evolved by #10629 sq `58011ae535b` (the guard's missing LOWER bound) | `source_session_chunk_pass` / `reinjection_merge_order` have **exactly one non-test caller**: `tools/longmem_eval/retrieve.py` — a **library + eval arm**, not the product ask path | **UNMEASURED** |
+| 3 | Official-metric framing (`recall_all@5`) | **C1 #2516** | #8707 sq `4a487147a0b`: per-category `recall_all@5` rows (`tools/longmem_eval/report.py:2701`) **and** the fact-grain leg `answer_evidence@k` (`run.py:5362`, `run.py:6215`) — this is item (a) of the #2513 scoping comment's §4.2 amendment | eval lane | the **metric exists**; the **sealed Phase-0 receipt does not** (#2516 indicator 1) |
+| 4 | Aggregation-aware reading | **C5 #2521** | #2607 merge `7361250f0e1` (content `6550db3ee80`): `tortoise/aggregate.py::detect_aggregative_intent`, consumed **in-product** at `tortoise/reader.py:399`; #10550 sq `7e866e462f9` (reader keeps counting discipline when its type fragment loses it) | **product reader path** | #10553 open (exact-count accuracy before/after) |
+| — | Completeness loop (the loop both 1 and 2 compose through) | **C3 #2519** | #2608 sq `77e590f88f7`: `tortoise/coverage_loop.py` shell + `session_diverse_order`; `tortoise/retrieval.py::guard_and_recap_pool` is its single shipped composition point | `guard_and_recap_pool` has **two** non-test call sites — `tools/longmem_eval/retrieve.py:2294` and `tortoise/session_reinjection.py:561` (the re-injection merge) — and both are reached only from the eval lane (`retrieve.py:2597`) | **UNMEASURED**; #2569 / #2570 open |
+
+**The pattern this table records, plainly:** every mechanism is landed and OFF, and the two units
+whose arming point is the *product* (C5's reader fragment) differ in kind from the four whose arming
+point is the *eval lane*. "Landed" therefore never means "shipped to users" for this program — read
+the `Where it is armed` column, not the PR list.
+
+### 10.3 Proof the landed seams are live (the run that backs this section)
+
+Run in an isolated worktree at `origin/main` = `de72cfd455a`, on a private lane container
+(`tools/test_lane.py` → `fdb-lane-eedd939a8d`, `127.0.0.1:16421`), so no peer lane's graphs are
+implicated:
+
+```bash
+# from an isolated worktree at de72cfd455a — private lane container, not the shared one
+uri="$(uv run python tools/test_lane.py uri | grep '^export')"   # 3 export lines
+eval "$uri"
+uv run pytest -q -p no:randomly \
+  tests/test_entity_key_expansion.py tests/test_coverage_loop_rules.py \
+  tests/test_session_reinjection_rules.py tests/test_guard_measured_revision.py \
+  tests/test_build_cohorts_2517.py tests/test_eval_reinjection_cap_resume.py \
+  tests/test_aggregative_intent.py tests/test_aggregative_facet_coverage.py \
+  tests/test_reader_aggregation_aware.py tests/test_temporal_leg_date_window_10538.py \
+  tests/test_w7_publish.py
+# → 309 passed in 24.26s
+
+uv run pytest -q -p no:randomly tests/test_session_reinjection.py tests/test_coverage_loop.py
+# → 44 passed in 21.14s   (docker-lane E2E legs)
+```
+
+**353 passed / 0 failed / 0 skipped.** ⚠️ Read this count for exactly what it is: the seams run at
+their **shipped defaults (OFF)** and are default-preserving, so the suite proves the mechanisms are
+live and inert-by-default — it does **not** show any lever moving a graded metric. That second claim
+is §6's business, and it is blocked (§10.4).
+
+### 10.4 What remains (this is the scope exit, not a wish list)
+
+| Remaining | Why it is open, stated as a testable condition |
+|---|---|
+| **#2516 (C1)** | Its indicator 1 — a sealed Phase-0 baseline receipt — has not run. Blocked on: evals parked (owner ruling) **and** the eval-lane embedder preflight failing under load (§0). The metric it needs already exists (§10.2 row 3), so this is a *run*, not a build. |
+| **#10538 (C6 tail)** | The DATE-RANGE half landed (#10549); the unit's Target is not evidenced — same blocked run. |
+| **#2518 (C2)** | Measured and **not adopted**; its plan's fail-safe OFF stands. Open as a decision, not as work. |
+| **#10540 (C4 survivor)** | Re-injection that survives #8713; its instrument landed (#10632) but not the fix. |
+| **#10553 (C5 measurement)** | Exact-count accuracy before/after for the reader aggregation discipline. |
+| **#2569 / #2570 (C3 tails)** | Coverage-signal routing; stratified window reconciliation. |
+| **N1 / N2 (proposed, unfiled)** | N1 is BLOCKED-BY W2A's root-cause attribution; N2 is trigger-conditional on the fact-grain leg. Both are defined in the #2513 scoping comment's §4.3 (this doc has no such subsections). Neither is dispatchable, and neither should be filed to look busy. |
+| **The sealed A/B** | The one measurement that would arm any of the OFF mechanisms. Cannot run here (same two blockers). #2513 therefore **stays OPEN**: its outcome is the evidence, and the evidence is what is missing. |
