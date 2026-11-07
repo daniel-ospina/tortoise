@@ -562,30 +562,40 @@ def _thread_start_stamp_violations() -> list[str]:
     (3) re-invoking the installer changes nothing (idempotence — a non-idempotent
         installer installs a NEW function object and the identity MOVES).
 
-    ⛔ WHAT THIS CANNOT SEE, stated so nobody reads it as more. Two residuals live
-    here and only ONE of them is real:
+    ⛔ WHAT THIS CANNOT SEE — AND WHAT IT REPORTS WRONGLY — stated so nobody
+    reads it as more:
 
-    (a) A stale copy at `Thread.start` IS caught, and named. The reachability
-        check compares OBJECTS, so a different function carrying the same
-        name / `__module__` / `__qualname__` misses the chain and is reported as
-        "… marker guard bypassed, or a stale module copy". Measured at this
-        head: driving that state produces exactly that violation, so a
+    (a) NOT a blind spot: a stale copy at `Thread.start` IS caught, and named.
+        The reachability check compares OBJECTS, so a different function
+        carrying the same name / `__module__` / `__qualname__` misses the chain
+        and is reported as "… marker guard bypassed, or a stale module copy".
+        Measured: driving that state produces exactly that violation, so a
         re-executed `tortoise.projection` is NOT indistinguishable from a
         third-party layer — an earlier draft of this docstring claimed it was,
         and that claim was false.
 
-    (b) `_ORIG_THREAD_START` is NEVER inspected. The walk follows `__wrapped__`
-        only, and this wrapper is a plain `def` that publishes none, so the
-        chain stops at it. That global is captured at import and re-captured on
-        `importlib.reload`, so after a reload it names a stale copy of this
-        wrapper (measured: `_ORIG_THREAD_START is <the pre-reload wrapper>`).
-        That particular reload state is still caught by (a), because
-        `Thread.start` holds the pre-reload object too. What nothing here can
-        see is a state where `Thread.start` is the CURRENT wrapper while
-        `_ORIG_THREAD_START` holds a stale copy: no check reads that global.
+    (b) A REAL blind spot: `_ORIG_THREAD_START` is NEVER inspected. The walk
+        follows `__wrapped__` only, and this wrapper is a plain `def` that
+        publishes none, so the chain stops at it. That global is captured at
+        import and re-captured on `importlib.reload`, so after a reload it names
+        a stale copy of this wrapper (measured: `_ORIG_THREAD_START is <the
+        pre-reload wrapper>`). That particular reload state is still caught by
+        (a), because `Thread.start` holds the pre-reload object too. What
+        nothing here can see is a state where `Thread.start` is the CURRENT
+        wrapper while `_ORIG_THREAD_START` holds a stale copy.
 
-    So this census pins the MARKER + REACHABILITY contract — our wrapper is
-    installed where `Thread.start` resolves, and the installer is idempotent —
+    (c) A FALSE POSITIVE, fail-closed: a layer ABOVE ours that publishes no
+        `__wrapped__` — a hand-rolled `Thread.start = f` with no
+        `functools.wraps` — hides our wrapper from the walk, so an INSTALLED
+        wrapper is reported as "not reachable". Measured: a plain-def
+        interceptor above ours yields that violation while our wrapper sits
+        installed one level down. The reachability check is therefore sound only
+        through `functools.wraps`-publishing layers — which is what invariant
+        (2) says, and what the real wrapper in play
+        (`sentry_sdk.integrations.threading`) publishes.
+
+    So this census pins the MARKER, installer IDEMPOTENCE, and OUR WRAPPER'S
+    REACHABILITY through the `__wrapped__` links `functools.wraps` records —
     not that the install cannot be what broke the stamp.
     """
     import threading

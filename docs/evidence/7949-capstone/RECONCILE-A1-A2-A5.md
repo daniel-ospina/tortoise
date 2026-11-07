@@ -416,10 +416,10 @@ git log -1 --format=%B 316a572ce2 | grep '^Closes #10999' # arm 2's keyword, in 
 # does NOT mean "merged only": OPEN references are in the set too — that follows from the three argument
 # DEFAULTS read just below (all `false`), which is why they are read and not remembered — so the default
 # is "every reference except a PR closed without merging" — narrower than "any PR named it", not the same
-# as "only merged ones". The OPEN pole has a live row in the loop below (#11337 -> [11389 OPEN]).
-# ⛔ Read that row, do not quote it: a row's state DRIFTS, and this note previously cited #10848/11392,
-# which merged and closed within the day — leaving the sentence re-deriving to its own opposite, beside
-# the very command that disproves it.
+# as "only merged ones". #11337 is in the loop below, so the OPEN pole is RE-DERIVED on every run.
+# ⛔ No row's state is quoted anywhere in this note, on purpose: a row's state DRIFTS, and an earlier
+# draft of this very sentence cited #10848/11392 that way — it merged and closed within the day, leaving
+# the sentence re-deriving to its own opposite, beside the command that disproves it.
 gh api graphql -f query='{__type(name:"Issue"){fields{name args{name defaultValue}}}}' \
   --jq '.data.__type.fields[]|select(.name=="closedByPullRequestsReferences")|.args[]|select(.name|test("Linked|ClosedPrs"))'
                                                           # all three default FALSE — the inverse Linked
@@ -489,10 +489,10 @@ done
 # The loop BELOW re-derives every row above — arm 1's four named issues, one arm 2, one arm 3, and the
 # two counter-examples that NARROW arms 2 and 3 (#10812 and #8447: each reads `[]` here, and each is
 # named by a PR that never merged, which is why both tests say "MERGED" rather than "no PR"), plus
-# #11337, whose row is the OPEN pole — an OPEN issue carrying an OPEN reference (11389, OPEN) — the row
-# that shows the default set is not "merged only". ⛔ The loop PRINTS that state and the prose must not
-# quote it: #10848/#11392 was this row until PR 11392 merged (#10848 closed one minute later), and the
-# quoted state then contradicted the command printed beside it. Everything below is read, never recalled.
+# #11337, which is in the loop because it is the OPEN pole — the row that shows the default set is not
+# "merged only". ⛔ The loop PRINTS every row's `state`; the prose must not quote one, because a quoted
+# state drifts: #10848/#11392 was this row until PR 11392 merged (#10848 closed one minute later), and
+# the quote then contradicted the command printed beside it. Everything below is read, never recalled.
 # Every issue AND every PR the arms name is read here, and so are the facts that are
 # neither an issue nor a PR — arm 2's commit message, and arm 1's user-linked filter with the schema
 # names it rests on — so no row, and no equality a row rests on, is asserted without a command:
