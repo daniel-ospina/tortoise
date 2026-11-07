@@ -1,3 +1,14 @@
+---
+title: "Cache egress — the measurement (#10976)"
+type: evidence
+domain: platform
+doc_status: live
+created: 2026-11-06
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#10976, tortoise/cache_evictor.py, tortoise/cache_eviction.py, epic #7879, docs/architecture/STORAGE-ARCHITECTURE.md"
+---
+
 # #10976 — cache EGRESS: the measurement
 
 The issue's mandate is *"code that bounds the cache + a red-first test + the measurement
