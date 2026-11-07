@@ -1690,8 +1690,9 @@ Two halves close that, and neither is a health *reading*:
 1. **`GET /liveness`** (`hosted_api.liveness`) — the handler yields to the loop
    once, then increments a per-process counter **for this request** and reports
    the age of the last completed one. If the loop cannot run, the coroutine
-   never resumes, so there is no answer to mistake for health. Measured: it
-   serves in ~50 ms; with the loop blocked, `/health` and `/liveness` both
+   never resumes, so there is no answer to mistake for health. By construction it
+   does no I/O of its own (one loop yield, one counter increment — no DB and no
+   network); with the loop blocked, `/health` and `/liveness` both
    answer **nothing** inside a 5 s client budget
    (`tests/test_10892_served_liveness.py`, which pins that shape and the
    "handler must not become a state read" regression).
@@ -2006,12 +2007,15 @@ on a `*/5 * * * *` cron **intent** (measured delivery is ~15 min; see §7.5a).
   `*/30`) + `.github/scripts/availability-liveness.sh`, harness `bash .github/scripts/availability-liveness.test.sh`
   (the `Availability pager liveness check (#4573)` step of the same CI job). It is a separate workflow on purpose — see §7.8a.
 
-**Two production targets (#3628).** The watchdog now drives TWO surfaces, as two
-steps of the same job: the Fly API probe (§7.1a) and the Cloudflare Pages auth
-surface probe (§7.1b). They alert **independently** (the auth step runs even if
-the API step failed) and each files its **own** incident, keyed by its own host
-label — the two never share an issue. Only the Fly API target is restartable;
-the auth target is **hard-disarmed** from the restart leg (§7.4).
+**Three production targets (#3628, #10892).** The watchdog drives THREE
+surfaces, as three steps of the same job: the Fly API probe (§7.1a), the
+Cloudflare Pages auth surface probe (§7.1b) and the served-request liveness
+probe (§7.1c). They alert **independently** (each step runs even if another
+failed) and each files its **own** incident, keyed by its own host label — no
+two share an issue. Only the Fly API target is restartable; the auth target is
+**hard-disarmed** from the restart leg because it has no Fly machine (§7.4), and
+the liveness target is hard-disarmed because it IS that machine — a second
+restart arm would spend `MAX_RESTARTS_PER_HOUR` twice on one wedged machine.
 
 > **The `PROD DOWN` path has never fired; `PROD DEGRADED` fired once.**
 > `gh issue list --state all --search '"[monitor] PROD DOWN" in:title'` returns
@@ -2071,7 +2075,7 @@ The auth target's UP contract is **narrower and stronger** than the API's:
 |---|---|---|
 | `PROBE_EXPECT_STATUS` | `302` | A healthy `/auth/start` is a redirect, not a 200. The watchdog's built-in arms classify 3xx as UNEXPECTED, so **without this allow-list a healthy site would page** — the #1 way to get this wrong |
 | `PROBE_REQUIRE_HEADER` | `code_challenge_method=s256` | Proof the PKCE flow row was actually written to D1. A 302 **without** it is an *answered-but-wrong* (UNEXPECTED → `PROD DEGRADED`) verdict, not an outage — “the site is up but nobody can sign in”, the entire lesson of #3616 |
-| `PROBE_HOST_LABEL` | `app.premiselabs.co` | The **session-bearing origin** the probe actually hits (the BFF moved here in #4054/#4104). The incident **title is built from this label** and the dedupe is an **exact-title match**, so it must agree with the host actually probed; renaming it **orphans incidents filed under the old title** (closed by hand, not auto-resolved). Two production targets must not share one label, or they fight over a single issue |
+| `PROBE_HOST_LABEL` | `app.premiselabs.co` | The **session-bearing origin** the probe actually hits (the BFF moved here in #4054/#4104). The incident **title is built from this label** and the dedupe is an **exact-title match**, so it must agree with the host actually probed; renaming it **orphans incidents filed under the old title** (closed by hand, not auto-resolved). Production targets must not share one label, or they fight over a single issue |
 
 The allow-list replaces **only** the UP arms: `000`/`5xx` are checked **first**
 and stay **DOWN** even if listed, and any other status stays **UNEXPECTED**. A
@@ -2093,6 +2097,32 @@ restartable set; on a **DOWN** verdict the run log / incident body say
 `disarmed:no_machine` explicitly (§7.4), while an answered-but-wrong
 (**DEGRADED**) verdict logs `disarmed:unexpected` — the restart leg is off the
 table either way.
+
+#### 7.1c The served-request liveness target (#10892)
+
+The third step probes `GET https://api.premiselabs.co/liveness`. It exists
+because neither Fly check could see the outage: `servicecheck-00-tcp-8000` is a
+kernel handshake (a hung app passes it) and `loop_liveness` reads the loop's own
+last tick from a listener on **another thread**, so on 2026-11-04 `api.` was
+unusable for ~2 h across two windows while both read `passing`. `/health` itself
+cannot be answered while the loop is blocked — nothing we RAN bounded the
+**absence**.
+
+| | Value | Why |
+|---|---|---|
+| `PROBE_EXPECT_STATUS` | `200` | Healthy is `200` and nothing else: `000`/`5xx` are DOWN (checked before the list), and an answered `404`/`3xx` is UNEXPECTED → `PROD DEGRADED`, which is the honest reading for a deploy that lacks the route |
+| `PROBE_TIMEOUT_S` | `5` | **The bound IS the instrument.** The handler does no I/O of its own (one loop yield, one counter increment — no DB, no network), so 5 s cannot fire on a healthy origin while it does fire on the outage shape (measured 9–12 s to `000`, 45 s to the eventual 504). Do not widen it to the API probe's 25 s: that is the status-only probe this target replaces |
+| `PROBE_HOST_LABEL` | `api.premiselabs.co (served request)` | Own dedupe key, so a green primary probe cannot close a red liveness incident |
+| `HEARTBEAT_EMIT` | `0` | Exactly one step per job emits the rolling heartbeat (two writes seconds apart race GitHub's search index into a duplicate issue) |
+
+**Machine-backed, but never restartable.** This surface is the **same Fly
+machine** as the primary API probe, so its incident is disarmed from the restart
+leg on purpose: each probe's incident issue is its own restart ledger, and a
+second arm would let one wedged machine spend `MAX_RESTARTS_PER_HOUR` **twice**.
+`disarmed:no_machine` here therefore does **NOT** mean "no machine" — check the
+machine (`flyctl checks list`, `flyctl logs`, `flyctl machine list`) and
+cross-check the primary API incident, and do **not** go looking for a Cloudflare
+Pages deploy. §7.7 states the residual this bound accepts.
 
 ### 7.2 How to read a failure
 
@@ -2166,7 +2196,11 @@ restart leg, and a production URL that is **not** restartable (the Pages auth
 surface — no Fly machine behind it, so a restart of the API app cannot repair a
 missing binding and would restart an unrelated service) is hard disarmed
 regardless of the failure class (`disarmed:no_machine` on a DOWN verdict,
-`disarmed:unexpected` on a DEGRADED one); (c) when the failure is
+`disarmed:unexpected` on a DEGRADED one); `no_machine` names the ARM, not the
+absence of a machine: the Pages auth target has no Fly machine, while the
+**served-request liveness** target IS the primary probe's machine and is
+disarmed so one wedged machine cannot spend the hourly restart budget twice
+(cross-check the primary incident for that one); (c) when the failure is
 one a restart cannot fix — `classify_failure()` maps curl's exit code to a
 class, and **DNS**
 (6) and **TLS/certificate** (35, 51, 58–60, 66, 77, 80, 82–83, 90–91) failures
@@ -2304,9 +2338,11 @@ in §7.8a (#4573), on a channel independent of this leg's Telegram page.
 The watchdog stops after `MAX_RESTARTS_PER_HOUR` and asks for a human — treat
 that as “this is not a wedged process”. Four disarm reasons also land here
 without the cap being reached, and all are named in the incident body and the
-run log: **`disarmed:no_machine`** (a production surface with no Fly machine —
-the Pages auth target on a **DOWN** verdict: repair the binding/route, there is
-nothing to restart; the same target logs `disarmed:unexpected` on a DEGRADED
+run log: **`disarmed:no_machine`** (a production surface whose restart leg is
+disarmed — the **Pages auth** target on a **DOWN** verdict, where the repair is
+the binding/route and there is nothing to restart, and the **served-request
+liveness** target, which IS the primary probe's Fly machine: check the machine
+and cross-check the primary incident, not a Pages deploy; the same target logs `disarmed:unexpected` on a DEGRADED
 verdict, because a restart is off the table before the no-machine guard is even
 reached),
 **`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
@@ -2386,8 +2422,11 @@ machinery (§7, §7.7). Two consequences:
    DRILL with self-heal disarmed — never add a flag, never loosen this to a
    prefix/wildcard match, and never let a drill URL appear in either set.
 
-**Both targets are probed on every run**, drills included: the auth step always
-uses its production URL and is hard-disarmed from the restart leg. Note the auth
+**All three targets are probed on every run**, drills included: the auth and
+liveness steps always use their production URLs and are hard-disarmed from the
+restart leg — the auth one because it has no Fly machine behind it, the
+liveness one because it IS that machine and a second restart arm would spend
+`MAX_RESTARTS_PER_HOUR` twice on one wedged machine (§6.4.2). Note the auth
 probe is **not** side-effect-free — asserting the PKCE header means the GET must
 reach `/auth/start`, which **writes an `auth_flows` row** (one per run). That row
 used to leak: the table's only deletion paths ran on flow *completion*, which an

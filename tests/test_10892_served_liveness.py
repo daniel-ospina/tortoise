@@ -34,7 +34,8 @@ one alone is a false PASS:
    "make it a state read like `/healthz`" regression statically).
 2. The prober that FAILS ON ABSENCE — `.github/workflows/availability-watchdog.yml`
    probes that path with a **5 s** per-request bound, against the API probe's
-   generous 25 s. `/liveness` serves in ~50 ms; during the outage the app took
+   generous 25 s. `/liveness` does no I/O of its own (one loop yield and one
+   counter increment: no DB, no network). During the outage the app took
    9–12 s to `000` from outside (and 45 s to the eventual 504), so a 5 s bound
    alarms within one cycle and a 25 s status-only probe does not exist for this
    shape at all. The workflow half is pinned in
@@ -65,7 +66,10 @@ HOSTED_API = REPO / "tortoise" / "hosted_api.py"
 #: chosen to pass: the prober's own per-request bound is 5 s
 #: (`.github/workflows/availability-watchdog.yml`, the served-liveness step), so
 #: a client that waits longer than that is waiting past the point where the page
-#: has already fired. 5 s is ~100x the endpoint's measured service time.
+#: has already fired. 5 s is a DESIGN bound over a handler that does no I/O of
+#: its own (one loop yield, one counter increment — no DB, no network), not a
+#: multiple of a measured service time: nothing in this repo pins a latency
+#: figure, so none is claimed here.
 PROBE_BUDGET_S = 5.0
 
 #: How long the loop is held hostage in the blocked-loop tests. Longer than the
@@ -191,6 +195,12 @@ def test_served_liveness_reports_a_counter_only_a_served_request_can_produce(mon
     assert not isinstance(second, str), f"the second /liveness did not answer ({second})"
 
     assert first.status_code == 200, f"/liveness answered {first.status_code}, not 200"
+    cache_control = first.headers.get("cache-control", "")
+    assert "no-store" in cache_control, (
+        f"/liveness answered with Cache-Control={cache_control!r}; the docstring's "
+        "provenance claim ('two probes must never see the same number') is only a "
+        "property if no intermediary may replay the answer — an unpinned header is "
+        "a comment, not a property")
     body = first.json()
     assert body["status"] == "ok"
     assert body["served"] == 1, (

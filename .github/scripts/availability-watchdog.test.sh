@@ -1949,6 +1949,9 @@ PKCE_HEADERS=$'HTTP/2 302\r\nlocation: https://github.com/login/oauth/authorize?
 classify_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; classify_code "$1"' "$WATCHDOG" "$1"; }
 prod_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; if is_production_url "$1"; then printf PROD; else printf DRILL; fi' "$WATCHDOG" "$1"; }
 restartable_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; if is_restartable_url "$1"; then printf YES; else printf NO; fi' "$WATCHDOG" "$1"; }
+# #10892 review round 3 residual (P2): `is_machine_backed_url` is the ONLY thing
+# that tells the two `disarmed:no_machine` targets apart, and nothing pinned it.
+machine_backed_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; if is_machine_backed_url "$1"; then printf YES; else printf NO; fi' "$WATCHDOG" "$1"; }
 
 # ── 93: classify_code — the allow-list is ADDITIVE, not a replacement ──────
 reset_case
@@ -1977,6 +1980,31 @@ assert_eq "$(prod_unit "https://api.premiselabs.co/v1/organizations/")" "PROD" "
 assert_eq "$(restartable_unit "https://api.premiselabs.co/v1/organizations")" "YES" "restart set: the Fly API surface may restart"
 assert_eq "$(restartable_unit "$AUTH_URL")" "NO" "restart set: the Pages auth surface is NEVER restartable"
 assert_eq "$(restartable_unit "https://staging.example.test/v1/organizations")" "NO" "restart set: a drill is not restartable"
+# ── 94a2: the MACHINE-BACKED set — the disarm class does NOT imply no machine ──
+# Both `disarmed:no_machine` targets reach case 88's arm; only ONE of them is a
+# Pages surface. Nothing pinned this discriminator, so dropping
+# `$LIVENESS_PROBE_URL` from the `FLY_MACHINE_PROBE_URLS` default (or reordering
+# the `is_machine_backed_url` branches) silently restored "no Fly machine … check
+# the Pages deploy" for a WEDGED MACHINE with every other assertion green — a
+# false PASS over exactly the misdiagnosis this arm exists to prevent. These
+# lines, plus the end-to-end case 88b, are that pin.
+#
+# The URL is read from the SCRIPT (not from the workflow step, which case 97
+# cross-checks against it), so this block does not depend on a variable case 97
+# defines further down.
+LIVENESS_URL_UNDER_TEST="$(sed -n 's|^LIVENESS_PROBE_URL="\(https://[^"]*\)".*|\1|p' "$WATCHDOG" | head -1)"
+assert_not_empty "$LIVENESS_URL_UNDER_TEST" \
+  "machine set: the script's LIVENESS_PROBE_URL is derivable (else every assertion below is vacuous)"
+assert_contains "$(grep '^FLY_MACHINE_PROBE_URLS=' "$WATCHDOG" || true)" 'LIVENESS_PROBE_URL' \
+  "machine set: the DEFAULT set names the liveness URL (dropping it restores the Pages prose for a wedged machine)"
+assert_eq "$(machine_backed_unit "$LIVENESS_URL_UNDER_TEST")" "YES" \
+  "machine set: the served-liveness surface IS the Fly machine (hard-disarmed from the restart leg, not machine-less)"
+assert_eq "$(machine_backed_unit "https://api.premiselabs.co/v1/organizations")" "YES" \
+  "machine set: the primary API surface is machine-backed"
+assert_eq "$(machine_backed_unit "$AUTH_URL")" "NO" \
+  "machine set: the auth surface is NOT machine-backed (its remediation really is a Pages deploy)"
+assert_eq "$(machine_backed_unit "https://staging.example.test/v1/organizations")" "NO" \
+  "machine set: an unrecognised URL is not machine-backed (fail closed — never promise a machine we did not verify)"
 
 # ── 94b: an explicitly EMPTY set is honoured — empty ≠ unset (P3) ──────────
 # `${VAR:-default}` substitutes on unset OR EMPTY, so an operator who sets
@@ -2112,6 +2140,33 @@ assert_contains "$(created_json)" "PROD DOWN" "auth: 503 → PROD DOWN title"
 assert_eq "$(count_calls 'FLYCTL')" "0" "auth: 503 → flyctl was NEVER called (no Fly machine; no restart)"
 assert_contains "$OUT" "restart decision: disarmed:no_machine" "auth: the run log names the no-machine disarm"
 assert_contains "$(patched_body)" "NO Fly machine" "auth: the incident body explains why nothing was restarted"
+
+# ── 88b: a DOWN on the MACHINE-BACKED liveness target names the MACHINE ────
+# Same arm as case 88 (`disarmed:no_machine`), OPPOSITE remediation: this
+# surface IS the Fly machine. The round-3 fix corrected the incident BODY; the
+# run log still said "production surface with no Fly machine" for this target,
+# and it is the FIRST artifact an operator reads during the outage. Assert all
+# three surfaces the on-call sees: the run log, the body, and the fact that no
+# restart ran despite a usable token.
+reset_case
+export PROBE_URL="$LIVENESS_URL_UNDER_TEST"
+export PROBE_HOST_LABEL="api.premiselabs.co (served request)"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"     # present on purpose: the token must NOT be enough
+run_watchdog
+assert_eq "$RC" "1" "liveness: 000 → exit 1"
+assert_contains "$(created_json)" "PROD DOWN" "liveness: 000 → PROD DOWN title (it is a PRODUCTION surface, so it pages)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "liveness: 000 → flyctl was NEVER called (the primary API probe owns that machine)"
+assert_contains "$OUT" "restart decision: disarmed:no_machine" "liveness: the disarm class is the shared no_machine arm"
+assert_not_contains "$OUT" "production surface with no Fly machine" \
+  "liveness: the RUN LOG must not claim there is no Fly machine — it IS the machine"
+assert_contains "$OUT" "MACHINE-BACKED production surface" \
+  "liveness: the RUN LOG names the machine-backed surface (the positive arm of the same split)"
+assert_not_contains "$(patched_body)" "NO Fly machine" \
+  "liveness: the incident body must not claim there is no Fly machine"
+assert_contains "$(patched_body)" "machine-backed" \
+  "liveness: the incident body names the machine-backed surface"
 
 # ── 89: sustained 60 min + a Fly token is STILL a hard no-restart ──────────
 # The strongest possible case for a restart and it must still not happen.

@@ -6846,7 +6846,7 @@ async def liveness(response: Response):
     ``loop_heartbeat_info()`` / ``_HEALTH_PROBE.snapshot()``. Those are written
     by the loop's timer/threads, so they keep answering exactly the question
     this endpoint exists to ask afresh — pinned by
-    ``test_handler_reads_no_cached_state_and_cannot_be_a_state_read``.
+    ``test_handler_yields_to_the_loop_and_reads_no_cached_state``.
 
     ⛔ AND ITS ONE WRITE IS UNCACHEABLE, BY DIRECTIVE (review round 2). The
     ``served`` counter is the provenance half of the answer, and a replay at any
