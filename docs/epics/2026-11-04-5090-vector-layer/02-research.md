@@ -182,7 +182,7 @@ comparables now say what that measurement will probably show, and how to run it:
 
 ### ✅ The VALUE gate's default half is ALREADY satisfied (`#10996`)
 
-This section first claimed *"the VALUE gate is off too"*. ⛔ **That was false at this head**, and it is the defect this repository keeps re-earning: a design-document citation believed over the code. §S2.2's code citations belong to commit `c79ba1cf2`, so that passage predates `#10996`, which **flipped the value gate ON**.
+This section first claimed *"the VALUE gate is off too"*. ⛔ **That was false at this head**, and it is the defect this repository keeps re-earning: a design-document citation believed over the code. §S2.2's citations predate `#10996`, which **flipped the value gate ON**.
 
 Verified at this head:
 
@@ -198,7 +198,7 @@ This section first repeated v4's wiring note as an open defect. At this head the
 
 - `_run_vet_pass` **returns** the list and the caller assigns it back (`tortoise/extractor_v2.py`), and `_collect_classify_items` is called **after** that assignment — so it collects from the already-pruned candidate set, not the whole one;
 - `apply_vet`'s Rule 1 is *"Only an explicit `DISCARD` removes anything"* (`tortoise/vet_gate.py`);
-- `vet_s2_pool` carries the S2 pass's removals forward, so an item the **live** `S4` gap-filler re-added after `S2.2` discarded it is **not** re-minted by `execute_embed` (`S4` here is the code's second extraction pass, which is not the design's removed *"S4 — granularity review"*).
+- `vet_s2_pool` carries the S2 pass's removals forward: an **operator** the live `S4` gap-filler re-added against an `S2.2`-discarded item is **not** re-minted by `execute_embed`, and an entity it started referencing does not 422 the session (`S4` here is the code's second extraction pass, which is not the design's removed *"S4 — granularity review"*). Item removal itself is driven by the union pass's own `DISCARD` decisions, not by the pool.
 
 ⇒ `DISCARD` already precedes `EMBED`. (`classify_consolidation` is a per-point dedup API, not the pruning site — citing it for this was wrong twice over.) v4's wiring note still **reads** as outstanding because its citations belong to the `c79ba1cf2` pin; that passage is stale at this head, and re-asserting it here is how the stale claim would have propagated.
 
