@@ -408,7 +408,21 @@ git log -1 --format=%B 316a572ce2 | grep '^Closes #10999' # arm 2's keyword, in 
 # carries MANUALLY-linked closing references too: `userLinkedOnly` and its inverse `excludeUserLinked` both
 # default to `false`, and `addCloseIssueReferences` is the mutation that creates the manual kind. So a
 # NON-EMPTY field on its own does NOT prove a body/title keyword — a hand close carrying a linked PR reads
-# the same. `gh issue view` has no flag for that filter, so this is the GraphQL read that separates them:
+# the same. `gh issue view` has no flag for that filter, so this is the GraphQL read that separates them.
+# Those three names are read from the SCHEMA here, not remembered: the defaults are what let a `[]` mean
+# "auto-detected", and the mutation pair is what creates and removes the other kind. No count is quoted.
+gh api graphql -f query='{__type(name:"Issue"){fields{name args{name defaultValue}}}}' \
+  --jq '.data.__type.fields[]|select(.name=="closedByPullRequestsReferences")|.args[]|select(.name|test("Linked"))'
+                                                          # both default FALSE — the inverse pair, and the
+                                                          # reason an unfiltered read and a `userLinkedOnly`
+                                                          # read can differ at all: that difference is the
+                                                          # entire discriminator this block rests on
+gh api graphql -f query='{__schema{mutationType{fields{name}}}}' \
+  --jq '.data.__schema.mutationType.fields[].name|select(test("CloseIssueReferences"))'
+                                                          # addCloseIssueReferences /
+                                                          # removeCloseIssueReferences — how the manual kind
+                                                          # is created and removed, i.e. the arm a
+                                                          # keyword read cannot separate on its own
 for n in 11001 10997 10684 10698; do                    # arm 1's four rows; `[]` = auto-detected, not linked
   gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,userLinkedOnly:true){nodes{number}}}}}" \
     --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
@@ -430,9 +444,9 @@ done
 # ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 reads null in two of its four examples. And an
 #   empty closingIssuesReferences is not evidence either: that PR-body field stays empty in arms 2 and 3.
 # The matrix above is this loop's OUTPUT, not prose — arm 1's four named issues, plus one arm 2 and
-# one arm 3. Every issue AND every PR the arms name is read here, and so are the two facts that are
-# neither an issue nor a PR — arm 2's commit message, and arm 1's user-linked filter — so no row, and no
-# equality a row rests on, is asserted without a command:
+# one arm 3. Every issue AND every PR the arms name is read here, and so are the facts that are
+# neither an issue nor a PR — arm 2's commit message, and arm 1's user-linked filter with the schema
+# names it rests on — so no row, and no equality a row rests on, is asserted without a command:
 for n in 11001 10997 10684 10698 10999 11021; do
   echo "#$n"
   gh issue view $n --json state,closedByPullRequestsReferences --jq '[.closedByPullRequestsReferences[].number]'
