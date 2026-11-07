@@ -2540,8 +2540,14 @@ def _sdk_methods_on_vector_leg(
         # P2). The whole-subtree walk collected a NESTED def's locals, so a
         # nested `_review_pool = 5` suppressed a genuine mention in the
         # ENCLOSING body — the silent-short-list direction this channel exists
-        # to prevent, produced by the guard against false alarms. Same skip rule
-        # as the mention walk, or the two disagree about what a scope is.
+        # to prevent, produced by the guard against false alarms.
+        # ⚠️ NOT the same rule as the mention walk, and the difference is
+        # deliberate (#11389 review, P3): this walk skips `ClassDef` — a class
+        # namespace is not FUNCTION scope, so a class-body binding must not
+        # suppress an enclosing mention — while the mention walk descends into a
+        # class body, because a mention there IS a real reach. The two disagree
+        # about `class` on purpose; the residual that follows (a class-body
+        # binding reusing an entrant's name is an OVER-report) is on `#11397`.
         shadowed: set[str] = set()
         for sub in fn.args.args + fn.args.kwonlyargs + fn.args.posonlyargs:
             shadowed.add(sub.arg)

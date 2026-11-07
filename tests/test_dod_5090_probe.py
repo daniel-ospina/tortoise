@@ -3502,8 +3502,14 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
     # census goes on describing a bound the instrument stopped reporting.
     _methods, _error, declared = probe._sdk_methods_on_vector_leg()
     if declared is None:
-        assert "no such body mention exists" in text, (
-            "the census doc no longer states the state the run reports")
+        # ⛔ A PROPERTY, not a magic sentence (#11389 review, P3): requiring one
+        # exact phrase the doc never documented made this arm red on a doc+code
+        # pair that agreed, with the repair being to guess the wording from the
+        # test body. The property is that the doc does not claim this method is
+        # declared when the scan declares nothing.
+        assert "volunteer_context" not in text, (
+            "the scan declares nothing and the census doc still presents "
+            "`volunteer_context` as a declared reach")
         assert "nested `def`'s decorators and parameter defaults" in text, (
             "the doc claims the declaration is total; the walk does not visit a "
             "nested def's defaults/decorators, and the doc must say so")
