@@ -105,11 +105,17 @@ def _no_embedder(monkeypatch):
     monkeypatch.setattr(_emb.EmbeddingModel, "get", staticmethod(lambda: None))
 
 
-#: Every env-gated knob ``retrieve_for_question`` reads that can move the POOL
-#: (membership/order), the WINDOW (item cap) or the ARM. A developer shell
+#: Every env-gated knob ``retrieve_for_question`` reads ON ITS CALL PATH —
+#: directly, or through the ``_env_int``/``_TRUTHY`` helpers — that can move the
+#: POOL (membership/order), the WINDOW (item cap) or the ARM. A developer shell
 #: carrying any of them would red a pinned count or flip the anchor — a spurious
 #: red, never a false pass, but still a price for nothing. Scrubbed, not
 #: tolerated: the pool/window/arm set is exactly this module's subject.
+#: ⛔ Scope, stated so the claim stays checkable: the ``TORTOISE_LME_GATE_*``
+#: singletons are read at MODULE import (``retrieve.py:3495-3511``), not on this
+#: path, so they are out of scope — a helper-mediated read is IN scope, which is
+#: why the ``TR_SESSION_COMPLETION_*`` sub-knobs below are listed alongside their
+#: own scrub-gated parent.
 _ENV_SCRUB = (
     # the arm under test + its boost legs
     "TORTOISE_LME_EVIDENCE_ASSEMBLY",
@@ -136,6 +142,11 @@ _ENV_SCRUB = (
     "TORTOISE_LME_AGGREGATIVE_FLAG",
     "TORTOISE_LME_TR_SESSION_ADMISSION",
     "TORTOISE_LME_TR_SESSION_COMPLETION",
+    # its gated sub-knobs, read through `_env_int` (`retrieve.py:2966-2985`)
+    "TORTOISE_LME_TR_SESSION_COMPLETION_TOTAL",
+    "TORTOISE_LME_TR_SESSION_COMPLETION_WINDOW",
+    "TORTOISE_LME_TR_SESSION_COMPLETION_SESSIONS",
+    "TORTOISE_LME_TR_SESSION_COMPLETION_PER_SESSION",
     # the floor-term guard's lower bound, read at CALL time inside the SUT
     # (`retrieve.py:2262`) as the two pool-ORDER compositions receive it
     "TORTOISE_LME_FLOOR_TERM",
