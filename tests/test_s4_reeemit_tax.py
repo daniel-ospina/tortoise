@@ -1091,3 +1091,26 @@ def test_the_partial_flag_counts_UNMEASURED_arms_not_only_errored_ones():
     assert mixed["sessions_failed"] == 1
     assert mixed["sessions_measured"] == 1
     assert mixed["partial"] is True
+
+
+def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
+    """`docs/00_index.md` is the ROUTING surface — the file a lane reads instead
+    of this evidence document — so a refuted claim that survives there is read
+    FIRST and by more lanes than the corrected one.
+
+    ⛔ The fix round that replaced "all 266" with "231 of the 266" in the README
+    and in `search_from_s2`'s docstring missed the index row, which still said
+    the correction channel was measured over all 266 items (#11385 review P2).
+    The README pin reads `README.md` only, so nothing would have redded: this
+    pins the index row against the SAME arithmetic — `search_from_s2` returns
+    entities/points/events and `_render_search_results` has no operators
+    section, so the 35 operators are never offered."""
+    index = (_REPO / "docs" / "00_index.md").read_text()
+    rows = [ln for ln in index.splitlines()
+            if "1789" in ln and "re-emit tax" in ln]
+    assert len(rows) == 1, f"expected exactly one #1789 index row, got {len(rows)}"
+    flat = " ".join(rows[0].split())
+    assert "all 266 items offered" not in flat, "the refuted claim is back"
+    assert "231 of the 266" in flat, "the corrected population is missing"
+    assert "operators" in flat, (
+        "the row must say WHY it is 231 — the never-rendered operators section")
