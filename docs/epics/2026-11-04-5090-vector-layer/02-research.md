@@ -77,7 +77,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
   served-vs-indexed gap. The **served** set is declared; the **indexed** set is **measured** from
   `CALL db.indexes()` (discriminator is the `types` column, index 2 — copying the older `_row[0]/_row[1]`
   read would read the wrong column).
-- **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**; ~28 sequential round trips (the `#3143: the probe has TWO phases` block in `monitoring.py` and the `#3243` cold-start block in `selfhost.py`; the figure wraps across two lines in the first, so grep the block header, not the literal). Any new read there **must be fail-open** or it breaks
+- **Operator workflow.** `_ensure_indexes` runs from `Projection.__init__` **unguarded**; ~28 sequential round trips (the `#3143: the probe has TWO phases` block in `monitoring.py` and the `#3243: the cold-start allowance lives on the REFRESHER, not the read` block in `selfhost.py`; the figure wraps across two lines in the first, so grep the block header, not the literal). Any new read there **must be fail-open** or it breaks
   store construction.
 
 ## Tech Stack Research
@@ -307,6 +307,11 @@ to a different docstring many lines away; re-anchored to the block header, which
 literals that each resolve to many `.py` files, at least one of whose plain-grep hits is a
 label-parameterised runbook call — the opposite shape from the "`Point`-only" claim the cell supports;
 re-anchored to `_ensure_vector_index_api`, whose definition is unique among `.py` files.
+**(10)** round 8's fix was applied to `monitoring.py` only: the same sentence still anchored `selfhost.py`
+to the bare tag `#3243`, which greps to **10** hits there — the first two *before* the intended block, and
+one of them names the cold-start allowance for the *opposite* subject (the on-demand MCP tool, not this
+read). So the sentence's own instruction ("grep the block header, not the literal") was not followable for
+that file. Re-anchored to the block header quoted above, which is unique in `selfhost.py` (`grep -cF` → 1).
 
 ### P1-a — `iterative_scan` was reported without its documented failure at correlated filters
 
