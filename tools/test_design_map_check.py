@@ -40,10 +40,22 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import would fail first (D9 shape). This tool is run from lanes and
+# from the required `docs` job, so an unattributed traceback would be read as a
+# real finding about the map.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/test_design_map_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/test_design_map_check.py`"
+    )
+
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
