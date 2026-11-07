@@ -152,6 +152,7 @@ may-never-run step at exit 0. The deploy workflow provisions it with
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import os
@@ -890,14 +891,20 @@ def workflow_secret_refs(text: str) -> set[str]:
     return set(_SECRET_REF_RE.findall(text))
 
 
-def fly_toml_env_keys(text: str) -> set[str]:
-    """Assigned keys inside ``fly.toml``'s ``[env]`` table.
+def fly_toml_env_assignments(text: str) -> dict[str, str]:
+    """``[env]`` key -> the value it assigns, as written (comments stripped).
 
     Parsed, not substring-matched: a name that appears only in a *comment* (the
     real fly.toml documents `TORTOISE_TRUST_X_FORWARDED_PROTO` that way) is not
     an assignment and must not satisfy a ``fly-toml-env`` declaration.
+
+    The VALUE matters to #11122: `fly.toml` carries five `[env] = ""` placeholders
+    (`TORTOISE_BACKUP_KEY`, `R2_*`) that exist only to document the names — a Fly
+    secret shadows them, so with the secret absent the app reads the empty value,
+    i.e. the mitigation IS in effect. Only a NON-EMPTY `[env]` value is a second
+    delivery path that would defeat a deliberate absence.
     """
-    keys: set[str] = set()
+    values: dict[str, str] = {}
     in_env = False
     for line in text.splitlines():
         stripped = line.strip()
@@ -907,10 +914,41 @@ def fly_toml_env_keys(text: str) -> set[str]:
         if not in_env:
             continue
         code = line.split("#", 1)[0]
-        match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", code)
+        match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", code)
         if match:
-            keys.add(match.group(1))
-    return keys
+            raw = match.group(2).strip()
+            # Normalise the quoting so `X = ""` and `X = ''` are EMPTY, not a
+            # two-character value: a quoted-empty placeholder is exactly what the
+            # real `fly.toml` carries, and reading it as non-empty reproduced the
+            # unrecordable-mitigation defect the value test exists to fix.
+            if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+                raw = raw[1:-1]
+            values[match.group(1)] = raw
+    return values
+
+
+def fly_toml_env_keys(text: str) -> set[str]:
+    """Assigned keys inside ``fly.toml``'s ``[env]`` table."""
+    return set(fly_toml_env_assignments(text))
+
+
+@contextlib.contextmanager
+def _ledger_path_override(path: Path):
+    """Point the payload harness at `path` for the duration of the block.
+
+    `_capture_payload` seeds the ledger seam from `ledger_path()`, which reads the
+    environment — so this is how the gate executes the SAME payload against a second
+    ledger without a second code path.
+    """
+    saved = os.environ.get("FLY_MITIGATION_LEDGER")
+    os.environ["FLY_MITIGATION_LEDGER"] = str(path)
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("FLY_MITIGATION_LEDGER", None)
+        else:
+            os.environ["FLY_MITIGATION_LEDGER"] = saved
 
 
 def resolve_app(toml_path: Path) -> str:
@@ -949,7 +987,8 @@ def main() -> int:
         app = resolve_app(toml_path)
         fly_names = read_fly_secret_names(app)
         workflow_text = workflow_path.read_text()
-        env_keys = fly_toml_env_keys(toml_path.read_text())
+        env_assignments = fly_toml_env_assignments(toml_path.read_text())
+        env_keys = set(env_assignments)
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         _err(f"cannot determine secret provenance: {exc}")
         return 2
@@ -975,6 +1014,32 @@ def main() -> int:
     # absent is conditionally propagated. Executing the block computes that
     # exactly, so no shell spelling can hide it — including the `-z` direction,
     # where the name appears ONLY in the no-secret sample.
+    # #11122: the UNLEDGERED world — the same payload executed against an EMPTY
+    # ledger. Used ONLY to explain one verdict (see the `workflow` branch below): a
+    # name the ledger it does not name CAN still be emptied by it, because the
+    # environment block blanks a ledgered name and the payload COMPOSES from it. A
+    # ledger entry for any member of the `BACKUP_SWEEP_ENABLED` conjunction makes
+    # that name unassigned, and the STALE arm then demanded the operator "declare
+    # the managing source … or manage it from deploy-hosted.yml", whose only reading
+    # is to make the assignment unconditional — which destroys the fail-closed
+    # default the conjunction exists for. A mitigation that cannot be deployed
+    # without breaking the thing it protects is not a mitigation.
+    unmitigated: frozenset[str] = frozenset()
+    if ledger:
+        try:
+            with tempfile.TemporaryDirectory(prefix="fly-secret-empty-ledger-") as tmp:
+                empty = Path(tmp) / "empty-ledger.txt"
+                empty.write_text("# no entries\n")
+                with _ledger_path_override(empty):
+                    a0, u0, live0, _ = payload_partition(blocks, gh_present)
+            unmitigated = frozenset(a0 | u0 | live0)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            _err(
+                "cannot determine secret provenance: the payload could not be "
+                f"classified against an empty ledger to explain the ledger's effect "
+                f"({exc})"
+            )
+            return 2
     assigned_conditionally = conditional_names(assigned, unconditional)
     if not assigned:
         _err(
@@ -997,6 +1062,10 @@ def main() -> int:
     #: releasing it is what re-arms the mitigation.
     unhonourable: list[str] = []
     conditional: list[str] = []
+    # Names the payload WOULD assign that the ledger emptied. Reported, never a
+    # violation: an entry emptied a derived `workflow` name, which is the ledger
+    # doing its job (see the `workflow` STALE arm).
+    mitigated_derived: list[str] = []
     mitigated = set(ledger)
 
     # (0) #11122 — the ledger is honoured at SYNC time by the workflow's payload
@@ -1043,12 +1112,23 @@ def main() -> int:
     # this ledger says the name is deliberately absent. `fly-toml-env` and `fly-only:`
     # are already refused `name in env_keys`; a `gh-secret:` name is not, so it has to
     # be caught here (review round 2 F4).
+    # VALUE-AWARE, because an `[env] = ""` entry is a PLACEHOLDER, not a value. A
+    # Fly secret SHADOWS `[env]`, so with the secret absent the app reads the empty
+    # string — which is exactly the deliberate absence this ledger records. Only a
+    # NON-EMPTY `[env]` value is a second delivery path that defeats the omission.
+    # Without this, the five `[env] = ""` placeholders in `fly.toml`
+    # (`TORTOISE_BACKUP_KEY`, `R2_*`) made the MOST LIKELY incident mitigations
+    # unrecordable — exit 2, never bypassable — while the header and the runbook
+    # used `TORTOISE_BACKUP_KEY` as their worked example (#11332 review, P1).
     for name in sorted(mitigated & set(env_keys)):
+        if not env_assignments.get(name):
+            continue
         unhonourable.append(
             f"LEDGER NOT HONOURED — {name!r} is recorded as deliberately absent in "
-            f"{ledger_file.name} but is also an assigned key in fly.toml [env], so the "
-            "deploy applies that value whatever the secret list says — the omission "
-            "cannot be honoured. Remove the [env] assignment, or delete the entry"
+            f"{ledger_file.name} but `fly.toml` `[env]` assigns it a NON-EMPTY value "
+            f"({env_assignments[name]}), which the deploy applies whatever the secret "
+            "list says — the omission cannot be honoured. Remove the [env] value, or "
+            "delete the entry"
         )
 
     # (0c) An EXPIRED entry keeps suppressing on purpose: silently re-arming on a
@@ -1125,6 +1205,13 @@ def main() -> int:
                 conditional.append(name)
         elif kind == "workflow":
             if name not in assigned:
+                if name in unmitigated:
+                    # The payload DOES assign it; the ledger is what emptied it. That
+                    # is the ledger working, not a stale declaration — and the generic
+                    # remedy below ("manage it from deploy-hosted.yml") would undo the
+                    # fail-closed default this name exists for.
+                    mitigated_derived.append(name)
+                    continue
                 violations.append(
                     f"STALE DECLARATION — {name!r} is declared workflow-set but "
                     "deploy-hosted.yml never assigns it"
@@ -1258,6 +1345,11 @@ def main() -> int:
     # every name this line prints is one the reader can act on by writing an entry.
     # One aggregated line, because N annotations is how a warning becomes
     # wallpaper.
+    # ⛔ BELT FIRST ON THE RELEASE PATH ONLY (#11332 review round 3, P2). This print
+    # used to sit ABOVE the `unhonourable`/`violations` returns, so a run that was
+    # then BLOCKED still announced "this deploy will CREATE N secret(s)" — a claim
+    # about a payload that was never staged. On a blocked run nothing is created, and
+    # the reader's remedy is the reported violation, not this warning.
     would_create = sorted(
         n
         for n in live
@@ -1275,6 +1367,18 @@ def main() -> int:
             "'never configured', which is what this deploy is about to fix."
         )
 
+    if mitigated_derived:
+        print(
+            "LEDGER-EMPTIED — "
+            f"{len(mitigated_derived)} declared name(s) would be assigned by this "
+            "deploy but are NOT, because a ledger entry emptied an input they are "
+            "composed from. That is the mitigation working, not a stale declaration:"
+        )
+        for name in sorted(mitigated_derived):
+            print(
+                f"  - {name} (declared workflow-set; its composition needs a name the "
+                "ledger records as deliberately absent)"
+            )
     fly_conditional = [n for n in fly_names if n in set(conditional)]
     if fly_conditional:
         print(

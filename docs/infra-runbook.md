@@ -2786,9 +2786,28 @@ undone.
   invariant that payload had just broken (the sweep and the staleness watcher start
   disabled, with only a warning). Blanking the name in the environment first makes
   every downstream `[ -n ]`, conjunction and default observe the deliberate absence.
-  The tail pass stays as the belt — a ledgered `TORTOISE_SESSION_LLM_MODEL` is
-  blanked up top and then RE-APPEARS from the unconditional default branch, so only
-  the tail removes it.
+  The tail pass stays as the belt — it is load-bearing for a **renamed pair**
+  (`GITHUB_CLIENT_ID` ← `GH_CLIENT_ID`, `SUPABASE_SERVICE_ROLE_KEY` ←
+  `SUPABASE_SERVICE_KEY`; the manifest's header documents the class), where blanking
+  the Fly name does not blank the differently-named SOURCE the compose line reads.
+  ⛔ Stated residual: for a renamed pair the **sibling** names a compose guard emits
+  are still staged, and a guard that READS the source still sees it present, so its
+  warning does not fire. The recorded name is still never staged — only that warning
+  is out of reach.
+- **`[env]` placeholders do not block an entry; a `[env]` VALUE does.** `fly.toml`
+  carries five `[env] = ""` placeholders (`TORTOISE_BACKUP_KEY`, `R2_*`) purely to
+  document the names; a Fly secret shadows `[env]`, so with the secret absent the app
+  reads the empty string — which IS the deliberate absence. Only a non-empty `[env]`
+  value is a second delivery path, and that is what `LEDGER NOT HONOURED` refuses. So
+  the most likely incident mitigations (unset the backup key, unset an R2 credential)
+  are recordable.
+- **A ledger entry that empties a DERIVED name is reported, not called stale.** A
+  member of the `BACKUP_SWEEP_ENABLED` conjunction is ledgered → the conjunction goes
+  false → that name is never assigned. It is declared `workflow`, so the stale-
+  declaration arm would have demanded "declare the managing source … or manage it from
+  deploy-hosted.yml", and the only reading of that remedy is to make the assignment
+  unconditional — destroying the fail-closed default. The gate instead classifies the
+  same payload against an EMPTY ledger and reports the name as `LEDGER-EMPTIED`.
 - **The gate's half is the reverse check**, so the two cannot rot apart: a ledger
   entry the payload still carries is `LEDGER NOT HONOURED` (dropping the filter
   would otherwise re-arm every mitigation while the ledger kept reading as a

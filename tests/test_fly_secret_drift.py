@@ -2774,6 +2774,21 @@ def _ledger_regions(text: str | None = None) -> tuple[str, str]:
         "AFTER the payload composition — which would restore the derived-value "
         "inconsistency the ordering exists to prevent"
     )
+    # ⛔ POSITION, not just internal order (#11332 review round 3, P1). Without this
+    # the assert below is INERT: moving the environment block to just above the tail
+    # region leaves `env_start < env_end < tail_start < tail_end` true, every fixture
+    # still passes (they impose their own order), and the deploy regresses to
+    # composing derived values from the UNFILTERED environment — the exact fail-open
+    # the two-region split exists to close, and it reads GREENER than the correct
+    # order because the emptied derived name then never trips the STALE arm.
+    first_compose = _line_of(lines, "ARGS=(FASTAPI_INTERNAL_KEY=")
+    assert env_end < first_compose, (
+        "the ledger ENVIRONMENT block now runs AFTER the payload composition starts "
+        f"(composition line {first_compose + 1}, ledger block ends {env_end + 1}) — "
+        "derived values such as BACKUP_SWEEP_ENABLED would be computed from the "
+        "UNFILTERED environment while the tail filter removed the name from argv, "
+        "shipping a payload that contradicts itself"
+    )
     env_block = "".join(lines[env_start : env_end + 1])
     tail_block = "".join(lines[tail_start:tail_end])
     return env_block, tail_block
@@ -3110,6 +3125,33 @@ class TestTheMitigationLedger:
             f"directory case: {proc.stdout}{proc.stderr}"
         )
 
+    def test_the_ledger_ENVIRONMENT_block_precedes_the_payload_composition(self):
+        """POSITION, not just internal order (#11332 review round 3, P1).
+
+        The other ordering assertions say `env_start < env_end < tail_start <
+        tail_end`, which stays TRUE if the environment block is moved to just above
+        the tail region — and every fixture imposes its own order, so the whole suite
+        passed over a workflow where the ledger ran AFTER the payload was composed.
+        That is the fail-open the two-region split exists to close, and it is not a
+        hypothetical: the gate certified the reordered workflow rc 0 while the
+        classified payload carried `BACKUP_SWEEP_ENABLED=true` and omitted the
+        ledgered name.
+
+        A named test so the regression has one place to fail, rather than taking the
+        module down at import through `_ledger_regions`.
+        """
+        lines = REAL_WORKFLOW.read_text().splitlines(keepends=True)
+        env_end = _line_of(lines, _LEDGER_ENV_BLOCK_END)
+        compose = _line_of(lines, "ARGS=(FASTAPI_INTERNAL_KEY=")
+        assert env_end < compose, (
+            "the ledger ENVIRONMENT block ends at line "
+            f"{env_end + 1} but the payload composition starts at {compose + 1} — the "
+            "ledger now runs AFTER compose, so derived values such as "
+            "BACKUP_SWEEP_ENABLED are computed from the UNFILTERED environment while "
+            "the tail filter removes the name from argv, shipping a payload that "
+            "contradicts itself"
+        )
+
     def test_a_ledgered_name_is_blanked_IN_THE_ENVIRONMENT_not_only_in_ARGS(self, tmp_path):
         """The ledger must be applied BEFORE the payload COMPOSES anything (#11332 P1).
 
@@ -3186,7 +3228,7 @@ class TestTheMitigationLedger:
         space-delimited accumulator. Drop either delimiter and `FOO_BAR` also matches
         `FOO`, so a ledger entry for `TORTOISE_BACKUP_KEY_PREVIOUS` would suppress
         `TORTOISE_BACKUP_KEY` as well — a REAL pair in this payload
-        (`deploy-hosted.yml:1097` / `:1102`), where the previous backup key is the
+        (`deploy-hosted.yml:1189` / `:1194`), where the previous backup key is the
         entry an operator is most likely to write after a rotation. The consequence
         is not a re-arm but the mirror-image defect: the LIVE key silently stops
         syncing on every deploy, so rotation breaks (#2318) and no gate reports it.
@@ -3453,7 +3495,114 @@ class TestTheMitigationLedger:
             },
         )
         assert proc.returncode == 2, proc.stdout + proc.stderr
-        assert "also an assigned key in fly.toml [env]" in proc.stdout, proc.stdout
+        assert "assigns it a NON-EMPTY value" in proc.stdout, proc.stdout
+
+    def test_an_EMPTY_fly_toml_env_PLACEHOLDER_does_not_block_the_entry(self):
+        """`[env] = ""` is a placeholder the Fly secret SHADOWS — so it must not refuse.
+
+        `fly.toml` carries five of them (`TORTOISE_BACKUP_KEY`, `R2_ACCOUNT_ID`,
+        `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`) purely to document
+        the names. A Fly secret shadows `[env]`, so with the secret ABSENT the app
+        reads the empty string — which IS the deliberate absence the ledger records,
+        and the value is not a second delivery path. Treating any `[env]` KEY as
+        blocking made the five most likely incident mitigations (unset the backup key,
+        unset an R2 credential) UNRECORDABLE at exit 2, never bypassable, while the
+        ledger header and the runbook used `TORTOISE_BACKUP_KEY` as their worked
+        example (#11332 review, P1) — so the documented remedy would have been
+        refused by the machinery the docs described.
+        """
+        toml = _fixture(
+            "ledger-env-placeholder.toml",
+            _FLY_TOML.replace("[env]\n", '[env]\n  SENTRY_DSN = ""\n', 1),
+        )
+        assert 'SENTRY_DSN = ""' in toml.read_text()
+        proc = _run(
+            _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], "ledger-env-ph-secrets.json"),
+            manifest=LEDGER_MANIFEST,
+            workflow=LEDGER_WORKFLOW,
+            toml=toml,
+            present={"SENTRY_DSN", "FASTAPI_INTERNAL_KEY", "OPT_SECRET"},
+            extra_env={
+                "FLY_MITIGATION_LEDGER": str(_ledger(_entry())),
+                "FLY_MITIGATION_TODAY": "2026-11-07",
+            },
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "LEDGER NOT HONOURED" not in proc.stdout, proc.stdout
+        assert "SENTRY_DSN (owner daniel" in proc.stdout, proc.stdout
+
+    def test_a_ledgered_CONJUNCTION_MEMBER_does_not_report_the_derived_name_STALE(self):
+        """The ledger emptying a derived name is the MITIGATION, not a stale declaration.
+
+        `BACKUP_SWEEP_ENABLED` is declared `workflow`: the payload assigns it only when
+        a conjunction of secrets is present. Blanking ONE ledgered member makes that
+        conjunction false, so the name is never assigned — and the STALE arm then
+        reported "declared workflow-set but deploy-hosted.yml never assigns it" with
+        the remedy "manage it from deploy-hosted.yml", whose only reading is to make
+        the assignment UNCONDITIONAL. That destroys the fail-closed default the
+        conjunction exists for (#545), so the recorded mitigation could not be deployed
+        without breaking the property it protects (#11332 review, P1).
+
+        The gate now classifies the same payload against an EMPTY ledger; a `workflow`
+        name only that world assigns is reported as LEDGER-EMPTIED, not STALE.
+        """
+        manifest = _fixture(
+            "derived-manifest.txt", _LEDGER_MANIFEST + "BACKUP_SWEEP_ENABLED  workflow\n"
+        )
+        # The shipped filter is KEPT (so the ledgered name really is suppressed), the
+        # step binds SENTRY_DSN through `env:` so the derived guard can read it, and
+        # the derived assignment reads the SHELL VARIABLE — which is what the
+        # environment block blanks.
+        workflow = _fixture(
+            "derived-workflow.yml",
+            _LEDGER_WORKFLOW.replace(
+                "      - name: Set all app secrets on Fly.io\n",
+                "      - name: Set all app secrets on Fly.io\n"
+                "        env:\n"
+                "          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}\n",
+                1,
+            ).replace(
+                '          flyctl secrets set',
+                '          if [ -n "${SENTRY_DSN-}" ]; then\n'
+                "            ARGS+=(BACKUP_SWEEP_ENABLED=true)\n"
+                "          fi\n"
+                "          flyctl secrets set",
+                1,
+            ),
+        )
+        assert "BACKUP_SWEEP_ENABLED" in workflow.read_text()
+        common = {
+            "manifest": manifest,
+            "workflow": workflow,
+            "present": {"FASTAPI_INTERNAL_KEY", "OPT_SECRET", "SENTRY_DSN"},
+        }
+
+        def run(ledger: Path, secrets_name: str):
+            return _run(
+                _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], secrets_name),
+                **common,
+                extra_env={
+                    "FLY_MITIGATION_TODAY": "2026-11-07",
+                    "FLY_MITIGATION_LEDGER": str(ledger),
+                },
+            )
+
+        control = run(_ledger("# empty\n", name="d0.txt"), "derived-control.json")
+        assert control.returncode == 0, control.stdout + control.stderr
+        assert "STALE DECLARATION" not in control.stdout, (
+            "the CONTROL run must be clean — the derived name IS assigned when nothing "
+            f"is ledgered, so this is what the assertion below rests on: {control.stdout}"
+        )
+        proc = run(_ledger(_entry("SENTRY_DSN"), name="d1.txt"), "derived-mitigated.json")
+        assert proc.returncode == 0, (
+            "ledgering a member of the conjunction reported the DERIVED name STALE, so "
+            "the operator cannot record the mitigation without making the assignment "
+            f"unconditional and losing the fail-closed default: {proc.stdout}"
+        )
+        assert "STALE DECLARATION" not in proc.stdout, proc.stdout
+        assert "LEDGER-EMPTIED" in proc.stdout and "BACKUP_SWEEP_ENABLED" in proc.stdout, (
+            "the explanation must be reported, not silently swallowed: " + proc.stdout
+        )
 
     def test_the_gate_runs_over_the_REAL_workflow_with_a_non_empty_ledger(self):
         """The other end-to-end test pins the ledger EMPTY (round-2 F5).

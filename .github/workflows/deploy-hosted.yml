@@ -1022,10 +1022,18 @@ jobs:
           # bash builtin, so it also satisfies the builtins-only rule below.
           #
           # The set is applied to ARGS again at the tail. That is the belt, not the
-          # mechanism: a ledgered `TORTOISE_SESSION_LLM_MODEL` is blanked here and
-          # then re-appears from the UNCONDITIONAL default branch (`else ARGS+=(…
-          # openrouter:google/gemini-2.5-flash)`), so the tail pass is what removes
-          # it, and the gate proves the name did not reach the payload.
+          # mechanism, and it is load-bearing for the RENAMED PAIR: where a Fly name is
+          # fed by a GitHub secret of a DIFFERENT name (`GITHUB_CLIENT_ID` ←
+          # `GH_CLIENT_ID`, `SUPABASE_SERVICE_ROLE_KEY` ← `SUPABASE_SERVICE_KEY`;
+          # `fly-managed-secrets.txt` line 27 documents the class), blanking the FLY
+          # name above does not blank the SOURCE variable the compose line reads — so
+          # the line still stages the name and only the tail removes it. The gate
+          # proves the name did not reach the payload either way.
+          # ⛔ KNOWN RESIDUAL, stated rather than implied: for a renamed pair the
+          # SIBLING names a compose guard emits are still staged, and a guard that
+          # READS the source (`[ -z "$GH_CLIENT_ID" ]`) still sees the source present,
+          # so its warning does not fire. The mitigation itself — the recorded name is
+          # not staged — holds for every class; only that warning is not reached.
           #
           # `$FLY_MITIGATION_LEDGER` is a seam for that same harness; a real deploy
           # takes the default, resolved from the run's cwd (the workspace root).
@@ -1288,10 +1296,13 @@ jobs:
           # ledgered name, so the compose lines above never saw them and the derived
           # values (`BACKUP_SWEEP_ENABLED`, the versioned model default) are
           # consistent. This pass is the belt on top of that mechanism, and it is NOT
-          # redundant: a ledgered `TORTOISE_SESSION_LLM_MODEL` is blanked up there and
-          # then RE-APPEARS from the unconditional default branch
-          # (`else ARGS+=(TORTOISE_SESSION_LLM_MODEL=openrouter:…)`), so only this
-          # pass removes it from the payload. A gate that merely warned would be a
+          # redundant: for a RENAMED PAIR (`GITHUB_CLIENT_ID` ← `GH_CLIENT_ID`) the
+          # environment block blanks the Fly name while the compose line still reads the
+          # differently-named SOURCE, so the line stages the name and only this pass
+          # removes it. (An earlier draft justified this with
+          # `TORTOISE_SESSION_LLM_MODEL`, which is unreachable — it is declared
+          # `workflow`, and the ledger refuses any non-`gh-secret:` source.) A gate
+          # that merely warned would be a
           # FALSE EXCEPTION — the measured Argo CD trap, where `ignoreDifferences`
           # quiets the report while the sync still applies the desired value — so the
           # exception is enforced where the WRITE happens, and
