@@ -557,7 +557,7 @@ def _pg_client_runner(workdir: Path):
         forwarded = {key: value for key, value in (env or {}).items() if key.startswith("PG")}
         cmd = ["docker", "run", "--rm", "--network", "host", "-v", f"{workdir}:{workdir}"]
         for key in sorted(forwarded):
-            cmd += ["--env", key]
+                                    cmd += ["--env", key]
         cmd += [image, *argv]
         return subprocess.run(
             cmd,
@@ -568,6 +568,67 @@ def _pg_client_runner(workdir: Path):
         )
 
     return run
+
+
+def test_the_docker_client_runner_keeps_the_password_out_of_argv(monkeypatch, tmp_path):
+    """The wrapper's env-only property, measured — it is DEAD on CI as written.
+
+    `_pg_client_runner` returns `None` whenever `pg_dump`/`pg_restore` are on PATH,
+    and on `ubuntu-latest` they are, so the `docker run --env KEY` construction
+    never executes on the leg D8 runs in. The production exposure IS pinned
+    (`tests/test_record_backup.py::test_the_password_never_reaches_argv_and_the_dsn_is_not_positional`),
+    but that pin covers `libpq_env`, not this wrapper — so this is the one place
+    the drill could reintroduce `--env PGPASSWORD=<secret>` with no falsifier, and
+    the docstring above asserts the property as though it were measured (#11429
+    review cycle 3).
+
+    Mutation: replace `["--env", key]` with `["--env", f"{key}={value}"]` in
+    `_pg_client_runner` -> RED (the secret appears in the captured argv).
+    """
+    module = sys.modules[__name__]
+    # Force the docker branch: no client binaries on this "box".
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(module, "_client_image", lambda: "mirror.gcr.io/postgres:16")
+
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = dict(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    runner = _pg_client_runner(tmp_path)
+    assert runner is not None, (
+        "the wrapper returned `None` with no client binaries on PATH — the docker "
+        "branch this test exists to measure was not reached")
+
+    secret = "s3cret-do-not-leak"
+    runner(
+        ["pg_dump", "--data-only", "--format=custom"],
+        env={"PGPASSWORD": secret, "PGHOST": "127.0.0.1", "PATH": os.environ.get("PATH", "")},
+    )
+
+    cmd = captured["cmd"]
+    assert not [part for part in cmd if secret in str(part)], (
+        f"the record's password reached argv: {cmd!r}. `--env KEY=VALUE` puts the "
+        "secret in `ps`, shell history and crash reports; only the NAME may be "
+        "forwarded, with the value taken from the docker client's environment")
+
+    env_flags = [cmd[i + 1] for i, part in enumerate(cmd) if part == "--env"]
+    assert env_flags == ["PGHOST", "PGPASSWORD"], (
+        f"the forwarded `--env` names are {env_flags!r} — the wrapper must forward "
+        "the PG* NAMES it was given, and nothing else")
+    assert "=" not in "".join(env_flags), (
+        "an `--env` argument carries `=`, which means a VALUE was put on the "
+        "command line — the exposure this seam exists to avoid")
+
+    forwarded = captured["kwargs"]["env"]
+    assert forwarded["PGPASSWORD"] == secret, (
+        "the secret must still reach the child through its ENVIRONMENT — moving "
+        "it off argv must not also stop the client from authenticating")
+    assert "PGHOST" in forwarded, forwarded
 
 
 def _client_image() -> str:

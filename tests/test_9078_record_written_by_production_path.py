@@ -3809,6 +3809,65 @@ def test_ci_arms_the_record_against_a_real_postgres():
         "decision is untestable inside YAML (it was — #9772 review P2), so it "
         f"belongs in {RECORD_LEG_GATE.name} and nowhere else")
 
+    # ⛔ PROVISION↔TEARDOWN PAIRING, asserted structurally (#11429 review cycle 3).
+    # Two Postgres instances share this one job, so the SECOND provision carries
+    # `with.label_var`/`with.dsn_var` to stop `$GITHUB_ENV` (last-one-wins) from
+    # making the drill point at itself. Nothing pinned the pairing: both ways to
+    # get it wrong are silent. (a) A teardown whose `label_var` differs from its
+    # provision's LEAKS the scratch container with no red anywhere. (b) A dropped
+    # `dsn_var` makes the second provision overwrite `TEST_RECORD_DB_URI`, so D8
+    # skips and the zero-skip gate reports "the record database did not arm" — a
+    # red that blames the WRONG database. The rule is structural, so extending the
+    # job with a third instance stays green while an unpaired one does not.
+    def _uses(step, action: str) -> bool:
+        return str(step.get("uses", "")).endswith(f"actions/{action}")
+
+    provisions = [s for s in steps if _uses(s, "postgres-provision")]
+    teardowns = [s for s in steps if _uses(s, "postgres-teardown")]
+
+    def _labels(batch):
+        return sorted(
+            (s.get("with") or {})["label_var"]
+            for s in batch if (s.get("with") or {}).get("label_var"))
+
+    assert len(provisions) == len(teardowns), (
+        f"{name} provisions {len(provisions)} Postgres instance(s) but tears "
+        f"down {len(teardowns)}: an unmatched provision leaves a container behind "
+        f"until the job's runner is reused (#9567 D8)")
+    assert _labels(provisions) == _labels(teardowns), (
+        f"{name}'s provision/teardown `label_var` sets do not pair "
+        f"(provision {_labels(provisions)}, teardown {_labels(teardowns)}): a "
+        "teardown selected by a different label than its provision removes the "
+        "WRONG container — or none — and nothing reds")
+    for teardown in teardowns:
+        if (teardown.get("with") or {}).get("label_var"):
+            assert str(teardown.get("if")) == "always()", (
+                f"{name}'s second teardown is not `if: always()`: when the armed "
+                "leg fails, the scratch container outlives the job it was made "
+                "for (#9567 D8)")
+
+    # The DSN a provision exports must be the env the DRILL reads. Read from the
+    # capstone's own constant rather than restated, so the workflow and the test
+    # cannot drift apart silently.
+    capstone_src = (REPO_ROOT / CAPSTONE_FILE).read_text()
+    scratch_match = re.search(
+        r'^SCRATCH_DB_ENV = "([A-Z0-9_]+)"', capstone_src, re.MULTILINE)
+    assert scratch_match is not None, (
+        f"{CAPSTONE_FILE} no longer declares SCRATCH_DB_ENV — re-anchor this pin")
+    scratch_env = scratch_match.group(1)
+    dsn_vars = sorted(
+        (s.get("with") or {})["dsn_var"]
+        for s in provisions if (s.get("with") or {}).get("dsn_var"))
+    assert dsn_vars == [scratch_env], (
+        f"{name}'s second provision exports {dsn_vars}, but the drill reads "
+        f"{scratch_env}: the second container would answer to a name nothing "
+        f"reads, D8 would skip, and the zero-skip gate would blame the record "
+        f"database for it (#9567 D8)")
+    assert scratch_env != RECORD_DB_ENV, (
+        f"the drill's scratch env is {RECORD_DB_ENV}, the record's own name: the "
+        "second provision would overwrite the first and D8 would refuse its own "
+        "target as `refuse_same_database` (#9567 D8)")
+
 
 def test_the_armed_record_leg_can_block_a_merge():
     """Decision 2 of #9551: REQUIRED on day one, not advisory.
@@ -3928,6 +3987,28 @@ _JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="4" failures="0" \
             name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
   <testcase classname="tests.test_9567_record_capstone"
             name="test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires"/>
+</testsuite></testsuites>"""
+
+#: ⛔ THE `xfail` QUARANTINE (#11429 review cycle 3): D8 is PRESENT by name but
+#: produced no verdict. Every other rule is satisfied — both armed files ran,
+#: nothing counted as a real skip, nothing failed — so a gate that asked only
+#: "does a testcase with this name exist" certified it, exit 0. `xfail` is the
+#: ordinary way a flaky leg is quarantined, and this leg runs a second container
+#: over the network, so it is the most likely thing anyone would quarantine. The
+#: xfail exclusion above is right for the ARMED legs (one carries a measured
+#: xfail); it must not extend to a REQUIRED case.
+_JUNIT_D8_XFAILED = """<testsuites><testsuite name="pytest" tests="4" failures="0" \
+ errors="0" skipped="1">
+  <testcase classname="tests.test_9078_record_written_by_production_path"
+            name="test_the_public_capture_path_writes_the_record"/>
+  <testcase classname="tests.test_9078_record_written_by_production_path"
+            name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+  <testcase classname="tests.test_9555_narrative_carrier"
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone"
+            name="test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires">
+    <skipped type="pytest.xfail" message="flaky: second container"/>
+  </testcase>
 </testsuite></testsuites>"""
 
 #: One leg deselected out of the run — the Postgres proof never happened.
@@ -4056,6 +4137,25 @@ def test_the_arm_gate_passes_a_green_armed_run(tmp_path):
 
     assert result.returncode == 0, result.stdout
     assert _gate_errors(result) == [], _gate_errors(result)
+
+
+def test_the_arm_gate_reds_on_a_quarantined_required_case(tmp_path):
+    """⛔ An `xfail` on D8 must not certify (#11429 review cycle 3).
+
+    The gate excludes `type="pytest.xfail"` from its skip count so a measured
+    engine xfail on an ARMED leg does not red the job. Composed with a
+    name-presence test for `REQUIRED_CASES`, that certified a run in which the
+    record's only restore drill never produced a verdict — one line away from the
+    hole `REQUIRED_CASES` was added to close. A required case must have RUN, not
+    merely appear.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_D8_XFAILED)
+
+    assert result.returncode == 1, (
+        "the gate certified a run in which the D8 drill was xfail-quarantined — "
+        f"it produced no verdict:\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any("required leg test_D8_" in line for line in errors), errors
 
 
 def test_the_arm_gate_tolerates_a_strict_xfail(tmp_path):

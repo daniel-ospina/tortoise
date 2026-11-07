@@ -150,7 +150,18 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
             "(#9551)")
     if failed:
         problems.append(f"{failed} failing/erroring leg(s) — see the run step")
-    present = {case.get("name", "") for case in root.iter("testcase")}
+    # ⛔ "PRESENT" MUST MEAN "PRODUCED A VERDICT", not "a testcase with this
+    # name exists" (#11429 review cycle 3). A case that did not run carries a
+    # `<skipped>` child — and `type="pytest.xfail"` is deliberately EXCLUDED from
+    # the `skipped` counter above, because one ARMED leg carries a measured xfail.
+    # Composed, a `@pytest.mark.xfail` on the D8 case — the ordinary quarantine
+    # idiom, and the most likely thing anyone would quarantine here since the leg
+    # runs a second container over the network — satisfied name-presence, recorded
+    # no real skip, and CERTIFIED (exit 0) a run in which the record's only restore
+    # drill never produced a verdict: the exact fail-open this rule exists to close,
+    # one line away. No `REQUIRED_CASES` entry has a legitimate xfail.
+    present = {case.get("name", "") for case in root.iter("testcase")
+               if case.find("skipped") is None}
     for required, why in sorted(REQUIRED_CASES.items()):
         if required not in present:
             problems.append(
