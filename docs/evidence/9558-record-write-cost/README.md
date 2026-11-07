@@ -134,26 +134,38 @@ win. `_default_connect` returns an idle handle when it has one, so the live
 door's per-record "open, commit, close" became "borrow, commit, return". The
 remaining 3.82–3.91 ms/record is one transaction boundary (prologue + plan + COMMIT)
 plus plan materialisation — **plus, and this was under-stated in the first
-revision, 0.32–0.34 ms of stat overhead**: `replay_plan` drives BOTH cached
-readers, and each recomputes the fifteen-file fingerprint (0.160–0.169 ms per
-pass, `fingerprint-cost.json`), so the cache is consulted twice per record. The
-known fix — compute the fingerprint once per plan build — therefore saves ONE
-pass, **0.160–0.169 ms**, and is filed as #11388 rather than hidden in "the work
-the record is for".
+revision, ≈0.68 ms of cache-consult overhead per record, in two halves this
+bullet used to conflate**: `replay_plan` drives BOTH cached readers, and each
+consult costs (i) `_migrations_dir()` → `_complete()`, fifteen `Path.exists()`
+calls resolving the base **before** the key is built (`record_projection.py:1659`
+with `:1497`/`:1502`), and (ii) one `_migrations_fingerprint` pass over the same
+fifteen files (0.160–0.169 ms, `fingerprint-cost.json`). Measured on one box at
+`d51c7897d6`: resolution median **0.169 ms**, fingerprint median **0.166 ms**, and
+a warm `table_columns()` **0.341 ms** — i.e. the committed warm medians
+(0.332–0.353 ms) ARE those two halves summed, not the fingerprint alone. So the
+residual is ≈**0.68 ms/record** (2 × 0.34), ≈0.33 ms resolution + ≈0.33 ms
+fingerprint. The known fix — compute the fingerprint once per plan build — saves
+ONE pass, **0.160–0.169 ms**, and **leaves the resolution half in place**, so
+#11388 must not be read as removing the whole residual; it is filed rather than
+hidden in "the work the record is for".
 
-⛔ **Three earlier revisions of this bullet, and why each was wrong.** It said
+⛔ **Four earlier revisions of this bullet, and why each was wrong.** It said
 "~80-85 % of the win" (that is the connection half as a share of the BEFORE TOTAL,
 not of the win). It said "~92-94 %" (94 % only falls out of the superseded ~0.9–1.0
-ms column-half estimate the same bullet replaced). And it said "≈0.9–1.0 ms of pure
+ms column-half estimate the same bullet replaced). It said "≈0.9–1.0 ms of pure
 stat" for the residual — which is 2 x the WHOLE cached call (stat + the per-call
-dict copy), not 2 x the stat pass, so the #11388 fix was overstated **2.6–3.1×
-against the residual it described (0.9–1.0 vs 0.32–0.34 ms), or 5.3–6.3× against
-the one pass #11388 actually saves (0.9–1.0 vs 0.160–0.169 ms)**. Whichever
-denominator the reader picks, it was wrong, and the denominator is named here now.
-The third was corrected here and in the three places in this repo that had
-copied it (⛔ #11388's own body still quotes the retired `0.27–0.33` /
-`0.135–0.166` bands as current; that artifact is outside this repo, so it is
-corrected on the issue itself rather than here).
+dict copy), not 2 x the stat pass. And the revision that replaced it said
+"0.32–0.34 ms of stat overhead", which is the whole warm call attributed to the
+fingerprint: **half of it is `_migrations_dir()`'s resolution**, so the residual
+is ≈0.68 ms and only ≈0.34 ms of it is stat. Against the two denominators the
+reader can pick, the retired ~0.9–1.0 ms figure was overstated **1.3–1.5× against
+the residual (0.9–1.0 vs 0.68 ms)** and **5.3–6.3× against the one pass #11388
+actually saves (0.9–1.0 vs 0.160–0.169 ms)**. Whichever denominator the reader
+picks, it was wrong, and the denominator is named here now.
+Those corrections were carried here and into the three places in this repo that
+had copied the retired figure (⛔ #11388's own body still quotes the retired
+`0.27–0.33` / `0.135–0.166` bands as current; that artifact is outside this repo,
+so it is corrected on the issue itself rather than here).
 
 **(b) The column-map half is real but smaller than the issue's "~4 ms" note
 suggests.** At this head `table_columns()` costs ~1.7 ms uncached and ~0.47 ms

@@ -122,6 +122,12 @@ class ScriptedConnection(FakeStatusConnection):
         cur.close = lambda: None       # type: ignore[method-assign]
         return cur
 
+    def set_session(self, **kwargs: Any) -> None:
+        """A psycopg2 SESSION MUTATOR — a METHOD, so it reaches the raw handle
+        through the wrapper's `__getattr__`, not through `__setattr__`."""
+        for name, value in kwargs.items():
+            setattr(self, name, value)
+
 
 @pytest.fixture(autouse=True)
 def _isolated_caches(monkeypatch):
@@ -636,6 +642,10 @@ def test_a_returned_handle_refuses_further_use():
     `autocommit` reaches the server: without its own fence a caller could
     re-poison the handle AFTER `_park_connection` normalised it, so the two fixes
     would cancel out (#9558 review cycle 2, P2, reproduced).
+    A FIFTH arm covers the SAME mutation reached as a METHOD
+    (`set_session(autocommit=True)`) — a method goes through `__getattr__`, so
+    fencing `__setattr__` alone left that door open (#9558 review at
+    `d51c7897d6`, P2, reproduced).
     """
     driver = pytest.importorskip("psycopg2", reason="the fence raises the "
                                                  "driver's own InterfaceError")
@@ -649,6 +659,8 @@ def test_a_returned_handle_refuses_further_use():
             call()
     with pytest.raises(driver.InterfaceError):
         handle.autocommit = True
+    with pytest.raises(driver.InterfaceError):
+        handle.set_session(autocommit=True)
     assert getattr(raw, "autocommit", False) is False, (
         "a post-close ATTRIBUTE WRITE reached the parked handle — it can "
         "re-poison the same connection's session state after "

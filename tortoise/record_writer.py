@@ -171,9 +171,13 @@ process-global guess, never a cross-request leak) is what they share, and
 neither may be replaced by one.
 
 **THE TRANSACTION.** The seam never calls `commit()` and never calls
-`rollback()` (pinned by a test whose fake connection counts both and asserts
-they are zero). When the caller injects `conn=`, the boundary is unambiguously
-theirs. When the seam opens the connection itself it RETURNS it on the outcome
+`rollback()` — **except at RELEASE**: when the seam opened the connection it
+hands back a `_PooledConnection` whose `close()` returns the handle to the pool,
+and `_park_connection` rolls back an unfinished transaction first so the next
+borrower cannot inherit it. A `conn=` the CALLER injected is never wrapped, so
+on that path both are still never called (pinned by a test whose fake
+connection counts both and asserts they are zero). When the caller injects
+`conn=`, the boundary is unambiguously theirs. When the seam opens the connection itself it RETURNS it on the outcome
 (`RecordWrite.connection`) so the caller can commit or close it — a seam that
 opened its own connection and committed it would commit the projection ALONE,
 which is the dual write §3 forbids.
@@ -433,7 +437,9 @@ class RecordWrite:
     last_seq: int = 0
     #: The connection the seam OPENED, or ``None`` when the caller injected one
     #: (theirs to close) or the call was not armed. When set, the caller owns the
-    #: transaction: this seam never commits and never rolls back.
+    #: transaction: this seam never commits, and never rolls back — except at
+    #: RELEASE, where the pooled handle's ``close()`` rolls back a transaction
+    #: that was left unfinished before parking the connection.
     connection: Any | None = field(default=None, repr=False)
     #: WHY an ARMED call did not write — one of the tokens
     #: ``monitoring.metrics()["record_write_failures"]`` / ``["record_non_journal_skips"]``
@@ -951,8 +957,10 @@ def _default_connect(dsn: str) -> Any:
     record. Pooling lives HERE, behind the one function whose job is "give me
     a connection", rather than at a call site, for one reason: it changes the
     cost of a connection and NOTHING about who owns one. `RecordWriter.write`
-    still neither commits nor rolls back, `RecordWrite.connection` is still the
-    handle its caller commits, and §2.0's unarmed path still opens nothing.
+    still neither commits nor rolls back (the one exception is RELEASE: the
+    pooled handle's ``close()`` rolls back an unfinished transaction before
+    parking it), `RecordWrite.connection` is still the handle its caller
+    commits, and §2.0's unarmed path still opens nothing.
 
     The handle returned is a :class:`_PooledConnection` whose ``close()``
     RETURNS it to the pool instead of closing it — that is the whole contract
@@ -1170,7 +1178,22 @@ class _PooledConnection:
 
     # — everything else is the real handle's —
     def __getattr__(self, name: str) -> Any:
-        return getattr(object.__getattribute__(self, "_raw"), name)
+        # ⛔ METHODS ARE THE SECOND DOOR TO THE RAW HANDLE, so they take the same
+        # fence as the three DB-API verbs. A psycopg2 session mutator is reached
+        # as a METHOD, not an attribute write: `handle.set_session(autocommit=True)`
+        # goes through here, and before this fence it reached the parked handle
+        # AFTER `_park_connection` had normalised it — re-poisoning the SAME
+        # connection for the next borrower, which is the state the normalisation
+        # exists to prevent (`__setattr__` closed the attribute-write door only;
+        # #9558 review, P2, reproduced). `set_isolation_level`, `reset` and
+        # `set_client_encoding` are the same shape.
+        #
+        # Attribute READS stay available: reading state cannot corrupt another
+        # borrower, and a debugger or `repr` must still work.
+        attr = getattr(object.__getattribute__(self, "_raw"), name)
+        if object.__getattribute__(self, "_returned") and callable(attr):
+            self._live()   # raises the driver's InterfaceError
+        return attr
 
     def __setattr__(self, name: str, value: Any) -> None:
         # `autocommit` and friends must reach the server, not vanish onto the
