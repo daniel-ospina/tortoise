@@ -1351,8 +1351,8 @@ class SummaryUnit:
             # that refusal escape as `TypeError: unhashable type` FROM THE SET
             # LITERAL — not the `ValueError` §12.5b's contract documents — and a
             # ``None`` class raised `TypeError: '<' not supported …` from
-            # ``sorted`` before this message sorted by ``repr``. Either way the
-            # caller's documented ``except ValueError`` recovery missed it and
+            # ``sorted`` before this message sorted by ``repr``. In both escapes
+            # the caller's documented ``except ValueError`` recovery missed it and
             # the traceback blamed Python instead of the store. The class is also
             # what ``promote_to`` exists to bolt shut, so a unit without one is
             # not a summary unit.

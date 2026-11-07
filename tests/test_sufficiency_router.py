@@ -1464,16 +1464,18 @@ def test_a_summary_unit_without_a_claim_class_is_refused_not_built() -> None:
     """The CLASS is load-bearing since the loop landed, and it was unvalidated.
 
     ``SummaryUnit.__post_init__`` checked the span, the claim, ``derived`` and the
-    ``unit_key`` — not the class. Two consequences, both measured on a mutant that
-    drops only this check: an unhashable class (a JSON row's ``list``) made the
-    store-contradiction refusal escape as ``TypeError: unhashable type`` raised
-    while building the message's SET LITERAL — not ``sorted``, which sorts by
-    ``repr`` precisely so a class that is merely unorderable cannot do this — and
-    a ``None`` class raised ``TypeError: '<' not supported …`` from ``sorted``
-    only BEFORE that ``key=repr`` landed. Either way the caller's documented
-    ``except ValueError`` recovery missed it, and ``plan_writeback`` would happily
-    MINT a unit whose class is ``None``. Fail closed at the type, next to the
-    other invariants.
+    ``unit_key`` — not the class. Two consequences, with their provenance kept
+    APART because they are not the same mutant. Dropping ONLY this check: an
+    unhashable class (a JSON row's ``list``) makes the store-contradiction refusal
+    escape as ``TypeError: unhashable type`` raised while building the message's
+    SET LITERAL — not ``sorted``, which sorts by ``repr`` precisely so a class
+    that is merely unorderable cannot do this — while a ``None`` class still
+    reaches the intended ``ValueError``. ALSO stripping that ``key=repr``: the
+    ``None`` class then raises ``TypeError: '<' not supported …`` from ``sorted``.
+    In both escapes the traceback blamed Python instead of the store, the
+    caller's documented ``except ValueError`` recovery could miss it, and
+    ``plan_writeback`` would happily MINT a unit whose class is ``None``. Fail
+    closed at the type, next to the other invariants.
     """
     span = _span()
     with pytest.raises(ValueError, match="claim class"):
