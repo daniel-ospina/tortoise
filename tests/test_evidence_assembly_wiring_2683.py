@@ -300,9 +300,11 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     # equivalent of, which is the gap #11467 records.
     # ⛔ Cited by SYMBOL, not line number, deliberately (`e1ba0974e`'s rule for
     # code citations): the numbers that stood here had drifted out from under
-    # them — the four keys now sit at `run.py:5396/5431/5440/5451`, the
-    # tr_session fingerprint entries at `:1956-1960`, its knobs at `:6048-6069`.
-    # A key name survives a rebase; a line number does not.
+    # them — the four keys now sit at `run.py:5396/5431/5440/5451` and its knobs
+    # at `:6048-6069` (the two `tr_session_*` CONFIG-FLAG entries at `:1956-1959`
+    # in `run.py`, whose block runs on to `:1975` with the four completion
+    # budgets — hence the symbol form above). A key name survives a rebase; a
+    # line number does not.
     # Hence this pin is the only guard the census has: a key that grows or
     # disappears is otherwise shipped unseen.
     assert set(stats) == {
