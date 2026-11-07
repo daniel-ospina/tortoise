@@ -169,15 +169,17 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   lane does the opposite (the ``PointRevised`` patch stores
   ``props.story_arc = null``, ``_props_from_row`` returns it, and
   ``node_statement`` renders ``SET n += $props``, where a null REMOVES the key),
-  so a record-sourced rebuild keeps it clear. And on NO label is
-  there a repair that RESTORES the value. ⛔ That is the
+  so a record-sourced rebuild keeps it clear. ⚠️ So where a ``:Point``'s record
+  ``props`` tail still CARRIES the prose, ``record-restore`` IS a repair that
+  RESTORES the value — and ``_partition_cache_owned``'s ``keep |=
+  set(record_props)`` makes that population COMPARED rather than bucketed, so it
+  is not a ``graph_only`` occurrence at all. What has no repair that RESTORES the
+  value is the two ANCHORS, not "no label". ⛔ That is the
   PROHIBITION, not a missing source: the record's TABLE holds the column (§9.1
   puts the narrative in Postgres), but ``cache_projection.CACHE_FORBIDDEN_COLUMNS``
-  forbids the RECORD→CACHE projection from writing it onto either ANCHOR and no
-  in-tree route re-derives it there (the ``:Point`` journal REPLAY
-  half is ``#10429``'s own), so no repair can put the value back. ⛔ Not "no
-  IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
-  clear — what is missing is a route that KEEPS the value. ⚠️ No shipped
+  forbids the RECORD→CACHE projection from writing it onto either ANCHOR. ⛔ Not
+  "no IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
+  clear — what is missing on those two ANCHORS is a route that KEEPS the value. ⚠️ No shipped
   instrument performs that removal for THIS class: ``#10017``'s purge
   (``tools/purge_legacy_turns.py``) is the precedent on a DIFFERENT population
   (legacy episodic turn ``:Point``s — a ``DETACH DELETE``) and names no
