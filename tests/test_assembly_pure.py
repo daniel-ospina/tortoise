@@ -925,6 +925,41 @@ def test_recency_guard_flag_defaults_on_and_is_tristate(monkeypatch):
     assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL
 
 
+def test_env_example_declares_the_recency_narrative_latest_switch():
+    """``.env.example`` IS this repo's env contract (``AGENTS.md``).
+
+    The same pin exists for the comparable arm switches
+    (``test_bm25_lexical_8488.py::test_env_example_declares_the_bm25_arm_switch``,
+    ``test_time_aware_2520.py::test_env_example_declares_the_valid_time_kill_switch``).
+    #8775's knob is the fix's only operator-visible lever, so an operator must be
+    able to find it without reading source — declared as the commented assignment
+    they copy, not merely named in prose.
+    """
+    root = Path(__file__).resolve().parent.parent
+    env = (root / ".env.example").read_text()
+
+    def _comment_body(line: str) -> str:
+        """The line with its leading comment markers AND indentation removed.
+
+        This file double-comments the block (``# # VAR=0   # <why>``), so a
+        single ``lstrip("#")`` leaves ``# VAR=0`` and matches nothing.
+        """
+        body = line.strip()
+        while body[:1] in ("#", " "):
+            body = body[1:]
+        return body
+
+    assert RECENCY_NARRATIVE_LATEST_ENV in env, (
+        f"{RECENCY_NARRATIVE_LATEST_ENV} (the #8775 recency guard) is an "
+        "operator-visible lever that is not declared in .env.example")
+    assignments = [
+        line for line in env.splitlines()
+        if _comment_body(line).startswith(f"{RECENCY_NARRATIVE_LATEST_ENV}=")]
+    assert assignments, (
+        f"{RECENCY_NARRATIVE_LATEST_ENV} must be shown as a commented "
+        "assignment (the example form an operator copies), not just named in prose")
+
+
 def test_recency_latest_selecting_an_interval_anchor_still_rejects():
     """#8775 (reviews 1–3): the exemption is STRUCTURAL — a `latest` inside a
     relative/subordinate clause — never a positional or vocabulary proxy.

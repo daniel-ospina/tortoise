@@ -845,8 +845,17 @@ def _latest_sits_in_a_relative_clause(match) -> bool:
     REFERENT the anchor's own noun phrase selects — "my latest exam", "the day
     of my latest exam", "my very own latest exam" — and the arms cannot resolve
     WHICH one (the name-FTS leg is an OR-union, so it matches any object
-    containing "exam"). Main abstained on all of those and still does; the arms
-    never re-read an anchor's narrative extension, so text there is harmless.
+    containing "exam"). Main abstained on all of those and still does.
+
+    ⚠️ DECLARED RESIDUAL, and it is NOT "text there is harmless" (#11458,
+    measured): this keys on the CLAUSE, a syntactic place and not a semantic
+    one, so a selecting `latest` that happens to sit after an incidental
+    relative opener — "between the book **which** I read about my latest exam
+    and my birthday" — is exempted and the question fires. The qualifier IS
+    re-read: `extract_subject_terms` keeps the anchor verbatim, i.e.
+    `['the book which I read about my latest exam', 'my birthday']`. The residual
+    is the SMALLER direction — rounds 1–2 measured that both positional proxies
+    leaked the other way — and it is tracked rather than silently shipped.
 
     #8775 review 4: the opener must belong to the CLAUSE the token sits in. "…the
     fair where I met her **and** took my latest exam" has an opener earlier in
