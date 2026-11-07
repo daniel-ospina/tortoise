@@ -2125,7 +2125,7 @@ they name (`purge → restore → sum(size(n.story_arc))` = 0) holds because the
 `story_arc` on either ANCHOR and its whole-graph wipe clears a legacy copy — not because a purge ran.
 
 ⚠️ **CORRECTED AGAIN (`#11325` review cycle 2)**: the ENTRY above (its "⛔ Only the NOT-PROJECTABLE class"
-sentence) says the class "lacks … a non-destructive" repair. That is true on the two ANCHORS this constant keys (`source`/`event`: `update_entity(…, story_arc=None)` is
+sentence) says the class "lacks a non-destructive" repair. That is true on the two ANCHORS this constant keys (`source`/`event`: `update_entity(…, story_arc=None)` is
 REFUSED as server-managed on BOTH anchors — `_SOURCE_SERVER_MANAGED_PROPS` / `_EVENT_SERVER_MANAGED_PROPS`, each raising
 with the stored value untouched) and **false on a
 `:Point`**, which has a non-destructive in-place one: `update_point(<id>, story_arc=None)` clears the property and KEEPS
