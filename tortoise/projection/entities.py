@@ -2035,9 +2035,11 @@ class _EntityHandlers:
         # owner rule says the property must not exist, no in-tree producer ever
         # emitted the key on this event (`api.add_document` takes no such
         # parameter), and the destructive removal of what DOES exist has no
-        # shipped instrument — a full restore's whole-graph wipe (refused
-        # pre-wipe on a production server graph name) or a graph-side
-        # `REMOVE n.story_arc` nobody issues; `#10017`'s purge is the legacy
+        # shipped instrument ON A PRODUCTION SERVER GRAPH — a full restore's
+        # whole-graph wipe clears it where the L2 name rule admits the target
+        # (`test_`-prefixed or an embedded `path=` DB) and is refused pre-wipe
+        # on every production name, and a graph-side `REMOVE n.story_arc` is
+        # issued by nobody; `#10017`'s purge is the legacy
         # turn `:Point` population and never matches a `:Source` (`#11325`).
         #
         # ⛔ Scope, so this is not read as more than it is: it denies the KEY.
