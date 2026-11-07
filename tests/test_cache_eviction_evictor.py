@@ -85,8 +85,6 @@ class _Record:
 @pytest.fixture()
 def lane():
     """A dedicated graph on the live lane container, dropped afterwards."""
-    import os
-
     import redis
     from falkordb import FalkorDB
 
