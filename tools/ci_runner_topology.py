@@ -70,7 +70,9 @@ tool names each separately because they have different remedies:
                         pinned off `ubuntu-latest` for the same reason
                         (`tests/test_ci_selection.py
                         ::test_slow_legs_are_pinned_off_the_ambiguous_runner_label`).
-                        REMEDY: strip the label from the non-x64 runner.
+                        REMEDY: attach it to the x64 pool. Removing it from the
+                        non-x64 carrier is `apply --strip-non-x64`, which is
+                        owner-gated (#6897/#9878) and therefore never a default.
 
   NO_X64_FALLBACK       The fallback is engaged (some runner carries it) and NO
                         x64 runner does, so every `ubuntu-latest` job that does
@@ -88,8 +90,12 @@ tool names each separately because they have different remedies:
                         above red.
 
 The DESIRED topology this tool produces (`--engage`):
-`ubuntu-latest` on the x64 pool ONLY — never on an ARM64 runner — and stripped
-from every runner that is not x64. That is #10912's own "preferred" remedy.
+`ubuntu-latest` ATTACHED to the x64 pool, so queueing `ubuntu-latest` work has a
+runner to reach. The x64-ONLY form — the label stripped from every runner that is
+not x64 — is `--engage --strip-non-x64`, and it is NOT the default: removing the
+label is the step `#6897/#9878` own (`tools/ci_runner_labels.py` R2), and this
+PR's own body records it as not adoptable without a reopen. Under a bare `apply`
+a non-x64 carrier is left byte-identical and REPORTED as `OWNER-GATED`.
 
 ⛔ WHAT THIS TOOL DOES NOT DO. It does not touch `runs-on:` in any workflow (the
 repo-side half of this class is already landed: `test-slow`/`workflow-lint` are
@@ -103,15 +109,19 @@ USAGE
     uv run python tools/ci_runner_topology.py check            # exit 1 on a violation
     uv run python tools/ci_runner_topology.py apply --dry-run  # what would change
     uv run python tools/ci_runner_topology.py apply            # ENGAGE (default): the desired topology
+    uv run python tools/ci_runner_topology.py apply --strip-non-x64  # + the owner-gated x64-only strip
     uv run python tools/ci_runner_topology.py apply --disengage # strip the fallback everywhere
     uv run python tools/ci_runner_topology.py check --queued-floor-seconds 1800
 
 `apply` ENGAGES by default. The strip direction is `--disengage`, stated
 explicitly, because a verb whose DEFAULT silently performs the destructive
 direction is how a pool ends up with no runner answering a label every queued
-job asks for. `apply --from-fixture` is refuse-without-`--dry-run`: a fixture
+job asks for. The x64-ONLY half (`--engage --strip-non-x64`) removes the label
+from non-x64 carriers and is opt-in, because that removal is the step
+`#6897/#9878` reserve; without it an ARM64 carrier is reported as `OWNER-GATED`
+and left byte-identical. `apply --from-fixture` is refuse-without-`--dry-run`: a fixture
 carries runner ids from another census (the measured one carries this repo's real
-ids 1-21), so writing from it relabels runners nobody asked it to touch.
+ids), so writing from it relabels runners nobody asked it to touch.
 
 `apply` needs `administration: write` on the token — `GITHUB_TOKEN` inside
 Actions does NOT have it, so the reconcile is operator/hub-run (the same token
@@ -465,17 +475,34 @@ def desired_label_set(runner: Runner, *, engage: bool, strip_non_x64: bool = Fal
 def unmanaged_reason(runner: Runner) -> str | None:
     """Why this runner is NOT ours to relabel, or None when it is a pool member we reconcile.
 
-    Both gates are taken from `ci_runner_gate.sh`'s own write path rather than invented here:
-    `managed_ids` selects only runners carrying a pool marker ("A runner carrying neither marker
-    is not ours to relabel, and leaving it untouched is the conservative reading"), and
-    `labels_for` refuses a runner whose host arch it cannot classify. A runner excluded by either
-    gate is REPORTED and left byte-identical — never rewritten on a guess, and never a diff the
-    plan can never close.
+    Three gates, and each one is named for the thing that actually implements it:
+
+    * the PLATFORM gate — this file's own, because a macOS runner cannot join the Linux pool;
+    * `ci_runner_gate.sh:managed_ids` — the POOL-MARKER gate: "A runner carrying neither marker
+      is not ours to relabel, and leaving it untouched is the conservative reading";
+    * `ci_runner_gate.sh:labels_for` — the ARCH gate: a runner whose host arch it cannot
+      classify is a named failure, never a guess.
+
+    A runner excluded by any gate is REPORTED and left byte-identical — never rewritten on a
+    guess, and never a diff the plan can never close.
     """
     if PLATFORM_LINUX not in runner.labels:
         return (
             "is not a Linux runner, so it is not a member of the Linux self-hosted pool this label "
-            "belongs to — left untouched (`ci_runner_gate.sh:managed_ids`)"
+            "belongs to — left untouched"
+        )
+    # ⛔ THE MARKER GATE IS NOT DECORATION. Without it `apply` attached `self-hosted-x64` AND
+    # `ubuntu-latest` to any Linux/x64 box — an unprovisioned machine the operator never enrolled
+    # would start receiving both `ubuntu-latest` and `[self-hosted, self-hosted-x64]` jobs, while
+    # this function's own docstring promised such a runner was left alone (measured probe: a
+    # Linux/X64 runner with custom labels `['gpu']` planned -> `['gpu','self-hosted-x64',
+    # 'ubuntu-latest']`). Latent on the measured pool — every runner there carries a marker — but
+    # the contract and the code disagreed, and the code was the one that would run.
+    if not POOL_MARKERS & runner.custom_labels:
+        return (
+            "carries neither pool marker ("
+            + " / ".join(sorted(POOL_MARKERS))
+            + "), so it is not ours to relabel — left untouched (`ci_runner_gate.sh:managed_ids`)"
         )
     if runner.host is None:
         return (
@@ -576,13 +603,6 @@ def check(
 
 # --------------------------------------------------------------------------- I/O
 REPO = os.environ.get("TORTOISE_REPO", "daniel-ospina/tortoise")
-
-
-def _gh(args: Sequence[str], *, check_rc: bool = True) -> str:
-    proc = subprocess.run(["gh", *args], capture_output=True, text=True)
-    if check_rc and proc.returncode != 0:
-        raise SystemExit(f"gh {' '.join(args)} failed rc={proc.returncode}: {proc.stderr[:500]}")
-    return proc.stdout
 
 
 def fetch_runners(repo: str = REPO) -> list[Runner]:
@@ -771,6 +791,13 @@ def _print_human(report: Mapping[str, Any]) -> None:
     # runner the tool never measured was still accepting `ubuntu-latest` work.
     for name, why in sorted(report.get("unclassified", {}).items()):
         print(f"  ⚠️  UNRECONCILED {name}: {why}")
+    # ⛔ THE SAME CHANNEL, ON THE TRIPWIRE'S OWN RENDER. `check --json` carried `owner_gated` and
+    # the human render did not, so the form the docstring calls the tripwire printed
+    # `REMEDY: strip 'ubuntu-latest' from this runner` with no note that `apply` will refuse to do
+    # it without `--strip-non-x64`. Asymmetry between the two renders is how a reader concludes the
+    # tool is broken rather than owner-gated.
+    for name, why in sorted(report.get("owner_gated", {}).items()):
+        print(f"  ⚠️  OWNER-GATED {name}: {why}")
     if not report["violations"]:
         print(f"verdict: {report['verdict']}")
     else:
@@ -982,7 +1009,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name, why in sorted(pending.unclassified.items()):
             print(f"  ⚠️  {name}: left untouched — {why}")
         for name, why in sorted(pending.owner_gated.items()):
-            print(f"  ⚠️  {name}: left untouched — {why}")
+            # ⛔ "LEFT UNTOUCHED" WAS FALSE FOR A RUNNER THE SAME RUN WRITES TO. An ARM64 carrier
+            # that also carries the foreign `self-hosted-x64` marker IS reconciled (the marker is
+            # dropped — that is this PR's round-6 fix), so printing "left untouched" beside
+            # `pi-runner-vm-9: [...] -> [...] [planned]` made the render contradict itself. Only
+            # the STRIP is skipped on such a runner, and the line now says exactly that.
+            if name in pending.changes:
+                print(f"  ⚠️  {name}: strip skipped (owner-gated) — its other owned labels are reconciled: {why}")
+            else:
+                print(f"  ⚠️  {name}: left untouched — {why}")
         if post is not None:
             # ⛔ THE COUNT MUST USE THE GATE'S DEFINITION. `census`'s `serving_fallback` has no
             # `online` filter (deliberately: it is a raw census), so printing it here produced

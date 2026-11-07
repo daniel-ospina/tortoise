@@ -1004,3 +1004,162 @@ def test_engage_and_strip_non_x64_are_ONE_topology_not_a_conflict(tmp_path: Path
     assert payload["owner_gated"] == {}
     # 16 attaches + 3 strips.
     assert len(payload["changes"]) == 19
+
+
+# ------------------------------------------- the queue age is the OLDEST run, and it is proven
+def test_the_oldest_queued_run_is_the_minimum_not_the_newest(monkeypatch):
+    """REGRESSION (#11435 review, fresh-context cycle 2 P1): the pre-fix code asked for
+    `?per_page=1&sort=created&direction=asc`, but `List workflow runs` accepts NO `sort` /
+    `direction`, so the API returned the NEWEST queued run — measured on this repo:
+    2026-11-07T17:51Z for a queue whose oldest entry was 2026-11-05T16:29Z. With that reading,
+    `queued_oldest_seconds >= floor` never holds and `starvation_suspected` — the one signal this
+    verb exists to emit — is unreachable, while the render prints a fresh-looking age beside a
+    two-day-old queue.
+
+    ⛔ THE MUTATION IS THE PROOF, and the previous round had none: flipping the MIN (`one <
+    created`) to MAX (`one > created`) left all 38 tests green, because every other test stubs
+    this function out. This one asserts the VALUE, so the flip reds.
+    """
+    payload = "\n".join(
+        [
+            "2026-11-07T17:51:59Z",  # the NEWEST — what the buggy query returned
+            "2026-11-05T16:29:12Z",  # the OLDEST — the age the tool must report
+            "2026-11-06T09:00:00Z",
+        ]
+    )
+
+    def fake_run(argv, **kwargs):
+        assert argv[:2] == ["gh", "api"], argv
+        url = argv[3]
+        # ⛔ THE QUERY ITSELF IS THE DEFECT. `sort`/`direction` are not parameters of this
+        # endpoint; sending them is what made a "oldest" read return the newest.
+        assert "sort=" not in url, url
+        assert "direction=" not in url, url
+        assert "--paginate" in argv, argv
+
+        class P:
+            returncode = 0
+            stdout = payload
+            stderr = ""
+
+        return P()
+
+    monkeypatch.setattr(topo.subprocess, "run", fake_run)
+    age = topo.fetch_oldest_queued_seconds("daniel-ospina/tortoise")
+    assert age is not None
+    # 2026-11-05T16:29:12Z is far more than a day before any plausible "now"; the newest is not.
+    assert age >= 24 * 3600, (
+        f"the oldest queued run must be the MINIMUM created_at, so its age is >24h; got {age}s — "
+        f"a small value means the NEWEST run was read (the pre-fix defect)"
+    )
+
+
+def test_an_unreadable_queue_age_is_none_never_zero(monkeypatch):
+    """A queue age nobody could read must not read as 'no queue'. `None` is the only honest
+    answer, and `check` then omits the starvation judgement instead of inventing a fresh queue."""
+    for rc, stdout in ((1, "2026-11-05T16:29:12Z"), (0, ""), (0, "garbage\nnot-a-timestamp")):
+        class P:
+            returncode = rc
+            stderr = "boom"
+            pass
+
+        P.stdout = stdout
+        monkeypatch.setattr(topo.subprocess, "run", lambda argv, _P=P, **kw: _P())
+        assert topo.fetch_oldest_queued_seconds("r") is None, (rc, stdout)
+
+
+# ------------------------------------------- the marker gate is code, not just a docstring
+def test_a_runner_without_a_pool_marker_is_never_enrolled(monkeypatch):
+    """REGRESSION (#11435 review, fresh-context cycle 2 P1): `unmanaged_reason`'s docstring
+    attributed a `managed_ids` POOL-MARKER gate to itself, and no such gate existed. Measured
+    probe before the fix: a Linux/X64 runner whose custom labels were `['gpu']` (no
+    `self-hosted-x64`, no `self-hosted-arm64`) planned to
+    `['gpu', 'self-hosted-x64', 'ubuntu-latest']` — i.e. `apply` enrolled an unprovisioned box
+    the operator never added to the pool, and both `ubuntu-latest` and
+    `[self-hosted, self-hosted-x64]` jobs would route to it. The tool's own contract says such a
+    runner is LEFT BYTE-IDENTICAL.
+    """
+    orphan = topo.parse_runner(
+        _runner(99, "legacy-gpu-box", ["self-hosted", "Linux", "X64", "gpu"])
+    )
+    assert topo.unmanaged_reason(orphan) is not None, "a runner carrying neither pool marker is not ours"
+    pending = topo.plan([orphan], engage=True)
+    assert pending.changes == {}, "no write may target a runner outside the pool"
+    assert "legacy-gpu-box" in pending.unclassified, "the skip must be REPORTED, never silent"
+    # …and a marked runner on the same host IS reconciled, so the gate is not over-broad.
+    member = topo.parse_runner(
+        _runner(100, "pi-runner-x64-9", ["self-hosted", "Linux", "X64", "self-hosted-x64"])
+    )
+    assert topo.unmanaged_reason(member) is None
+    assert "pi-runner-x64-9" in topo.plan([member], engage=True).changes
+
+
+# ------------------------------------------- the dry run's CAPACITY gate is proven, not assumed
+def test_a_dry_run_on_an_x64less_pool_reports_the_capacity_gate(tmp_path: Path):
+    """REGRESSION (#11435 review, fresh-context cycle 2 P2): the dry-run branch's
+    `engage_gate(...)` could be replaced with `None` and all 38 tests stayed green — the gate that
+    makes a pre-flight honest was unproven. On a pool with no x64 arm, a reconcile attaches the
+    label nowhere servable, so the PROJECTION must say so and exit non-zero.
+    """
+    fixture = tmp_path / "arm-only.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "total_count": 2,
+                "runners": [
+                    _runner(1, "pi-runner-vm-2", ["self-hosted", "Linux", "ARM64", "self-hosted-arm64"]),
+                    _runner(2, "pi-runner-vm-3", ["self-hosted", "Linux", "ARM64", "self-hosted-arm64"]),
+                ],
+            }
+        )
+    )
+    proc = subprocess.run(
+        [
+            sys.executable, str(TOOL), "apply", "--dry-run", "--engage", "--strip-non-x64",
+            "--from-fixture", str(fixture), "--json",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert topo.VIOLATION_ENGAGE_NO_X64_SERVER in proc.stderr, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["ok"] is False
+    assert payload["post_is_projection"] is True
+    assert payload["post"]["verdict"] == topo.VIOLATION_ENGAGE_NO_X64_SERVER
+
+
+# ------------------------------------------- one render, no self-contradiction
+def test_the_apply_render_never_says_untouched_about_a_runner_it_writes(tmp_path: Path):
+    """REGRESSION (#11435 review, fresh-context cycle 2 P2): an ARM64 carrier that also carries
+    the FOREIGN `self-hosted-x64` marker IS rewritten (the marker is dropped — this PR's round-6
+    fix) and was printed as `left untouched` on the same run. The two halves of one render
+    contradicted each other, which is the class this PR keeps closing.
+    """
+    fixture = tmp_path / "mixed.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "total_count": 2,
+                "runners": [
+                    _runner(1, "pi-runner-x64-1", ["self-hosted", "Linux", "X64", "self-hosted-x64"]),
+                    _runner(
+                        2,
+                        "pi-runner-vm-9",
+                        ["self-hosted", "Linux", "ARM64", "self-hosted-arm64", "self-hosted-x64",
+                         "ubuntu-latest"],
+                    ),
+                ],
+            }
+        )
+    )
+    proc = subprocess.run(
+        [sys.executable, str(TOOL), "apply", "--dry-run", "--from-fixture", str(fixture)],
+        capture_output=True,
+        text=True,
+    )
+    lines = proc.stdout.splitlines()
+    written = [line for line in lines if line.strip().startswith("pi-runner-vm-9:")]
+    assert written, proc.stdout
+    assert "left untouched" not in " ".join(lines), proc.stdout
+    assert "strip skipped (owner-gated)" in proc.stdout, proc.stdout
