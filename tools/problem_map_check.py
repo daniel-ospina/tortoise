@@ -49,6 +49,7 @@ What it re-measures, offline, from the tree in front of it:
   reinstates the false drift. Pinned by a real corrupted object in
   `test_a_corrupt_object_store_reads_as_no_answer_not_as_drift`.
 
+- **Anchor relevance** (see check 3): existence + ancestry, never "is this the
   fix". Reading the commit is the reviewer's job.
 - **Pin relevance**: a pin resolves and — for a `tests/*.py` module — declares at
   least one test function (the `_DEF_TEST` floor, which a FIXTURE named `test_*`

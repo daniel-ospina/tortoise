@@ -9933,8 +9933,8 @@ durations:
   # weight is
   # deliberately a
   # LOWER bound and is NOT a junit measurement; the cost is a bounded `git
-  # cat-file`/`merge-base` per anchor, a few `Path.read_text` calls, and one
-  # throwaway `git init` repos in three cases. Measured on this box at the landed
+  # cat-file`/`merge-base` per anchor, a few `Path.read_text` calls, and a
+  # throwaway `git init` repo in three cases. Measured on this box at the landed
   # head with `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q`:
   # `43 passed in 5.94s` including the repo conftest's import/teardown, so the
   # file's own testcase time is well under it. Re-measure rather than quoting
