@@ -215,7 +215,7 @@ below are that population's, not production's** — they demonstrate the instrum
 *label/index* facts, which are properties of the engine and the product's index DDL rather than of a row
 count. The production counts are §5's open item, and are **not** substituted with these.
 
-The transcript below is the tool's **text mode**, pasted unedited:
+The transcript below is the tool's **text mode**, pasted unedited — with one line ADDED at `#11337`'s head, since this section's run predates it: the `⛔ surface: UNMEASURED(declared bound: …)` line, which the surface block now always carries because `volunteer_context` passes the leg by reference. It is marked rather than silently woven in, because an "unedited" transcript that does not reproduce is worse than a dated one:
 
 ```text
 $ uv run python tools/dod_5090_probe.py --census --uri <lane-uri> --graph census11088_demo
@@ -234,6 +234,9 @@ Census — graph `census11088_demo` at 2026-11-06T23:21:34+00:00 (CALL db.indexe
              entity_type(s) served by this label: ['subject'] — removing the UNINDEXED remainder changes query results: True
   surface consequence — removal is REQUESTED, not performed; it needs the owner's approval (MCP/SDK surface):
     affected entity_type values: ['document', 'event', 'object', 'source', 'subject']
+    ⛔ surface: UNMEASURED(declared bound: volunteer_context (tortoise_fts_query) — a leg-reaching
+       function is taken by reference here, which this scan follows as a name-resolved call only;
+       the caller list and its entity-type set may be short by that reach)
     path: tortoise_issue_insight (GET /v1/issue-insight, entity_type=point) / tortoise_query (MCP only (no REST route)) / tortoise_recall (MCP only (no REST route), entity_type=object|point) / tortoise_review_connections (MCP only (no REST route), entity_type=point) / tortoise_search (GET /v1/search) / tortoise_search_sessions (MCP only (no REST route), entity_type=event) / tortoise_suggest_entry_points (MCP only (no REST route), entity_type=point) → tortoise_fts_query(entity_type=…) → tortoise.search_engine.run_vector_query
     tools whose results change: tortoise_query (any (the caller chooses)) / tortoise_recall (['object']) / tortoise_search (any (the caller chooses)) / tortoise_search_sessions (['event'])
   population: CALL db.labels()

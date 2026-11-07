@@ -2474,10 +2474,14 @@ def _sdk_methods_on_vector_leg(
     # list is SHORT, and the only honest report is to say so. Emitted through
     # the `UNMEASURED` channel the caller already prints, so it rides beside the
     # tools rather than in a docstring nobody reads at report time.
-    # ⛔ MEASURED at this head, and verified against the SOURCE, not against this
-    # scan's own output: `tortoise/sdk.py` holds no by-reference shape (there is
-    # no `_safe(`-style helper call in it at all), so this stays empty and a
-    # clean run is still clean. A previous cycle read five entries off this
+    # ⛔ MEASURED at this head, against the SOURCE: `tortoise/sdk.py` holds
+    # exactly ONE by-reference shape — `volunteer_context`'s
+    # `_search_fn=self.tortoise_fts_query` — so this does NOT stay empty and a
+    # clean run DOES publish a declared-bound line. Grepping for `_safe(`
+    # answers a SPELLING, not the shape; that inference is what made an earlier
+    # version of this comment certify the opposite of the truth, and the
+    # cheapest repair for a reader who trusted it would be to delete the
+    # declaration as a false positive. A previous cycle read five entries off this
     # scan's output and published them as "LIVE" — they were all the
     # resolved-call false positive above, which is why the negative pin exists
     # beside the positive one: the instrument's own output is not evidence about
