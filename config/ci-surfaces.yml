@@ -5468,8 +5468,10 @@ surfaces:
   # the eval measured OFF-vs-OFF. Docker-lane leg (dedicated graph), same sibling
   # set as `test_time_aware_eval_2520.py`. Registered on `core` for the paths
   # that reach it WITHOUT a named-surface match: this test file as its own
-  # change selects `core` and the `core` fallback is what a diff to any other
-  # `tortoise/**` module lands on. ⚠️ Its two subjects select OTHER surfaces and
+  # change selects `core` and the `core` fallback is what a diff to any
+  # `tortoise/**` module that matches no `SOURCE_PATTERNS` row lands on
+  # (measured: `tortoise/quota.py` selects `api` and does NOT reach this file).
+  # ⚠️ Its two subjects select OTHER surfaces and
   # REPLACE the `core` fallback — `tortoise/retrieval.py` selects `sdk` and
   # `tools/longmem_eval/` selects `eval` (see the `sdk` and `eval` entries
   # below), so a `retrieve.py`-only change does NOT run this file via `core`.
