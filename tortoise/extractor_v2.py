@@ -9937,7 +9937,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # rides the claim as `surface` + the span it addressed, and nothing here
         # is ever minted as an :Object.
         _mentions = _mentions_for_claim(
-            embed_list, content, armed=_referentiality.enabled())
+            embed_list, content, armed=_referentiality.enabled(),
+            narrative=story_arc or summary)
         if _mentions:
             pt_entry["mentions"] = _mentions
         # #2684 (Slice B): a VALUE-BEARING point carries the verbatim source
@@ -10857,8 +10858,24 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     _attached = sum(len(p.get("mentions") or []) for p in payload_points
                     if isinstance(p, dict))
     _armed = _referentiality.enabled()
-    _records = ([m for m in (embed_list.get("mentions") or []) if isinstance(m, dict)]
-                if _armed else [])
+    # ⛔ The ACCOUNTING is built from the SAME clamped projection the evidence
+    # surface publishes, not from the raw channel:
+    #   • `_dedupe_mentions` runs inside `route_mentions` — the call that may have
+    #     raised — so on the fail-open path one hold was counted twice while the
+    #     published lists said one (review at `d785f3da8`, P2);
+    #   • and two RAW entries whose surfaces agree only after the 200-character cap
+    #     were still counted twice because the raw keys differ (`"a"*201+"X"` vs
+    #     `"a"*201+"Y"`), so `mentions_recorded` exceeded what the run published —
+    #     the self-disagreement the dedupe was supposed to close (review at
+    #     `b791a3eb2`, P3);
+    #   • and a raw `claim_ref` over `_MAX_CONTENT` keyed apart from its own emitted
+    #     claim, reporting a HAD-emitted claim as unresolved (review at `b791a3eb2`,
+    #     P2).
+    # Counting the clamped records answers all three by construction.
+    _records = (_dedupe_mentions([
+        r for r in (_clamped_mention(m) for m in (embed_list.get("mentions") or [])
+                    if isinstance(m, dict)) if r is not None])
+        if _armed else [])
     _emitted_refs = {_norm(str(p.get("content") or "")) for p in payload_points
                      if isinstance(p, dict)}   # payload content IS the write's form
     unresolved = [m for m in _records
@@ -11278,7 +11295,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     4. it is recorded as a mention on **every** claim that used it —
        ``{surface, claim_ref, quote, span_start, span_end, span_source,
        kind_guess, rule_id}`` — which is where the information a hold would
-       otherwise destroy now lives. ⚠️ Every POINT carrier, exactly: an EVENT is
+       otherwise destroy now lives, **in the payload** (see the boundary below). ⚠️ Every POINT carrier, exactly: an EVENT is
        a carrier too (its ``about_entities`` is stripped like a claim's), but
        ``execute_embed``'s ref set is points-only, so a record written against an
        EVENT can never resolve and would be reported as a fold that never
@@ -11286,6 +11303,24 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
        surface is listed in ``mention_unrecorded_surfaces`` and counted in
        ``mention_carrier_is_event``. The surface is still HELD (never minted) —
        only the DM1 record is missing, and that gap is the persistence slice's.
+
+    ⛔ **The record stops at the PAYLOAD, and that is stated, not implied.** All
+    FOUR write doors drop ``mentions`` — the REST ``CreatePointRequest``, the SDK
+    capture whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``),
+    ``hosted_api._execute_commit_writes`` (the ``sdk.create_point`` call the v2
+    payload actually rides), and the SELF-HOST mirror
+    ``selfhost_api.CreatePointRequest`` / ``selfhost_api.create_point`` — so an
+    armed run's ``stats["mentions_recorded"]`` counts records the WRITE discards.
+    ⛔ The self-host pair is a SEPARATE model and route, not an alias: ``#4032``
+    frames it as the parity mirror of the hosted pair, so a ``mentions`` field
+    added on one side alone re-opens the divergence (review at `0c15ad04d`, P3 —
+    this line said THREE while the tree had four). That is #11239's slice (DM1's
+    home on the Point is declared and unfulfilled): the count is an extraction
+    measurement, never a claim that the graph holds it. There are also FOUR keys
+    carrying a record, and the two producer lists
+    (``result["embed_list"]["mentions"]``, ``result["s2_embed"]["mentions"]``)
+    are the model's RAW channel on the fail-open path — see
+    ``commit_schema.Mention``'s docstring.
 
     **Held on the SURFACE, not on a live reference — because a hold removes the
     reference it was decided from.** An earlier draft required
@@ -11345,11 +11380,23 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         # byte-identical" is the whole promise; a key is not byte-identical.
         return embed_list
 
-    entities = embed_list.get("entities")
-    if not isinstance(entities, list):
-        return embed_list
     channel = embed_list.get("mentions")
     channel = channel if isinstance(channel, list) else []
+    entities = embed_list.get("entities")
+    if not isinstance(entities, list):
+        # ⛔ A CHANNEL-ONLY response is reachable, and returning here skipped the
+        # channel entirely: ``_validate_output_shape`` accepts a section the
+        # parsed output omits (``if section not in parsed: continue``), and the
+        # armed prompt now ASKS for ``mentions[]``, so a model that believes the
+        # session has no entities could emit the channel and no ``entities[]``.
+        # The early return then handed the model's RAW entries to the payload —
+        # including a ``rule_id`` naming a cue that never ran on that surface
+        # (review at `591906397`, P2). No entity candidates is a legitimate
+        # state; no *verification* is not, so the channel is processed against
+        # an empty candidate set instead of being dropped.
+        if not channel and not isinstance(embed_list.get("mention_held"), list):
+            return embed_list
+        entities = []
     points = [p for p in (embed_list.get("points") or []) if isinstance(p, dict)]
     events = [e for e in (embed_list.get("events") or []) if isinstance(e, dict)]
     # ── the decisions an EARLIER pass carried (see `_carried_holds`) ────────
@@ -11380,23 +11427,17 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     # (pass 1 kept a surface the model also mentioned, pass 2 removed it and
     # stripped it from every claim — a 70-reference must-keep referent deleted on
     # a model-supplied entry; #11021 review cycle 2, P1).
-    for m in channel:
-        if not isinstance(m, dict):
-            continue
-        surface = str(m.get("surface") or "").strip()
-        if not surface or surface in hold:
-            continue
-        recorded_rule = str(m.get("rule_id") or "")
-        # ⛔ The model's `rule_id` is a CLAIM. Trusting it let an entry tagged
-        # "referentiality.pronoun" remove a surface `judge()` says is a referent —
-        # a 70-reference must-keep deleted on model say-so (review cycle 3, P1).
-        # The cue is RE-RUN and must agree with the claim.
-        verdict = _referentiality.judge(surface)
-        if (verdict is not None and verdict[0] == recorded_rule
-                and recorded_rule != _referentiality.RULE_CHANNEL):
-            hold.setdefault(surface, (recorded_rule,
-                                      "already recorded on a claim"))
-
+    #: Surfaces the CHANNEL proved — the cue re-run on THAT surface and returns a
+    #: verdict (the model's `rule_id` string is NOT consulted; see the arm).
+    #: ⛔ Collected here and folded into
+    #: `held_surfaces` below, because writing `hold` alone is a decision nothing
+    #: enacts: `_strip_reference_sets`, the operator prune, `by_rule`,
+    #: `mention_held` and the record loop ALL key on `held_surfaces`. A
+    #: channel-only response (the shape this fix exists for) therefore kept the
+    #: surface in `about_entities` — `validate_payload_dict` returned
+    #: `about_entities reference unknown entities` — carried no `mention_held`
+    #: into the union pass, and reported `held_surfaces: 0` while writing a
+    #: record that named the cue rule (review at `5da3575b7a`, P1).
     def _claims_naming(surface: str) -> list[dict]:
         """Every carrier of this surface — claims AND events, in BOTH reference
         sets Layer-1 resolves against the emitted entities.
@@ -11407,6 +11448,10 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         slot-only reference invisible: the hold was abandoned, the phantom was
         MINTED (fail-open) and the slot then dropped with a warning that reads
         as an extraction error (#11021 review cycle 5, P1).
+
+        Defined ABOVE the channel loop because the hold asks it a question —
+        "can a claim carry this surface?" is a fact about the PAYLOAD, not a
+        verdict on the model's `claim_ref` string.
         """
         carriers: list[dict] = []
         for carrier in [*points, *events]:
@@ -11416,6 +11461,56 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
                     or surface in _slot_ref_names(carrier)):
                 carriers.append(carrier)
         return carriers
+
+    #: The claims a mention can attach to, keyed by the identity the WRITE keeps
+    #: (`_mention_ref`) — one home for the carry loop and the channel record loop.
+    claims_by_ref = {_norm(_mention_ref(p)): p for p in points
+                     if str(p.get("content") or "").strip()}
+    channel_held: set[str] = set()
+    for m in channel:
+        if not isinstance(m, dict):
+            continue
+        surface = str(m.get("surface") or "").strip()
+        if not surface or surface in hold:
+            continue
+        # ⛔ The model's `rule_id` is a CLAIM and is not trusted — but it is not
+        # REQUIRED either, and requiring it was a gate on an input the prompt
+        # never asks for: `_MENTION_CONTRACT_LINE` is
+        # `{surface, claim_ref, quote, kind_guess}` and carries NO `rule_id`
+        # (`merge_embed_lists` says the same of S4's contract-shaped entry), so
+        # `verdict[0] == recorded_rule` held only for a model that echoed this
+        # module's internal id. Measured at `d785f3da8`: the prompt shape gave
+        # `held_surfaces: 0`, the surface stayed in `about_entities`, and Layer-1
+        # rejected the session ("about_entities reference unknown entities") —
+        # the failure this fix exists to close, open for every compliant model.
+        # ⛔ The CUE decides, and the rule id comes from the CUE: `judge()` is
+        # re-run, and a `None` verdict (a REFERENT) still never holds — that is
+        # the cycle-3 P1 protection (a model-supplied pronoun tag cannot delete a
+        # 70-reference must-keep), not the model's string.
+        # ⛔ And NOTHING ELSE in the entry decides it. A first cut also required
+        # the model's `claim_ref` to resolve, on the theory that "refused" must
+        # mean not-held rather than held-but-unrecorded — but the record loop is
+        # CARRIER-driven (`_claims_naming` above), so with a carrier the record
+        # is written whatever the model typed, and the gate only removed the
+        # HOLD: a contract-permitted `claim_ref: null` (the prompt allows
+        # `str|null`), or a paraphrase of the claim's text, left the surface in
+        # `about_entities` and 422'd the session (review at `40a0a81e6`, P1).
+        # The refusal is a fact about the PAYLOAD — "no claim can carry it" — so
+        # that is what is asked below, and the model's string is not.
+        # ⛔ The ref is compared THROUGH the write's window (`_mention_ref`), like
+        # every other lookup since the last door was fixed: `claims_by_ref` is keyed
+        # on the CUT identity, so a raw over-cap ref matched nothing and an entry
+        # whose claim is present was refused as claimless (review at `9561959ed7`,
+        # P3). A paraphrase still matches nothing — only the window changed.
+        if (_norm(_mention_ref({"content": str(m.get("claim_ref") or "")}))
+                not in claims_by_ref
+                and not _claims_naming(surface)):
+            continue                       # no claim to carry it — refused below
+        verdict = _referentiality.judge(surface)
+        if verdict is not None:
+            hold.setdefault(surface, (verdict[0],
+                                      "recorded on the mention channel"))
+            channel_held.add(surface)
 
     stats: dict = {"held_surfaces": 0, "hold_abandoned_no_claim": 0,
                    "channel_refused_no_claim": 0, "channel_entry_is_entity": 0,
@@ -11443,7 +11538,9 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     #: re-emits it — a bare `about_entities` reference S4 added would otherwise
     #: survive the union pass and 422 the whole session at Layer-1, downstream of
     #: the caller's fail-open guard (review cycle 4, P1-a).
-    held_surfaces: set[str] = set(carried_holds)
+    # ⛔ Seeded from the CARRIED decisions AND the channel's own: a surface the
+    # channel proved is held exactly like one an entity candidate proved.
+    held_surfaces: set[str] = set(carried_holds) | channel_held
     #: a surface whose hold was REFUSED (no claim to record it against). It is
     #: NOT held: it neither strips aboutness nor prunes operators nor counts as
     #: held, so `held_surfaces` says exactly what its name says.
@@ -11571,8 +11668,8 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     # claim over `_MAX_CONTENT` keys apart from its own record and the mention is
     # lost at the union pass while being reported as a fold that never happened
     # (review cycle 4, P1-c).
-    claims_by_ref = {_norm(_mention_ref(p)): p for p in points
-                     if str(p.get("content") or "").strip()}
+    # …`claims_by_ref` is built ABOVE the channel loop: the hold is gated on the
+    # same resolution the record loop uses.
     # A record this module WROTE is CARRIED verbatim, never re-derived: pass 2
     # would otherwise relabel a `quote`/`narrative` span as `model` and overwrite
     # the cue's reason (review at 41fb0c65e, P1). A model entry (no cue rule, or a
@@ -11592,7 +11689,12 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         if verdict is None or verdict[0] != rule_in:
             continue                       # not this module's record
         ref = str(entry.get("claim_ref") or "").strip()
-        if surface in candidate_surfaces or _norm(ref) not in claims_by_ref:
+        # ⛔ Same window as the record's own `claim_ref` — the MEMBERSHIP test and the
+        # SUBSCRIPT below are the same key, or an over-cap claim passes the test and
+        # `claims_by_ref[...]` raises KeyError on the raw string (review at
+        # `9561959ed7`, P3; the first cut of this fix moved only the test).
+        claim_key = _norm(_mention_ref({"content": ref}))
+        if surface in candidate_surfaces or claim_key not in claims_by_ref:
             continue                       # the entity wins / the claim is gone
         # ⛔ CARRIED, but still CONSTRUCTED: `dict(entry)` copied a model-supplied
         # `span_start`/`span_end`/`span_source` verbatim, so an entry that guessed
@@ -11604,7 +11706,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         # exists for, while clamping the quote first and demoting an unverified
         # declaration to `"model"`.
         records.append(_mention_record(
-            surface=surface, claim=claims_by_ref[_norm(ref)],
+            surface=surface, claim=claims_by_ref[claim_key],
             kind_guess=str(entry.get("kind_guess") or "").strip() or None,
             rule_id=rule_in,
             reason=(str(entry.get("reason") or "").strip()
@@ -11612,6 +11714,11 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             narrative=narrative,
             quote=str(entry.get("quote") or ""),
             span=entry))
+        # ⚠️ Left on the RAW ref on purpose: aligning it to `_mention_ref` changes
+        # nothing observable (the trailing `_dedupe_mentions` removes the duplicate
+        # this set exists to prevent), and a change no row can discriminate is the
+        # unpinned shape reviews keep rejecting. Re-align it with the channel loop
+        # only if the final dedupe is ever removed (review at `9561959ed7`, P3).
         seeded.add((surface, _norm(ref)))
 
     for entry in channel:
@@ -11626,22 +11733,56 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             stats["channel_entry_is_entity"] += 1
             continue
         claim_ref = str(entry.get("claim_ref") or "").strip()
-        if (surface, _norm(claim_ref)) in seeded:
+        claim_key = _norm(_mention_ref({"content": claim_ref}))
+        if (surface, claim_key) in seeded:
             continue                       # carried verbatim above
-        claim = claims_by_ref.get(_norm(claim_ref))
+        claim = claims_by_ref.get(claim_key)
         if claim is None:
-            # A mention with no resolvable claim is not a record (contract row).
+            # ⛔ NOT A REFUSAL WHEN THE HOLD ALREADY PUBLISHED A RECORD. The hold
+            # gate above accepts an entry with a null/paraphrased `claim_ref` as long
+            # as a carrier NAMES the surface (`_claims_naming`), and the
+            # carrier-driven loop then writes the record — so counting this loop's
+            # unresolvable ref as `channel_refused_no_claim` made ONE run report
+            # `held_surfaces: 1` + a record + `mention_held` AND "1 mention lost for
+            # lack of a claim", naming that same surface in
+            # `channel_refused_surfaces`. That is the run-disagrees-with-itself class
+            # this PR closes, in the evidence a lane reads to decide whether mentions
+            # are being lost (review at `ea790070d`, P3).
+            if surface in held_surfaces:
+                continue                   # a carrier already wrote its record
+            # A mention with no resolvable claim AND no carrier is not a record.
             stats["channel_refused_no_claim"] += 1
             stats.setdefault("channel_refused_surfaces", []).append(surface)
             continue
+        # ⛔ BOTH sides through the write's window here too: a cut key compared to the
+        # model's RAW ref never matched an over-cap claim, so the unstripped `claim`
+        # fallback was used. Not observable today (only `claim["content"]` is read
+        # and both yield the same `claim_ref`), but the comment above claims a
+        # uniformity this line did not have (review at `2a1153519`, P3).
         carrier = next((p for p in kept_points
                         if isinstance(p, dict)
-                        and _norm(_mention_ref(p)) == _norm(claim_ref)), claim)
+                        and _norm(_mention_ref(p))
+                        == _norm(_mention_ref({"content": claim_ref}))), claim)
+        # ⛔ THE DECISION ALREADY TAKEN WINS OVER THE MODEL'S SILENCE. The channel
+        # loop ABOVE wrote the cue's `(rule_id, reason)` into `hold` for this
+        # surface; stamping `entry.rule_id or RULE_CHANNEL` here overrode it, so a
+        # run published `referentiality.channel` ("the model said so") on the
+        # record while `by_rule`/`mention_held` said `referentiality.pronoun` — TWO
+        # ANSWERS to "what did this hold", and the disagreeing one is the surface
+        # plan R1's arming measurement READS. The shape is the one the armed prompt
+        # asks for: a mention its claim does not also NAME in `about_entities`, so
+        # the carrier-driven loop above writes no record for it (review at
+        # `40a0a81e6`, P2; re-verified at `0c15ad04d`).
+        hold_rule, hold_reason = hold.get(surface, ("", ""))
         records.append(_mention_record(
             surface=surface, claim=carrier,
             kind_guess=str(entry.get("kind_guess") or "").strip() or None,
-            rule_id=str(entry.get("rule_id") or _referentiality.RULE_CHANNEL),
+            # `_mention_rule` re-checks the cue rule against `judge()`, so this
+            # can only ever REPEAT a verdict the cue took — never smuggle one.
+            rule_id=(hold_rule
+                     or str(entry.get("rule_id") or _referentiality.RULE_CHANNEL)),
             reason=(str(entry.get("reason") or "").strip()
+                    or hold_reason
                     or "emitted by the extraction model on the mention channel"),
             narrative=narrative,
             quote=str(entry.get("quote") or claim.get("quote") or ""),
@@ -11904,12 +12045,21 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
     shipped record (review at ``41fb0c65e``, P1: "a consumer that resolves the
     span per ``span_source`` reads the wrong bytes").
 
+    ⚠️ TWO exceptions, both stated rather than implied, and BOTH builders apply
+    them: an absent **narrative** is UNKNOWABLE (no haystack was supplied, so the
+    declaration stands unchecked instead of being relabelled ``"model"``), while
+    an absent **quote** is a MISMATCH (``"quote": null`` is in the output
+    contract, so there is no text to address).
+
     ⛔ ``isinstance(True, int)`` is ``True``, and ``True`` is not an offset: a
     boolean offset is DROPPED, not coerced to ``1``. ``commit_schema.validate_span``
     has the same rule first (the one home, #5007) — this path may not be the
     weaker copy.
     """
-    surface = str(surface or "")[:200]
+    # ⛔ STRIP **THEN** CAP: `_clamped_mention` now strips before capping too, so a
+    # padded surface over the cap is the same name on both builders — capping
+    # first left `"i"` here and `"itx"` there (review at `d785f3da8`, P3).
+    surface = str(surface or "").strip()[:200]
     # ⛔ The record's own text is CLAMPED FIRST, because the span is located in it:
     # locating in the unclamped quote and then storing 200 chars shipped
     # `span_source: "quote"` with offsets pointing past the end of the quote the
@@ -11948,7 +12098,19 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
                 if declared == "quote":
                     verified = _mention_span(quote, surface)
                 elif declared == "narrative":
-                    verified = _mention_span(narrative, surface)
+                    # ⛔ AN ABSENT NARRATIVE IS AN UNKNOWABLE HAYSTACK, not a
+                    # failed verification — the rule `_clamped_mention` states and
+                    # pins. `narrative` defaults to `""` in BOTH builders, so
+                    # demoting on it relabelled a genuinely cue-derived address as
+                    # `"model"` AND made the two builders disagree about WHICH TEXT
+                    # the same offsets address: the two-answers class this PR
+                    # closes (review at `40a0a81e6`, P2; re-verified at
+                    # `0c15ad04d`). `_clamped_mention`'s comment named the
+                    # divergence as known and this side as the incorrect one; they
+                    # now agree. An absent QUOTE stays a definite MISMATCH
+                    # (`"quote": null` is in the output contract).
+                    verified = (_mention_span(narrative, surface)
+                                if narrative else (span_start, span_end))
                 else:
                     verified = None
                 span_source = (declared
@@ -12003,15 +12165,78 @@ def _dedupe_mentions(mentions: list) -> list[dict]:
     """One record per (surface, claim) — the S2 and union passes both run the
     selection, and a duplicated record is a duplicated measurement."""
     out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    at: dict[tuple[str, str], int] = {}
     for m in mentions:
         if not isinstance(m, dict):
             continue
         key = (_norm(str(m.get("surface") or "")),
                _norm(str(m.get("claim_ref") or "")))
-        if not key[0] or key in seen:
+        if not key[0]:
             continue
-        seen.add(key)
+        if key in at:
+            # ⛔ FIRST-IN-LIST is not the right winner: a spanless duplicate listed
+            # first replaced a VERIFIED address listed second, so the shipped record
+            # had no address while one was available — and the address is the
+            # record's whole point (review at `b791a3eb2`, P3).
+            # ⛔ And the test is `is None`, NOT key presence: `_mention_record`
+            # ALWAYS emits `span_start`/`span_end` (`None` when it could not locate
+            # the surface) while `_clamped_mention` POPS them, so a presence test was
+            # inert on the builder where the defect was observed and the rule did
+            # nothing on the normal path (review at `9561959ed7`, P2).
+            # ⛔ The ADDRESS is merged into the FIRST record rather than swapping the
+            # record: a whole-record swap replaced the cue's `rule_id`/`reason` with
+            # the duplicate's channel-labelled ones — it fixed the address by losing
+            # the provenance that says the cue derived it.
+            # ⛔ ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX. Copying the
+            # offsets and `span_source` while keeping the FIRST record's `quote`
+            # (the old code adopted the winner's quote only when the kept one was
+            # EMPTY) shipped a `"quote"`-labelled address into a text it does not
+            # index: `quote[start:end]` read bytes the surface never occupied, and
+            # `Mention._span_is_an_address` cannot see it (it checks completeness,
+            # order and range only). Measured on the fail-open path, where the clamp
+            # runs BEFORE this dedupe: `{'quote': 'the budget is 40k',
+            # 'span_start': 2, 'span_end': 4, 'span_source': 'quote'}` →
+            # `quote[2:4] == 'e '` for surface `it` — the fabricated-address class
+            # #5007 forbids (review at `d59000f10`, P2; the peer lane found the same
+            # defect independently at `2a1153519`). The adopted pair therefore takes
+            # ITS OWN quote with it; a `narrative`/`model` pair needs none, since the
+            # narrative is not replaced here and `model` asserts nothing verified.
+            # Pinned as a PROPERTY by
+            # `test_a_deduped_address_must_INDEX_the_text_the_record_carries`: a
+            # shipped `"quote"` address must index its own surface in its own quote,
+            # whichever entry won.
+            kept = out[at[key]]
+            # ⛔ The ADDRESS is only adoptable for the SAME SPELLING of the surface: the
+            # key folds case and whitespace runs (`_norm`) while `_mention_span` is
+            # case-SENSITIVE, so a pair verified for `it` would otherwise ship under
+            # a survivor named `It` — an address that indexes a variant of the
+            # surface the record names (review at `1bc5847b4`, P3). The survivor
+            # keeps its (cue-derived) form and no address, which is the honest state;
+            # the published surfaces would demote such a pair to `"model"` anyway,
+            # one round later and only after disagreeing with the producer channel.
+            same_spelling = str(kept.get("surface") or "") == str(m.get("surface") or "")
+            if (same_spelling and kept.get("span_start") is None
+                    and m.get("span_start") is not None):
+                for field in ("span_start", "span_end", "span_source"):
+                    if m.get(field) is not None:
+                        kept[field] = m[field]
+                # ⛔ A `quote`-space address travels WITH its quote: the offsets were
+                # verified against the DUPLICATE's text, so filling the quote only
+                # "when absent" shipped `span_source: "quote"` beside the survivor's
+                # different quote — offsets that index bytes the record does not
+                # name, which is the forgery the whole clamp exists to refuse, and
+                # no later clamp can catch it because every published surface
+                # clamps BEFORE deduping (review at `2a1153519`, P2; found
+                # independently as the round-7 blocker at `d59000f10`).
+                # ONE ADDRESS = LABEL + OFFSETS + THE TEXT THEY INDEX: the shipped
+                # quote is therefore the one that indexes the shipped pair, and the
+                # surviving record's own quote is kept when it already indexes it.
+                if m.get("quote") and (kept.get("span_source") == "quote"
+                                       or not kept.get("quote")):
+                    kept["quote"] = m["quote"]
+
+            continue
+        at[key] = len(out)
         out.append(m)
     return out
 
@@ -12083,8 +12308,158 @@ def _prompt_contract(*, core_only: bool = False) -> str:
                             1)
 
 
+def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
+    """ONE mention entry in the committed shape, with every model CLAIM re-derived.
+
+    ⛔ **The single clamp, called by BOTH surfaces that publish a record.** It was
+    inline in :func:`_mentions_for_claim`, so only the payload was clamped and
+    ``result["mentions"]["records"]`` — assembled from the merged ``mentions[]`` in
+    :func:`extract_session_v2` — kept the model's raw claims. One run then reported
+    two answers to "what did this hold", and the unverified one was the one plan
+    R1's arming measurement reads (review at `11039b1bd8`, P2).
+
+    Two things a model entry may CLAIM and neither is trusted:
+
+    - ``rule_id`` — re-derived by :func:`_mention_rule`, which returns the same
+      rule only when :func:`referentiality.judge` agrees with it for THAT surface,
+      else ``referentiality.channel``. This is the last door: the caller that
+      keeps the raw channel whenever ``route_mentions`` raises is
+      :func:`extract_session_v2` — the ``try`` guarding its FIRST ``route_mentions``
+      call; ``execute_embed`` never calls it — so a record can reach here without
+      ever passing :func:`_mention_record`.
+    - ``span_source`` — a declared space is honoured only when the offsets are
+      EXACTLY where that haystack puts the surface; otherwise it is demoted to
+      ``"model"`` ("the model asserted these bytes"), never shipped as an address
+      of a text it does not index. ``"quote"`` verifies against the record's own
+      quote, ``"narrative"`` against the narrative this run was extracted from.
+      ⚠️ TWO exceptions, both stated rather than implied:
+      an absent **quote** is a MISMATCH (``"quote": null`` is in the output
+      contract, so there is no text to address), while an absent **narrative**
+      is UNKNOWABLE — no haystack was supplied, so the declaration stands
+      unchecked instead of being relabelled ``"model"``, which would tell a
+      consumer the cue invented offsets it derived.
+      ⚠️ Demotion is not dropping: an unverifiable declaration keeps its offsets
+      under the honest label, so a consumer still sees what the model claimed.
+
+    Returns ``None`` for an entry with no ``surface`` (nothing to record).
+    """
+    record: dict = {}
+    for k in _MENTION_FIELDS:
+        v = m.get(k)
+        if v is None or v == "":
+            continue
+        if k == "surface":
+            # ⛔ STRIP **THEN** CAP, the order `_mention_record` uses: capping
+            # first let a padded 202-character surface collapse to the
+            # one-character `"i"` here and stay `"itx"` on the sibling builder
+            # (review at `d785f3da8`, P3).
+            record[k] = str(v).strip()[:_MENTION_CAPS[k]]
+        elif k in _MENTION_CAPS:
+            record[k] = str(v)[:_MENTION_CAPS[k]]
+        elif k in ("span_start", "span_end"):
+            record[k] = v if isinstance(v, int) else None
+        elif k == "rule_id":
+            record[k] = _mention_rule(str(m.get("surface") or ""), v)
+        elif k == "claim_ref":
+            # ⛔ The ref is the claim's identity AS THE WRITE KEEPS IT — cut
+            # through the same window `_mention_ref` gives every record and every
+            # lookup. Copied raw, a claim over `_MAX_CONTENT` keyed apart from its
+            # own (truncated) point, so the mention never attached and the run
+            # reported a claim it HAD emitted as folded away by a NOOP/duplicate/
+            # MERGE that never happened — the defect `_mention_record` fixed at
+            # its own call site (review cycle 4, P1-c), left open at the last door
+            # on the fail-open path (review at `b791a3eb2`, P2).
+            record[k] = _mention_ref({"content": str(v)})
+        else:
+            # `span_source` is `str` on the model: a non-str value 422'd the
+            # payload (review cycle 3, P3).
+            record[k] = str(v)
+    if record.get("span_start") is None:
+        record.pop("span_start", None)
+    if record.get("span_end") is None:
+        record.pop("span_end", None)
+    surface = str(record.get("surface") or "")
+    if not surface:
+        return None
+    record["surface"] = surface
+    # ⛔ `rule_id` is emitted UNCONDITIONALLY, and this is the LAST door. The field
+    # loop above SKIPS empty values, so an entry that OMITS the key — the shape
+    # `_MENTION_CONTRACT_LINE` actually asks for — shipped with no rule at all and
+    # `commit_schema.Mention.rule_id` defaulted to `""`, a value outside
+    # `referentiality.RULES`: the field whose comment says "no silent hold" saying
+    # nothing. Reachable on the ONE path that never passes `_mention_record` (the
+    # fail-open path), which is exactly where the model's contract-shaped entry
+    # arrives (review at `40a0a81e6`, P2). `_mention_rule` re-derives it from the
+    # cue, which is what this function's docstring promises.
+    record["rule_id"] = _mention_rule(surface, record.get("rule_id"))
+    # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
+    # one `commit_schema.Mention` accepts — otherwise the whole payload 422s.
+    # Both halves are dropped rather than 422 (review cycle 2, P1: an over-cap
+    # pair and a junk `span_source` each lost the session).
+    s0, s1 = record.get("span_start"), record.get("span_end")
+    # ⛔ ``isinstance(True, int)`` is ``True``: a boolean offset coerces to ``1``
+    # on the model and names bytes the surface never occupied.
+    if not (isinstance(s0, int) and not isinstance(s0, bool)
+            and isinstance(s1, int) and not isinstance(s1, bool)
+            and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
+        record.pop("span_start", None)
+        record.pop("span_end", None)
+    # ⛔ A PADDED space is the SAME declaration: `_mention_record` strips it
+    # (`str(span.get("span_source") or "").strip()`), so leaving it raw here
+    # demoted a verifiable address on one builder and verified it on the other.
+    # Written back STRIPPED, or the record carries `" quote "` and
+    # `commit_schema.Mention.span_source`'s `Literal` 422s the whole payload.
+    declared = str(record.get("span_source") or "").strip()
+    if declared in _MENTION_SPAN_SOURCES:
+        record["span_source"] = declared
+    if declared not in _MENTION_SPAN_SOURCES:
+        record.pop("span_source", None)
+    elif declared in ("quote", "narrative") and "span_start" in record:
+        haystack = (str(record.get("quote") or "") if declared == "quote"
+                    else str(narrative or ""))
+        # ⛔ THE AMNESTY IS `narrative`-ONLY. An absent NARRATIVE is not a failed
+        # verification: `execute_embed`'s `story_arc` defaults to `""`, so a
+        # caller that omits it (every test, any seam) otherwise DEMOTED a
+        # genuinely cue-derived `narrative` address to `"model"` — telling a
+        # consumer that resolves the span per `span_source` that the cue invented
+        # offsets it derived (review at `5da3575b7a`, P2).
+        # ⛔ An absent QUOTE is the opposite: `"quote": null` is IN the output
+        # contract, and `Mention.quote` defaults to `""`, so an empty quote is a
+        # definite MISMATCH, never an unknown. Exempting it (the first cut of this
+        # guard did) shipped a `quote`-labelled address into a record that has no
+        # quote — the caller resolves `quote[start:end]` to bytes that do not
+        # exist, which is the forgery this branch is (review at `1a7072e22`, P2).
+        want = (record["span_start"], record["span_end"])
+        # A `quote` address is ALWAYS checkable (an empty quote is a definite
+        # mismatch); a `narrative` one only when a haystack was supplied — the
+        # offsets cannot be checked here, so that declaration stands. `narrative`
+        # defaults to `""` in BOTH builders, so this is not an exemption this
+        # side makes and the record builder declines: :func:`_mention_record`
+        # applies the SAME rule (review at `40a0a81e6`, P2 — the earlier note here
+        # described the divergence as known and this side as the correct one).
+        checkable = declared == "quote" or bool(haystack)
+        if checkable and _mention_span(haystack, surface) != want:
+            record["span_source"] = "model"
+    # ⛔ A SPACE LABEL AND ITS OFFSET PAIR ARE ONE ADDRESS, and this clamp used to
+    # publish either half alone (review at `d785f3da8`, P2): a surviving pair with
+    # no declared space shipped with NO `span_source` — and `Mention`'s own field
+    # comment says "a bare offset that does not say which space it is in is not an
+    # address" — while a declared space whose pair did not survive kept its label.
+    # `_mention_record` can emit neither state (its label exists only inside the
+    # valid-pair branch, and an undeclared pair becomes `"model"`), and
+    # `Mention._span_is_an_address` checks only completeness/order/range, so
+    # Layer-1 accepted both. Mirror the record builder: an undeclared pair is
+    # `"model"` (the model asserted these bytes), and a label never outlives the
+    # address it describes.
+    if "span_start" in record:
+        record.setdefault("span_source", "model")
+    else:
+        record.pop("span_source", None)
+    return record
+
+
 def _mentions_for_claim(embed_list: dict, content: str,
-                        *, armed: bool) -> list[dict]:
+                        *, armed: bool, narrative: str = "") -> list[dict]:
     """The mentions whose ``claim_ref`` is THIS claim — in the committed shape.
 
     Resolution is by the claim's own text (:func:`_norm`), never by position: S4
@@ -12093,11 +12468,25 @@ def _mentions_for_claim(embed_list: dict, content: str,
 
     ``armed`` is the cue's own switch: with it OFF the attachment is skipped
     entirely, so an unmeasured run's payload is genuinely unchanged (the comment
-    that claimed this without doing it was a review P2).
+    that claimed this without doing it was a review P2). ``narrative`` is only the
+    haystack a declared ``narrative`` span is verified against
+    (:func:`_clamped_mention`); when it is ABSENT that declaration stands
+    unchecked (an unknowable haystack is not a failed verification — see the
+    exception note there), and when a narrative IS supplied but does not put the
+    surface at the declared offsets, the label is demoted to ``"model"``.
     """
     if not armed:
         return []
-    key = _norm(str(content or ""))
+    # ⛔ BOTH sides of the match go through `_mention_ref`: the record's `claim_ref`
+    # is cut to the write's window, so an over-cap claim did not match itself —
+    # the mention attached to nothing and was reported as a claim the run folded
+    # away (review at `b791a3eb2`, P2).
+    # ⚠️ WHICH SIDE IS LOAD-BEARING, measured: the ENTRY comparison below is (mutant
+    # G3 reddens the row). This one is idempotent on the content `execute_embed`
+    # passes (already `_write_span`-cut, 1000 chars measured), so removing it alone
+    # leaves the file green (G2) — kept because the two sides of one identity must be
+    # computed the same way, not because a test pins it.
+    key = _norm(_mention_ref({"content": str(content or "")}))
     if not key:
         return []
     out: list[dict] = []
@@ -12105,43 +12494,19 @@ def _mentions_for_claim(embed_list: dict, content: str,
         if not isinstance(m, dict):
             continue
         ref = str(m.get("claim_ref") or "").strip()
-        if not ref or _norm(ref) != key:
+        # ⛔ BOTH sides go through the SAME window: `key` is the write's cut of the
+        # claim, so comparing it to the model's RAW ref failed for any claim over
+        # `_MAX_CONTENT` — the entry was skipped as "not this claim" and a
+        # HAD-emitted claim was reported unresolved (review at `b791a3eb2`, P2).
+        if not ref or _norm(_mention_ref({"content": ref})) != key:
             continue
-        record: dict = {}
-        for k in _MENTION_FIELDS:
-            v = m.get(k)
-            if v is None or v == "":
-                continue
-            if k in _MENTION_CAPS:
-                record[k] = str(v)[:_MENTION_CAPS[k]]
-            elif k in ("span_start", "span_end"):
-                record[k] = v if isinstance(v, int) else None
-            else:
-                # `claim_ref`/`rule_id`/`span_source` are `str` on the model: a
-                # non-str value 422'd the payload (review cycle 3, P3).
-                record[k] = str(v)
-        if record.get("span_start") is None:
-            record.pop("span_start", None)
-        if record.get("span_end") is None:
-            record.pop("span_end", None)
-        if not record.get("surface"):
-            continue
-        # An address must be COMPLETE, ORDERED and IN RANGE, and its space must be
-        # one the model declares — otherwise `commit_schema.Mention` rejects the
-        # whole payload. Both halves are dropped rather than 422 (review cycle 2,
-        # P1: an over-cap pair and a junk `span_source` each lost the session).
-        s0, s1 = record.get("span_start"), record.get("span_end")
-        # ⛔ ``isinstance(True, int)`` is ``True``: a boolean offset coerces to
-        # ``1`` on the model and names bytes the surface never occupied.
-        if not (isinstance(s0, int) and not isinstance(s0, bool)
-                and isinstance(s1, int) and not isinstance(s1, bool)
-                and 0 <= s0 < s1 <= _SPAN_OFFSET_MAX):
-            record.pop("span_start", None)
-            record.pop("span_end", None)
-        if record.get("span_source") not in _MENTION_SPAN_SOURCES:
-            record.pop("span_source", None)
-        out.append(record)
-    return out
+        record = _clamped_mention(m, narrative=narrative)
+        if record is not None:
+            out.append(record)
+    # ⛔ `_dedupe_mentions` runs INSIDE `route_mentions` — the call that may have
+    # raised. On the fail-open path nothing deduped, so ONE hold was counted twice
+    # (review at `d785f3da8`, P3). Idempotent: the normal path deduped upstream.
+    return _dedupe_mentions(out)
 
 
 def _run_vet_pass(embed_list: dict, narrative: str, *, arbiter=None,
@@ -12715,11 +13080,47 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ⛔ FLAG-GATED: unarmed, the list still holds the model's raw `mentions[]`
     # entries (route_mentions returns the list unchanged), and publishing those as
     # "the mentions held" claimed a hold that never ran (review cycle 4, P3).
+    # ⛔ FOUR keys carry a record, not two — and only the two PUBLISHED ones go
+    # through the clamp. `result["s2_embed"]` and `result["embed_list"]` are this
+    # pass's OUTPUT, not S2's raw list: both are assigned from the list
+    # `route_mentions` rewrote — its first call REBINDS `embed_list` in place, and
+    # `result["s2_embed"]` stores that same list — and the raw identity holds ONLY
+    # on the fail-open path, where `route_mentions` raised and the list was never
+    # rewritten. Both are the PRODUCER channel, and a reader who believed "two
+    # surfaces" would not look at them (review at `5da3575b7a`, P2).
+    # ⚠️ CITED BY SYMBOL, NOT BY LINE: three rounds of this PR shipped a stale
+    # absolute line number here (the branch merges, so every number rots), and a
+    # citation a reader cannot trust is worse than none (review at `d59000f10`,
+    # P3).
+    # ⛔ `records` is the surface plan R1's arming measurement READS, so it is
+    # clamped by the SAME function the payload uses (`_clamped_mention`), not
+    # copied from the merged list: on the fail-open path the entries there are
+    # the model's raw channel, and publishing them as "the mentions held"
+    # reported a cue rule and a span address that nothing had verified (review at
+    # `11039b1bd8`, P2 — the payload said `referentiality.channel`, this surface
+    # said `referentiality.pronoun`, for one run).
+    # ⛔ `reason` is NOT a `commit_schema.Mention` field, so `_clamped_mention`
+    # drops it — but this surface published it before this clamp existed, and it
+    # is the only prose saying WHY a surface was held. Restored here, on this
+    # surface only (review at `5da3575b7a`, P3).
+    _evidence_records: list[dict] = []
+    if _referentiality.enabled():
+        for _m in complete_list.get("mentions") or []:
+            if not isinstance(_m, dict):
+                continue
+            _r = _clamped_mention(_m, narrative=story)
+            if _r is None:
+                continue
+            _reason = str(_m.get("reason") or "").strip()
+            if _reason:
+                _r["reason"] = _reason      # see the note above: THIS surface only
+            _evidence_records.append(_r)
     result["mentions"] = {
         "stats": mention_s2_stats,
-        "records": ([m for m in (complete_list.get("mentions") or [])
-                     if isinstance(m, dict)]
-                    if _referentiality.enabled() else []),
+        # …and deduped for the same reason `_mentions_for_claim` is: on the
+        # fail-open path `_dedupe_mentions` (inside `route_mentions`) never ran, so
+        # this surface double-counted one hold (review at `d785f3da8`, P3).
+        "records": _dedupe_mentions(_evidence_records),
     }
     # #1933 (E2E-4 negative a): the chain-completeness evidence surface +
     # human-readable warnings (additive keys — the S5-failure branch above
