@@ -1843,7 +1843,46 @@ _RESIDUAL_NEGATED_OPEN = (
 #: clause split leaves the anchor in the first clause and the phrase in the
 #: second — the same shape as the row's honest sentence, so no clause-scoped rule
 #: can separate them (#11258 review `P2`).
-_RESIDUAL_FAIL_OPEN = re.compile(r"\bfails?\s+open\b", re.I)
+#: ⛔ THE DENIAL OF THIS PREDICATE IS NOT A REOPENING, and until #11258 review
+#: round 25 `P2` this arm had NO negation veto at all while every other
+#: `open`-predicate arm in this file carried one — so the plain, honest negation of
+#: the very phrase it reads was REFUSED: `the ADJACENCY half no longer fails open.`,
+#: `… never fails open.`, `… does not fail open.` and `the numeric side no longer
+#: fails open.` each returned a claim, appeared in NO ledger entry, and got the
+#: message that says the region "REOPENS a gap this row says is CLOSED" plus a
+#: pointer at a ledger with no matching entry — the same double defect rounds
+#: 19/20 were spent removing. MEASURED both directions with this module's own
+#: functions at `9e6839bc4636` (waived=False, one claim each).
+#:
+#: ⛔ THE VETO IS A FIXED-WIDTH RUN, one form per must-stay-GREEN partner in
+#: `_RESIDUAL_TRUTHFUL_STATEMENTS` (this file's own rule, round 17 `P1`: a form in
+#: the run with no partner is a form nothing re-measures). `’` is in the apostrophe
+#: class for parity with every other run site, and its falsifier is the ASCII-valued
+#: `… doesn't fail open.` partner, which
+#: `test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling`
+#: re-measures in both spellings.
+#:
+#: ⛔ AND EACH FORM IS A FIXED-WIDTH LOOKBEHIND SITTING IMMEDIATELY IN FRONT OF THE
+#: VERB, which is what keeps the EMPHATIC negations RED: `not only fails open` and
+#: `never merely fails open` ASSERT the predicate, and the four chars in front of
+#: the verb there are `nly `/`rely `, not `not `, so they are still read. That
+#: narrowness is pinned rather than asserted — `the ADJACENCY half not only fails
+#: open, it leaks.` is in `_RESIDUAL_REOPENING_MUTATIONS` and goes GREEN the moment
+#: the veto is widened into a WINDOW scan (the trade round 2 `P1` and round 13 had
+#: to correct one arm over). ⛔ DO NOT ADD AN EMPHATIC BRANCH: one was written in
+#: this round's first cut, was measured INERT (dropping it left `108 passed`,
+#: because no grammatical emphatic form puts `not` immediately before the verb),
+#: and dead arms are the class rounds 18/23 `P0` filed.
+#:
+#: ⚠️ THE BOUNDED-LOOKBEHIND COST IS PAID OPENLY: an adverb between the negator and
+#: the verb (`does not actually fail open`) sits outside every form the run can
+#: carry, so it is refused. That shape is in `_RESIDUAL_REFUSED_TRUTHFUL`, which is
+#: the route this artifact's own refusal message names.
+_RESIDUAL_FAIL_OPEN = re.compile(
+    r"(?<!\bnot\s)(?<!\bnever\s)(?<![n'\u2019]t\s)(?<!no longer\s)"
+    r"\bfails?\s+open\b",
+    re.I,
+)
 
 #: The gap between the verb and `open` may hold an OBJECT ("keeps the gap open"),
 #: a participle ("is held open"), adverbs or a parenthetical ("remains, in
@@ -2543,6 +2582,13 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the time-unit half fails open.",
     "the carve-out fails open.",
     "the value class fails open.",
+    # ⛔ THE EMPHATIC FORM OF THE SAME PREDICATE (#11258 review round 25 `P2`):
+    # `not only fails open` ASSERTS it, so the `fails open` arm's new negation veto
+    # must not swallow it. This pins the veto's NARROWNESS — it is four fixed-width
+    # lookbehinds immediately in front of the verb, so `not only` never vetoes — and
+    # it goes GREEN the moment the veto is widened into a window scan, the same
+    # coverage regression round 2 `P1` recorded for the `open` arm (`is not only open`).
+    "the ADJACENCY half not only fails open, it leaks.",
     # round 5 (#11258 review round 2 `P1`): EMPHATIC negations ASSERT the gap is
     # open — a negation veto wide enough to refuse these is a coverage regression,
     # and one was shipped for a round before these probes caught it.
@@ -2798,6 +2844,18 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "(e) remains open.",
     "(d2) does not reopen (d)'s ADJACENCY result — the unit word IS fused.",
     "an unknown unit still fails open on purpose.",
+    # ⛔ THE DENIALS OF `fails open`, one per form in `_RESIDUAL_FAIL_OPEN`'s veto
+    # run (#11258 review round 25 `P2`, MEASURED): every one of these was REFUSED at
+    # `9e6839bc4636` — the arm had no negation veto at all — while `origin/main`
+    # accepted all four (it had no `fails open` arm). A plain denial of this
+    # predicate CLOSES the gap, so each must stay GREEN; `doesn't` (ASCII) is also
+    # the `’` partner for the run's apostrophe class, re-measured in both spellings
+    # by `test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling`.
+    "the ADJACENCY half no longer fails open.",
+    "the ADJACENCY half never fails open.",
+    "the ADJACENCY half does not fail open.",
+    "the ADJACENCY half doesn't fail open.",
+    "the numeric side no longer fails open.",
     # ⛔ HONEST DENIALS, and they are here because they were FALSE BLOCKS: each one
     # red the scan before the negation guards above (#11258 review `P2`, measured).
     # A false block is how a guard gets deleted, so the surface is executable
@@ -3084,6 +3142,17 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     # `test_the_residual_region_is_scanned_WHERE_a_lane_appends`).
     "the numeric side fails open on an unknown unit",
     "the numeric side still fails open on purpose",
+    # ⛔ THE SAME BOUNDED-LOOKBEHIND COST, MET BY THE NEW `fails open` VETO (#11258
+    # review round 25 `P2`, MEASURED RED at the append point): the run admits a
+    # negator only IMMEDIATELY before the verb, so an adverb between them falls
+    # outside every fixed-width form and the sentence is refused although it is an
+    # honest DENIAL. Recorded rather than left to be discovered — the rule this
+    # ledger exists for — because the refusal message names this ledger as the
+    # route out, so an entry must exist for that route to be true. ⛔ DO NOT "FIX" IT
+    # BY WIDENING THE RUN: a variable-width `not … fail` lookbehind is impossible in
+    # `re`, and an adverb allowlist is the closed-list trade rounds 2/9/10 measured
+    # against.
+    "the ADJACENCY half does not actually fail open.",
     # ⛔ THE BOUNDED-LOOKBEHIND OVER-BLOCK, recorded here rather than in the run's
     # own note (#11258 review round 20 `P3`, MEASURED RED at the append point):
     # these are honest DENIALS of a reopening — the direction the run exists to
@@ -3271,10 +3340,14 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 156, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 157, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (156 — 149 raised by round 23's fourteen falsifiers: one "
+        "THE CURRENT LENGTH (157 — 156 raised by round 24's four falsifiers for the "
+        "restored waived `reopen` arm, plus ONE this round adds for the "
+        "`not only fails open` shape that pins the NARROWNESS of "
+        "`_RESIDUAL_FAIL_OPEN`'s new negation veto (#11258 review round 25 `P2`); "
+        "before that, 149 raised by round 23's fourteen falsifiers: one "
         "per `_RESIDUAL_OPEN_VERBS` alternative that had none, `whereas`/`though`, "
         "and the three `_RESIDUAL_CLASS_ANCHOR` members; plus four this round adds "
         "for the restored waived `reopen` arm. A FIFTH shape,"
@@ -3292,12 +3365,15 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
         "A `>=` at the current length costs nothing on growth and refuses any "
         "shrinkage; raise it in the same commit that adds proofs.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 74, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 79, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (74 — 70 raised by round 23's four partners: the three "
+        "CURRENT LENGTH (79 — 74 raised by round 24's four partners for the "
+        "restored `reopen` arm, plus FIVE this round adds for `_RESIDUAL_FAIL_OPEN`'s "
+        "negation run, one per form + its `’` partner (#11258 review round 25 `P2`); "
+        "before that, 70 raised by round 23's four partners: the three "
         "`never …` lookbehind forms that had none, and the coordinator guard's "
-        "honest shape; plus FOUR this branch adds: `_SPELLING_FLOOR`'s curly "
+        "honest shape, plus FOUR round 24 added: `_SPELLING_FLOOR`'s curly "
         "partner and the restored `reopen` arm's three honest denials. Before "
         "round 23 it was 66 — raised in the commit AFTER the two "
         "contraction "
@@ -3318,11 +3394,13 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         _RESIDUAL_REFUSED_TRUTHFUL), (
         "the over-block ledger has duplicate entries — a duplicate pays for a "
         "dropped cost while the count stays constant")
-    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 15, (
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 16, (
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
         "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (15), i.e. ZERO SLACK: the round-11 entries are the "
+        "CURRENT LENGTH (16 — 15 plus this round's bounded-lookbehind cost of the "
+        "new `fails open` negation veto, #11258 review round 25 `P2`), i.e. ZERO "
+        "SLACK: the round-11 entries are the "
         "`not … closed` cost, round 19 added the two `fails open` costs, round 20 "
         "added the three bounded-lookbehind denials, and slack above them is "
         "slack to delete one of those with")
@@ -3383,7 +3461,13 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # negation run, so deleting the note that explains it now reds here.
             "the ADJACENCY half has not to date been reopened.",
             "the ADJACENCY half has not, in practice, been reopened.",
-            "the ADJACENCY half has not yet, in practice, been re-opened.",):
+            "the ADJACENCY half has not yet, in practice, been re-opened.",
+            # ⛔ AND THE `fails open` VETO'S OWN BOUNDED-LOOKBEHIND COST (#11258
+            # review round 25 `P2`): without membership it is substitutable by a
+            # duplicate of an entry above — uniqueness and length survive and the
+            # measured cost leaves the ledger, the same defect round 9 closed one
+            # entry over.
+            "the ADJACENCY half does not actually fail open.",):
         assert required in _RESIDUAL_REFUSED_TRUTHFUL, (
             f"the over-block ledger no longer carries {required!r} — that shape's "
             "refusal is the measured price of a specific rule; if it is no longer "
@@ -3396,6 +3480,11 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             "the ADJACENCY half is no longer fused",
             # the clause-anchored `fails open` arm
             "the ADJACENCY half fails open.",
+            # ⛔ AND ITS EMPHATIC FORM (#11258 review round 25 `P2`): `not only
+            # fails open` ASSERTS the predicate, so it is the falsifier for the
+            # veto's narrowness — a veto widened into a WINDOW scan would turn this
+            # GREEN and leave the arm reading denials as claims.
+            "the ADJACENCY half not only fails open, it leaks.",
             # the emphatic negations the veto must NOT swallow
             "the ADJACENCY half is not only open, it is unfused.",
             # ⛔ THE CLOSED-VERDICT ARM (round 4/5, #11258 round-6 review `P1`
@@ -3461,6 +3550,12 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # ⛔ THE OTHER DIRECTION NEEDS MEMBERSHIP TOO: without it every proof of
             # this branch's own false-block fixes was deletable with zero red.
             "the ADJACENCY half is not open.",
+            # ⛔ AND ONE PER FORM OF THE `fails open` VETO RUN (#11258 review round
+            # 25 `P2`): the run's own members need membership, or a proof can be
+            # swapped for a duplicate while uniqueness and the floor both survive.
+            "the ADJACENCY half no longer fails open.",
+            "the ADJACENCY half never fails open.",
+            "the ADJACENCY half does not fail open.",
             "the SPELLING gap has never been closed, and the ADJACENCY half is closed by the tables.",):
         assert (required in _RESIDUAL_REOPENING_MUTATIONS
                 or required in _RESIDUAL_TRUTHFUL_STATEMENTS), (
@@ -3947,7 +4042,13 @@ def test_the_fails_open_over_block_is_in_the_ledger_not_only_a_comment():
     text = (pathlib.Path(__file__).resolve().parent.parent
             / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
     for sentence in ("the numeric side fails open on an unknown unit",
-                     "the numeric side still fails open on purpose"):
+                     "the numeric side still fails open on purpose",
+                     # ⛔ AND THE BOUNDED-LOOKBEHIND COST OF THE ARM'S NEW VETO
+                     # (#11258 review round 25 `P2`): the run admits a negator only
+                     # IMMEDIATELY before the verb, so an adverb between them is
+                     # refused though the sentence denies the predicate. Recorded,
+                     # so a widening of the run that stops refusing it reds here.
+                     "the ADJACENCY half does not actually fail open."):
         assert sentence in _RESIDUAL_REFUSED_TRUTHFUL, (
             f"the `fails open` over-block {sentence!r} is not in the ledger, so "
             "nothing re-measures it — a cost recorded only in a comment can drift")
@@ -4000,11 +4101,13 @@ def test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling():
         "them with a typographic apostrophe gets a different answer than its own "
         "proof list records, so one of the two is an UNRECORDED over-block: "
         f"{mismatches}")
-    assert converted >= 19, (
+    assert converted >= 20, (
         f"only {converted} proof-list shapes carry an apostrophe — the invariant "
         "above is measured on the shapes that exist, so a shrink here means the "
-        "surface it pins shrank. ⚠️ FLOOR IS THE CURRENT COUNT (19: 7 mutations + "
-        "12 truthful statements + 0 ledger entries at round 22), ZERO SLACK, the "
+        "surface it pins shrank. ⚠️ FLOOR IS THE CURRENT COUNT (20: 7 mutations + "
+        "13 truthful statements + 0 ledger entries — round 22's 19 plus round 25's "
+        "`… doesn't fail open.` partner for `_RESIDUAL_FAIL_OPEN`'s veto run), ZERO "
+        "SLACK, the "
         "same rule the two proof-list floors carry: raise it in the same commit "
         "that adds shapes.")
 
