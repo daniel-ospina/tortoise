@@ -379,6 +379,154 @@ def test_a_symlink_loop_at_the_carrier_path_is_a_fault_not_an_absence(
     assert "is not on disk" not in str(excinfo.value), str(excinfo.value)
 
 
+# ── 2c. The BYTES arm and the DOC arm: two more ways to lose the namespace ─
+#
+# Every test above exercises a carrier whose bytes DECODE. These do not: one
+# is undecodable on disk, and two are a doc that decodes to zero rows. Each was
+# measured as a live escape before the guards below existed.
+
+def test_a_non_utf8_carrier_is_a_packaging_fault_not_a_decode_error(
+        tmp_path, monkeypatch):
+    """`UnicodeDecodeError` is a `ValueError`, so `except OSError` never saw it.
+
+    Measured pre-fix on a carrier holding undecodable bytes: the reader raised
+    `UnicodeDecodeError`, which is not a `PlacementTableUnavailable`, so the
+    CLI's own `except Exception` re-wrapped it as *"record is unreadable"* /
+    exit 2 / divergence UNKNOWN — the #10663 misdiagnosis, pointing an operator
+    at the record's credentials for a file that is ON DISK and merely damaged.
+
+    The neighbouring corrupt-carrier test writes `"{not json"`, which is valid
+    UTF-8, so every gate in the tree stayed green on this class.
+    """
+    damaged = tmp_path / "_placement_table.json"
+    damaged.write_bytes(b'\xff\xfe{"rows": []}')
+    monkeypatch.setattr(cp, "PACKAGED_PLACEMENT_TABLE", damaged)
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+
+    message = str(excinfo.value)
+    assert "unreadable" in message, message
+    assert "UnicodeDecodeError" in message, message
+    assert "INSTALL" in message, message
+    # It is present, so it must never be reported as absent (the doc fallback).
+    assert "is not on disk" not in message, message
+    assert isinstance(excinfo.value, cp.CacheProjectionError)
+
+
+def test_a_non_utf8_doc_is_a_packaging_fault_not_a_decode_error(tmp_path):
+    """The DOC arm reads bytes too, and had the same hole.
+
+    A checkout doc that does not decode must be named as the install fault it
+    is; escaping as `UnicodeDecodeError` reaches the CLI as *"record is
+    unreadable"* — the same misdiagnosis, through the other arm.
+    """
+    damaged = tmp_path / "02-identity-and-placement.md"
+    damaged.write_bytes(b"\xff\xfe# Placement\n")
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows(doc=damaged)
+
+    message = str(excinfo.value)
+    assert "UnicodeDecodeError" in message, message
+    assert str(damaged) in message, message
+
+
+def test_a_doc_that_parses_to_zero_rows_is_refused_not_read_as_the_extras_only(
+        tmp_path, monkeypatch):
+    """The EMPTY guard landed on the packaged arm only — the doc arm kept it open.
+
+    Measured pre-fix with the carrier absent and a doc that parses to zero rows:
+    `_read_placement_rows()` returned the four `ADDITIONAL_PRIMARY_COLUMNS`
+    extras and `placement_columns()["point"]` held only `baseline_alpha` /
+    `baseline_beta` — every record property projects UNMAPPED, silently. The
+    test that owns this branch compared the runtime answer against the same
+    parser over the same empty doc, so it passed on exactly this state.
+    """
+    empty_doc = tmp_path / "02-identity-and-placement.md"
+    empty_doc.write_text("# Placement\n\nno table here\n", encoding="utf-8")
+
+    # (a) the explicit-doc arm
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows(doc=empty_doc)
+    message = str(excinfo.value)
+    assert "ZERO rows" in message, message
+    assert str(empty_doc) in message, message
+    assert "is not on disk" not in message, message
+
+    # (b) the runtime fallback arm: carrier absent, doc present but empty
+    monkeypatch.setattr(cp, "PACKAGED_PLACEMENT_TABLE", tmp_path / "absent.json")
+    monkeypatch.setattr(cp, "PLACEMENT_DOC", empty_doc)
+    with pytest.raises(cp.PlacementTableUnavailable) as runtime:
+        cp._read_placement_rows()
+    # The doc IS on disk, so the "NEITHER location" message would be a false
+    # statement about a file the operator can see.
+    assert "NEITHER" not in str(runtime.value), str(runtime.value)
+    assert "ZERO rows" in str(runtime.value), str(runtime.value)
+
+    with pytest.raises(cp.PlacementTableUnavailable):
+        cp.placement_columns()
+
+
+def test_a_carrier_row_naming_no_declared_table_is_refused(tmp_path,
+                                                         monkeypatch):
+    """A row under a table nothing reads parses fine and projects NOTHING.
+
+    Measured pre-fix: `["pointz", "id"]` with a matching `_row_count` was
+    ACCEPTED, and the property landed under a `pointz` key no accessor asks for
+    — a silently partial namespace, the same class as the empty carrier, with
+    the count check unable to see it. `parse_placement_rows` cannot produce such
+    a row (it maps sections through `_PLACEMENT_SECTION_TABLE`), so the carrier
+    was strictly weaker than the doc it is generated from.
+    """
+    payload = _real_payload()
+    payload["rows"][0] = ["pointz", "id"]
+    _carrier(tmp_path, payload, monkeypatch)
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows()
+    message = str(excinfo.value)
+    assert "pointz" in message, message
+    assert "declared" in message, message
+
+
+def test_the_explicit_doc_arm_raises_only_the_PUBLIC_type(tmp_path):
+    """The private absence type must never escape a public accessor.
+
+    Measured while this branch was being built, BEFORE the wrapping below was
+    added: `_read_placement_rows(doc=<absent>)` re-raised `_PlacementDocAbsent`
+    — a class that is not exported, so no out-of-module handler could name what
+    it caught, while the no-arg form of the SAME function raised the public type
+    for the identical condition. (Not a `main` measurement: `_PlacementDocAbsent`
+    does not exist there, so the doc arm raised the public type already.)
+    """
+    absent = tmp_path / "not-there.md"
+
+    with pytest.raises(cp.PlacementTableUnavailable) as excinfo:
+        cp._read_placement_rows(doc=absent)
+
+    assert type(excinfo.value).__name__ == "PlacementTableUnavailable", (
+        f"a public accessor leaked {type(excinfo.value).__name__} — a caller "
+        f"outside this module cannot catch a name it cannot import")
+    assert str(absent) in str(excinfo.value), str(excinfo.value)
+
+
+def test_the_doc_arm_success_path_is_pinned():
+    """Both new refusals above must not have eaten the arm's WORKING case.
+
+    The other `doc=` uses in this file assert only refusal, and the drift pin
+    calls `parse_placement_rows` directly — so without this one, a regression
+    that made the explicit-doc arm refuse (or return unextended rows) would
+    merge green.
+    """
+    rows = cp._read_placement_rows(doc=cp.PLACEMENT_DOC)
+
+    doc_rows = cp.parse_placement_rows(cp.PLACEMENT_DOC.read_text(encoding="utf-8"))
+    assert doc_rows, "the real doc must parse to rows for this pin to mean anything"
+    assert rows == cp._placed_rows_with_extras(doc_rows)
+    assert ("point", "pointKind") in rows, rows[:3]
+
+
 # ── 3. The carrier reaches an installed user ───────────────────────────────
 
 

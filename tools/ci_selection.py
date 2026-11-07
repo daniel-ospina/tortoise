@@ -4175,9 +4175,10 @@ def duplicate_entries(manifest: dict) -> list[str]:
 
     ⛔ Do NOT read a duplicate as proof that a union merge ran, and do not expect
     a byte-identical row to collapse. MEASURED on real merges: the SAME row
-    appended at two DIFFERENT positions survives as TWO rows, with `merge=union`
-    (`f.yml merge: union`) and without it (`f.yml merge: unspecified`) alike,
-    because nothing reconciles independent appends. Only the SAME change made in
+    appended at two DIFFERENT positions survives as TWO rows, with the attribute
+    set and with it unset alike (`git check-attr merge -- f.yml` ->
+    `f.yml: merge: union` / `f.yml: merge: unspecified`), because nothing
+    reconciles independent appends. Only the SAME change made in
     the SAME place collapses to one copy, and that is git's ordinary
     identical-change resolution, not a property of `union` (it collapses with the
     attribute and without it). Three identical rows landed on `main` on

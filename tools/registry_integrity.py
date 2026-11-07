@@ -16,8 +16,11 @@ a duplicate list entry, or a structurally broken document — and
 `yaml.safe_load` then **silently keeps the LAST duplicate key**. Nothing
 downstream can tell that happened.
 
-It is a line-SET union, and that is ALL it is: it never dedupes, it only replaces
-conflict markers with both sides' lines. MEASURED on real merges: the same row
+It is a line-level union MERGE (not a set union — identical lines are NOT
+collapsed: two copies inside one conflicting hunk survive as two), and that is ALL
+it is: it never dedupes, it only replaces conflict markers with both sides' lines
+(#11336: `git merge-file --union`, base `alpha/X/gamma` vs `OURS1/X/OURS2` and
+`THEIRS1/X/THEIRS2`, emits `X` twice). MEASURED on real merges: the same row
 appended at two DIFFERENT anchors survives as TWO rows, with `merge=union` and
 without it alike, because nothing reconciles independent appends; only the SAME
 change in the SAME place collapses, and that is git's ordinary identical-change
