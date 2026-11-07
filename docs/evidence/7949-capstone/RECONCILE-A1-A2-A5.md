@@ -48,6 +48,7 @@ recorded, because each one on its own is a trap:
 | `#11213` | `#11001` | **MERGED** 2026-11-06T19:13:23Z | `e918f3d6d` | ✅ `merge-base --is-ancestor` → 0 |
 | `#11211` | (part of `#11021` — **not** a PR close) | **MERGED** 2026-11-06T20:27:05Z | `aa414b4d5` | ✅ `merge-base --is-ancestor` → 0 |
 | `#11212` | `#10997` | **MERGED** 2026-11-06T21:33:54Z | `80c912244` | ✅ **`80c912244` IS the `origin/main` tip** — but ❌ `merge-base --is-ancestor 78e8abae6` still exits **1**, because the landing was **squashed** |
+| `#11205` | `#10999` (closed by its own merge commit — `Closes #10999` rode `316a572ce2`'s message; ⛔ `closingIssuesReferences` is empty because the keyword rode the commit, **not** the PR body, so the empty field is **not** evidence of a manual close) | **MERGED** 2026-11-06T22:40:32Z — **after the base, before this record merged** | `316a572ce2` | ✅ `merge-base --is-ancestor` → 0; and it is the landing that moved one of §5's own counts (below) |
 
 ⛔ **`git merge-base --is-ancestor` is a ONE-SIDED landing test: exit `1` is not a landing test, and
 `0` is.** Exit **0** is sound — the commit is in `origin/main`'s history, so it landed, and that is what
@@ -62,6 +63,18 @@ text), and `gh issue view 10997 --json state` → `CLOSED 2026-11-06T21:33:55Z`.
 --grep='#10997'` finds the commits either way — `--all` walks every ref, so it cannot distinguish a
 landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to answer "did it land"; a
 `0` does answer it, and only a read of the tree answers "is its content here".**
+
+⚠️ **A fourth landing arrived between the base and this record's merge — and it is why one recipe below
+no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
+**entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
+`hasPart` (`tortoise/extractor_v2.py:1720`). It does **not** discharge A1: it is **transport only** —
+nothing in the tree consumes `result["relations"]` (`extractor_v2.py:10702`), and materialising them as
+Object→Object edges is **`#11237`** (OPEN). What it *does* change is this record's evidence surface: the
+bare token count of the three edge-creating verbs prints **4** on `origin/main` and **0** at the base,
+because #11205's own explanation names `sdk.create_operator` in four comments
+(`extractor_v2.py:8892/8910/8917/9231`). The **calls** are still absent, so §1's second reason stands
+unchanged; §1 and §5 therefore now carry the call-shaped command, which a comment cannot satisfy. That
+is §7's lesson one merge later: **a count is only as good as the base it was taken at.**
 
 ⚠️ **`#11211` did not close `#11021`** — `gh pr view 11211 --json closingIssuesReferences` is empty
 and its own body says `Part of #11021 — not Closes`, routing the remaining row to `#11239` (OPEN).
@@ -110,16 +123,16 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:353` the definition,
    `:447` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner). The producer is
-   a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999`.
+   a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999` (now
+   **CLOSED**; its remainder is **`#11237`**, OPEN).
 2. **`extractor_v2.py` calls none of the three edge-creating verbs**, so it cannot be the producer of any
-   Object→Object edge, including the declared `hasPart` pairs: the **4** textual hits for `git grep -n -E
-   'create_edge|create_about_edge|create_operator' -- tortoise/extractor_v2.py` are **every one prose,
-   not a call** — `#` comments at `:8892` and `:9231`, docstring text at `:8910` and `:8917` (all four at
-   `d69faaf38`) — so the **call** count is **0**.
-   ⚠️ *Recipe drift, corrected 2026-11-07:* this read `grep -c … → 0` when the record was measured at
-   `80c912244`, and the same command prints **4** at `d69faaf38` — read the hits, never the bare count; a
-   lane that reads `4` as calls goes hunting for a producer that is not there. This is `#10984`'s
-   own third bullet, still true after the merge.
+   Object→Object edge, including the declared `hasPart` pairs:
+   `git grep -nE '\.(create_edge|create_about_edge|create_operator)\(' tortoise/extractor_v2.py` → **no
+   output**. This is `#10984`'s own third bullet, still true after the merge.
+   ⛔ **Do not use the bare token count.** `grep -c -E 'create_edge|create_about_edge|create_operator'`
+   printed **0** at this record's base and prints **4** on `origin/main`, because `#11205`'s explanation
+   names `sdk.create_operator` in four comments — a count of *mentions*, not of calls. The call-shaped
+   command above cannot be satisfied by prose, which is why it is the one recorded here.
    ⚠️ **Scoped on purpose.** The narrower claim is the one the command proves. "The extraction lane emits
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
@@ -147,8 +160,13 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `#11001` does **not** own and is "the half most likely to be dropped".
 
 **Exact remaining gap for `#10984`** (states its own scope, writes no producer):
-(a) invoke the `#11213` planner at a real call site, or declare that `#11083`/`#10999` own the invocation
-and re-scope to measurement-only; (b) add the declared-edge leg to the census so `0 → N` is observable at
+(a) invoke the `#11213` planner at a real call site, or declare that `#11083`/`#11237` own the invocation
+and re-scope to measurement-only — ⚠️ **not `#10999`**, which this record named before that issue closed:
+`#10999` is **CLOSED** (2026-11-06T22:40:34Z, `closedByPullRequestsReferences` empty — the issue field, not
+`closingIssuesReferences`, which is a PR field and cannot be read on an issue) and its remainder, the
+Object→Object **write** path, is **`#11237`** (OPEN). Naming a closed issue as an owner is the same
+orphaning this section warns about for the `v4-mechanisms.yml` row;
+(b) add the declared-edge leg to the census so `0 → N` is observable at
 all; (c) define the rollup query, hand-label its ground truth, pre-state the scoring; (d) re-run on the
 pre-registered corpus. **`#10984` is now dispatchable** — its named blocker closed.
 
@@ -213,15 +231,20 @@ Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 
 - **And the 0.0 pp is a property of the CORPUS, not of S2.2 — the probe's own control shows it.** Strip
   the 9 `about_entities` references and the *same* arbiter arm then removes all 9
   (`control variant=unreferenced-definite-descriptions arm=after-vet-arbiter stripped_objects=9
-  stripped_references=9 objects=16 share=0.375000 real_facts=90 removed=9`; the probe's own note: *"the
-  0.0 pp is a corpus property (every Object wired to its statement), not a property of S2.2"*). So nothing
+  stripped_references=9 objects=16 the_prefix=6 share=0.375000 real_facts=90 removed=9`; the probe's
+  own note: *"the 0.0 pp is a corpus property (every Object wired to its statement), not a property of
+  S2.2"*). So nothing
   is removed here because on this corpus every Object is defended by a reference — which is the same fact
   that makes E1b's `90 of 90` hold **vacuously**.
 - And the mechanism that *would* move it is foreclosed: the **design decision recorded for `#5333`,**
   in `#10069` (merged) and in `EXTRACTOR-V4-ARCHITECTURE.md` §*G5's destructive half*, says a pass may
-  not remove a committed row — and E1's share is moved by **no non-destructive mechanism**. ⚠️ `#5333`
-  is still **OPEN** because that is the *design* answer only: the **authorisation** (its task 1,
-  *whether a relocation pass may ever RUN*) remains the owner's, and nothing here assumes it.
+  not remove a committed row — and **no shipped** non-destructive mechanism moves E1's share. The one
+  hypothetical arm that does (`counterfactual-mint-skip`, `0.600000 → 0.375000` on the 16-Object
+  stripped corpus — the arm §2's gap (c) below names) is a mechanism that does not exist **and would
+  still miss the registered `0.300000` bound if it did** — so "nothing non-destructive moves it" is
+  true of the tree, false of the arithmetic. ⚠️ `#5333` is still **OPEN** because that is the *design*
+  answer only: the **authorisation** (its task 1, *whether a relocation pass may ever RUN*) remains the
+  owner's, and nothing here assumes it.
 
 ⛔ **The blocker `#10985` names by id has LANDED — and it did not move the number.** Its body: *"⛔ The id
 is `#10997` (S3 — an unresolved identity is HELD, never minted)"*. `#10997` is **CLOSED
@@ -348,7 +371,10 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
   worktree. So it never certifies that no lane holds `#10984`. An unmeasured
   surface is not a free one, which is the read-vs-verdict rule §0/§7 exist for. Treat `#10984` as
   dispatchable **subject to a clean `collision_preflight.py 10984` run** at dispatch time. The sequence is: census leg (§1(b)) → rollup query + ground truth
-  (§1(c)) → re-run (d). ⛔ **Its `config/v4-mechanisms.yml` row does not exist today** — the file carries
+  (§1(c)) → re-run (d). ⛔ **And the write path it must consume is `#11237`'s, not one it may build.**
+  `#10999` — the owner candidate §1(a) named — is **CLOSED**, and its remainder (the Object→Object write
+  path) is **`#11237`** (OPEN). A `#10984` lane consumes that transport; writing a second `create_edge`
+  producer is the "second producer" the epic forbids. ⛔ **Its `config/v4-mechanisms.yml` row does not exist today** — the file carries
   **13** mechanism ids (`vet`, `source_dedup`, `exact_dedup`, `near_dup_detect`, `near_dup_merge`,
   `against_priors_consolidation`, `span_link`, `embed_gate`, `sufficiency_router`, `fanout_cap`,
   `state_value_carve_out`, `atomic_point_write`, `failure_policy`) and **none for the declared-hierarchy
@@ -378,6 +404,15 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
 gh pr view 11213 --json state,mergeCommit,mergedAt
 gh pr view 11211 --json state,mergeCommit,mergedAt,closingIssuesReferences
 gh pr view 11212 --json state,mergeCommit,mergedAt        # MERGED 21:33:54Z, mergeCommit 80c912244
+# How an issue was actually CLOSED — the discriminator an empty closingIssuesReferences cannot give:
+gh api "repos/daniel-ospina/tortoise/issues/10999/timeline?per_page=100" \
+  --jq '.[] | select(.event=="closed") | {created_at, commit_id}'
+                                                          # a SHA => a commit's closing keyword closed it
+                                                          #   (#10999 -> 316a572ce2, message `Closes #10999`)
+                                                          # null => a MANUAL close (#11021 reads null)
+                                                          # ⛔ An empty closingIssuesReferences does NOT mean
+                                                          # "manual": the keyword can ride the squash COMMIT,
+                                                          # which never populates that PR-body-derived field
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
@@ -394,10 +429,11 @@ gh issue view 11021 --json state,closedAt                 # CLOSED, one second a
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
 git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
 git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
-grep -c -E 'create_edge|create_about_edge|create_operator' tortoise/extractor_v2.py   # ⛔ NOT 0 — see below
-# 4 hits at d69faaf38, and EVERY one is prose rather than a call ('#' comments at :8892 and :9231,
-# docstring text at :8910 and :8917): the CALL count is 0. The command is `grep -c`, so prose that
-# mentions a verb counts exactly like a call. Read the hits.
+git grep -nE '\.(create_edge|create_about_edge|create_operator)\(' tortoise/extractor_v2.py   # no output
+                                                          # ⛔ NOT the bare token count: that is 4 on
+                                                          # origin/main since #11205 (four COMMENTS naming
+                                                          # sdk.create_operator) and 0 at this base — a
+                                                          # count is only as good as the base it was taken at
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
 tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer (2 holders on a
                                                           # clean checkout); exit 2 = a surface could not
