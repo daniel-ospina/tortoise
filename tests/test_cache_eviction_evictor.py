@@ -117,8 +117,14 @@ def lane():
     #     if the process dies.
     #
     # Pinned by
-    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`,
-    # which reds while any of the three halves is missing (#11182).
+    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
+    # — but for (a) and (c) ONLY (#11182): that census tests `os.urandom` and a
+    # real `_journal_append` CALL in the enclosing block, and it has NO prefix
+    # leg at all. Half (b) is therefore carried here DELIBERATELY and is NOT
+    # guarded: reverting the `test_` stem to a bare `evict_<hex>` while keeping
+    # (a) and (c) leaves the census GREEN (measured — its own non-vacuity arm
+    # pins a `g_<hex>` name and asserts no violations). Do not read that
+    # guard's green as covering the sweep-owned prefix.
     graph_name = f"test_10976_evict_{os.urandom(6).hex()}"
     _journal_append(graph_name)
     graph = db.select_graph(graph_name)
