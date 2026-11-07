@@ -58,6 +58,11 @@ RED:
   ``test_a_repeat_escalation_writes_nothing_and_the_loop_closed``,
   ``test_one_stored_unit_does_not_suppress_a_DIFFERENT_finding``,
   ``test_a_repeat_occurrence_is_reported_once`` and four more RED (eight in total).
+* **Let the module's own prose credit the within-call half** — restore the
+  pre-#11428 docstring bullet (*"written back twice is ONE unit. That is what
+  makes the escalation an investment … its absence is … 'no attribution loop'"*)
+  → ``test_no_loop_claim_in_the_module_docstring_credits_the_within_call_half``
+  RED, and green everywhere else in this file (it asserts prose only).
 * **Report a MINTED unit as already stored** — drop the ``key in persisted`` half
   of the branch → ``test_a_minted_unit_is_never_also_reported_as_persisted`` RED.
 * **Leave the stored class out of the class guard** — compare only against
@@ -1192,14 +1197,16 @@ def test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it() -> 
 # investment" true.
 #
 # Each test below is RED on the pre-fix module. Measured by loading `origin/main`'s
-# module in place of this one — 16 failed, 211 passed (227 total) — and the 16 break
+# module in place of this one — 17 failed, 211 passed (228 total) — and the 17 break
 # down EXACTLY as: 12 x `TypeError: unexpected keyword argument 'already_written'`,
 # 1 x `AssertionError: Regex pattern did not match` (the bare-key test asserts the
 # refusal MESSAGE, so the interpreter's own TypeError lands inside its
-# `pytest.raises`), 1 x `AttributeError: no attribute 'already_persisted'`, and 2 x
+# `pytest.raises`), 1 x `AttributeError: no attribute 'already_persisted'`, 2 x
 # `Failed: DID NOT RAISE ValueError` (the `SummaryUnit` class-invariant tests —
-# `main` has no class check to drop). So the red-first evidence is the whole set,
-# not a sample.
+# `main` has no class check to drop), and 1 x `AssertionError: the module docstring
+# credits the loop without naming the across-call half` (the prose guard: `main`'s
+# docstring bullet credits the within-call dedupe for making the escalation an
+# investment). So the red-first evidence is the whole set, not a sample.
 # (`settled`'s own SEMANTICS are not proved by that run — none of these tests
 # reaches it pre-fix; they are held by the `settled = not units` revert, which
 # reddens three of them.)
