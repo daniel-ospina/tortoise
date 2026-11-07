@@ -355,7 +355,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:12799-12803` — the classify block starts at `:12799`, the vet surface at `:12803` — and `:13246-13260`, the two result blocks). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:12799-12803` — the classify block starts at `:12799`, the vet surface at `:12803` — and `:13246-13252` / `:13256-13260`, the two result blocks). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -1186,7 +1186,7 @@ the same lesson (cite the symbol, not the line).
 | S2.2 VET | `_run_vet_pass` `:12894` | `result["vet"]` — built at `extractor_v2.py:13256-13260`, copied onto the receipt at the meta fold `sdk.py:17086` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
 | S2.3 CLASSIFY | `_apply_classify_kinds` `:12910` | `result["classify_later"]` — built at `extractor_v2.py:13246-13252`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
 | S3 RESOLVE | `search_graph` `:12926` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
-| S5 CONNECT | `execute_embed` `:9388` (+ `run_s4` `:12947` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
+| S5 CONNECT | `execute_embed` `:13163` (+ `run_s4` `:12947` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]`, copied as `stats["step_witness"]["commit"]` (payload_produced + the count the write loop RESOLVED — created or folded onto an existing canonical, so a fully-folded capture reports the folded count, never 0) | ✅ — `capstone_measure.py` additionally reads the committed `:Point` nodes and their `eventId` stamps off the live graph |
 
 `capstone_run.py` binds `result = captured` and hands `observe_steps` the receipt itself — the
