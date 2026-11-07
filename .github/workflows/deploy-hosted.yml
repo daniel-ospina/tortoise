@@ -1063,18 +1063,33 @@ jobs:
             echo "::error::#11122 — the mitigation ledger could not be read as a FILE at ${MITIGATION_LEDGER} (missing, unreadable, or a directory), so this deploy cannot tell a deliberate absence from an unconfigured secret and must not stage anything. Restore the file (or the path) and re-run."
             exit 1
           fi
-          # The redirect is opened on a DEDICATED, DYNAMICALLY ALLOCATED fd with its
-          # own failure check rather than inline on `done`, so an unopenable ledger
-          # is a hard failure instead of a skipped loop.
+          # The redirect is opened on a DEDICATED, FIXED fd (4) with its own failure
+          # check rather than inline on `done`, so an unopenable ledger is a hard
+          # failure instead of a skipped loop.
+          # ⛔ FIXED, NOT `exec {LEDGER_FD}<` — the auto-allocated form is a **bash
+          # ≥ 4.1** feature and it is the only thing in this block that needs anything
+          # newer than bash 3.2: stock macOS `/bin/bash` is 3.2, `shutil.which("bash")`
+          # in the provenance gate finds it, and every classification on a developer
+          # box then dies at `exec: {LEDGER_FD}: not found` (rc 127) — surfacing as an
+          # unrelated "unreadable ledger" over tests that never touch the ledger
+          # (#11332 review). The bash manual's own caveat about the dynamic form is
+          # that it allocates fd ≥ 10, and "redirections using file descriptors greater
+          # than 9 should be used with care, as they may conflict with file
+          # descriptors the shell uses internally". A fixed 4 is identical on bash
+          # 3.2 … 5.x. Locally: `/bin/bash -c 'echo $BASH_VERSINFO'` prints the floor
+          # this block now runs under.
           # ⛔ NOT fd 3: the provenance gate classifies this payload by executing it
           # under a wrapper that has ALREADY opened fd 3 as the stub binaries'
-          # write channel (`exec 3>argv.records`). Reusing a fixed fd silently
-          # re-points that channel and the classification loses the argv it reads —
-          # a fork-free way to break the gate while looking tidier.
-          # ⛔ AND `-f` IS STILL REQUIRED: `exec {fd}<` SUCCEEDS on a DIRECTORY
+          # write channel (`exec 3>argv.records`). Reusing THAT fd silently
+          # re-points the channel and the classification loses the argv it reads —
+          # a fork-free way to break the gate while looking tidier. fd 4 is opened by
+          # nothing else in this `run:` block, in the runner's shell, or in the
+          # harness's wrapper (pinned by
+          # `tests/test_deploy_workflow.py::test_the_ledger_fd_is_fixed_and_avoids_the_stub_channel`).
+          # ⛔ AND `-f` IS STILL REQUIRED: `exec 4<` SUCCEEDS on a DIRECTORY
           # (measured — `open(2)` on a directory is permitted), so the fd form alone
           # does not rule a directory out.
-          exec {LEDGER_FD}< "$MITIGATION_LEDGER" || {
+          exec 4< "$MITIGATION_LEDGER" || {
             echo "::error::#11122 — the mitigation ledger at ${MITIGATION_LEDGER} could not be opened for reading, so this deploy cannot tell a deliberate absence from an unconfigured secret and must not stage anything."
             exit 1
           }
@@ -1084,8 +1099,8 @@ jobs:
             case "$LEDGER_NAME" in ''|'#'*) continue ;; esac
             MITIGATED="$MITIGATED$LEDGER_NAME "
             printf -v "$LEDGER_NAME" '%s' ''
-          done <&$LEDGER_FD
-          exec {LEDGER_FD}<&-
+          done <&4
+          exec 4<&-
           # ⛔ #11122 — END OF THE ENVIRONMENT BLOCK. The payload composition follows.
           ARGS=(FASTAPI_INTERNAL_KEY="$FASTAPI_INTERNAL_KEY" TORTOISE_SECRET_PEPPER="$TORTOISE_SECRET_PEPPER" FALKORDB_CLOUD_URI="$FALKORDB_CLOUD_URI")
           # #2208: TORTOISE_GIT_SHA — the exact deploy commit, exposed by GET

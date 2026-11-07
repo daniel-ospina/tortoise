@@ -5468,6 +5468,51 @@ def test_the_sync_step_honours_the_mitigation_ledger():
         )
 
 
+def test_the_ledger_fd_is_fixed_and_avoids_the_stub_channel():
+    """The ledger fd is a FIXED number, and it is not the stub channel's (#11332 review).
+
+    Two independent constraints, each with its own failure mode:
+
+    * `exec {LEDGER_FD}<` — bash's auto-allocated form — is a **bash >= 4.1**
+      feature, and it is the ONLY thing in this block that needs anything newer
+      than bash 3.2. Stock macOS `/bin/bash` is 3.2 and the provenance gate
+      resolves its interpreter with `shutil.which("bash")`, so on a developer box
+      every classification dies at `exec: {LEDGER_FD}: not found` (rc 127) and
+      surfaces as an unrelated "unreadable ledger" fault over tests that never
+      touch the ledger. The bash manual also warns that the dynamic form
+      allocates fd >= 10, and that fds greater than 9 "should be used with care, as
+      they may conflict with file descriptors the shell uses internally".
+    * fd **3** is the harness's own write channel (`exec 3>argv.records`, opened by
+      `_capture_payload`'s wrapper around this payload). Reusing it silently
+      re-points that channel, so the classification loses the argv it reads.
+
+    Non-vacuous both ways: reverting to `exec {LEDGER_FD}<` reds the first
+    assertion, and moving the fd to 3 reds the second.
+    """
+    run = _steps()[_SET_STEP]["run"]
+    block = _ledger_block(run)
+    code = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert not re.search(r"exec\s+\{[A-Za-z_]\w*\}<", code), (
+        "the ledger redirect uses bash's `exec {var}<` auto-allocation (bash >= 4.1). "
+        "The gate resolves its shell with `shutil.which(\"bash\")`, so on stock "
+        "macOS (bash 3.2) every classification exits 127 and reports an unrelated "
+        "unreadable-ledger fault. Open a fixed fd instead."
+    )
+    opened = re.findall(r'exec\s+(\d+)<\s*"\$MITIGATION_LEDGER"', code)
+    assert opened == ["4"], (
+        "the ledger must be opened on the fixed fd 4 — NOT fd 3, which "
+        "`_capture_payload` has already opened as the stub binaries' write channel "
+        "(`exec 3>argv.records`), so reusing it loses the argv the gate reads: "
+        f"opened fd(s) = {opened or 'none'}"
+    )
+    assert "done <&4" in code and "exec 4<&-" in code, (
+        "the read loop must consume fd 4 and the shell must close it afterwards — "
+        "otherwise the descriptor leaks for the rest of the step"
+    )
+
+
 def test_the_ledger_mandatory_set_matches_the_verify_gate():
     """`MANDATORY_FLY_SECRETS` is a SECOND owner of the hard-fail set — pin it.
 
