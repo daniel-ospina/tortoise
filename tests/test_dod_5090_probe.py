@@ -3816,6 +3816,200 @@ def _doc_section(text: str, start: str, end: str) -> str:
     return text[begin:stop]
 
 
+# ⛔ THE RESIDUAL PIN READS THREE FACTS, NOT ONE SUBSTRING (#11389 review, P3).
+# The pin's job is to red the census doc when §3 stops saying that the walk does
+# not visit a nested `def`'s decorators/defaults — including when it says the
+# exact INVERSE. `"not" in sentence` cannot do that: it is a substring test, so
+# it is satisfied by `noted`, by a sentence about something else, and by a
+# sentence asserting the opposite. Measured GREEN under it, on this doc:
+#
+#   "…are noted as reported"                        (substring `not`)
+#   "…are not exempt — reached from inside the walk   (asserts the INVERSE)
+#    and therefore reported"
+#   "…are never skipped by this walk"               (inverse)
+#   real clause DELETED + "This section does not discuss
+#    decorators or defaults"                        (no walk at all)
+#
+# So the polarity is read as three separate facts: a negation cue that must be a
+# WORD, coverage vocabulary the claim is actually about, and the absence of the
+# positive reading.
+# ⛔ THE NEGATION MUST GOVERN THE CLAIM, not merely occur in the sentence
+# (#11437 review, round 3, P1). `_NEGATION.search(sentence)` only asked that a
+# `not`/`never`/`outside` token EXIST somewhere, so an inverse passed on the
+# strength of a stray negation: measured, all of these were GREEN —
+#   "The walk does visit a nested `def`'s decorators and parameter defaults;
+#    this is not a gap."
+#   "Reported by the walk: a nested `def`'s decorators and parameter defaults,
+#    which is not what an earlier draft said."
+#   "outside the method body, the walk reports a nested `def`'s …"
+# Requiring the negation to sit within two words of a COVERAGE verb closes every
+# one of them. Window measured: 0, 1 and 2 all close 13/13 inverse rows and keep
+# the real doc a HIT; 3 re-opens "are not missed by the walk".
+# ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
+# RED, because `touched` is not in the coverage list — a false block bought for
+# that false pass, which is the trade this predicate always takes.
+_NEGATION = re.compile(r"\b(?:not|never|outside)\b")
+# ⛔ `(?:s|es|ed)?` — NOT `ed?`. `ed?` binds the `?` to the `d`, so it matches only
+# `e` or `ed`: the bare words this vocabulary is named for (`walk`, `visit`,
+# `reach`, `report`) did NOT match, and an honest present-tense rewording
+# ("This walk does not visit …") went RED where the merged predicate was green
+# (#11437 review, P2). Measured: 5 present-tense rewordings 1->0 under `ed?`.
+# ⛔ `es` is in the alternation for the same reason, one inflection further out:
+# without it `(?:s|ed)?` matched `visit`/`visits`/`reach`/`reports` but NOT
+# `reaches` — `reach` is the one verb here whose third person is `-ches`, and the
+# alternation then carries no match for it. Measured on the row that isolates it
+# (`"it never reaches a nested `def`'s decorators and parameter defaults"`, no
+# `walk` to fall back on): `False` under `(?:s|ed)?`, `True` under
+# `(?:s|es|ed)?`, i.e. an honest statement of the claim was a false RED
+# (#11437 review, round 2, P2). ⚠️ A phrasing that also says `the walk …` is NOT
+# the evidence: `walk` is itself a coverage word, so that sentence matches under
+# either spelling — citing it as proof of `es` was a measurement that does not
+# reproduce (#11437 review, P3), corrected to the row above.
+_COVERAGE = re.compile(r"\b(?:walk|visit|reach|report)(?:s|es|ed)?\b")
+# The negation must GOVERN a coverage verb: within two words of one.
+_NEGATION_GOVERNS = re.compile(
+    r"\b(?:not|never|outside)\b(?:\s+\w+){0,2}?\s+"
+    r"(?:walk|visit|reach|report)(?:s|es|ed)?\b")
+# The positive readings. The first three are the literal phrases the doc used;
+# the rest refuse the INVERSE stated in other vocabulary (#11437 review, P1).
+# The first cut listed four literals (`not outside` / `not exempt` / `not left`
+# / `except`) and the next review measured four MORE that it let through —
+# `not excluded`, `not out of scope`, `not omitted from`, `does not fail to
+# report` — so the negated half is written as the CLASS it was always meant to
+# be: a negation governing a REVERSER. `not outside the walk` reads as "inside
+# the walk", so a negated reverser has to be refused as explicitly as the
+# affirmatives are. ⛔ This is still a vocabulary list, not a parser: a reverser
+# outside it still false-GREENs, which is one of the residuals
+# `_residual_sentences` declares.
+# ⛔ `except THAT`, not bare `except`: the reverser is the concessive *clause*
+# ("visited, except that … are not reported"), while a bare `except` also reds
+# the honest "…, except when the outer method runs" — which is the real doc's
+# own argument, one rewording away (#11437 review, P3). Measured: the inverse
+# row still reds, the honest `except when` row greens.
+# ⛔ And the NEGATED PRIVATIVE — `never unvisited`, `not unreported` — is a
+# double negative that asserts coverage. #11443 measured two of these GREEN; the
+# `un…` list closes them without touching an honest "…are never visited".
+# ⛔ And a HEDGE is not a negation of the CLAIM, which is the same shape one step
+# out from finding 2's stray `not` (#11437 review, round 2, P2's class, measured
+# again here): a pseudo-negation governs a coverage verb while asserting NEITHER
+# the exclusion NOR its inverse, because it negates the MODALITY —
+# `"it is not sure the walk reaches …"`, `"…does not always visit …"`,
+# `"…does not necessarily report …"` were all GREEN, so a §3 re-written into
+# hedges went on satisfying the pin. That list is the STANDARD's answer, not an
+# invention here: NegEx carries an explicit PSEUDO-NEGATION termset (with
+# `negspacy`'s `en_clinical` default) precisely because `not certain` / `not
+# sure` / `not necessarily` are cues that do NOT negate the finding they precede
+# — https://pypi.org/project/negspacy/ (external rung for #11437: `web_search`
+# model=sonar on "NegEx NegSpacy negation cue scope … pseudo-negation").
+# Measured before this alternation: 3/3 hedges GREEN; after: 3/3 RED, with every
+# `must_stay_green`, `declared_open` and `declared_blocks` row unmoved.
+_AFFIRMED = re.compile(
+    r"\binside the walk\b|\btherefore reported\b|\bskipped\b|\bexcept that\b"
+    r"|\bnot\s+(?:outside|exempt|excluded|omitted|left|out\s+of\s+scope|fail)"
+    r"|\b(?:not|never)\s+un(?:visited|reported|reached|walked|covered|mentioned|seen)\b"
+    r"|\b(?:not|never)\s+(?:always|necessarily|certain|certainly|sure|clear"
+    r"|definitely|conclusively|guaranteed)\b")
+
+
+def _residual_sentences(s3: str) -> list[str]:
+    r"""Sentences of §3 that state the walk does NOT visit a nested def's
+    decorators/defaults — the claim the pin exists to protect.
+
+    ⛔ THE RESIDUALS THIS CANNOT CLOSE, stated where they are taken. This reads
+    VOCABULARY, not assertion structure, so it is wrong in BOTH directions and
+    each shape below was measured in #11437's review rather than assumed:
+
+    FALSE-GREEN (it misses the inverse):
+
+    * a DECOY about one of §3's other walks — the doc distinguishes the direct
+      walk, the closure, the mention scan and the retrieval walk, and
+      `"Parameter defaults and decorators are not reported against the retrieval
+      walk."` reds nothing while saying nothing about the body walk;
+    * a sentence about the INSTRUMENT'S OUTPUT rather than the walk's visit —
+      `report` is in the coverage list because §3's real clause says "and
+      therefore NOT reported", so `"This section has not reported on `def`
+      decorators or parameter defaults"` satisfies the pin (#11443, P2).
+      Dropping `report` would fix this decoy and red every honest "the scan
+      never reports …" rewording — a false block for a false pass, paid for in
+      the wrong direction here, so it is declared rather than closed;
+    * an inverse whose REVERSER is outside `_AFFIRMED`'s vocabulary — the list is
+      a class pattern for negated reversers and negated privatives now, not four
+      literals, but it is still a list;
+    * a HEDGE whose cue is outside `_AFFIRMED`'s pseudo-negation termset. The
+      NegEx-style list closes `not always` / `not necessarily` / `not sure` /
+      `not certain` / `not clear` …, but an adverb it does not name still reads
+      as an exclusion — measured GREEN with that list in place:
+      `"the walk does not substantially visit …"`, `"…does not routinely
+      report …"`, `"…does not generally reach …"`. Closing this needs SCOPE
+      rather than a longer list, so it is declared instead.
+
+    FALSE-BLOCK (it reds the claim, stated honestly):
+
+    * an exclusion stated with none of `not`/`never`/`outside`, or one that says
+      `skipped`, or one phrased `"…are never inside the walk"` — `inside the
+      walk` is an affirm marker and `never` does not outrank it;
+    * an HONEST sentence that uses a marker as an ASIDE — both measured RED
+      (#11437 review, round 2, P3): a concessive `"…except that a default is
+      evaluated when the outer method runs"`, which trips the `except that`
+      reverser that exists to red its inverse twin, and `"…from inside the walk's
+      enclosing frame"`, where the `\binside the walk\b` marker matches the
+      possessive `walk's`. Declared rather than paid for: narrowing either marker
+      re-opens the inverse it was added for. Both are ROWS in `declared_blocks`
+      below, not only this prose (#11437 review, round 2, P3);
+    * a statement whose coverage verb is outside the `walk/visit/reach/report`
+      list — measured, `"…are never TOUCHED by the walk"` reds, because the
+      negation must reach one of those four verbs to be read as governing it
+      (#11437 review, round 3, P1).
+
+    ⛔ The false-GREEN direction is the one that matters: a missed inverse is a
+    false PASS in the file whose purpose is to be false-PASS-free, while a false
+    block is loud and cheap. Where the two conflict, take the false block.
+
+    ⛔ AND THE APPROACH ONLY NARROWS. Four review rounds have each closed a
+    shape of the same class — literals → class → privatives → governance →
+    pseudo-negation — and a fifth found the next shape (the out-of-termset hedge
+    declared above). A vocabulary predicate over English prose is
+    not going to converge; what keeps it honest is that every measured shape is
+    a ROW in `test_the_residual_pin_separates_the_claim_from_its_inverse`, so
+    each tightening is a test result rather than a claim.
+
+    Pinning any of these exactly would mean pinning §3's wording again, which is
+    the failure this file's history is a chain of (#11389 P2/P3): the doc+code
+    pair agrees, the pin reds, and the cheapest repair is to guess the phrasing
+    from the test body. What is pinned instead is the ROW SET in
+    `test_the_residual_pin_separates_the_claim_from_its_inverse`.
+    """
+    lowered = s3.lower()
+    return [sentence for sentence in lowered.split(". ")
+            if "decorator" in sentence and "default" in sentence
+            and _NEGATION_GOVERNS.search(sentence)
+            and _COVERAGE.search(sentence)
+            and not _AFFIRMED.search(sentence)]
+
+
+def _assert_census_states_the_residual(text: str) -> None:
+    """Red the census doc unless some sentence of §3 states the exclusion.
+
+    ⛔ THIS IS A FUNCTION, NOT AN INLINE ASSERTION, FOR A MEASURED REASON
+    (#11437 review, round 2, P1). It lived inside the `declared is None` arm of
+    `test_the_census_doc_states_the_same_probe_bound_the_report_does`, and on
+    this tree that arm is DEAD — `probe._sdk_methods_on_vector_leg()` declares a
+    bound (`volunteer_context`), so `declared` is not None. Measured before the
+    hoist: deleting §3's residual sentence from the doc left every test in this
+    file GREEN, because the predicate returned `[]` into a branch nobody ran.
+    That is a false PASS in the artifact whose whole purpose is to be
+    false-PASS-free.
+
+    As a function it can be handed a MUTATED document, so the pin's ability to
+    fail is itself pinned by `test_the_residual_pin_separates_the_claim_from_its
+    _inverse`. An inline assertion can only be "tested" by reading it.
+    """
+    residual = _residual_sentences(_doc_section(text, "## 3.", "## 4."))
+    assert residual, (
+        "the doc claims the declaration is total; the walk does not visit a "
+        "nested def's defaults/decorators, and no sentence of §3 says so")
+
+
 def test_the_doc_slice_requires_a_UNIQUE_LINE_ANCHORED_H2():
     """`_doc_section`'s anchoring and uniqueness must be PINNED, not just prose.
 
@@ -3883,6 +4077,47 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
     assert _error is None, (
         "the scan could not be TAKEN on the real tree, so the declaration read "
         f"below is measuring the wrong channel: {_error}")
+    # ⛔ THE RESIDUAL IS A PROPERTY OF THE WALK, NOT OF THE DECLARATION — so it
+    # runs on EVERY tree (#11437 review, round 2, P1). It used to live inside the
+    # `declared is None` arm below; on this tree `probe._sdk_methods_on_vector_
+    # leg()` DOES declare a bound (`volunteer_context`), so that arm never ran.
+    # Measured before this hoist: deleting §3's residual sentence from the census
+    # doc left BOTH this test and the predicate's row-set test GREEN — the
+    # predicate returned `[]` and nothing asserted on it. That is a false PASS in
+    # the artifact whose purpose is to be false-PASS-free, and it is the same
+    # dormancy the parent commit named as its third defect while giving only the
+    # PREDICATE an executor. This gives the PIN one.
+    #
+    # ⛔ THE PROPERTY RULE (#11389 review, P2): the arm used to require ONE exact
+    # sentence ("nested `def`'s decorators and parameter defaults"), so any
+    # legitimate rewording of that clause red a doc+code pair that still agreed.
+    # Assert the CLAIM instead, in `_assert_census_states_the_residual`. The
+    # measurements that chose its shape:
+    #  · same-sentence keeps it falsifiable — a whole-document word search stays
+    #    green with the clause deleted, because both words appear elsewhere;
+    #  · NOT `"nested" in sentence` either: pinning that ADJECTIVE still red a
+    #    rewording to "an **inner** `def`'s decorators and parameter defaults",
+    #    which states the same claim (#11389 review, P2);
+    #  · and NOT a loosened `(def|function) + (decorator|default)`: measured, that
+    #    false-GREENS with the clause deleted — two other §3 sentences hit it
+    #    ("…runs the SDK's own default …", "…`:Object` on its default path");
+    #  · the polarity is why the reversed doc reds: `"decorator" and "default"`
+    #    alone stays GREEN on a sentence asserting the exact inverse (#11389
+    #    review, P3);
+    #  · and the polarity is read as three separate facts, because
+    #    `"not" in sentence` is a substring test that any of these defeats — all
+    #    four measured GREEN on this doc before the split (#11389 review, P3):
+    #      "…are noted as reported"                       (substring `not`)
+    #      "…are not exempt — reached from inside the walk  (asserts the
+    #       and therefore reported"                         INVERSE)
+    #      "…are never skipped by this walk"                (inverse)
+    #      real clause DELETED + "This section does not discuss
+    #       decorators or defaults"                        (no walk at all)
+    # Measured on this doc: 1 hit with the clause, 1 with the `inner def`
+    # rewording, 0 with the clause deleted, 0 with the clause REVERSED
+    # ("Inside the walk, and therefore reported").
+    _assert_census_states_the_residual(text)
+
     if declared is None:
         # ⛔ A PROPERTY, not a magic sentence (#11389 review, P3): requiring one
         # exact phrase the doc never documented made this arm red on a doc+code
@@ -3892,38 +4127,6 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
         assert "volunteer_context" not in text, (
             "the scan declares nothing and the census doc still presents "
             "`volunteer_context` as a declared reach")
-        # ⛔ THE SAME PROPERTY RULE APPLIES TO THE RESIDUAL ITSELF (#11389
-        # review, P2): this arm used to require ONE exact sentence
-        # ("nested `def`'s decorators and parameter defaults"), so any
-        # legitimate rewording of that clause red a doc+code pair that still
-        # agreed — the very failure the comment four lines up names. Assert the
-        # CLAIM instead: some SENTENCE of §3 names both a `decorator` and a
-        # `default`, which is what "the walk does not visit a nested def's
-        # decorators/defaults" reduces to once the wording is free.
-        #  · same-sentence keeps it falsifiable — a whole-document word search
-        #    stays green with the clause deleted, because both words appear
-        #    elsewhere in the document;
-        #  · NOT `"nested" in sentence` either: pinning that ADJECTIVE still red
-        #    a rewording to "an **inner** `def`'s decorators and parameter
-        #    defaults", which states the same claim (#11389 review, P2);
-        #  · and NOT a loosened `(def|function) + (decorator|default)`:
-        #    measured, that false-GREENS with the clause deleted — two other §3
-        #    sentences hit it ("…runs the SDK's own default …", "…`:Object` on
-        #    its default path").
-        # Measured on this doc: 1 hit with the clause, 1 with the `inner def`
-        # rewording, 0 with the clause deleted, 0 with the clause REVERSED
-        # ("Inside the walk, and therefore reported").
-        #  · the polarity cue is why the reversed doc reds: `"decorator" and
-        #    "default"` alone stays GREEN on a sentence that asserts the exact
-        #    inverse the comment above names (#11389 review, P3).
-        s3 = _doc_section(text, "## 3.", "## 4.").lower()
-        residual = [sentence for sentence in s3.split(". ")
-                    if "decorator" in sentence and "default" in sentence
-                    and ("not" in sentence or "never" in sentence
-                         or "outside" in sentence)]
-        assert residual, (
-            "the doc claims the declaration is total; the walk does not visit a "
-            "nested def's defaults/decorators, and no sentence of §3 says so")
     else:
         assert ("no such shape exists" not in text
                 and "no such body mention exists" not in text), (
@@ -3953,6 +4156,314 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
                 f"name it (it appears elsewhere in the document: "
                 f"{name in text}) — a mention in the transcript or §4 is not "
                 f"the doc stating the bound")
+
+
+def test_the_residual_pin_separates_the_claim_from_its_inverse():
+    r"""The residual predicate must RED the inverse, and must not red the claim.
+
+    ⛔ THIS TEST EXISTS BECAUSE THE PIN WAS DORMANT (#11437 review, P2). The
+    predicate it guards **lived** in
+    `test_the_census_doc_states_the_same_probe_bound_the_report_does`, inside the
+    `declared is None` arm, so on a tree whose scan declares a bound — every tree
+    where `volunteer_context` is taken by reference, `tortoise/sdk.py` holding
+    exactly one such shape — that arm never ran. Measured then: reverting the
+    predicate to `"not" in sentence` left the whole file GREEN, so the nine-row
+    table in the PR body was a hand-measurement with no executor behind it. Same
+    shape as `test_the_doc_slice_requires_a_UNIQUE_LINE_ANCHORED_H2`, which
+    exists for the same reason ("that measurement lived only in the docstring").
+    ⛔ IT IS NO LONGER DORMANT, and saying so in the present tense would be the
+    defect this PR is about: the pin now runs through
+    `_assert_census_states_the_residual` from
+    `test_the_census_doc_states_the_same_probe_bound_the_report_does` on EVERY
+    tree, outside the `if declared is None` branch — measured, deleting §3's
+    residual clause reds both that test and this one. This test still earns its
+    keep: the doc pin's ability to FAIL is what the mutations at the end of THIS
+    TEST pin (not at the end of the file — seven unrelated tests follow it), and
+    a row set that names the measured defeats is what keeps the helper's declared
+    surface honest. The sets cover every shape four review rounds have measured,
+    plus the residuals deliberately left open in both directions.
+
+    Every row — `must_red`, `must_stay_green`, `declared_open` and
+    `declared_blocks` alike — is asserted to differ from the original sentence,
+    so no row can pass by being the original mistyped (#11437 review, round 2,
+    P3).
+    """
+    def _red(sentence: str) -> bool:
+        return _residual_sentences(f"## 3.\n\n{sentence}\n\n## 4.\n") == []
+
+    original = (
+        "⚠️ **outside the walk, and therefore not reported:** a nested `def`'s "
+        "decorators and parameter defaults (`def inner(cb=self._review_pool)` "
+        "*is* a real reach, evaluated when the outer method runs)")
+    assert not _red(original), (
+        "the claim itself does not satisfy the residual pin, so every row below "
+        "is measuring the wrong predicate")
+
+    # ⛔ The substring and inverse rows the split exists to catch. All four were
+    # GREEN under `"not" in sentence`, and the last four were still GREEN under
+    # the first cut of the split (#11437 review, P1) — a negated REVERSER reads
+    # as the inverse, not the claim.
+    must_red = {
+        "substring `not` inside `noted`":
+            "a nested `def`'s decorators and parameter defaults are noted as "
+            "reported",
+        "inverse: reached from inside the walk":
+            "a nested `def`'s decorators and parameter defaults are not exempt "
+            "— reached from inside the walk and therefore reported",
+        "inverse: never skipped by this walk":
+            "a nested `def`'s decorators and parameter defaults are never "
+            "skipped by this walk",
+        "decoy: no walk at all":
+            "this section does not discuss decorators or defaults",
+        "inverse: not outside the walk, they ARE reported":
+            "a nested `def`'s decorators and parameter defaults are not outside "
+            "the walk; they are reported by the enclosing body scan",
+        "inverse: except that they are not reported":
+            "every decorator and default is visited, except that a nested "
+            "`def`'s decorators and defaults are not reported",
+        "inverse: not exempt — they are walked and reported":
+            "a nested `def`'s decorators and parameter defaults are not exempt "
+            "— they are walked and reported",
+        "inverse: not left unreported, so they are reported":
+            "a nested `def`'s decorators and parameter defaults are not left "
+            "unreported by the body walk, so they are reported",
+        # ⛔ The next four were GREEN through the first cut of this fix, which
+        # listed four literal phrases instead of the CLASS `_AFFIRMED` now is
+        # (#11437 review, round 2, P1): a negation governing a reverser reads as
+        # the inverse, whichever reverser word it picks.
+        "inverse: not excluded — the walk does report them":
+            "a nested `def`'s decorators and parameter defaults are not excluded "
+            "— the walk does report them",
+        "inverse: not out of scope — the walk reports them":
+            "a nested `def`'s decorators and parameter defaults are not out of "
+            "scope — the walk reports them",
+        "inverse: does not fail to report (double negative)":
+            "the walk does not fail to report a nested `def`'s decorators and "
+            "parameter defaults",
+        "inverse: not omitted from the walk":
+            "a nested `def`'s decorators and parameter defaults are not omitted "
+            "from the walk; the walk reports them",
+        # ⛔ The NEGATED PRIVATIVE — a double negative that asserts coverage.
+        # #11443 measured all three of these GREEN (#11437 review, P1); the
+        # `un…` alternation in `_AFFIRMED` closes them.
+        "inverse: never unvisited":
+            "a nested `def`'s decorators and parameter defaults are never "
+            "unvisited: the closure walk visited them",
+        "inverse: not unreported":
+            "a nested `def`'s decorators and parameter defaults are not "
+            "unreported: the walk reported them",
+        # ⛔ And the STRAY-NEGATION class (#11437 review, round 3, P1): the
+        # negation only has to OCCUR under the old `_NEGATION.search`, so an
+        # inverse passed on the strength of a `not` that governed nothing. All
+        # five were measured PASSING before `_NEGATION_GOVERNS`.
+        "inverse: stray `not` in a trailing clause":
+            "the walk does visit a nested `def`'s decorators and parameter "
+            "defaults; this is not a gap",
+        "inverse: stray `not` in a relative clause":
+            "reported by the walk: a nested `def`'s decorators and parameter "
+            "defaults, which is not what an earlier draft said",
+        "inverse: stray `outside` naming something else":
+            "outside the method body, the walk reports a nested `def`'s "
+            "decorators and parameter defaults",
+        "inverse: `not` + a non-coverage verb":
+            "a nested `def`'s decorators and parameter defaults are not missed "
+            "by the walk",
+        "inverse: a reach the walk takes, not a gap":
+            "a reach the walk takes, not a gap: a nested `def`'s decorators and "
+            "parameter defaults are visited and reported",
+        # ⛔ The two shapes the round-2 reviewer measured GREEN (#11437 review,
+        # round 2, P2): a cue governing NEITHER the claim NOR a reverser — a `not`
+        # about an adjective (`not surprising`) and one about the walk's OBJECT
+        # LIST (`not the only … things`). Closed by `_NEGATION_GOVERNS`
+        # (`027742ceb`) and PINNED here, because a shape that leaves the
+        # docstring's false-GREEN list has to become a ROW or its closure is a
+        # claim again — the failure mode this whole file is a chain of.
+        "inverse: `not` governing an adjective, not the walk":
+            "it is not surprising that the walk visits a nested `def`'s "
+            "decorators and parameter defaults and reports them",
+        "inverse: `not the only` governing the object list":
+            "a nested `def`'s decorators and parameter defaults are not the "
+            "only things the walk visits, and it reports them",
+        # ⛔ And the HEDGE class — the same shape one step out, where the cue is a
+        # PSEUDO-NEGATION: `not sure` / `not always` / `not necessarily` govern a
+        # coverage verb without asserting the exclusion, because they negate the
+        # MODALITY. All three were GREEN; the pseudo-negation termset in
+        # `_AFFIRMED` (NegEx's own class) reds them, and they are pinned so a
+        # `§3` re-written into hedges cannot satisfy the pin again.
+        "hedge: `not sure` governs the walk":
+            "it is not sure the walk reaches a nested `def`'s decorators and "
+            "defaults",
+        "hedge: `not always`":
+            "the walk does not always visit a nested `def`'s decorators and "
+            "defaults",
+        "hedge: `not necessarily`":
+            "the walk does not necessarily report a nested `def`'s decorators "
+            "and defaults",
+    }
+    for label, sentence in must_red.items():
+        assert sentence != original, f"row {label!r} merely restates the claim"
+        assert _red(sentence), (
+            f"the residual pin is GREEN on an inverse statement ({label}): "
+            f"{sentence!r} — the pin's whole purpose is to red this")
+
+    # ⛔ The other direction: honest restatements of the SAME claim must stay
+    # GREEN, or the pin is tied to this doc's exact wording — the doc+code-agrees
+    # -but-reds class in this file's own history (#11389 review, P2/P3). The
+    # present-tense rows are why the coverage alternation is `(?:s|es|ed)?` and not
+    # `ed?` (#11437 review, P2; the `es` alternative added in round 2 for
+    # `reaches`): under `ed?` they were all RED.
+    must_stay_green = {
+        "honest: are not reported by this walk":
+            "a nested `def`'s decorators and parameter defaults are not reported "
+            "by this walk",
+        "honest, present tense: does not visit":
+            "this walk does not visit an inner def's decorators or defaults",
+        "honest, present tense: does not report":
+            "the walk does not report nested def decorators or defaults",
+        "honest, present tense: does not reach":
+            "the walk does not reach a nested def's decorators and defaults",
+        "honest, present tense singular: never visits":
+            "the walk never visits a nested def's decorators and defaults",
+        "honest, present tense singular: never reaches":
+            "the walk never reaches a nested def's decorators and defaults",
+        "honest, concessive: except when the outer method runs":
+            "the walk does not visit a nested def's decorators and defaults, "
+            "except when the outer method runs",
+        "honest, past tense: are never reached":
+            "nested def decorators and defaults are never reached by the walk",
+        # `reach` is the one verb whose third person is `-ches`, so the coverage
+        # alternation needs the `es` branch — `(?:s|ed)?` leaves `reaches`
+        # unmatched and turns this honest row (which names no other coverage word
+        # to fall back on) into a false RED (#11437 review, round 2, P2).
+        "honest, third person of `reach`":
+            "it never reaches a nested `def`'s decorators and parameter defaults",
+        "honest, third person of `report`":
+            "the scan never reports a nested `def`'s decorators or defaults",
+    }
+    for label, sentence in must_stay_green.items():
+        assert sentence != original, f"green row {label!r} merely restates the claim"
+        assert not _red(sentence), (
+            f"the residual pin reds an honest statement of its own claim "
+            f"({label}): {sentence!r}")
+
+    # ⛔ THE DECLARED RESIDUALS, pinned AS residuals so they cannot be silently
+    # believed closed. If a later change closes one, this assertion reds and the
+    # docstring gets updated — the point being that a residual nobody can see is
+    # indistinguishable from a fix.
+    declared_open = {
+        "decoy: retrieval walk":
+            "parameter defaults and decorators are not reported against the "
+            "retrieval walk",
+        "decoy: closure walk":
+            "decorator and default nodes are not visited by the closure walk",
+        "decoy: the instrument's OUTPUT, not the walk's visit":
+            "this section has not reported on `def` decorators or parameter "
+            "defaults",
+    }
+    for label, sentence in declared_open.items():
+        assert sentence != original, f"decoy row {label!r} merely restates the claim"
+        assert not _red(sentence), (
+            f"the declared residual ({label}) is no longer open — the predicate "
+            "now tells WHICH walk or WHICH subject a sentence is about. That is "
+            "better than this test assumed: tighten `must_red` to include it "
+            "and update `_residual_sentences`'s docstring")
+
+    # ⛔ AND THE DECLARED FALSE-BLOCKS, pinned the other way. These are honest
+    # statements of the claim that the pin REJECTS, each paid for deliberately:
+    # `never touched by the walk` is the price of requiring the negation to
+    # GOVERN a coverage verb (#11437 review, round 3, P1).
+    declared_blocks = {
+        "false block: coverage verb outside the walk/visit/reach/report list":
+            "nested def decorators and defaults are never touched by the walk",
+        "false block: `never inside the walk`":
+            "nested def decorators and defaults are never inside the walk",
+        # ⛔ Both measured RED and declared open in the docstring above (#11437
+        # review, round 2, P3); pinned AS blocks here for the same reason
+        # `declared_open` is pinned — a residual nobody can see is
+        # indistinguishable from a fix. The first trips the concessive reverser
+        # that exists to red its inverse twin; the second matches the POSSESSIVE
+        # `walk's`. Narrowing either marker re-opens the inverse it was added for.
+        "false block: concessive `except that …`":
+            "the walk does not visit nested `def` decorators and defaults, "
+            "except that a default is evaluated when the outer method runs",
+        "false block: `inside the walk's` matches the possessive":
+            "the walk does not visit nested `def` decorators and defaults "
+            "reached from inside the walk's enclosing frame",
+    }
+    for label, sentence in declared_blocks.items():
+        assert sentence != original, (
+            f"false-block row {label!r} merely restates the claim")
+        assert _red(sentence), (
+            f"the declared false-block ({label}) is not a block any more — the "
+            "predicate got more tolerant than this test assumed: move the row "
+            "into `must_stay_green` and update `_residual_sentences`'s docstring")
+
+    # ⛔ THE PIN ITSELF MUST BE ABLE TO FAIL (#11437 review, round 2, P1).
+    # Everything above pins `_residual_sentences`; this pins the ASSERTION built
+    # on it, against the REAL document. Without it the assertion can drift back
+    # into a branch that does not run and every test here stays GREEN — which is
+    # exactly what the round-1 fix shipped, and what was measured before the
+    # hoist (deleting §3's sentence red nothing at all).
+    root = Path(probe.__file__).resolve().parent.parent
+    doc = (root / "docs" / "epics" / "2026-11-04-5090-vector-layer"
+           / "S3-VECTOR-CENSUS.md")
+    real = doc.read_text(encoding="utf-8")
+    _assert_census_states_the_residual(real)  # GREEN on the doc as committed
+
+    # ⛔ DERIVE THE CUE FROM THE PREDICATE, never from the doc's wording (#11437
+    # review, round 3, P2). Hard-coding
+    # "Outside the walk, and therefore NOT reported:" made this test re-pin the
+    # exact phrasing the predicate exists to be TOLERANT of: an honest rewording
+    # of §3 kept the PIN green and turned THIS test red — the same
+    # doc+code-agrees-but-reds class the row set above is a monument to. The
+    # sentences the predicate SELECTS are the cue, whichever words they use.
+    s3 = _doc_section(real, "## 3.", "## 4.")
+    selected = _residual_sentences(s3)
+    assert selected, (
+        "this test cannot derive a cue to delete because the predicate selects "
+        "nothing on the real doc — that is the pin's own failure, reported by "
+        "`_assert_census_states_the_residual` above")
+
+    def _mutate(sentence: str, new: str) -> str:
+        """Replace ONE occurrence in the DOC's own casing, and prove it landed.
+
+        ⛔ `real.replace(sentence, ...)` is a silent no-op here (#11437 review,
+        round 3, P2): `_residual_sentences` returns sentences from the
+        LOWERCASED §3, so the lowercased cue never matches the document's own
+        casing — measured, `residual after mutation` came back UNCHANGED, i.e.
+        the arm below was asserting that an unmutated document still passes. The
+        guard that "the sentence is in §3" passed because it was also checked
+        against the lowercased slice. Case-insensitive substitution plus an
+        assert on the replacement count is what makes this arm mean anything.
+        """
+        out, hits = re.subn(re.escape(sentence), new, real, count=1,
+                            flags=re.IGNORECASE)
+        assert hits == 1, (
+            f"the selected sentence could not be located in the document "
+            f"(case-insensitively), so this arm would test nothing: "
+            f"{sentence!r}")
+        assert out != real, f"the substitution did not change the document: {new!r}"
+        return out
+
+    for sentence in selected:
+        with pytest.raises(AssertionError):
+            _assert_census_states_the_residual(
+                _mutate(sentence, "mutated away entirely"))
+
+    # …and the clause REVERSED, the case #11389 exists for: the sentence KEPT
+    # but asserting the inverse must red. ⛔ The replacement KEEPS a negation
+    # (#11437 review, round 3, P3): the first version swapped in "Inside the
+    # walk, and therefore reported", which DROPS `not`, so the arm fired on the
+    # missing negation token exactly like the deletion arm above and proved
+    # nothing about polarity. Keeping `NOT` makes this the real test of the
+    # affirm markers, and the re-measurement below is why it is kept.
+    for sentence in selected:
+        flipped = re.sub(r"\b(not|never|outside)\b", "", sentence).strip()
+        with pytest.raises(AssertionError):
+            _assert_census_states_the_residual(
+                _mutate(sentence,
+                        "inside the walk, and therefore NOT reported: "
+                        + flipped))
 
 
 def test_the_census_doc_collects_what_the_file_collects():
