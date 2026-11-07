@@ -6819,8 +6819,10 @@ def _record_health() -> dict:
 # and Fly's own routing cover that). The latency arm that closes the first
 # blind spot is the prober's per-request bound, not this handler.
 _LIVENESS_SERVED_LOCK = threading.Lock()
-#: Requests to `/liveness` this PROCESS has answered. Monotonic, never reset
-#: (a restart starting again at 1 is itself the evidence of a restart).
+#: Requests to `/liveness` this PROCESS has answered. Monotonic WITHIN the
+#: process, and it starts again at 1 after a restart (a restart starting again
+#: at 1 is itself the evidence of a restart). So it is NOT monotonic ACROSS a
+#: restart: a smaller N after a deploy is healthy, not a replayed body.
 _LIVENESS_SERVED_COUNT = 0
 #: ``time.monotonic()`` stamped when this process last STARTED a ``/liveness``
 #: handler, or None before the first one — "no sample" must be distinguishable
