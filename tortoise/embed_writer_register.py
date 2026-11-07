@@ -390,9 +390,12 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "loop from `_embedding_expr`; PR `#3018` review P2), so a TENANT can supply one "
             "on those paths. ⚠️ But this row is not their journal half, and it is not dead: "
             "it guards a vector handed straight to `add_point`'s `fields` — a DIRECT "
-            "`EventAPI` caller, which is exactly what "
-            "`tests/test_write_path_unreachable_seam_5148.py` pins "
-            "(`add_point(…, embedding=[0.25, 0.5])` reaches this branch and is carried). "
+            "`EventAPI` caller. ⛔ `tests/test_write_path_unreachable_seam_5148.py` pins that the "
+            "key is CARRIED, NOT that it reaches this branch: the test runs under an unimportable "
+            "seam, where the branch body is a re-assignment `p.update(fields)` has already made, "
+            "so it stays green if the block is deleted (its own docstring: \"This pins the GUARD, "
+            "not the ASSIGNMENT ORDER\"). The RE-NORMALISATION this branch performs when the seam "
+            "IS importable is what the test does not cover. "
             "The tenant doors journal in `tortoise.sdk`: `create_point` through "
             "`_journal_snapshot_from_create_map` → `_emit_event`'s "
             "`clean.setdefault(\"embedding\", None)`, `update_point` through the "
@@ -537,7 +540,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: UNCONDITIONALLY (`tortoise/sdk.py:13821-13824`) and then discards the result (`if "embedding" in
 #: props:` replaces it at `:14023-14026`, and `_create_map["embedding"] = _embedding_expr` at
 #: `:14057` assigns the caller branch last), while `update_point` genuinely skips the derive
-#: (`:18652`) — so on one path the gate RUNS and its verdict is OVERWRITTEN, on the other it is not
+#: (`:18651-18652`) — so on one path the gate RUNS and its verdict is OVERWRITTEN, on the other it is not
 #: called at all. Neither outcome is "the gate decides this vector".
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
 #: docstring: the census's discovery is a source-text regex PLUS the AST pass that decides the
@@ -587,7 +590,8 @@ def undeclared(writers: Iterable[str]) -> tuple[str, ...]:
     restriction is the CALLER's to apply (this module imports nothing from ``tortoise`` and ships
     no filter, so it cannot apply it for you;
     `tests/test_embed_writer_register.py::NEEDS_A_DECLARATION` is the same tuple of discovery kinds
-    spelled for the suite — `tests/` is not a packaged module, so a runtime
+    spelled for the suite — `tests/` is not shipped in the wheel (only
+    `../tests/sample_transcript.txt` is), so a runtime
     consumer in ``tortoise/`` cannot import it from there). Handing it the instrument's whole map
     answers with the ``gated``/``producer`` writers that need no declaration, and :func:`classify`
     then raises for each of them — a false refusal on a correct write. ⛔ ``gated`` and ``producer``
