@@ -1099,12 +1099,17 @@ place a machine reads it.
 - **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
   `:12921`/`:13068`.
 - **Why:** three merges — `#11205` (S5 Job 1's entity↔entity channel), `#11264` (`#11021`'s
-  mention-only rule) and `#11361` (`#10999`'s relation census) — together insert **1055** lines
-  into `extractor_v2.py` above every one of them. The symbols are unchanged. Each number was
-  verified by CONTENT at this head (the `def`, the `return items` that ends it, the two
-  `if items:` gates, the two `except` arms), never by adding an offset: `11098 - 10397 = 701` and
-  `12908 - 11849 = 1059`, so no single offset reaches all of them, which is precisely why this
-  block is re-cut by content.
+  mention-only rule) and `#11361` (`#10999`'s relation census) — together change
+  `extractor_v2.py` by **+1,226 added, 111 removed** lines (`git diff --numstat 80c912244f8..<this
+  head> -- tortoise/extractor_v2.py`; the three commits alone account for 1,237 added and 122
+  removed). The symbols are unchanged. ⛔ The shift is **NOT uniform**, so no single number describes it: **+701** at the
+  collector (`10397→11098`), **+1055** at `extract_session_v2` (`11609→12664`), and **+1059** at
+  both `if items:` gates (`11849→12908`, `11998→13057`), because the inserts are interleaved on
+  both sides of the collector's block. That is precisely why this block is re-cut by CONTENT and
+  never by adding an offset — a uniform `+N` bump, the mechanical-bump defect
+  `README.md:218-219` forbids, would be wrong by 354 at the collector and by 4 at both gates. Each
+  number was verified by content at this head (the `def`, the `return items` that ends it, the two
+  `if items:` gates, the two `except` arms).
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.

@@ -5035,6 +5035,37 @@ _PREREG_STEP_CITE_DOCS = (
 )
 
 
+def _without_change_history(text: str) -> str:
+    """The document minus every `### 10.x` change-control entry.
+
+    §11's cites are LIVE claims about the tree at this head. A §10.x entry records a
+    value the document held in the PAST — its "Original value" line still quotes the
+    number the re-derivation replaced. A whole-document `in text` check cannot tell
+    the two apart, so a §10.x entry that happens to name the current number satisfies
+    the pin while the live sentence still cites the stale one: the gate is green over
+    exactly the claim it exists to guard (#11262 review, P1).
+
+    Stripping the history is the general fix — it binds the collector, its extent and
+    BOTH `if items:` gates to the live prose by construction. The narrower
+    alternative (scoping each assert to a hand-picked carrier line) leaves the
+    binding a property of one line's punctuation: §10.9's "New value" writes the bare
+    `:11098`, while the collector assert requires the `tortoise/extractor_v2.py:`
+    prefix, so only a line that happens to spell the prefix with the current number
+    would bind it.
+    """
+    out: list[str] = []
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        if re.match(r"^### 10\.", line):
+            skipping = True
+            continue
+        if skipping and re.match(r"^#{1,3} ", line):
+            skipping = False        # the next `## 11.` (or any outer heading)
+        if not skipping:
+            out.append(line)
+    return "".join(out)
+
+
 def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
     """§11's five code sites are DERIVED from the tree, never typed twice.
 
@@ -5055,6 +5086,21 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
     `:9209`/`:9341` while the tree carried `:9767`/`:9767-9789`/`:10310`/`:10442`,
     and at `c3612c299` it still cited `:9223`/`:9353` for the fail-open `except`
     arms the tree carries at `:10323`/`:10453` — this leg reds on every one of them.
+
+    ⛔ HISTORY IS STRIPPED, AND THE GATES ARE BOUND PER CARRIER (#11262 review, P1).
+    Two bypasses were live here, both measured, and both the same shape — a
+    whole-document check satisfied by a mention that is not the claim:
+
+    1. `### 10.x` change-control entries quote the number they REPLACED. After §10.9
+       added the current values to its "New value" line, reverting BOTH live `if
+       items:` prose cites to the stale numbers stayed GREEN (`3 passed`).
+    2. Even with history stripped, the §11 INDEX ROW is a second live carrier, so
+       reverting the two prose sentences still stayed GREEN. So the gate check is
+       now per carrier: EVERY live line containing `` `if items:` `` must name both
+       gates.
+
+    `_without_change_history` fixes (1); the carrier loop fixes (2). Both mutations
+    now red this leg.
     """
     collector = _extractor_lineno("def _collect_classify_items(")
     # The collector's EXTENT is read, not assumed: the cited end is a claim too, and
@@ -5074,7 +5120,13 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
         _extractor_fail_open_except('errors.append(f"classify(union) failed'),
     )
     for doc_name, path in _PREREG_STEP_CITE_DOCS:
-        text = path.read_text(encoding="utf-8")
+        # ⛔ §10.x HISTORY IS STRIPPED (#11262 review, P1). The collector, its extent
+        # and both `if items:` gates were whole-document `in text` checks, and this
+        # PR's own §10.9 "New value" line names all three of them — so reverting the
+        # LIVE cites to their stale numbers left this leg GREEN (measured: 3 passed),
+        # the same bypass the fail-open pair below was scoped for. See
+        # `_without_change_history`.
+        text = _without_change_history(path.read_text(encoding="utf-8"))
         assert f"tortoise/extractor_v2.py:{collector}" in text, (
             f"{doc_name} does not cite the collector at "
             f"tortoise/extractor_v2.py:{collector} — §11's argument rests on "
@@ -5089,11 +5141,29 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
             f"tortoise/extractor_v2.py:{collector}-{end} (the `def` through "
             f"`return items`) — a range that runs past the body names the next "
             "function's lines")
-        for gate in gates:
-            assert f"`{gate}`" in text, (
-                f"{doc_name} does not cite the `if items:` gate at {gate} — the "
-                f"classify passes are gated on the collector's list being "
-                f"non-empty, which is the whole of S2.3's conditionality")
+        # ⛔ EVERY LIVE `if items:` CARRIER MUST NAME BOTH GATES (#11262 review, P1).
+        # A single whole-document `in text` check is satisfied by ANY one carrier, and
+        # there are three: the §11 index row (which is what kept this leg green) and
+        # the two PROSE sentences. Measured at the head that fixed the fail-open pair:
+        # reverting BOTH prose cites to `:11849`/`:11998` left this leg `3 passed`,
+        # because the index row still spelled the current numbers. Binding each
+        # carrier by its own words — the pattern the fail-open pair below already uses
+        # — is what makes a stale prose cite red.
+        carriers = [ln for ln in text.splitlines() if "`if items:`" in ln]
+        assert carriers, (
+            f"{doc_name} no longer cites `if items:` anywhere — S2.3's "
+            "conditionality is stated by that phrase, so this leg cannot find what "
+            "it guards. Re-word the pin if the prose legitimately changed")
+        for carrier in carriers:
+            for gate in gates:
+                assert f"`{gate}`" in carrier, (
+                    f"{doc_name}: the live `if items:` line "
+                    f"{carrier.strip()[:90]!r} does not cite the gate at {gate} — "
+                    f"every live carrier of that phrase must name BOTH gates "
+                    f"({gates[0]}, {gates[1]}), because the classify passes are "
+                    "gated on the collector's list being non-empty, which is the "
+                    "whole of S2.3's conditionality. A §10.x history entry does NOT "
+                    "satisfy this: history is stripped before the check")
         # ⛔ THE FAIL-OPEN PAIR IS SCOPED TO ITS LIVE SENTENCE (#11262 review, P1).
         # A whole-document `in text` check is satisfied by ANY mention of the
         # number — including a §10.x history entry — so re-pointing the HISTORY
