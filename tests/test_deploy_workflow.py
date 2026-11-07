@@ -5133,9 +5133,22 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #:     verb, so this is the appositive reading split across the boundary.
     #:   * a COMMA-APPOSITIVE CLEFT that denies truthfully and names no tree — "It is not
     #:     `ff6379eb2`, the #9601 merge, that is the tree before #9548." — is REFUSED here
-    #:     and accepted by `origin/main` and by the previous head: a FALSE RED, disclosed in
-    #:     table B of PR #11191 rather than traded back (the trade would restore the
-    #:     fail-open above). Closing it needs the proposition binding #11301 owns.
+    #:     and accepted by `origin/main`: a FALSE RED, disclosed in table B of PR #11191
+    #:     rather than traded back (the trade would restore the fail-open above). ⛔ Its
+    #:     PROVENANCE is r9's cut, `46c3020e7b` — that head refuses it too, and the heads
+    #:     before it accepted it (#11191 review r11, F2 — MEASURED; the earlier wording of
+    #:     this bullet said "the previous head", which was false). Closing it needs the
+    #:     proposition binding #11301 owns.
+    #:   * a REFUTATION that names the pin's OWN phrase with its modifier — "The claim that
+    #:     the tree immediately before #9548 is `ff6379eb2` is false; the true tree is
+    #:     `047c91f7a`." — is REFUSED here and ACCEPTED by `origin/main` (#11191 review r11,
+    #:     F1 — MEASURED, five spellings). The cause is `_REFUTED_INVERTED`'s `{0,20}`
+    #:     character gap after `that`: "the tree " is 9, "the tree immediately " is 21, so the
+    #:     longer — and more natural — spelling falls through to `_FALSE_SHA_ADJACENT`. It is
+    #:     PRE-EXISTING in this lineage (the r9/r10 parent refuses it too), it is a FALSE RED
+    #:     rather than a fail-open, and it is recorded on #11301 with this measurement rather
+    #:     than widened here: widening an exemption arm without a two-direction measurement
+    #:     is how the three rounds above each opened the next hole.
     _NOT_FALSE_SHA = re.compile(
         r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}"
         + re.escape(_FALSE_TREE)
