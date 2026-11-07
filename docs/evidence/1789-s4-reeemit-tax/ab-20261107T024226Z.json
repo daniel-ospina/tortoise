@@ -2050,7 +2050,7 @@
  "caveats": [
   "Measured per-session S4 output tokens on RECORDED real S2 geometry; the prompt inputs are identical across arms, so the delta is the output contract's effect.",
   "One call per arm per session (no production-run composition): model compliance in the wild is not measured here \u2014 it is OBSERVABLE per row via verbatim_reemissions / added_by_s4 / corrected_by_s4 / s4_delta_reemit_suspect.",
-  "The S3 search block is reconstructed from the session's own S2 list (what production S4 sees after S2 is written), not a live graph read.",
+  "The S3 search block is reconstructed from the session's own S2 list and is NOT production geometry: extract_session_v2 runs S3 (search_graph) BEFORE S4 and writes the session's items only afterwards (execute_embed), so production S4 sees bounded PREVIOUS-graph hits (max_queries=15 x limit=3, the capture's own turn echoes dropped). Relabelling the session's own list as already-in-the-graph is the maximally gap-SUPPRESSING input for a delta contract, so the measured saving is a CEILING and the delta arm's added_by_s4 / s4_items read as a floor.",
   "model_id is the model REQUESTED; the served id is not recorded here.",
   "Accuracy / chunk@20 are the eval lane's gates and are NOT measured here."
  ]

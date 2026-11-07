@@ -65,10 +65,10 @@ it added (gaps) and how many it corrected.
     # and the CI pin that the two renders differ at all)
     uv run python tools/s4_reeemit_tax.py dry-run --receipt …
 
-Exit codes: ``0`` measured (the report is written) · ``1`` usage/IO (a bad
-flag, an unreadable receipt, a receipt with no embed list) · ``2`` refused
-(no ``DEEPSEEK_API_KEY`` in the environment — a measurement that cannot
-call the model is not a zero result).
+Exit codes: ``0`` measured (the report is written) · ``1`` IO (an unreadable
+receipt, a receipt with no embed list) · ``2`` refused (no
+``DEEPSEEK_API_KEY`` in the environment — a measurement that cannot call the
+model is not a zero result; a BAD FLAG also exits 2, via argparse).
 
 ⚠️ WHAT THIS DOES NOT MEASURE, stated here so the report cannot be read
 wider than it is: accuracy / chunk@20 (the eval lane's gates), and model
@@ -155,11 +155,19 @@ def load_sessions(receipt_dir: Path, *, embeds_arm: str = "narrative",
 def search_from_s2(s2: dict) -> dict:
     """The S3 "existing graph" block, reconstructed from the session's S2 list.
 
-    Production runs S4 *after* S2's items reach the graph, so S4's search
-    results are the S2 items themselves. Handing both arms the same
-    reconstructed block keeps the A/B single-variable (an empty block would be
-    the "degraded search" condition the plan excludes from compliance reads,
-    and it would change both arms' behaviour).
+    ⛔ **This is NOT what production S4 sees, and an earlier revision of this
+docstring said it was** ("Production runs S4 *after* S2's items reach the
+graph, so S4's search results are the S2 items themselves").
+    ``extract_session_v2`` runs S3 (``search_graph``) BEFORE S4 and writes the
+    session's items only afterwards (``execute_embed``), so production S4 reads
+    bounded PREVIOUS-graph hits — ``max_queries=15`` × ``limit=3``, with the
+    capture's own turn echoes dropped — never the session's own list
+    relabelled as "already exists". Handing both arms the same reconstruction
+    keeps the A/B single-variable (an empty block would be the "degraded
+    search" condition the plan excludes from compliance reads, and it would
+    change both arms' behaviour) — but the reconstruction is the MAXIMALLY
+    gap-SUPPRESSING input for a delta contract, so the measured saving is a
+    CEILING, not production's saving.
 
     ⛔ THE IDS ARE SYNTHETIC (`s2-ent-0`, `s2-pt-1`, …): the receipts record no
     graph ids. Production would offer real node ids (or none), so any output
@@ -194,17 +202,19 @@ def search_from_s2(s2: dict) -> dict:
 def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
     """(TOTAL output tokens this arm emitted, the basis used).
 
-    TOTAL over EVERY call the arm made — the escalated retry and the
+    TOTAL over every SUCCESSFUL call the arm made — the escalated retry and the
     error-informed re-prompt are separate billed calls, and a final-call read
     under-counts exactly the expensive arms (the ones that truncate or emit a
     malformed list), i.e. it shrinks the legacy arm and flatters the delta.
+    ⛔ A call that RAISED is in no total here: `_accumulate_call_cost` runs on
+    `_complete`'s success return, so a retried-and-failed attempt is billed and
+    counted nowhere. `attempts` is its only trace.
 
     `stats["cost"]["completion_tokens"]` is the ONE accumulator with that
-    `stats["cost"]["completion_tokens"]` is the ONE accumulator with that
-    property: `_accumulate_call_cost` adds one entry per SUCCESSFUL call, so an
-    escalation or parse-retry is summed, never overwritten
-    (``tortoise/extractor_v2.py::_accumulate_call_cost``, called from
-    ``_complete``'s success path). It is read FIRST for that reason.
+    property: it takes one entry per SUCCESSFUL call, so an escalation or
+    parse-retry is summed, never overwritten (``tortoise/extractor_v2.py::
+    _accumulate_call_cost``, called from ``_complete``'s success path). It is
+    read FIRST for that reason.
 
     The recovery-based sum is only a fallback: `recovery.s4_out_tokens` is the
     terminal successful call and `truncation_completion_tokens_s4` the
@@ -298,11 +308,20 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
         })
         return row
     merged = x.merge_embed_lists(sess["s2"], s4)
-    # production's own "found nothing" predicate: ANY content-bearing schema
-    # section, not just the 4 tax sections (#1789 Task 3 `_s4_section_is_content`)
-    emitted_nothing = not any(
+    # production's own "found nothing" predicate. It has TWO conjuncts, not one
+    # (`extract_session_v2`, the `s4_delta_empty = 1` arm):
+    #     if any(_s4_section_is_content(k, v) …):  merge
+    #     elif not s4_shape_bad:                   s4_delta_empty = 1
+    # so a section-bearing list of malformed items (`{"entities": [{}]}`) is NOT
+    # production's "no changes" response — production records `s4_shape_error`
+    # and does not merge. An earlier revision of this line tested the content
+    # predicate ALONE, which published a malformed delta as the COMPLIANT
+    # "found nothing" — the flattering direction on the one compliance signal
+    # the evidence document leans on (#11385 review P2).
+    malformed = x._s4_malformed_sections(s4) if isinstance(s4, dict) else []
+    emitted_nothing = (not malformed and not any(
         x._s4_section_is_content(k, v)
-        for k, v in (s4 or {}).items())
+        for k, v in (s4 or {}).items()))
     # the #2408 census instrument, reused verbatim — one implementation
     comp = x._s4_merge_stats(sess["s2"], s4, merged)
     out_tokens, basis = arm_out_tokens(stats)
@@ -320,7 +339,9 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
         # whose delta emitted nothing, which contradicts the data). They are
         # DERIVED here with PRODUCTION'S OWN predicates: `s4_delta_empty` from
         # `_s4_section_is_content` over EVERY emitted section (a retraction-only
-        # delta is NOT empty — it carries content the merge keeps), and the
+        # delta is NOT empty — it carries content the merge keeps) AND
+        # `_s4_malformed_sections` being empty (production's `elif not
+        # s4_shape_bad`), and the
         # suspect flag from pure verbatim re-emission at ≥
         # `_S4_REEMIT_SUSPECT_RATIO` × S2.
         "s4_delta_empty": emitted_nothing if arm == "delta" else None,

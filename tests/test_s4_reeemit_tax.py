@@ -230,10 +230,46 @@ def test_s4_delta_empty_uses_productions_own_predicate(tmp_path):
     assert retraction_only["s4_delta_empty"] is False   # but the delta had content
 
 
+def test_a_MALFORMED_delta_is_not_productions_no_changes_response(tmp_path):
+    """⛔ Production's `s4_delta_empty` has TWO conjuncts, and an earlier revision
+    of the instrument tested ONE.
+
+    `extract_session_v2`:
+        if any(_s4_section_is_content(k, v) …):  merge
+        elif not s4_shape_bad:                   s4_delta_empty = 1
+
+    So a section bearing only MALFORMED items — `{"entities": [{}]}` — is not
+    "the correct no-changes response": production records `s4_shape_error` and
+    does not merge. Reading the content predicate alone published that arm as
+    COMPLIANT, which is the flattering direction on the only compliance signal
+    the evidence document leans on (#11385 review P2).
+    """
+    sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
+    for payload in ({"entities": [{}], "events": [], "points": [],
+                     "operators": []},
+                    {"entities": [42], "events": [], "points": [],
+                     "operators": []}):
+        row = tool.run_arm(_FakeModel(payload), sess, "delta")
+        assert tool.x._s4_malformed_sections(payload) == ["entities"], payload
+        assert row["s4_delta_empty"] is False, payload
+    # …and the real no-changes response (all four lists empty) IS "empty"
+    row = tool.run_arm(_FakeModel({"entities": [], "events": [], "points": [],
+                                   "operators": []}), sess, "delta")
+    assert row["s4_delta_empty"] is True
+
+
 def test_both_arms_get_identical_inputs(tmp_path):
     """R1, the load-bearing property: the SAME story / S2 list / search block /
     cap reach both arms. If the delta arm silently got a different search block
-    the "tax" would double and every number in the report would be meaningless."""
+    the "tax" would double and every number in the report would be meaningless.
+
+    ⛔ The SEARCH BLOCK is asserted by identity, not by "some shared string is
+    present". An earlier revision checked three substrings of the story and the
+    S2 embed list — all of which ride both prompts whatever happens to the search
+    block — so swapping the delta arm's search block for `{}` (the exact vacuous
+    A/B this file's module docstring names as failure mode #1) passed green
+    (#11385 review P2).
+    """
     sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
     model = _FakeModel({"entities": [], "events": [], "points": [],
                         "operators": []})
@@ -247,6 +283,16 @@ def test_both_arms_get_identical_inputs(tmp_path):
     # … and the story + S2 list + search block ride BOTH system prompts
     for shared in (sess["story"], '"Halcyon archive"', '"stalled"'):
         assert shared in legacy["system"] and shared in delta["system"]
+    # the search block itself: every line of the block the arms were handed must
+    # be in BOTH renders, and the block must be non-empty (a `{}` search block
+    # renders as the degraded-search condition, which changes both arms)
+    import tortoise.extractor_v2 as ev2
+    rendered = ev2._render_search_results(tool.search_from_s2(sess["s2"]))
+    lines = [ln.strip() for ln in rendered.splitlines() if ln.strip()]
+    assert len(lines) > 3, "the reconstruction must carry real content"
+    for ln in lines:
+        assert ln in legacy["system"], ln
+        assert ln in delta["system"], ln
 
 
 def test_the_gap_items_ride_the_artifact(tmp_path):
@@ -492,3 +538,63 @@ def test_load_sessions_raises_on_a_receipt_with_no_embed_list(tmp_path):
     (tmp_path / "empty.arms.json").write_text(json.dumps({"stories": {}}))
     with pytest.raises(ValueError, match="no 'narrative' embed list"):
         tool.load_sessions(tmp_path)
+
+
+_EVIDENCE = _REPO / "docs" / "evidence" / "1789-s4-reeemit-tax"
+
+
+def test_every_committed_artifact_reconciles_with_its_own_rows():
+    """The evidence bundle's headline numbers are re-derived from the artifacts —
+    so an artifact-only edit selects this pin in CI, which is the reason
+    `tools/ci_selection.py`'s `CORE_ALSO` carries the bundle's path.
+
+    ⛔ What is pinned is the artifact's INTERNAL CONSISTENCY, not a literal
+    figure, deliberately: the instrument is re-run and its artifacts replaced
+    whenever the measurement is re-taken (#11385 did this twice in one review),
+    so a hard-coded number would red on a legitimate regeneration — a false block
+    on the very workflow this bundle exists to support. What must never be green
+    is an artifact whose published summary has drifted from the rows behind it,
+    which is the corruption that makes a number like this un-auditable.
+    """
+    artifacts = sorted(_EVIDENCE.glob("ab-*.json"))
+    assert artifacts, "the evidence bundle lost its artifacts"
+    for path in artifacts:
+        d = json.loads(path.read_text())
+        s = d["summary"]
+        rows = s["rows"]
+        assert rows, path.name
+        assert s["sessions_measured"] == s["sessions_attempted"] == len(rows)
+        # the published totals ARE the sums of the rows
+        assert s["sum_legacy_out_tokens"] == sum(
+            r["legacy_out_tokens"] for r in rows), path.name
+        assert s["sum_delta_out_tokens"] == sum(
+            r["delta_out_tokens"] for r in rows), path.name
+        # …and the headline is that ratio, not a number typed beside it
+        assert round(1 - s["sum_delta_out_tokens"] / s["sum_legacy_out_tokens"],
+                     4) == s["token_weighted_reduction"], path.name
+        # the per-session statistics ARE the rows' statistics
+        reductions = sorted(
+            1 - r["delta_out_tokens"] / r["legacy_out_tokens"] for r in rows)
+        assert round(min(reductions), 4) == s["min_session_reduction"]
+        assert round(max(reductions), 4) == s["max_session_reduction"]
+        assert round(reductions[len(reductions) // 2], 4) == \
+            s["median_session_reduction"]
+        # each row's own `reduction` agrees with the two numbers it came from
+        for r in rows:
+            assert round(1 - r["delta_out_tokens"] / r["legacy_out_tokens"],
+                         4) == r["reduction"], (path.name, r["session"])
+        # the composition channels reconcile: merged = base + added, and the
+        # corrections are a SUBSET of the corrections census (the pair counts
+        # the items an items-not-in-S2 filter would drop, the census counts
+        # every changed item — the two differ by ~1/run and the README says so)
+        for arm in ("legacy", "delta"):
+            c = s["composition"][arm]
+            assert c["merged_items"] == c["s2_items"] + c["added_by_s4"], (path.name, arm)
+            assert c["corrected_by_s4"] <= c["s4_items"], (path.name, arm)
+            assert c["verbatim_reemissions"] <= c["corrected_by_s4"], (path.name, arm)
+        # a published byte count with no basis string is not auditable
+        for a in d["arms"]:
+            for arm in ("legacy", "delta"):
+                r = a[arm]
+                if r.get("out_tokens") is not None:
+                    assert r.get("basis"), (path.name, a["session"], arm)
