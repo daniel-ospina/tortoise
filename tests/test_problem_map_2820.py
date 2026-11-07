@@ -170,6 +170,82 @@ def test_a_fix_claim_with_no_anchor_is_drift(tmp_path):
     assert any("#2813" in e and "no anchor" in e for e in errors), errors
 
 
+def test_a_fix_claim_with_no_PIN_is_drift(tmp_path):
+    """Fails when a VERIFIED-FIXED row loses its pin.
+
+    Reachable, and a MUTATION survivor until this control existed: emptying the pin
+    cell (the mirror of emptying the anchor cell, which already had a control) made
+    the guard certify `CLEAN` — a fixed claim with nothing in the tree that fails if
+    the fix is undone. The reviewer's mutant `if not row.pins: pass` went unnoticed
+    by every other test.
+    """
+    copy = _doc_copy(tmp_path)
+    text = _rewrite_row(copy.read_text(), 2788,
+                        "`tests/test_event_state_carrier_2788.py`", "``")
+    copy.write_text(text, encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("#2788" in e and "no pin" in e for e in errors), errors
+
+
+def test_a_duplicated_row_is_drift(tmp_path):
+    """Fails when the same issue appears in two rows.
+
+    Reachable: the map's tables are appended to by hand, and a duplicated row would
+    double-count one defect in §2 while a reader sees two. MUTATION survivor until
+    this control existed (`if count > 1:` could be deleted silently).
+    """
+    copy = _doc_copy(tmp_path)
+    text = copy.read_text()
+    marker = "| #2696 |"
+    line = next(ln for ln in text.splitlines(keepends=True) if ln.startswith(marker))
+    copy.write_text(text.replace(line, line + line, 1), encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("appears in 2 rows" in e for e in errors), errors
+
+
+def test_a_missing_status_row_in_the_summary_is_drift(tmp_path):
+    """Fails when §2 omits one of the three counts.
+
+    Reachable: deleting a count is the easy way to stop it disagreeing (the same
+    instinct the `Total tracked` control exists for). MUTATION survivor until this
+    control existed — `if declared is None: continue` could be deleted silently.
+    """
+    copy = _doc_copy(tmp_path)
+    kept = [ln for ln in copy.read_text().splitlines(keepends=True)
+            if not ln.startswith("| OPEN |")]
+    copy.write_text("".join(kept), encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("missing a row for OPEN" in e for e in errors), errors
+
+
+def test_is_shallow_returns_None_when_git_cannot_answer(tmp_path):
+    """Fails if an unreadable `--is-shallow-repository` is read as False.
+
+    Reachable and cheap: a directory that is not a git repo makes `git rev-parse`
+    exit non-zero. `False` there would certify the ancestor check, so the answer
+    must be `None` — a MUTATION survivor until this control existed (the
+    `returncode != 0` leg had no test).
+    """
+    plain = tmp_path / "not-a-repo"
+    plain.mkdir()
+    assert pmc.is_shallow(plain) is None
+
+
+def test_is_shallow_returns_None_for_an_unrecognised_answer(monkeypatch):
+    """Fails if a `--is-shallow-repository` answer the parser does not know is False.
+
+    Reachable: git has printed `true`/`false` for this flag for years, but a future
+    or wrapped git could print anything; treating an unknown answer as "not
+    shallow" turns a state error into a drift verdict on a true document. MUTATION
+    survivor until this control existed (the unrecognised-answer leg had no test).
+    """
+    monkeypatch.setattr(
+        pmc, "_git",
+        lambda repo, *args: subprocess.CompletedProcess(args, 0, stdout="maybe\n", stderr=""),
+    )
+    assert pmc.is_shallow(REPO) is None
+
+
 def test_a_nonexistent_pin_is_drift(tmp_path):
     """Fails when a pin path does not exist at this head.
 
@@ -476,6 +552,30 @@ def test_an_ancestor_anchor_passes_on_the_same_repo(tmp_path):
     report = pmc.Report()
     assert pmc.check_anchors(repo, [row], report) == []
     assert report.unverified == []
+
+
+def test_a_shallow_clone_HOLDING_the_anchor_still_reports_unverified(monkeypatch):
+    """Fails if the `shallow is True` arm of `check_anchors` is deleted.
+
+    Reachable, and found by the MUTATION-ATTRIBUTION round: the test above patches
+    `is_shallow` only, with an anchor object that is ABSENT, so it leaves via the
+    "not in this clone" branch — a `raise` inside the `shallow is True` arm left the
+    whole suite green. In a real `--depth 1` clone that DID fetch the anchor, the
+    arm is the one that runs, and deleting it flips a shallow clone from UNVERIFIED
+    (2) to DRIFT (1) — a false red on a document that is not known to be wrong.
+    The three patches are the only state that enters the arm.
+    """
+    monkeypatch.setattr(pmc, "is_shallow", lambda repo: True)
+    monkeypatch.setattr(pmc, "commit_exists", lambda repo, sha: True)
+    monkeypatch.setattr(pmc, "is_ancestor", lambda repo, sha: False)
+    report = pmc.Report()
+    row = pmc.Row(issue=1, defect="d", status="VERIFIED-FIXED",
+                  anchors=["deadbeefdeadbeef"], pins=[], line=1)
+    errors = pmc.check_anchors(REPO, [row], report)
+    assert errors == []
+    assert report.unverified and "shallow" in report.unverified[0]
+    report.errors = []
+    assert report.code == 2
 
 
 def test_a_shallow_clone_reports_unverified_never_drift(monkeypatch):
