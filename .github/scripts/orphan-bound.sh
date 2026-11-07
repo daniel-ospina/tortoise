@@ -78,6 +78,22 @@
 #         retire this term as "the complement form above": the refused form has
 #         two inputs and cannot fail, this one has three and is pinned failing
 #         by `test_build_end_sweep_report_folds_the_vanished_window_into_exited`.
+#         `exited` has a THIRD measured source since #11427, by the same rule
+#         and equally NOT the complement: a candidate the sweep EXAMINED and
+#         then DECLINED to act on (a live client, an unconfirmed path-based or
+#         unattributed server, a spent kill budget, a refused provenance
+#         guard, a live owner) is in `discovered_pids`, so the #8599 term
+#         cannot claim it; it is never killed, so `reaped` cannot; and it is
+#         never re-read for liveness, so the dead-pid branch cannot either. If
+#         it then shuts itself down (redislite's fire-and-forget NOSAVE close,
+#         asynchronously) nothing accounts for it, and a run whose pytest
+#         passed reds on `before=26, reaped=0, exited=0, left=25`. So
+#         `build_end_sweep_report` folds in `|declined_pids - left_pids|`
+#         (`_declined_pids_gone`): two observations of ONE population that the
+#         sweep's own skip decisions name, so a server the sweep COMMITTED to
+#         act on and then lost, or one discovery never reached, still leaves
+#         the shortfall visible. An un-instrumented or incompletely-scanned
+#         sweep reports it UNMEASURED (None, never 0), exactly as above.
 #         Skipped only when `before` is `null` (the probe failed — a distinct
 #         state) or `0`; a report that OMITS `before` or `exited` is unusable
 #         → RED, so the

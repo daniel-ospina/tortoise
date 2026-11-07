@@ -6481,7 +6481,113 @@ def test_build_end_sweep_report_folds_the_vanished_window_into_exited():
     )
 
 
-def test_build_end_sweep_report_leaves_exited_alone_when_the_term_is_unmeasured():
+def test_declined_pids_gone_measures_a_declined_server_against_left():
+    """#11427: the THIRD window — examined, DECLINED, then gone.
+
+    A declined candidate is in `discovered_pids` (so #8599's vanished term
+    cannot claim it), is never killed (so `reaped` cannot) and is never re-read
+    for liveness (so #6984's dead-pid branch cannot). Its self-shutdown was
+    therefore in no bucket at all, and the gate red the run.
+    """
+    from tortoise.embedded_reaper import _declined_pids_gone
+
+    # pid 7 was declined and is gone at `left`; 8 was declined and is still
+    # alive there — `left` already counts 8, so claiming it would DOUBLE-count
+    # and mask a genuine shortfall.
+    assert _declined_pids_gone({7, 8}, [8, 9]) == 1
+    assert _declined_pids_gone({7, 8}, [7, 8]) == 0
+    # No declines at all is a measured 0, not an unmeasured None.
+    assert _declined_pids_gone(set(), [8]) == 0
+    # Either observation missing = UNMEASURED, never a confident 0 (#10255 A).
+    assert _declined_pids_gone(None, [8]) is None
+    assert _declined_pids_gone({7}, None) is None
+
+
+def test_build_end_sweep_report_folds_the_declined_window_into_exited():
+    """End-to-end on the measured CI shape: before=26, reaped=0, exited=0,
+    left=25 (`pytest rc 0`) — the false red this lane was dispatched for.
+
+    The population is 26 servers all of which the sweep DECLINED (it killed
+    none), one of which shut itself down. The identity is asserted as the
+    inequality the gate evaluates, and the SAME shape is re-run with the pid
+    NOT declined: then the shortfall must come back, or the term has become the
+    complement #6984 refused.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    pre = list(range(1, 27))
+    post = list(range(2, 27))
+
+    def report(declined):
+        sweep = _scan_aware([])
+        sweep.discovered_pids = set(pre)
+        sweep.declined_pids = declined
+        return build_end_sweep_report(
+            iter([sweep]).__next__, deadline=1030.0,
+            probe=iter([pre, post]).__next__, clock=lambda: 1000.0)
+
+    healed = report(set(pre))
+    assert (healed["before"], healed["reaped"], healed["left"]) == (26, 0, 25)
+    assert healed["exited"] == 1, (
+        "the declined server that shut itself down is accounted as a natural "
+        "exit, not read as a broken sweep"
+    )
+    assert (healed["reaped"] + healed["exited"] + healed["left"]) >= healed["before"], (
+        "the gate's accounting identity must hold on this shape — it is the "
+        "false red of #11427"
+    )
+
+    lost = report(set())
+    assert lost["exited"] == 0, (
+        "a server this sweep did NOT decline must never be claimed by the "
+        "declined term"
+    )
+    assert (lost["reaped"] + lost["exited"] + lost["left"]) < lost["before"], (
+        "with the same before/left and no decline, the shortfall must survive "
+        "— otherwise the term is a tautology"
+    )
+
+    unmeasured = report(None)
+    assert unmeasured["exited"] == 0, (
+        "an un-instrumented sweep (no declined reading) must not invent the "
+        "missing pid as a natural exit"
+    )
+
+
+def test_reap_reports_the_pids_it_declined_but_not_the_ones_it_killed_or_saw_dead():
+    """#11427: `declined_pids` is the sweep's OWN skip decisions, per record.
+
+    It must be a measurement of what `reap()` decided not to touch: a record
+    that was killed (here: dry-run, which takes the same action path) and one
+    whose pid was already dead (#6984's observed natural exit, counted by
+    `exited`) are NOT declined — claiming either would let the declined term
+    launder a server this sweep was responsible for.
+    """
+    from tortoise.embedded_reaper import reap
+
+    # A live pid, an unattributed/path-based server: the provenance-bearing
+    # branch declines it in every mode, without any probe.
+    declined_rec = {"classification": "candidate", "pid": os.getpid(),
+                    "socket_path": "/tmp/nonexistent-11427-declined.sock",
+                    "path_based": True}
+
+    acted = reap([declined_rec], dry_run=True)
+    assert declined_rec["pid"] in (acted.declined_pids or set()), (
+        "a server the sweep declined must be recorded, or its later "
+        "self-shutdown lands in no bucket at all"
+    )
+
+    dead = {"classification": "candidate", "pid": 99999999,
+            "socket_path": "/tmp/nonexistent-11427-dead.sock"}
+    acted_dead = reap([dead], dry_run=False)
+    assert acted_dead.exited == 1
+    assert 99999999 not in (acted_dead.declined_pids or set()), (
+        "an OBSERVED natural exit is already counted by `exited`; counting it "
+        "here too would double-count and mask a genuine shortfall"
+    )
+
+
+
     """An un-instrumented sweep reports UNMEASURED, not zero-vanished.
 
     A `run_one` that carries no `discovered_pids` (a monkeypatched seam) used

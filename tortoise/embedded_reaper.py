@@ -2058,6 +2058,22 @@ class _ScanAwareList(list):
     # seam), never "discovered nothing" — that difference is what stops a
     # forgotten value from claiming a server this sweep genuinely lost.
     discovered_pids: set[int] | None = None
+    # #11427: candidates discovery EXAMINED and `reap()` then DECLINED to act
+    # on, for a stated reason (a live client, an unconfirmed path-based or
+    # unattributed server, a spent kill budget, a refused provenance guard, a
+    # live owner). This is the identity's THIRD unaccounted window: such a
+    # server is in `discovered_pids` (so the #8599 vanished term cannot claim
+    # it), it is never killed (`reaped` cannot claim it) and it is never
+    # re-read for liveness (the #6984 dead-pid branch cannot claim it) — so
+    # when it shuts itself down on its own nothing accounts for it and the
+    # gate read the shortfall as "the sweep's own measurement is broken" on a
+    # run whose pytest passed (measured: before=26, reaped=0, exited=0,
+    # left=25, `pytest rc 0`). The builder MEASURES this window against the
+    # post-sweep `left` pid set (see `_declined_pids_gone`).
+    # `None` = NOT MEASURED (an un-instrumented seam, or an incomplete
+    # discovery), never "declined nothing" — same fail-closed rule as
+    # `discovered_pids`, for the same reason.
+    declined_pids: set[int] | None = None
 
 
 def _candidate_pids(records) -> set[int]:
@@ -2595,11 +2611,27 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                                            r["socket_path"]))
                        for r in candidate_records]
             _client_before_cache = {rid: f.result() for rid, f in futures}
+    # #11427: candidates this sweep examined and DECLINED to act on, by pid.
+    # Recorded at the decision (each skip below), never derived as a complement
+    # — a derived `examined - acted` set would claim a server this sweep
+    # committed to killing and then lost, which is the one shortfall #6984's
+    # measured `exited` exists to keep visible.
+    declined: set[int] = set()
+
+    def _decline(rec) -> None:
+        """Note a candidate this sweep decided NOT to act on (#11427)."""
+        if rec.get("pid"):
+            declined.add(rec["pid"])
+
     for record in records:
         if deadline is not None and time.monotonic() >= deadline:
             logger.info("sweep deadline hit (%.1fs elapsed) — %d acted, "
                         "stopping; cron sweeps clear the remainder",
                         time.monotonic(), len(acted))
+            # #11427: the records after this one are NOT recorded as declined —
+            # an exhausted sweep did not decide anything about them, so their
+            # later disappearance stays an unaccounted shortfall. Only a
+            # decision this sweep actually made can claim a natural exit.
             break
         classification = record.get("classification")
         if classification == "stale_socket":
@@ -2624,6 +2656,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         # `continue` (not break) so interleaved stale records after the
         # budget is exhausted are still processed (#1383 branch ordering).
         if batch_size is not None and killed >= batch_size:
+            _decline(record)
             continue
         if only_safe and not (record.get("dir_missing")
                               or record.get("_orphan_confirmed")
@@ -2631,6 +2664,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             logger.info(
                 "concurrent-suite guard: skipping live ephemeral candidate %s",
                 record.get("socket_path"))
+            _decline(record)
             continue
 
         # #1642 FIX 3: orphanhood for a LIVE-pid server is decided by
@@ -2652,6 +2686,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                         "concurrent-suite guard: live-pid server not "
                         "orphan-confirmed under only_safe, skipping %s",
                         record.get("socket_path"))
+                    _decline(record)
                     continue
                 # #3767: 'path_based' OR 'unattributed' — a server with no
                 # tortoise-written owner instrument cannot be attributed to
@@ -2689,6 +2724,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                     logger.info(
                         "path-based/unattributed server not orphan-confirmed, "
                         "skipping %s", record.get("socket_path"))
+                    _decline(record)
                     continue
 
         # Liveness-first: never kill a dead PID's leftovers via connect.
@@ -2734,10 +2770,12 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             logger.warning(
                 "CLIENT LIST probe failed, skipping (fail closed): %s",
                 record.get("socket_path"))
+            _decline(record)
             continue
         if clients_before > 0:
             logger.info("server has %d active client(s), skipping: %s",
                         clients_before, record["socket_path"])
+            _decline(record)
             continue
         clients_after = (0 if socketless
                          else _active_client_count(record["socket_path"]))
@@ -2745,10 +2783,12 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             logger.warning(
                 "CLIENT LIST re-probe failed, skipping (fail closed): %s",
                 record.get("socket_path"))
+            _decline(record)
             continue
         if clients_after > 0:
             logger.info("server gained a client between checks, skipping: %s",
                         record["socket_path"])
+            _decline(record)
             continue
 
         # #3599 adversarial review (fail-open): the per-server owner signal is
@@ -2772,12 +2812,14 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             logger.info(
                 "owner lock held (live owner), skipping: %s",
                 record["socket_path"])
+            _decline(record)
             continue
         owners_now = _owner_records(record["socket_path"])
         if owners_now is not None and owners_now[0] > 0:
             logger.info(
                 "owner attached since confirmation (%d live), skipping: %s",
                 owners_now[0], record["socket_path"])
+            _decline(record)
             continue
 
         # #4136 provenance guard — the SIGTERM authority is exercised HERE,
@@ -2791,6 +2833,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                 "refusing to kill PID %s: %s — provenance guard (#4136); "
                 "skipping %s", record.get("pid"), refusal,
                 record["socket_path"])
+            _decline(record)
             continue
 
         if dry_run:
@@ -2864,6 +2907,10 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     # #8599: what discovery examined, so the report builder can tell a server
     # that vanished BEFORE discovery apart from one this sweep lost.
     out.discovered_pids = _candidate_pids(records)
+    # #11427: what this sweep examined and then declined to act on, so the
+    # report builder can tell a DECLINED candidate that shut itself down from a
+    # server the sweep lost. See `_ScanAwareList.declined_pids`.
+    out.declined_pids = set(declined)
     return out
 
 
@@ -3768,6 +3815,15 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # finds such a dir whenever it is ephemeral-named, which is nearly all of
     # them (`EPHEMERAL_PREFIXES`).
     out.discovered_pids = _candidate_pids(resolved) if records.complete else None
+    # #11427: the same fail-closed rule for the declined set. A truncated
+    # discovery hands `reap()` a SUBSET of candidates, so the set it declined is
+    # a subset too — but unlike `discovered_pids` a short set here can only
+    # UNDER-claim a natural exit, never over-claim one. It is still published as
+    # UNMEASURED (None, never a partial set) because a report whose terms are
+    # measured over different populations is exactly what #10757 P2 refused:
+    # one reading, one scope, or no reading.
+    out.declined_pids = (getattr(acted, "declined_pids", None)
+                         if records.complete else None)
     return out
 
 
@@ -3819,9 +3875,12 @@ def _hygiene_report(reaped, cleared, left, before, exited, own_left) -> dict:
     vanished-before-discovery window is measured as a pid-set difference
     (:func:`_vanished_before_discovery`) and folded in by
     :func:`build_end_sweep_report`, because it is the same physical event
-    observed by a second instrument. The property the identity exists for is
-    unchanged — a server the sweep DID discover and then lost is in neither
-    window, so it still leaves a shortfall.
+    observed by a second instrument. #11427 widens it once more, by the same
+    rule, for the third window — a candidate the sweep EXAMINED and DECLINED
+    to act on that shut itself down afterwards (:func:`_declined_pids_gone`).
+    The property the identity exists for is unchanged — a server the sweep DID
+    discover and then lost, and a server discovery never reached, are claimed
+    by neither window, so each still leaves a shortfall.
     ``own_left`` (#1005) is the count of live servers attributable to THIS RUN
     at the same post-sweep seam as ``left`` — see :func:`own_live_server_count`.
     `None` means the attribution could not be measured (no run roots, or the
@@ -4071,6 +4130,45 @@ def _vanished_before_discovery(before_pids, discovered_pids,
     return len(set(before_pids) - set(discovered_pids) - set(left_pids))
 
 
+def _declined_pids_gone(declined_pids, left_pids) -> int | None:
+    """DECLINED candidates that are GONE at the post-sweep probe (#11427).
+
+    The identity's THIRD unaccounted window, and the one that redded this PR's
+    carve-out leg: `before=26, reaped=0, exited=0, left=25`, `pytest rc 0`. A
+    candidate the sweep examined and then DECLINED to act on (a live client, an
+    unconfirmed path-based/unattributed server, a spent kill budget, a refused
+    provenance guard, a live owner) is in `discovered_pids`, so
+    :func:`_vanished_before_discovery` cannot claim it; it is never killed, so
+    `reaped` cannot; and it is never re-read for liveness, so the #6984
+    dead-pid branch cannot either. When it shuts itself down on its own —
+    redislite's fire-and-forget NOSAVE close does exactly that, asynchronously
+    (`TORTOISE_FAST_ATEXIT=1`) — nothing accounts for it and the gate reads the
+    shortfall as a broken sweep.
+
+    THIS IS A MEASUREMENT, NOT THE COMPLEMENT `before - reaped - left` #6984
+    refused. It is a pid-set difference over TWO observations of ONE declared
+    population: the set `reap()` recorded at each skip decision, and the
+    post-sweep `left` reading. It can therefore FAIL (None) and it is bounded:
+    it can only ever claim pids the sweep itself decided not to act on, so
+
+      * a candidate the sweep COMMITTED to act on and then lost is not
+        declined, is in neither `reaped` nor `exited` nor `left`, and its
+        shortfall survives — the one control derived from the sweep's own
+        work stays falsifiable;
+      * a candidate discovery never reached is not declined either (that is
+        :func:`_vanished_before_discovery`'s window), so a truncated census
+        cannot launder itself through this term;
+      * a declined candidate still ALIVE at `left` is counted by `left`, so it
+        is not claimed here — claiming it would double-count and mask a
+        genuine shortfall (the fail-open direction).
+
+    Returns None (UNMEASURED, never 0) when either observation is unavailable.
+    """
+    if declined_pids is None or left_pids is None:
+        return None
+    return len(set(declined_pids) - set(left_pids))
+
+
 def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
                            own_probe=None) -> dict:
     """Compose the session-end hygiene report the CI orphan gate consumes (#4740).
@@ -4094,9 +4192,12 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
     `cleared` is threaded verbatim from `sweep_until_cleared`, because `cleared`
     is a diagnostic flag that does not decide the gate's verdict at any measured
     count. `exited` (#6984) is threaded from the same call — the natural exits
-    the sweep observed — and is widened here by the vanished count (#8599),
-    which is a natural exit observed by a DIFFERENT instrument (a pid-set
-    difference across discovery rather than a dead pid at kill time).
+    the sweep observed — and is widened here by TWO measured windows: the
+    vanished-before-discovery count (#8599), and the declined-then-gone count
+    (#11427). Both are natural exits observed by a DIFFERENT instrument (a
+    pid-set difference against the pre- and post-sweep readings), and both are
+    measured only over pids the sweep's own decisions name — so neither can
+    claim a server the sweep committed to act on.
 
     ``own_probe`` (#1005) is called ONCE, immediately after the post-sweep
     `left` reading, and supplies `own_left` — the count of live servers this RUN
@@ -4112,15 +4213,22 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
     # seam must read as UNMEASURED, so the vanished term cannot claim a server
     # this sweep genuinely lost.
     discovered: set[int] | None = set()
+    # #11427: the same accumulation for the pids each iteration DECLINED.
+    declined: set[int] | None = set()
 
     def _watched():
-        nonlocal discovered
+        nonlocal discovered, declined
         result = run_one()
         pids = getattr(result, "discovered_pids", None)
         if pids is None:
             discovered = None
         elif discovered is not None:
             discovered |= set(pids)
+        decline_pids = getattr(result, "declined_pids", None)
+        if decline_pids is None:
+            declined = None
+        elif declined is not None:
+            declined |= set(decline_pids)
         return result
 
     reaped, cleared, exited = sweep_until_cleared(_watched, deadline, clock)
@@ -4135,6 +4243,16 @@ def build_end_sweep_report(run_one, deadline, probe, clock=time.monotonic,
             "counted as natural exits, so the orphan gate's accounting "
             "identity does not read a self-shutdown as a broken sweep "
             "(#8599)", vanished)
+    # #11427: the same treatment for a candidate this sweep DECLINED and that
+    # then shut itself down — the third window, measured against `left`.
+    declined_gone = _declined_pids_gone(declined, left_pids)
+    if declined_gone:
+        exited += declined_gone
+        logger.warning(
+            "%d declined server(s) exited on their own after the sweep "
+            "declined them — counted as natural exits, so the orphan gate's "
+            "accounting identity does not read a self-shutdown as a broken "
+            "sweep (#11427)", declined_gone)
     return _hygiene_report(reaped, cleared, left, before, exited, own_left)
 
 
