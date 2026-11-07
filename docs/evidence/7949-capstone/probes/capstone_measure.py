@@ -452,13 +452,13 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    "TORTOISE_SESSION_LLM_MOCK", "TORTOISE_EXTRACTOR_PROMPT",
                    "TORTOISE_EXTRACT_MODEL", "TORTOISE_EXTRACTOR_MAX_TOKENS",
                    "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
-                   "TORTOISE_REFERENTIALITY")
+                   "TORTOISE_REFERENTIALITY", "TORTOISE_CONTEXT_ENRICH")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
 #: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
 #: which changes the embed list a run measures without changing the arm.
-DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"),)
+DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"))
 
 #: The v4 seam ledger AT THE HEAD THIS RUN MEASURED (#10983, C2's Target 3).
 #:
