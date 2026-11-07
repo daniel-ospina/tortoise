@@ -6166,20 +6166,24 @@ def _entity_key_dense_query(
         text = alias.strip()
         if not text:
             continue
-        new_toks = [
-            t for t in tokenize_sparse_query(text, keep_numeric=True)
-            if t not in have
-        ]
+        alias_toks = tokenize_sparse_query(text, keep_numeric=True)
+        new_toks = [t for t in alias_toks if t not in have]
         if not new_toks:
             continue
         if used_chars + len(text) + 1 > _ENTITY_DENSE_ALIAS_CHARS:
             continue
-        if used_terms + len(new_toks) > _ENTITY_DENSE_ALIAS_TERMS:
+        # The TERM budget bounds the text this composer APPENDS — so it counts
+        # every token of the alias, not only the novel ones. Counting the novel
+        # half read as a budget that could never bind: a measured composition
+        # appended 33 tokens under a 32-token bound, because the repeated tokens
+        # (which still lengthen the composed query) were free (review finding,
+        # PR #11459).
+        if used_terms + len(alias_toks) > _ENTITY_DENSE_ALIAS_TERMS:
             continue
         picked.append(text)
         have.update(new_toks)
         used_chars += len(text) + 1
-        used_terms += len(new_toks)
+        used_terms += len(alias_toks)
         if (used_chars >= _ENTITY_DENSE_ALIAS_CHARS
                 or used_terms >= _ENTITY_DENSE_ALIAS_TERMS):
             break
@@ -39737,9 +39741,22 @@ class TortoiseSDK:
         composition adds nothing (``_entity_key_dense_query`` returns ``None``).
 
         Merge contract — identical to the sparse half's: the expanded run comes
-        first, the pass-1-only ids follow in their original order. Additive
-        recall, never a replacement; the read's original dense ranking survives
-        inside the merged leg.
+        first, the pass-1-only ids follow in their original order. No id is ever
+        DROPPED (that is what "additive" means here, exactly as in A4), and the
+        candidate SET only grows.
+
+        ⛔ State the second half of that contract plainly, because it is real
+        behaviour and not a footnote: the merged leg's ORDER is the composed
+        query's, so an id already in pass 1 can move up **or down**, and in the
+        degenerate case where the expansion finds nothing new the leg is still
+        re-ranked. That is inherent, not a bug — ``rrf_fusion`` is rank-based, so
+        a merge IS an ordering, and the composed query is the same question with
+        entity context attached (no original token is removed), so its ranking is
+        the mechanism rather than a side effect. It is also exactly what the
+        sparse half does. What a caller must NOT read into "additive" is
+        "order-preserving": on a lever that ships OFF and unmeasured, a state
+        that re-orders a dense leg is a decision to be measured, not a promise
+        the code can keep.
 
         Fail-open (mirrors A4 #2070 / the sparse half): no embedder, an encode
         failure, a query failure or an empty result returns ``None`` and the

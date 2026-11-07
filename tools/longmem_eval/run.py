@@ -1579,6 +1579,20 @@ def _model_id(model: Any) -> str | None:
     return _adapter_fingerprint(model)
 
 
+def _resolved_dense_arm(entity_key_expansion: bool | None) -> bool | None:
+    """The C2 dense half's fingerprint value (#2518 indicator 2).
+
+    ``True`` only when the arm could actually have FIRED — i.e. the dense
+    switch is armed AND the sparse lever it is a parity of is on. Stamping an
+    armed-but-inert env var recorded an arm the retrieval did not run and
+    refused an equivalent resume over it (``CheckpointStaleError``; review
+    finding, PR #11459). ``None`` otherwise, so a disarmed run's fingerprint
+    stays byte-identical to a pre-feature checkpoint's.
+    """
+    return (True if (entity_key_expansion and _entity_key_dense_enabled())
+            else None)
+
+
 def _build_fingerprint(*, reader_model: str, judge_model: str,
                        ks: tuple[int, ...], top_k: int, split: str,
                        ingest_mode: str, extractor_model: Any,
@@ -4586,7 +4600,13 @@ def run_evaluation(
         # so the methodology, the checkpoint fingerprint and the per-question
         # retrieval cannot disagree about which arm ran. Reported as ``None``
         # while disarmed so a pre-feature checkpoint's fingerprint is unchanged.
-        entity_key_dense=(True if _entity_key_dense_enabled() else None),
+        # BOTH levers must be on: the dense half is a PARITY of the sparse one,
+        # so with ``entity_key_expansion`` off the read path provably cannot run
+        # it (the gate short-circuits) and stamping it would record an arm the
+        # retrieval did not run — and refuse an equivalent resume
+        # (``CheckpointStaleError``) over an inert env var (review finding,
+        # PR #11459). Only an arm that could have fired is fingerprinted.
+        entity_key_dense=_resolved_dense_arm(entity_key_expansion),
         # #8486: the resolved belief-layer arm — an armed checkpoint can never
         # be resumed without it (the resumed outcomes would carry no activation
         # manifest and the run would be EP-inert for exactly those questions).

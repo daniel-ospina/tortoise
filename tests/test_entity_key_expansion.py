@@ -603,11 +603,33 @@ def test_dense_composer_bounds_and_no_op_guard():
     composed = _entity_key_dense_query(base, huge)
     assert composed is not None
     assert len(composed) <= len(base) + 1 + _ENTITY_DENSE_ALIAS_CHARS
-    # (b') the TERM budget holds on its own (many short aliases).
+    # (b') the TERM budget holds on its own (many short aliases) — and it
+    # bounds the tokens the composition APPENDS, not merely the novel ones
+    # (counting only the novel half made the bound unable to bind: a measured
+    # composition appended 33 tokens under a 32-token budget — review finding,
+    # PR #11459).
     many_short = [f"zq{i}" for i in range(200)]
     composed_terms = _entity_key_dense_query(base, many_short)
     added = composed_terms[len(base):].split()
     assert len(added) <= _ENTITY_DENSE_ALIAS_TERMS
+    # The TERM half must also bind ON ITS OWN, so the input has to be aliases
+    # that are SHORT (the char budget must not fire first) and mostly REPEATED
+    # from the question (so that counting only the NOVEL tokens would never
+    # reach the bound). ``road bike cost <i>`` is that shape: ~2 novel tokens per
+    # alias against ~5 appended ones, so a novel-only budget appends 60 tokens
+    # where the correct one stops at 30 — measured against the pre-fix composer
+    # (review round 1 on PR #11459 caught the earlier shape as non-discriminating:
+    # long aliases made the CHAR budget bind first and the assertion passed
+    # pre- and post-fix alike).
+    from tortoise.sparse import tokenize_sparse_query as _tok
+    repeating = [f"road bike cost {i}" for i in range(200)]
+    composed_repeat = _entity_key_dense_query(base, repeating)
+    tail_tokens = _tok(composed_repeat[len(base):], keep_numeric=True)
+    assert len(tail_tokens) <= _ENTITY_DENSE_ALIAS_TERMS
+    # the discriminating half: a novel-token count would have let ~2x through.
+    assert len(tail_tokens) > _ENTITY_DENSE_ALIAS_TERMS // 2, (
+        "the fixture must push the term budget to its bound, or reverting "
+        "`len(alias_toks)` to `len(new_toks)` would still pass")
     # (c) deterministic + order-preserving.
     pool = ["wheel truing", "spoke tension", "hydraulic bleed"]
     assert (_entity_key_dense_query(base, pool)
@@ -730,6 +752,21 @@ def test_eval_fingerprint_records_the_dense_half_only_when_armed(
         "the conditional-presence convention: a disarmed run must not stamp an "
         "inert key into the fingerprint, or every existing checkpoint refuses")
     assert fp_off == runner._build_fingerprint(**base, entity_key_dense=None)
+
+    # An ARMED env var with the sparse lever OFF cannot make the read run the
+    # dense half (the pass is a parity), so the call site stamps the arm only
+    # when BOTH levers are on — otherwise the record asserts an arm that
+    # provably did not run, and an equivalent resume is refused over an inert
+    # env var (review finding, PR #11459).
+    from tortoise.sdk import _entity_key_dense_enabled
+    assert _entity_key_dense_enabled() is False  # unset in this process
+    assert runner._resolved_dense_arm(False) is None
+    assert runner._resolved_dense_arm(None) is None
+    assert runner._resolved_dense_arm(True) is None  # env unset here
+    monkeypatch.setenv("TORTOISE_ENTITY_KEY_DENSE", "1")
+    assert runner._resolved_dense_arm(True) is True
+    assert runner._resolved_dense_arm(False) is None
+    monkeypatch.delenv("TORTOISE_ENTITY_KEY_DENSE", raising=False)
 
     fp_on = runner._build_fingerprint(**base, entity_key_dense=True)
     assert fp_on["entity_key_dense"] is True
