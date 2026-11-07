@@ -1341,7 +1341,23 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # The empty-content test fired first and reported "no paragraph open", so the wide-gap marker
     # below opened its own list and the real close was blanked. The round-39 empty-content rule still
     # holds for a BULLET (`- ` + `  2.      Closes #100`), which `_lazy_push` never answers true for.
-    if lazy_marker:
+    # ⛔ …BUT ONLY FOR A TOP-LEVEL PARAGRAPH (`container is None`). When an ITEM holds the
+    # paragraph, `_is_lazy_marker`'s `line_col >= container.rest_col` arm answers from the OUTER
+    # item's content column, and an item whose own content is itself a LIST has its paragraph one
+    # level DEEPER — so the line is answered lazy where the renderer put a `<pre><code>` (round-55
+    # review, P0 — a FAIL-OPEN in BOTH arms, `strict` included, i.e. a false PASS in
+    # `issue_process_lint`'s arm 1):
+    #     `* - x` + `   2. -` + `  2.     Closes #100`
+    #         renderer: the `- x` list is nested INSIDE the `*` item, so its paragraph lives at the
+    #         nested content column; the marker line below is a `code_block` -> CODE
+    #         `origin/main` `[]` both arms; the round-52 head credited `[100]` in both, and
+    #         `issue_process_lint.claims()` returned `closing: [100]` — the arm-1 false PASS
+    # The cost of taking this answer for an ITEM too is a LOST close on the sibling spelling, where
+    # the item's own content IS a paragraph (`- x` + `  2. -` + `  2.     Closes #100`, renderer ONE
+    # `<p>`): `origin/main` loses it too, so this is a return to main's answer, not a new loss —
+    # measured on a 450-body family, the ITEM arm goes 4 new fail-opens -> 0 while lost closes stay
+    # strictly below `origin/main`'s (4 vs 31 lenient, 13 vs 31 `strict`).
+    if lazy_marker and container is None:
         return False
     # ⛔ §4.4 COMES BEFORE THE LEAF TESTS, NOT AFTER THEM (round 50 — the ordering half of the
     # finding that kept the WIP arm from blanking a paragraph's own text). "An indented code block
@@ -1942,8 +1958,11 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                       #         head `[]`: the fence became top-level and ran to EOF
                       #     `> Notes` + `- ` + `  <pre>` + `2.     Closes #100`
                       #         renderer `<code_block>`; `origin/main` `[]`, head `[100]`
-                      # The paragraph the underline would belong to lives at `prev_quote_depth`
-                      # (round 38's own rule), so that is the term that was missing.
+                      # The paragraph's depth under the `>` rule is `prev_quote_depth` when the last
+                      # line stayed at it (round 38's own rule). ⛔ NOT when a `pushed` lazy continuation
+                      # reset it below the paragraph — that is what `prev_para_depth` carries (round-54),
+                      # and this term is deliberately still the LINE's, because an underline is a fact
+                      # about the line.
                       and not (prev_prose and container is prev_container
                                and _quote_depth(prefix) == prev_quote_depth
                                and _SETEXT_UNDERLINE_RE.match(rest.strip())))
@@ -1989,8 +2008,8 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # blank line (types 6/7) end the leaf block AT that line, so anything after it still belongs
         # to it and a new block may only start on the NEXT line.
         _scan_for_opener = False
-        #: Did THIS line open the leaf block (`_opened` answered)? A block's OPENER line is its
-        #: own raw text, so it must survive `strict` — see the note at `indent_code`.
+        #: Did THIS line open the leaf block (`_opened` answered)? A block's OPENER line is its own
+        #: raw text, so it must survive `strict` — see the note at `indent_code`.
         _html_opened_here = False
         # ⛔ A LINE INSIDE AN ALREADY-OPEN LEAF BLOCK IS THAT BLOCK'S RAW TEXT, SO IT OPENS NO
         # PARAGRAPH (round 49 review, P1 — a FAIL-OPEN in `strict=True`, the PASS arm). The prose
@@ -2090,7 +2109,9 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 # continuation:
                 #     `Notes` + `2. -` + `> <br />` + `     -     Closes #100`
                 #         renderer: `<p>` then a blockquote whose `html_block` is `<br />`, then a
-                #         `code_block` -> CODE; `origin/main` `[]`, this head credited `[100]`
+                #         `code_block` -> CODE; `[]` at `3861f0a10` (the tree `c83cd2803` merged) and
+                #         at `origin/main` `d69faaf38`; `[100]` at the BRANCH POINT `80c912244`, and the
+                #         round-54 head credited it
                 # The depth term is the rule `_is_lazy_marker`'s docstring already states, applied
                 # where the leaf question is asked. Measured: that body `[]` in both arms, the
                 # controls (`Notes` + `2. -` + `> x` + …, `Notes` + `2. -` + `2.     Closes #100`,
@@ -2308,7 +2329,11 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         #     `- > q` + `  >     -     Closes #100`
         #         renderer ONE `<p>` inside the inner quote (`q\n    -     Closes #100`)
         #         origin/main `[100]`; head `[]` — 60 such bodies per marker family, all lost
-        # The paragraph's depth is `prev_quote_depth` (it already carries lazy continuation), so when
+        # The paragraph's depth here is `prev_quote_depth` — it already carries lazy continuation, and
+        # ⛔ that is exactly the case it does NOT cover: a `pushed` lazy continuation resets it BELOW
+        # the paragraph it continues, which is why `prev_para_depth` exists (round-54 review, P1).
+        # Where the question is genuinely the PARAGRAPH's depth, `prev_para_depth` is the term; here
+        # the question is where the line's own markers placed it.
         # it is DEEPER than the item and the line is written at or one marker below that depth, the
         # line is inside that quote: consume the line's own markers and measure from the quote's
         # content column, which in that space is 0. Swept over 22,176 + 9,072 bodies against
@@ -2352,24 +2377,34 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                                 or _dropped_quote_is_lazy(prefix, prev_quote_depth, container,
                                                           prev_container, rest_indent, indent))
         own_code = own_gap > 4 and not ordered_continuation and not _html_here
-        # ⛔ `not _html_here` IS A TERM OF THE LENIENT BRANCHES ONLY, NEVER OF `strict` (round 52
-        # review, P1 — a FAIL-OPEN in the `strict` PASS arm, the arm `issue_process_lint` refuses
-        # `lands` with). `_html_here` is this module's own HTML-block state machine, and `strict`
-        # reads the CARRIER body where a lenient-only match is a PASS — so a state machine that is
-        # WRONG about a line must not be able to EXEMPT that line from the arm whose whole contract
-        # is "blank every indented line" (this file states that contract two screens down: "The
-        # `strict` half deliberately does NOT take the term"). It became a shared prefix with the
-        # leaf-block work, and the consequence is the arm crediting a keyword the renderer puts in
-        # `<pre><code>`:
+        # ⛔ `indent_code` NO LONGER TAKES `_html_here` WHEN `strict` IS SET (P1 — a FAIL-OPEN in
+        # the `strict` PASS arm, the arm `issue_process_lint` refuses `lands` with). `_html_here` is
+        # this module's own HTML-block state machine, and `strict` reads the CARRIER body where a
+        # lenient-only match is a PASS — and an OVER-OPEN guess (the unsafe direction: it believes a
+        # leaf block is open when the renderer has none) must not be able to EXEMPT a line from the
+        # arm whose whole contract is "blank every indented line" (this file states that contract
+        # two screens down: "The `strict` half deliberately does NOT take the term"). It became a
+        # shared prefix with the leaf-block work, and the consequence is the arm crediting a keyword
+        # the renderer puts in `<pre><code>`:
         #     `-` + `    code` + `<br />` + `     -     Closes #100`
         #         renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
-        #         `[]` at the branch point `origin/main` `80c912244`; `[100]` in `strict` AND
-        #         `indented_code` at `1177c6708`/tip `3861f0a10` and at the pre-fix head — so this is
-        #         a fail-open CURRENT `main` still has, not a divergence from it
+        #         `main` before #11186 `[]`; after #11186 `[100]` in `strict` — a FALSE PASS
         # `strict` blanked `    code` (its own declared over-blank), which left no paragraph open, so
         # `<br />` opened a PHANTOM type-7 block and `_html_here` then exempted the line below it.
-        # The lenient and `indented_code` branches keep the term: there `_html_here` is protecting a
-        # real close — a leaf block's own TEXT is read, not hidden.
+        # ⛔ THIS TERM IS NARROWER THAN "STRICT IS UNCONDITIONAL", AND THE DIFFERENCE IS A DECLARED
+        # TRADE, NOT A RESTORE: an html block's own INDENTED text (a visible `<div>`/`<span>` raw
+        # text, renderer PROSE) is blanked by `strict` again — exactly pre-#11186's answer, and
+        # round 30's recorded "a PASS arm blanks every indented line" choice. The close is still
+        # READ by the lenient and `indented_code` arms, so `classify` downgrades it to a warning
+        # rather than hiding it. Widening "read, not hidden" (round 44/45) to a block's INDENTED
+        # text is a REOPEN of that choice, homed on #11156 — not a behaviour to change here.
+        # ⛔ The SAME over-open exposure still exists on `own_code` above (a column-0 wide-gap marker
+        # under a phantom block), where the term is load-bearing for a REAL block's own text; that
+        # residue is #11287/#11156's, and this comment must not be read as "no `_html_here`
+        # exemption remains in `strict`".
+        # The lenient and `indented_code` branches keep the term: there `_html_here` protects the
+        # #11156 class — a leaf block's own TEXT is read, which is a fail-open only for the
+        # preformatted tag family and is the declared, round-44/45-pinned residual.
         indent_code = rest_indent > _MAX_FENCE_INDENT and (
             # ⛔ the block's OWN OPENER line is its raw text and is never blanked by `strict`: it is
             # where the state below is LEARNED, so blanking it loses the block (and the `_html_here`
@@ -2454,15 +2489,19 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 #         -> CODE; `origin/main` `[]`, the round-50 head `[100]` in `strict=True`
                 # The `real and prev_prose` terms keep the fact to its own case: a 4+-column marker
                 # with NOTHING open is an indented block, and its pop moves no paragraph.
-                # ⛔ FROM THE POP, NOT FROM `prev_prose` (round-52 review, P0 — and this is why
-                # widening it was not enough on its own). The question the record answers is "which
-                # item holds the paragraph below this line", and `prev_prose` is about the paragraph
-                # ABOVE it: a marker whose own content is a bare marker (`- 2.`) answers
-                # "no paragraph" here, so gating on `prev_prose` skipped the record and
-                # `_is_lazy_marker` fell back to its vacuous `container is None` arm:
+                # ⛔ THE RECORD IS STILL GATED ON `prev_prose` AT BOTH POPS, AND THAT IS THE STATE
+                # THIS HEAD SHIPS — the `- 2.` family below is NOT fixed here. What the round-52 fix
+                # changed was WHERE the fact is recorded (from the POP, so the indent-pop no longer
+                # needs `prev_prose` to have been true at the previous line), not the gate itself:
                 #     `- 2.` + `    - x` + `x` + `2.     Closes #100`
-                #         renderer `<pre><code>` -> CODE, and `issue_process_lint.claims()` went
-                #         `[] -> [100]` — a false PASS in the arm-1 gate
+                #         renderer `<pre><code>` -> CODE; `[]` lenient / `[100]` in `strict` at this
+                #         head, and `issue_process_lint.claims()` returns `closing: [100]` — STILL a
+                #         false PASS in the arm-1 gate. It is the residual the PR body declares open
+                #         (`origin/main` carries the same `strict` answer): the record would have to
+                #         survive the one-line clearing at the top of the loop, and both candidate
+                #         fixes cost ~110 lost closes in the arm `in_flight_markers` and the
+                #         comment-body read go through (measured on a 15,000-body grid: −6 fail-opens
+                #         for +116 lost closes, and −5 / +112).
                 # ⚠️ BOTH TERMS ARE GATED ON `prev_prose`, MEASURED: un-gating this one changes 0 of
                 # 60,000 fuzz bodies (it is unobservable — the record only matters when a paragraph
                 # was open above, which is what the gate says), and un-gating the DEDENT pop at the

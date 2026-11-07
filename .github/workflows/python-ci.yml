@@ -2930,7 +2930,7 @@ jobs:
         # has no timeout of its own, so at a 15m cap it can never be amortized —
         # and the `cancelled` it causes reds a REQUIRED check on a green leg
         # (#5219). This job only ever READ the shared key; `test-d14-hosted-api`
-        # writes it on every run, `test-slow` only when `slow_run == 'true'`.
+        # is its unconditional writer (saving on a MISS), `test-slow` only under `slow_run`.
         uses: actions/cache/restore@v4
         continue-on-error: true
         with:
@@ -3480,8 +3480,8 @@ jobs:
         # UNBOUNDED term — the save has no timeout of its own.
         #
         # Nothing is lost by not saving here: the key is SHARED
-        # (`pip-<os>-<hash uv.lock>`), written on EVERY run by `test-d14-hosted-api`
-        # (unconditional, PR + push) and by `test-slow` only under `slow_run`.
+        # (`pip-<os>-<hash uv.lock>`), written by `test-d14-hosted-api` on EVERY run
+        # (unconditional, PR + push), by `test-slow` only under `slow_run` — each saving on a MISS.
         # This job only ever READ it.
         #
         # `continue-on-error`: a cache-SERVICE error (transport/503) must never

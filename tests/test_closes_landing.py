@@ -4820,6 +4820,76 @@ def test_no_ITEM_opens_inside_an_HTML_block_and_none_of_its_text_is_HIDDEN():
         assert "#100" in cl.strip_code(body, indented_code=True), body
         assert cl.parse_closing_refs(body) == [100], body
 
+def test_a_WIDE_GAP_marker_in_a_NEW_blockquote_after_an_HTML_block_is_CODE():
+    """#11287 — the fail-open the review round reported, pinned on the shape it reported.
+
+    An HTML block takes NO lazy continuation: the unquoted `    x` ends the blockquote that held
+    `> <span>`, so it is a top-level indented CODE block, and the marker then arrives in a NEW
+    blockquote. `2.` + five spaces is §5.2's wide-gap item — one space is the delimiter and the
+    remaining four are the item's indented CODE block:
+
+        `> <span>` + `    x` + `> 2.     Closes #100`
+            renderer: `<blockquote><span></blockquote><pre><code>x</code></pre><blockquote>
+            <ol start="2">…<pre><code>Closes #100`  -> the keyword is CODE, so every arm owes `[]`.
+
+    The round-49..51 heads (from `282644682d`, the round-48 resolution) credited it in ALL FOUR
+    arms; the round-48 head (`4ef23920a5`) and pre-#11186 `main` (`80c912244f`) refused it in
+    `strict` and `indented_code` and credited it in `lenient` (the pre-existing #11156 direction).
+    Round 52 (`cc8f7baf02`, merged as #11186) closed both, and its term is `_html_leaf_text` — "a leaf
+    block's own raw text leaves no paragraph" — measured NECESSARY AND SUFFICIENT on these rows:
+    clearing that flag on the fixed tree restores `[100]` in all four arms, and nothing else is
+    needed. ⚠️ NOT `_html_here` (it is `False` on the marker line at every tree here, and its "this
+    line's own answer" comment predates round 52), and NOT `_html_rest` (round 52's §4.6
+    content-column allowance, an IDENTITY on these rows because `container is None`; it is the term
+    for the lost-close family, which is control 2 below). This test reds on the round-51 tree
+    (`1bbc16ce57`) — that is the property it exists to keep.
+    ⚠️ The baseline for the two "pre-existing" rows is **pre-#11186 `main`**, never `origin/main`:
+    after #11186 landed, `main` refuses these shapes in all four arms, so a reader re-deriving them
+    against today's `main` gets `[]` and would wrongly conclude the fail-open was never there.
+
+    ⚠️ Not #11268 (the `indented_code` arm crediting inside a DEEPER blockquote) and not #11156
+    (`strip_code` never blanks raw-HTML content): what is measured here is the HTML block's END,
+    not its text.
+    """
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "#100" in getattr(t, "content", "")}
+
+    # The two rows #11287 reported: the container ends, then the marker arrives in a new quote.
+    for body in ("> <span>\n    x\n> 2.     Closes #100\n",
+                 "> </pre>\n      x\n> 2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+        assert cl.parse_closing_refs(body, None, strict=True) == [], body
+        assert "#100" not in cl.strip_code(body, indented_code=True), body
+        assert "#100" not in cl.strip_code(body, indented_code=True, strict=True), body
+
+    # The same body WITHOUT an indented line between the opener and the marker: the renderer also
+    # puts the keyword in `<pre><code>`, and both pre-#11186 `main` (`80c912244f`) and the series
+    # heads credited it — a pre-existing fail-open the same `_html_leaf_text` term closed. Pinned so "refuse
+    # this family" is the recorded answer rather than an accident of the two rows above.
+    pre_existing = "> <span>\nx\n> 2.     Closes #100\n"
+    assert keyword_types(pre_existing) == {"code_block"}, pre_existing
+    assert cl.parse_closing_refs(pre_existing) == [], pre_existing
+    assert cl.parse_closing_refs(pre_existing, None, strict=True) == [], pre_existing
+
+    # CONTROL 1 — the marker NOT in a new blockquote: already refused before the fix, and refused
+    # for the renderer's reason (`<pre><code>`), so this keeps the fix from spreading to shapes that
+    # were never wrong.
+    for body in ("> <span>\n      x\n2.     Closes #100\n",
+                 "x\n      x\n> 2.     Closes #100\n"):
+        assert keyword_types(body) == {"code_block"}, body
+        assert cl.parse_closing_refs(body) == [], body
+
+    # CONTROL 2 — the fix must not have become "blank every wide gap after an HTML block": where
+    # the renderer puts the keyword in PROSE, it is still a close (round 52's own pinned shape).
+    prose = "- a\n    <div>\n<br />\n2.     Closes #100\n"
+    assert keyword_types(prose) == {"html_block"}, prose
+    assert cl.parse_closing_refs(prose) == [100], prose
+    assert cl.parse_closing_refs(prose, None, strict=True) == [100], prose
+
+
 def test_a_fence_that_DROPS_a_NESTED_items_marker_is_still_inside_the_OUTER_one():
     """Round 49 review, P1 — a LOST close, a regression against `origin/main`.
 
@@ -5309,8 +5379,10 @@ def test_a_type_6_block_on_a_LAZY_line_belongs_to_the_item_it_is_still_inside():
             that block ends WITH THE ITEM, so the last line is a NEW blockquote whose wide-gap
             content is `<pre><code>` -> CODE. `[]` at the branch point `origin/main` `80c912244`
             (closing-tag spelling; the opening-tag spellings give `[100]` there) and `[100]` at the
-            pre-fix head `1bbc16ce5^` — `([100], [100], blanked)`, a false PASS in the
-            `issue_process_lint` arm.
+            pre-fix head `1bbc16ce5^` — `([100], [100], kept)`, a false PASS in `lenient`, in
+            `strict=True` AND in `indented_code=True`, so the 4th assertion below IS discriminating
+            at that head (round-55 review, P2 — the earlier wording said "blanked", which the tree
+            says otherwise and which made the assertion read as redundant).
 
     The same root is why the `<div>` spelling has always leaked on `origin/main`
     (50 of 244 renderer-CODE bodies in the round-50 targeted grid): the binding was the container
@@ -5535,24 +5607,29 @@ def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
 
     `strict` is the PASS arm — `classify` refuses `lands` on it, and `issue_process_lint` reads the
     carrier body through it — so its documented rule is "blank every indented line". `_html_here` is
-    THIS MODULE's HTML-block state machine, and a state machine that is wrong about a line (it can
-    only ever be wrong in the direction of believing a leaf block is open) must not be able to
-    exempt that line from the arm whose whole contract is to blank it. The exempting term was a
-    shared prefix on the `indented_code` branch, so it took `strict` with it:
+    THIS MODULE's HTML-block state machine, and an OVER-OPEN guess (the unsafe direction for a PASS
+    arm: it believes a leaf block is open where the renderer has none) must not be able to exempt
+    that line from the arm whose whole contract is to blank it. The state machine errs in BOTH
+    directions — see `> > - item` + `>` + `> >   <span>` + a wide-gap marker, where it reads
+    `_html_here=False` over an open `html_block` — so the premise is the direction that matters
+    here, not an invariant. The exempting term was a shared prefix on the `indented_code` branch, so
+    it took `strict` with it:
 
         `-` + `    code` + `<br />` + `     -     Closes #100`
             renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
-            `[]` at the branch point `origin/main` `80c912244`, `[100]` at `1177c6708`/tip and at the
-            pre-fix head — a FALSE PASS that CURRENT `main` still has.
+            `main` before #11186 `[]` in `strict`; after #11186 `[100]` — a FALSE PASS.
 
     The mechanism is the strict arm's own declared over-blank feeding the guess: `strict` blanks
     `    code`, so no paragraph looks open, so `<br />` is read as a legal type-7 opener (§4.6: type
     7 cannot interrupt a paragraph), and the block it invents then exempts the marker line below it
     — a line the renderer puts inside a real `<li>`'s code block.
 
-    The lenient controls are here because the fix must not move them: the lenient and
-    `indented_code` arms keep the term, where it protects a real close (a leaf block's own TEXT is
-    read, not hidden — see `test_an_HTML_blocks_own_text_is_READ_not_hidden`).
+    ⛔ BOTH LENIENT ASSERTIONS BELOW ARE THE DECLARED #11156 RESIDUAL, NOT "a real claim": the
+    renderer puts this keyword in `<pre><code>`, so a lenient credit here is the raw-HTML fail-open
+    that round 44/45 PINNED as policy (`test_an_HTML_blocks_own_text_is_READ_not_hidden`). They are
+    asserted so the fix cannot move them silently — not because the renderer says the close is real.
+    "Protects a real close" is true only of the `leaf` control, where the block's own text is the
+    marker at column 0.
     """
     md = MarkdownIt("commonmark")
 
@@ -5563,9 +5640,9 @@ def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
     assert keyword_types(body) == {"code_block"}, body
     assert cl.parse_closing_refs(body, None, strict=True) == [], body
     assert "#100" not in cl.strip_code(body, strict=True), body
-    # …and the LENIENT arms keep it (round 5 review, P3 — the docstring claimed this control and the
-    # only assertions were on `leaf`, a different body): the warn arms must not lose a real claim
-    # while the PASS arm stops crediting a false one.
+    # …and the LENIENT arms keep the term. This is the DECLARED #11156 residual (the renderer puts
+    # the keyword in `<pre><code>`, so a lenient credit is a fail-open), pinned here only so the fix
+    # cannot move it silently — see the docstring.
     assert cl.parse_closing_refs(body) == [100], body
     assert "#100" in cl.strip_code(body, indented_code=True), body
     # …the CONTROL the fix must not touch: a wide-gap marker line inside a REAL html block is still
@@ -5575,6 +5652,21 @@ def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
     assert cl.parse_closing_refs(leaf) == [100], leaf
     assert cl.parse_closing_refs(leaf, None, strict=True) == [100], leaf
     assert "#100" in cl.strip_code(leaf, indented_code=True), leaf
+    # …and an html block's OWN OPENER line is never blanked by `strict`: it is where the state is
+    # LEARNED, so blanking it would destroy the block (and every later `_html_here` answer).
+    opener = "- a\n    <div>\n<br />\n2.     Closes #100\n"
+    assert cl.parse_closing_refs(opener, None, strict=True) == [100], opener
+    # ⛔ THE DECLARED TRADE, PINNED (reviewer A, P1 — it must not ship undeclared or unpinned).
+    # `strict` blanks an html block's own INDENTED text again, which is round 30's recorded "a PASS
+    # arm blanks every indented line" choice and exactly what `main` did before #11186. The renderer
+    # says PROSE here (a `<div>`'s raw text is visible), so the close is still READ by the lenient
+    # and `indented_code` arms — `classify` downgrades it to a warning rather than hiding it. If
+    # round 44/45's "read, not hidden" should extend to a block's INDENTED text, that is a REOPEN of
+    # the round-30 choice, homed on #11156 — the assertion below is what a reopen must change.
+    indented_html = "<div>\n    Closes #100\n"
+    assert keyword_types(indented_html) == {"html_block"}, indented_html
+    assert cl.parse_closing_refs(indented_html) == [100], indented_html
+    assert cl.parse_closing_refs(indented_html, None, strict=True) == [], indented_html
 
 
 def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm():
@@ -5647,3 +5739,80 @@ def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm
     prose = "- > q\n  > 2.     Closes #100\n"
     assert [t.type for t in md.parse(prose) if "Closes" in getattr(t, "content", "")] == ["inline"], prose
     assert cl.parse_closing_refs(prose) == [100], prose
+
+
+def test_an_ITEM_whose_own_content_is_a_NESTED_LIST_leaves_NO_paragraph():
+    """Round-55, P0 — a FAIL-OPEN in BOTH arms (`strict` included) that the ladder's move introduced.
+
+    The round-52 fix answered "an item whose own content is itself a bare marker holds no
+    paragraph" AFTER `lazy_marker`, because `lazy_marker` is the caller's answer about a top-level
+    paragraph. That is right for a TOP-LEVEL paragraph and wrong when an ITEM holds it: the lazy
+    test's `line_col >= container.rest_col` arm measures against the OUTER item's content column, and
+    an item whose own content is a nested LIST keeps its paragraph one level DEEPER — so the line is
+    answered "lazy continuation" where the renderer put a `<pre><code>`:
+
+        `* - x` + `   2. -` + `  2.     Closes #100`
+            renderer: the `- x` list is nested INSIDE the `*` item, so the marker line under it is a
+            `code_block` -> CODE
+            `origin/main` `[]` both arms; the round-52 head credited `[100]` in both, and
+            `issue_process_lint.claims()` returned `closing: [100]` — a false PASS in arm 1 of the
+            gate this module feeds.
+
+    ⚠️ THE TRADE, measured rather than assumed. Taking the answer for an ITEM too costs a LOST close
+    on the sibling spelling, where the item's own content IS a paragraph:
+
+        `- x` + `  2. -` + `  2.     Closes #100`     renderer ONE `<p>` -> PROSE
+
+    `origin/main` loses that one too, so this is a return to main's answer, not a new loss. On a
+    450-body family (10 first lines x 9 bare-marker spellings x 5 tails) the ITEM arm goes from
+    **4 new fail-opens to 0**, and lost closes stay strictly below `origin/main`'s (4 vs 31 lenient,
+    13 vs 31 `strict`). The top-level CONTROL is the neighbouring test's body and must stay `[100]`.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "* - x\n   2. -\n  2.     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    assert "#100" not in cl.strip_code(body, indented_code=True), body
+    # …end-to-end through the gate's own reader, which is what makes this a P0 and not a nit.
+    sys.path.insert(0, str(ROOT))
+    from tools import issue_process_lint as ipl
+
+    assert ipl.claims(body)["closing"] == [], body
+
+    # CONTROL — the top-level spelling the round-52 fix exists for, unchanged.
+    control = "Notes\n2. -\n2.     Closes #100\n"
+    assert keyword_types(control) == {"inline"}, control
+    assert cl.parse_closing_refs(control) == [100], control
+
+
+def test_the_leaf_veto_reads_the_PARAGRAPHS_depth_not_the_last_lines():
+    """Round-54, P1 — pinned, because the suite did NOT ride on this term (round-55 review, P2).
+
+    `prev_quote_depth` is reset by a `pushed` lazy continuation, so it can sit BELOW the paragraph it
+    continues. Asking the type-7 leaf veto against it drops the veto and blanks a real close:
+
+        `> Notes` + `     - x` + `> <br />` + `     -     Closes #100`
+            renderer ONE `<p>` in the blockquote -> PROSE
+            `c83cd2803` credited it; with `prev_quote_depth` in the placeholder term the line is
+            `[]` in `lenient` — a LOST close. `prev_para_depth` keeps the answer `[100]`.
+
+    Measured: reverting the term to `prev_quote_depth` leaves the whole file green without this
+    test, and moves 8 bodies (7 of them real closes lost in `lenient`) on a 252-body family.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    body = "> Notes\n     - x\n> <br />\n     -     Closes #100\n"
+    assert keyword_types(body) == {"inline"}, body
+    assert cl.parse_closing_refs(body) == [100], body
+    # `strict` blanks every indented line — the paragraph's own, included (round 30's choice).
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
