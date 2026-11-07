@@ -43,6 +43,8 @@ readout is blind to the vector index, which lives in a separate module). A publi
 puts non-index structure at **41 %**. **The range is 17–44 % and it is unmeasured; it is not an input to
 anything here.**
 
+Anything in this document that IS ours carries its pin inline. **⚠️ PROVENANCE of the four EXTERNAL figures this document leans on** — the 41 % non-index structure; the **0.0015 nDCG@10** spread at 381,559 vectors; the **0-of-10** filtered-ANN result and its 0.975/0.847 relax-order recall; and the **8–23 nDCG@10** Postgres-FTS-vs-BM25 gap — each is a **third-party published measurement, not ours and not reproduced here**. They are cited by RESULT; their specific citations are **owed before this document is quoted as measurement evidence**, and the fix is to attach them, not to drop the claims. Anything else here that reads as measured is ours and carries its pin.
+
 ---
 
 ## 1.5 The phases, named — because "beta" was doing two jobs
@@ -237,7 +239,7 @@ makes EP recomputation exact (§6.3).
 |---|---|
 | **retain closed components / 2-hop closures** | closure is what makes a walk and an EP recompute correct; measured cache studies show 1-/2-hop closure prefetch raises hit ratio for **every** policy tested |
 | **cap the pin: count, bytes, AND a degree ceiling** | unconditional hub pinning is a *measured* anti-pattern ("they can thrash each other"; naive pinning scored 62.4 % miss vs LRU at 60.2 %). Degree is **U-shaped** — helpful mid-tail, harmful at the head; a single huge hub can eat a 77 MB window |
-| **window-local touch counters + admission control** | recency beats static degree ranking, and adaptive policies beat every static one measured; eviction must be budget-triggered, not per-request, or the cycle "demote a leaf → the next query needs it → re-materialise → evict another leaf" becomes a storm |
+| **window-local touch counters + admission control** | recency beats static degree ranking, and adaptive policies beat every static one measured; eviction must be budget-triggered, not per-request, or the cycle "demote a leaf → the next query needs it → re-materialise → evict another leaf" becomes a storm. ⚠️ **The counter is WINDOW-LOCAL cache state — a different artifact from `tortoise/read_ledger.py`.** That ledger is TENANT-WIDE and is explicitly not a product input: `STORAGE-ARCHITECTURE.md` §17.4.6 states that reading it for any product decision *"would be a violation"* (it exists to measure `f`). Wiring it as the eviction signal is exactly the violation it names. |
 | **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **measured**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~300–460 MB, and the engine has **no per-graph memory cap**. This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each) |
 | **a walk materialises its seeds first** | search returns ids from Postgres; a non-resident seed must be written into the graph before traversing — a write on the query path, which is why the headroom above is mandatory |
 | **label what was truncated** | a confidence within 2 hops of a truncated boundary is **refused** (`degraded: "insufficient_graph"`); beyond that it may be returned as `degraded: "truncated_boundary"`. The shipped residency marker (`residency.py`, `not-hot`, `TORTOISE_RESIDENCY`) is this mechanism, and it is currently OFF |
@@ -257,9 +259,9 @@ Postgres disk $0.125/GB; plan $25 + compute $60 per project.
 
 | | complete graph (private-beta, §1.5) | windowed (post-measurement, §1.5) |
 |---|---|---|
-| graph per solo tenant | ~150 MB ⇒ **$8.75** | ~77 MB ⇒ **$4.38** |
+| graph per solo tenant | ~150 MB ⇒ **$8.75** | ~77 MB ⇒ **$4.49** |
 | Postgres storage | negligible | **dominant line** (multi-GB, still cents) |
-| vs the $5.70 budget | **154 %** — above, and known | **77 %** — inside |
+| vs the $5.70 budget | **154 %** — above, and known | **79 %** — inside |
 
 ⚠️ **The Postgres side is not free of unknowns, only of cost:** under both states the dominant unmeasured
 lines are **compute tier, provisioned IOPS and egress**, driven by the **miss rate** — which nobody has
