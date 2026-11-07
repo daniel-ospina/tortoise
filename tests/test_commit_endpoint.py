@@ -5076,8 +5076,9 @@ class Test4051ChargeCoversTheLoopShape:
     test_a_mitigates_operator_is_charged_for_its_second_event` for the
     `points[]` and `operators[]` lanes. It was **not** pinned for the shapes
     below. ⚠️ Nor is `supersessions[]` pinned by anything, against the graph OR
-    against the formula: `_COMMIT_SUPERSESSION_ENTRY_NODES` is referenced by no
-    test, and `TestDeclaredCommitWriteCount::
+    against the formula: `_COMMIT_SUPERSESSION_ENTRY_NODES` is asserted by no
+    test (its only tests-side mention is this paragraph), and
+    `TestDeclaredCommitWriteCount::
     test_each_collection_entry_is_charged_once` — whose docstring names the
     "`supersessions[]` TWO" rate — carries no `supersessions[]` entry in its
     payload. That is a live coverage gap, recorded here rather than closed here.
@@ -5111,10 +5112,18 @@ class Test4051ChargeCoversTheLoopShape:
 
     @staticmethod
     def _points_count() -> int:
-        """The COUNT the commit lane's points gate reads — the real predicate.
+        """The same `_count_resource` predicate the points gate reads.
 
         Called through `quota._count_resource` rather than re-written here,
         because a copy of the predicate is a test that can agree with the defect.
+
+        ⚠️ SCOPED: it passes no `sdk`, so it counts the org's DEFAULT graph,
+        while the gate counts on the REQUEST's handle
+        (`_check_org_limit(org, "points", sdk=sdk)` — the #10637 defect). The two
+        coincide only because this file's `TEST_TEAM` is a legacy full-access
+        key with no graph binding, so it writes the default graph. For a
+        graph-BOUND key they would differ; do not read this helper as "the count
+        the gate reads" in general.
         """
         from tortoise.quota import _count_resource
 
@@ -5186,17 +5195,22 @@ class Test4051ChargeCoversTheLoopShape:
         """`entities[]` / `events[]` are charged 1 node per entry — measured.
 
         `declared_commit_write_count` charges `_COMMIT_FLAT_NODE_LANES` one node
-        per entry, an assumption no test covered: the existing invariant legs
-        measure `points[]` and `operators[]` only, and `supersessions[]` is
-        pinned by nothing at all (see this class's docstring). An entry
-        that minted a node AND a durability `:GraphEvent` would make that rate a
-        2× fail-open — the same defect review cycles 2 and 3 found on the points
-        and operator lanes, one lane over. Measured: declared 7 / minted 7 for
-        three entries on each lane (4 chain nodes + one per entry).
+        per entry, an assumption no test had measured against the GRAPH
+        (`TestDeclaredCommitWriteCount::test_each_collection_entry_is_charged_once`
+        pins the flat RATES, against the formula). The existing graph-measured
+        invariant legs cover `points[]` and `operators[]` only, and
+        `supersessions[]` is pinned by nothing at all (see this class's
+        docstring). An entry that minted a node AND a durability `:GraphEvent`
+        would make that rate a 2× fail-open — the same defect review cycles 2
+        and 3 found on the points and operator lanes, one lane over. Measured:
+        declared 7 / minted 7 for three entries on each lane (4 chain nodes +
+        one per entry).
 
         Mutation this REDs: empty `_COMMIT_FLAT_NODE_LANES` (measured: reds this
-        leg and ONLY this leg), or let an entry start minting a second node
-        without raising the rate.
+        leg, and outside this class also
+        `TestDeclaredCommitWriteCount::test_each_collection_entry_is_charged_once`
+        — no other leg of this class moves), or let an entry start minting a
+        second node without raising the rate.
         """
         _pin_shipped_ingest_allowance(monkeypatch)
 
