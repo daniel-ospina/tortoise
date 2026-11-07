@@ -9922,9 +9922,6 @@ durations:
   # them (so a reader grepped a number that no longer held the token); the count
   # rots the same way. Prose INFLATES a grep, it never deflates one.
   # The 56 -> 58 gap is (three arms − one function) = 2, exactly as the
-  # header above says. One count per head, in
-  # The 54 -> 56 gap is (three arms − one function) = 2, exactly as the
-  # The 55 -> 57 gap is (three arms − one function) = 2, exactly as the
   # header above says.) One count per head, in
   # FUNCTIONS, measured per commit
   # (`git show <sha>:tests/test_problem_map_2820.py | grep -c '^def test_'`):
