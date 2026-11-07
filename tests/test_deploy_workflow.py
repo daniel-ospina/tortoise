@@ -10107,9 +10107,11 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # coordination", which is true for the coordinated/`;`/dash members and FALSE for `:`,
         # because `_CLAUSE_DELIM` has no `:` member): a coordinator or `;`/dash inside the
         # aside is cut by `_CLAUSE_DELIM`, while a `:` inside the aside is stopped by THIS
-        # pattern's own excluded `:` in the gap tail BELOW (the inline pattern is quoted
-        # there, which is the citation that cannot rot) — proved by dropping `:` from
-        # that tail, which flips the `:` spellings and nothing else. Each row below is ADMITTED
+        # pattern's own excluded `:` in its gap tail — the pattern is quoted INLINE at the
+        # end of this definition, which is why no line number is cited for it (a number rots
+        # the moment a hunk lands above it; the r9 text said `:4993` and the r10 text said
+        # "below", and the pattern is at neither) — proved by dropping `:` from that tail,
+        # which flips the `:` spellings and nothing else. Each row below is ADMITTED
         # here and REFUSED by `origin/main`, and each was ADMITTED at the pre-r6 head
         # `b37a6c24abb` too, and the `:` spellings are that class too
         # ("The note never says (as the row records: nothing) that the tree immediately before
@@ -10125,7 +10127,12 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # The last one has NO coordinated clause at all: the `;` is INSIDE the aside, and
         # `_clause_before_phrase` cuts at `;` regardless of paren depth, so the aside's own
         # interior ends the reporting frame. Closing the class needs clause cutting to be
-        # paren-depth aware — a change to the primitive every arm in this predicate reads
+        # paren-depth aware — a change to the primitive the CLAUSE-CUTTING arms read
+        # (`_clause_before_phrase` / `_clause_containing`). ⛔ NOT EVERY ARM READS IT: the
+        # `_REVERSING_FRAME` arm reads `_sentence_before_phrase`, which does its own scan with
+        # its own boundary set (`[.;\u2014\u2013]`), so a fixer who makes clause cutting
+        # paren-depth aware leaves that arm on the old behaviour — the r11 review measured
+        # that and the sentence now names the boundary it actually makes.
         # measured denominator, re-measured at four trees (#11191 review r9, P2 — the first
         # cut of this sentence said `_CLAUSE_DELIM` "25 times" and that three named trees
         # agreed; BOTH were false, and of exactly the class this block exists to remove):
