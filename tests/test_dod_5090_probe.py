@@ -4629,16 +4629,16 @@ def _residual_sentences(s3: str) -> list[str]:
       because the pseudo-negation termset exists to refuse exactly that modal.
       The price is stated rather than hidden: a doc that honestly NARROWS the
       exclusion has to say so as a clause (`"…except when the outer method
-      runs"`, which stays green) rather than as a hedge
+      runs"`, which stays green) rather than as a hedge.
 
     ⛔ The false-GREEN direction is the one that matters: a missed inverse is a
     false PASS in the file whose purpose is to be false-PASS-free, while a false
     block is loud and cheap. Where the two conflict, take the false block.
 
-    ⛔ AND THE APPROACH ONLY NARROWS. Four review rounds have each closed a
-    shape of the same class — literals → class → privatives → governance →
-    pseudo-negation — and a fifth found the next shape (the out-of-termset hedge
-    declared above). A vocabulary predicate over English prose is
+    ⛔ AND THE APPROACH ONLY NARROWS. The shapes have been closed one at a time —
+    literals → class → privatives → governance → pseudo-negation — and the next
+    one (the out-of-termset hedge above) is already measurable. A vocabulary
+    predicate over English prose is
     not going to converge; what keeps it honest is that every measured shape is
     a ROW in `test_the_residual_pin_separates_the_claim_from_its_inverse`, so
     each tightening is a test result rather than a claim.
