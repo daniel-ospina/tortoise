@@ -1215,8 +1215,10 @@ def parity_difference(cache_props: Mapping[str, Any],
       ``update_point(<id>, story_arc=None)`` clears the property and keeps the
       node (measured; ``record_reconcile``'s module docstring states the door);
       ``#10017``'s
-      purge clears only TURN-SHAPED (``pointKind='event'``) legacy episodic
-      ``:Point`` copies — a non-turn episodic ``:Point`` refuses its sweep
+      purge clears only TURN-SHAPED legacy episodic ``:Point`` copies (turn
+      shape = ``is_episodic`` + ``pointKind='event'`` + a ``<sid>_t<digits>`` id,
+      per ``tools/turn_parity_census.py``) — any other episodic ``:Point``
+      refuses its sweep
       rather than being cleared — vs nothing at
       all), and
       ``record_reconcile`` is where that distinction is made (``graph_only``

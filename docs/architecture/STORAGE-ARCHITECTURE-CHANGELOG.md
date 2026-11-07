@@ -2119,11 +2119,14 @@ repairs it in place. The classes differ in both why and which lane.
 
 ⚠️ **CORRECTED AGAIN (`#11325` review cycle 2)**: the sentence above says the class "lacks … a non-destructive"
 repair. That is true on the two ANCHORS this constant keys (`source`/`event`: `update_entity(…, story_arc=None)` is
-REFUSED as server-managed on a `:Source` and leaves the stored value in place on an `:Event`) and **false on a
+REFUSED as server-managed on BOTH anchors — `_SOURCE_SERVER_MANAGED_PROPS` / `_EVENT_SERVER_MANAGED_PROPS`, each raising
+with the stored value untouched) and **false on a
 `:Point`**, which has a non-destructive in-place one: `update_point(<id>, story_arc=None)` clears the property and KEEPS
 the node (measured — the `None` passes `sdk._refuse_unpaired_narrative`, whose refusal is on a NON-EMPTY narrative, and
-`update_point`'s `SET n += $props` removes a `None`-valued key; the journal keeps the `None`, so a rebuild clears it
-rather than restoring it, and the same door is bound by the MCP tool `tortoise_update_point`). A `:Point` carrying the
+`update_point`'s `SET n += $props` removes a `None`-valued key). ⚠️ It is a LIVE clear, not a durable one: the journal
+records the `None` but `projection.entities._persist_extra_props` SKIPS a `None` value, so a journal rebuild of a legacy
+copy whose creation record carried the prose re-materialises it — that replay half is `#10429`'s. The same live door is
+bound by the MCP tool `tortoise_update_point`. A `:Point` carrying the
 prose is a `graph_only` occurrence of THIS count (`:Point`'s placeable set omits `story_arc`, §17.2), so the sentence's
 unscoped "the PROPERTY" sent that operator to `tortoise_delete` — which REMOVES the node and journals the delete that
 drops its record row — when a clear-and-keep route shipped.
@@ -2138,7 +2141,7 @@ graph-side purge was undone by the next routine recovery", "what makes `#10017`'
 recorded, because a changelog is a historical record — but they carry the SAME assumption this stamp retracts,
 that the purge clears THIS class. What the restore undid was `#10000`'s write deletions, and the acceptance
 they name (`purge → restore → sum(size(n.story_arc))` = 0) holds because the restore now writes no
-`story_arc` and its whole-graph wipe clears a legacy copy — not because a purge ran.
+`story_arc` on either ANCHOR and its whole-graph wipe clears a legacy copy — not because a purge ran.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED
