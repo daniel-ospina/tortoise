@@ -7612,6 +7612,70 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "P3):\n  "
         + "\n  ".join(_preposed_denial_now_accepted)
     )
+    # ⚠️ …AND THE CORRECTION-VERB / RETRACTION SPELLINGS ARE REFUSED, which is a FALSE RED
+    # the r30 reviewer found by fuzzing the correction arms and which NO control carried
+    # (#11191 review r31, P2 — MEASURED at `origin/main`, `96043c0fc0` and this head: every
+    # row below is ACCEPTED by `origin/main` and REFUSED here, and not one of them appears
+    # anywhere else in this file, so the class was invisible in both directions).
+    # ⛔ THE OBVIOUS FIX IS A MEASURED TRADE, not a fix — adding `for` to the
+    # `_tail_reasserts_equivalence` opener set closes `R7` and OPENS a fail-open:
+    #   `…is false; the tree, for the commit for #9601, is `ff6379eb2`.`
+    # was REFUSED by `origin/main` and becomes ACCEPTED (measured at the same three
+    # trees). That is `_CLAUSE_DELIM`-consistency bought with an alibi, i.e. the same
+    # false-RED-for-fail-open trade `_possessive_relation_known_open` records. Two other
+    # mechanisms are at work and neither is a spelling gap: a correction verb whose OBJECT
+    # is the reported claim (`R1`, `R2`, `R3`) or a passive retraction of it (`R4`, `R5`)
+    # is only seen when the verb is bound to the phrase's OWN occurrence, and the cleft
+    # (`R6`) predicates the OTHER tree of #9601 before the phrase names the true one.
+    # Settling these needs proposition binding — #11301 — not a fifth verb list.
+    _correction_verb_known_refused = (
+        # R1/R2/R3 — the verb takes the reported claim as its object.
+        f"`{_TRUE_TREE}` supersedes the claim that `{_FALSE_TREE}` is the tree before #9548.",
+        f"The heading says `{_FALSE_TREE}` is the tree before #9548; "
+        f"`{_TRUE_TREE}` supersedes that claim.",
+        f"`{_TRUE_TREE}` refutes the claim that `{_FALSE_TREE}` is the tree before #9548.",
+        # R4/R5 — the passive retraction, whose verb `_CORRECTION_VERB` already admits.
+        f"The claim that `{_FALSE_TREE}` is the tree before #9548 has been retracted; "
+        f"the tree is `{_TRUE_TREE}`.",
+        f"The claim that `{_FALSE_TREE}` is the tree before #9548 is falsified; "
+        f"the tree is `{_TRUE_TREE}`.",
+        # R6 — the cleft: the other tree is predicated of #9601, before the phrase.
+        f"It was `{_FALSE_TREE}` that #9601 merged; the tree before #9548 is `{_TRUE_TREE}`.",
+        # R7 — `for` is a connective in `_CLAUSE_DELIM` but not an opener here.
+        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; "
+        f"the true tree is `{_TRUE_TREE}`, for the commit for #9601 is `{_FALSE_TREE}`.",
+    )
+    _correction_verb_now_accepted = [
+        s for s in _correction_verb_known_refused if not _refuses_before_9548(s)
+    ]
+    assert not _correction_verb_now_accepted, (
+        "a truthful correction this pin recorded as REFUSED is now ACCEPTED — if that "
+        "acceptance is correct this residual has been CLOSED and this characterisation "
+        "should be inverted, with the truthful rows beside it re-measured for the "
+        "fail-open the widening bought (#11191 review r31, P2; class #11301):\n  "
+        + "\n  ".join(_correction_verb_now_accepted)
+    )
+    # ⛔ …AND THE `_CORRECTION_CUE` SCOPE IS A LOAD-BEARING ARM WITH NO CONTROL (#11191
+    # review r31, P2 — MEASURED). The r14 comment above records that reading the cue on
+    # `norm` instead of `own` ACCEPTED `row + " The 3-line figure was corrected to 10; the
+    # tree is `ff6379eb2`."` — the pin disabled on the LIVE §A8 cell. Nothing in the file
+    # reds when that scoping is reverted: measured at this head, reverting it to
+    # `_CORRECTION_CUE.search(norm)` leaves the full suite GREEN (111 passed) while this
+    # exact splice flips REFUSE -> accept. Pinned on the ARTEFACT, the way the A2 controls
+    # above are, so a future edit cannot quietly re-open it.
+    _cue_splice = " The 3-line figure was corrected to 10; the tree is `ff6379eb2`."
+    assert not _refuses_before_9548(row), (
+        "§A8's own evidence cell is now REFUSED by the pin that guards it — the cell and "
+        "the guard disagree (#11191 review r31, P2)"
+    )
+    assert _refuses_before_9548(row + _cue_splice), (
+        "a correction of a DIFFERENT proposition (`the 3-line figure was corrected to 10`) "
+        "exempts the false equivalence spliced beside it — `_CORRECTION_CUE` is being read "
+        "on the sentence instead of the occurrence, which disables the pin on the LIVE §A8 "
+        "cell (#11191 review r14, P2 / r31, P2 — MEASURED: revert `search(own)` to "
+        "`search(norm)` and this assertion is the only one that reds; the suite is "
+        "otherwise green)"
+    )
     # ⛔ …AND THE ARM READS THE OCCURRENCE, NOT THE SENTENCE (#11191 review r21 P3 / r22 P3
     # — MEASURED). r21 measured that reverting `_REFUTED_INVERTED.search(own)` to
     # `search(norm)` kept the whole file green and concluded no control existed; that
