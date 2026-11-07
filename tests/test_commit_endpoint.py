@@ -5044,8 +5044,14 @@ def _pin_shipped_ingest_allowance(monkeypatch) -> None:
     `TestCommitOrgIngestBound::test_default_allowance_admits_a_normal_commit`
     already uses.
 
-    ⛔ It must run BEFORE any commit in a test: a LOW export throttles the test's
-    own commits, so a pin placed after them is too late to help.
+    ⛔ It must run BEFORE the test's own commits, because the pin sets the
+    allowance every LATER measurement is computed against. It is not that a first
+    commit is throttled: `quota.commit_ingest_admit` admits a charge on an EMPTY
+    window whatever the allowance (`bucket_used == 0 and charge > limit`), so a
+    leg whose only commit precedes a late pin is still admitted. What a late pin
+    does red is any SECOND commit (the flat lanes) and any drain computed at the
+    pinned figure (the residual leg, which counts 1 instead of 2,560). Measured
+    with `TORTOISE_COMMIT_INGEST_BYTES_PER_MIN=4096` in the ambient export.
     """
     import tortoise.quota as quota_mod
 
@@ -5398,10 +5404,15 @@ class Test4051ChargeCoversTheLoopShape:
         """
         import tortoise.quota as quota_mod
 
-        # Pin the SHIPPED figure FIRST — before this leg commits anything, not
-        # after it. Ordering is load-bearing: a LOW
-        # ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` export throttles this leg's OWN
-        # commits, so a pin placed after them still fails (measured at 4096).
+        # Pin the SHIPPED figure FIRST — before this leg's own commit, and above
+        # all before the DRAIN below. Ordering is load-bearing, but the object it
+        # protects is the drain, not this leg's single `_measure` commit: a charge
+        # on an EMPTY window is admitted whatever the allowance
+        # (`quota.commit_ingest_admit` — `bucket_used == 0 and charge > limit`),
+        # so one commit cannot be throttled by a low export. The drain can:
+        # `admitted` below is computed at the pinned allowance, so a pin placed
+        # after it counts 1 instead of 2,560 (measured with
+        # `TORTOISE_COMMIT_INGEST_BYTES_PER_MIN=4096`).
         _pin_shipped_ingest_allowance(monkeypatch)
 
         declared, minted, charge = self._measure(client, _raw_payload(
