@@ -986,6 +986,31 @@ def _site_assets_the_icon_guard_reads() -> set[str]:
     return found
 
 
+def _class_body_assignments(body: list[ast.stmt]):
+    """Every statement in a CLASS BODY, including the ones inside `if`/`try`/`with`.
+
+    ⛔ NOT `ClassDef.body` only. The regex this replaced (`^\s+NAME = "…"`) matched an
+    assignment at ANY indentation, so a constant bound under `if sys.platform == …:`
+    was collected by the regex and is NOT collected by a bare body scan — a coverage
+    regression dressed as a port. MEASURED: an `if`-guarded `ICON_PNG` yields
+    `{website/favicon.png}` under the regex and `{}` under a body-only scan, i.e. the
+    witness silently becomes unowned, which is the #1349 class this ratchet closes.
+
+    Nested FUNCTION and CLASS scopes are still skipped: their bindings are not this
+    class's constant, and `ast.walk` visits a nested class on its own.
+    """
+    for stmt in body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        yield stmt
+        for field in ("body", "orelse", "finalbody"):
+            inner = getattr(stmt, field, None)
+            if isinstance(inner, list):
+                yield from _class_body_assignments(inner)
+        for handler in getattr(stmt, "handlers", None) or []:
+            yield from _class_body_assignments(handler.body)
+
+
 def _class_constant_strings(src: str) -> dict[str, set[str]]:
     """Class-level `NAME = "literal"` bindings in the guard, PARSED, not regexed.
 
@@ -1006,7 +1031,7 @@ def _class_constant_strings(src: str) -> dict[str, set[str]]:
     for node in ast.walk(ast.parse(src)):
         if not isinstance(node, ast.ClassDef):
             continue
-        for stmt in node.body:
+        for stmt in _class_body_assignments(node.body):
             if isinstance(stmt, ast.AnnAssign):
                 targets, value = [stmt.target], stmt.value
             elif isinstance(stmt, ast.Assign):
@@ -1037,9 +1062,13 @@ def _opened_site_witnesses(src: str) -> set[str]:
     and a class constant holding a literal (`self.ICON_PNG = "favicon.png"`, read as
     `(self.WEB / self.ICON_PNG)`), with NO call-suffix requirement — the same rule the
     chain pass follows. The constant pass previously demanded a chained
-    `.read_bytes()`, so `(self.WEB / self.TEXT_FIXTURE).read_text()` — a shape the real
-    guard already uses for a text fixture — was resolved by nothing and reported by
-    nothing, while this docstring promised the shape was covered.
+    `.read_bytes()`, so `(self.WEB / self.TEXT_FIXTURE).read_text()` — the shape an
+    author adds when a constant-held fixture is text or HTML — was resolved by nothing
+    and reported by nothing, while this docstring promised the shape was covered.
+    NOT TODAY'S GUARD, stated so the motivation is not overstated: its only
+    `self.WEB`-rooted `.read_text()` is `(self.WEB / name)` over the page-name tuple,
+    which is the runtime-bound shape below and is still unresolved. So this width
+    closes a hole an author would fall into, not a live one.
 
     NOT resolved: a name bound at runtime — today the `(self.WEB / n).read_bytes()`
     comprehension over `(self.ICON_PNG, self.ICON_APPLE)`. That is deliberate and not
@@ -1111,17 +1140,22 @@ class T(BaseTestCase):
     ICON_PNG = "favicon.png"
     TEXT_FIXTURE = 'logo.png'  # single quotes AND a trailing comment
     ANNOTATED: str = "apple-touch-icon.png"
+    if sys.platform == "darwin":  # a GUARDED fixture constant
+        GUARDED = "favicon.ico"
     def icons(self):
         return self._png_size((self.WEB / self.ICON_PNG).read_bytes())
     def text(self):
         return self._head((self.WEB / self.TEXT_FIXTURE).read_text())
     def annotated(self):
         return self._head((self.WEB / self.ANNOTATED).read_text())
+    def guarded(self):
+        return self._ico_entries((self.WEB / self.GUARDED).read_bytes())
     def bound(self):
         shared = self.WEB / "assets" / "og-tortoise.jpg"
         return shared.read_bytes()
 '''
     assert _opened_site_witnesses(synthetic) == {
+        "website/favicon.ico",
         "website/favicon.png",
         "website/logo.png",
         "website/apple-touch-icon.png",
