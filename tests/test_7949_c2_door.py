@@ -63,6 +63,7 @@ import ast
 import json
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 
@@ -771,7 +772,7 @@ def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
     assert re.search(r'os\.environ\.get\("TORTOISE_SESSION_EXTRACTOR"\)', hosted_body)
 
 
-def test_the_door_citation_is_derived_not_typed():
+def test_the_door_citation_is_derived_not_typed(tmp_path, monkeypatch):
     """A typed ``:16975`` is the #8506 rot class. Resolve it every run.
 
     ⛔ The resolution is checked against a source TEXT SCAN, not against the
@@ -779,8 +780,20 @@ def test_the_door_citation_is_derived_not_typed():
     derivation is a tautology, and it stayed GREEN in the #10983 mutation pass
     when ``_cite`` was rewritten to return a typed constant — the dead-weight
     shape of #3442 rule 3, where an assertion's value cannot vary under any
-    mutation of the diff. The text scan cannot be moved by editing ``_cite``,
-    so that mutation now reds this row.
+    mutation of the diff.
+
+    ⛔ And the text scan alone only catches a typed WRONG number (review at
+    `7eb4a042`, P2): `scanned == [line]` is satisfied by a `_cite` rewritten to
+    return a TYPED but currently-CORRECT line, so the rot class the row is
+    named for — the number nobody re-derives — survives exactly as long as the
+    tree has not moved yet. The second arm below shifts the source and requires
+    the cite to MOVE with it: a typed constant cannot, so both halves of the
+    class now red. Two mutants, two rows:
+
+    * `_cite` → `return f"{path.relative_to(REPO)}:17469"` (typed, WRONG today)
+      reds the scan;
+    * `_cite` → `return f"{path.relative_to(REPO)}:17467"` (typed, RIGHT today)
+      passes the scan and reds the shift.
     """
     cite = _cite(HOSTED, "_capture_lane")
     line = int(cite.rsplit(":", 1)[1])
@@ -799,6 +812,23 @@ def test_the_door_citation_is_derived_not_typed():
     # produce — the same #3442 rule-3 dead weight this test was rewritten to
     # remove, and it was caught in the row that rewrote it (review at
     # `7eb4a042`).
+
+    # ── the SHIFT arm: a cite that cannot move is not a derivation ────────
+    # Pad the same source with N leading comment lines and re-cite it. A real
+    # derivation reads the def's line out of the file it is given, so it lands
+    # N lines lower; a constant does not move at all. `REPO` is re-pointed at
+    # the temp dir only so `_cite`'s `path.relative_to(REPO)` stays valid — no
+    # file in the worktree is written.
+    pad = 7
+    shifted = tmp_path / "hosted_api_shifted.py"
+    shifted.write_text("# shifted\n" * pad + _source(HOSTED), encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    moved = int(_cite(shifted, "_capture_lane").rsplit(":", 1)[1])
+    assert moved == line + pad, (
+        f"_cite returned {moved} for a copy of the module shifted down {pad} "
+        f"lines, but the def is at {line + pad} there — the citation does not "
+        f"follow the source it is given, so it is a TYPED number that happens "
+        f"to be right today (#8506; review at 7eb4a042 P2)")
 
 
 # ── 2. the seam ledger, from the code ─────────────────────────────────────
@@ -1883,7 +1913,11 @@ def test_the_run_REFUSES_a_bypassed_capture_at_the_CALL_SITE_that_arms_the_witne
     * it is handed the RUN LIST — `require_door_entered([])` returns
       `{"entered": 0, "bypassed": []}` and refuses nothing, so a literal must red;
     * it runs BEFORE `render_log(...)`, so the refusal precedes the artifact it
-      is refusing to write.
+      is refusing to write;
+    * it is UNCONDITIONAL — an `if`/`try` body is still "in `main`'s own scope"
+      for the walk above, so a call that can never run (`if False:`) or whose
+      `SystemExit` is swallowed (`try: … except SystemExit: pass`) has to be a
+      separate mutant of this same row (review at `7eb4a042`).
     """
     tree = _tree(PROBE)
     functions = {node.name: node for node in tree.body
@@ -1940,3 +1974,36 @@ def test_the_run_REFUSES_a_bypassed_capture_at_the_CALL_SITE_that_arms_the_witne
         f"at {render_calls[0].lineno} — the door is checked AFTER the log is built, "
         "so a bypassed capture still produces the artifact and the run exits 0 "
         "(#10983 review P2)")
+
+    # (d) the call is UNCONDITIONAL — reached on every run, not merely PRESENT.
+    # `own_scope` skips only a nested `def`/`lambda`/`class`, so it descends
+    # straight through `if` and `try` bodies: `if False: require_door_entered(
+    # runs)` guards nothing, and `try: require_door_entered(runs)` +
+    # `except SystemExit: pass` lets the refusal the witness exists for fall
+    # through — while every assertion above stays green (review at `7eb4a042`,
+    # P2). Both mutants red here.
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(main):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    branch = (ast.If, ast.IfExp, ast.Try, ast.While, ast.For, ast.AsyncFor,
+              ast.Match, ast.comprehension, ast.BoolOp)
+    try_star = getattr(ast, "TryStar", None)
+    if try_star is not None:
+        branch += (try_star,)
+    chain: list[ast.AST] = []
+    anchor = parents.get(id(call))
+    while anchor is not None and anchor is not main:
+        chain.append(anchor)
+        anchor = parents.get(id(anchor))
+    assert anchor is main, (
+        "require_door_entered(...) does not resolve back to `main` — the "
+        "call-site pin is reading a node it cannot place (#10983)")
+    guarded = [type(node).__name__ for node in chain
+               if isinstance(node, branch)]
+    assert not guarded, (
+        f"the require_door_entered(...) call at line {call.lineno} sits inside "
+        f"{guarded}, so it is present but NOT unconditional — an `if False:` "
+        f"arm never runs it and a `try/except SystemExit` arm swallows the very "
+        f"refusal it exists to make, while the run still writes a table saying "
+        f"`measured: true` and exits 0 (#10983 review P2 at 7eb4a042)")
