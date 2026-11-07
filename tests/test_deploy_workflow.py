@@ -5554,6 +5554,13 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             #    ("the #9601 merge is `ff6379eb2`"), which is why the subject set is closed.
             clause, clause_end = _clause_containing(norm, phrase.start())
             own = _occurrence_span(norm, phrase, clause, clause_end)
+            #: The clause with asides BLANKED — one definition, used by the veto below AND
+            #: by the `_INVERTED_TRUE` guard, so the two cannot disagree about whether an
+            #: aside names this proposition (#11191 review r18, P1 — MEASURED false RED: the
+            #: veto blanked and the guard did not, so the truthful aside the veto was written
+            #: to admit still reded one arm over).
+            _veto_region = _PAREN.sub(lambda _m: " " * len(_m.group(0)), clause)
+            _veto_region = _INCISE.sub(lambda _m: " " * len(_m.group(0)), _veto_region)
             # ⛔ THE CUE IS SCOPED TO THE OCCURRENCE, NOT THE SENTENCE (#11191 review r14,
             # P2 — MEASURED). Read on `norm`, ONE correction word anywhere in the sentence
             # switched the co-reference veto off, so the equivalence could be asserted next
@@ -5788,16 +5795,24 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             # So: a denial of THIS occurrence wins (the arms above), asides are blanked (they
             # name a different proposition, the rule the referent cascade already applies), and
             # a correction that follows the false object undoes it.
-            _veto_region = _PAREN.sub(lambda _m: " " * len(_m.group(0)), clause)
-            _veto_region = _INCISE.sub(lambda _m: " " * len(_m.group(0)), _veto_region)
             _recorrected = _RECORRECTED_TO_FALSE.search(_veto_region)
-            if _recorrected and not _CORRECTION_VERB.search(_veto_region[_recorrected.end() :]):
+            if _recorrected and not _CORRECTION_VERB.search(
+                _veto_region[_recorrected.end() :] + norm[clause_end:]
+            ):
                 return False
-            if _CORRECTION_VERB.search(own):  # "… is now corrected to `047c91f7a`"
-                # The arm carries its own object (`_CORRECTION_VERB`), so the true tree no
-                # longer has to be searched for in the span — that search is what admitted
-                # `corrected to <false>` whenever the true tree was named earlier in the
-                # same span (#11191 review r18, P1 — measured fail-open).
+            # ⛔ THE CALLER'S TRUE-TREE BOUND STAYS (#11191 review r18, P1 — MEASURED
+            # fail-open, a REGRESSION against `origin/main` and against this commit's parent).
+            # Binding the OBJECT of `corrected|replaced|superseded to|with` and of
+            # `disproven|refuted by` is what closes the inverse direction — but
+            # `retracted|falsified` are deliberately object-free (they retire the CLAIM, not
+            # an attribution), so the search below is their ONLY bound. Removing it let any
+            # non-retiring use of the word buy the exemption, and the sentence that does it
+            # went GREEN inside §A8's own cell:
+            #   "The tree immediately before #9548 is `ff6379eb2`, a claim never retracted by
+            #    the note."                                     -> ACCEPTED (pin defeated)
+            # It is a NO-OP for the object-bound alternatives, which cannot match without the
+            # true tree anyway — so this line costs nothing and restores the bound.
+            if _CORRECTION_VERB.search(own) and re.search(_TRUE_TREE, own, re.I):  # "… corrected to `047c91f7a`"
                 return True
             # 3. THE CLAIM ITSELF — the false sha adjacent to the phrase, in either order,
             #    with no copula required ("5 lines immediately before #9548 at
@@ -5839,7 +5854,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                     : _inv_true.group(0).lower().rfind(_TRUE_TREE)
                 ]
                 _inv_between = re.sub(_PHRASE_RE, " ", _inv_between, flags=re.I)
-                if not _third_sha_in_clause(_inv_between) and not _RECORRECTED_TO_FALSE.search(clause):
+                if not _third_sha_in_clause(_inv_between) and not _RECORRECTED_TO_FALSE.search(_veto_region):
                     return True  # "the tree before #9548 IS `047c91f7a`"
             # 4. A REFERENT. The phrase refers to the nearest sha written before it — that
             #    is what apposition and attribution mean in prose, with no distance
@@ -6526,6 +6541,12 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         # defect whatever true tree the sentence also names (this one defeated the pin on
         # §A8's own cell with the full suite green).
         "The tree immediately before #9548 is `047c91f7a`, corrected to `ff6379eb2`.",
+        # ⛔ THE OBJECT-FREE ALTERNATIVES STILL NEED THE TRUE-TREE BOUND (#11191 review r18,
+        # P1 — MEASURED fail-open this control exists to keep closed). `retracted|falsified`
+        # retire a CLAIM, so they cannot be object-bound; the caller's span search is their
+        # only bound, and removing it let any non-retiring use of the word buy the exemption —
+        # GREEN inside §A8's own cell. `origin/main` refuses this sentence.
+        "The tree immediately before #9548 is `ff6379eb2`, a claim never retracted by the note.",
         # a denial may not be BORROWED across a coordinate — the comma is not the only one.
         "`ff6379eb2` is not the #9601 merge: the row names the tree before #9548 as `ff6379eb2`.",
         # ⛔ THE VETO'S OWN CONTROL (#11191 review r18, P1 — MEASURED over-determined
