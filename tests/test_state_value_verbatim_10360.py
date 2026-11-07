@@ -1356,13 +1356,41 @@ _RESIDUAL_CLASS_ANCHOR = re.compile(
 #: round 11 `P2`) — so the withholding set is the narrow surface. ⛔ THE COUNT IS
 #: DELIBERATELY NOT RESTATED: it drifted once already, and the measurement is the
 #: claim.
-#: The `(?<!['’])` guards are what keep the bare `m`/`s` alternatives from
-#: arming on a contraction: `\b` treats `'` as a boundary, so without them
-#: `I'm confident … is no longer fused` and `the pair's refusal … is no longer
-#: fused` RED (measured — a false block on the artifact's own vocabulary).
+#: ⛔ THE UNIT SPELLINGS ARE ONE DECLARED TUPLE, and the pin DERIVES its sample
+#: spellings from it, so an arm added or removed here is measured the moment it
+#: is declared. Two of the alternatives an earlier revision carried were DEAD and
+#: are gone: `unit\s+word` (`units?` already matches `unit`) and `millisec`
+#: (`millisecs?` covers both forms) — each could be deleted at the previous head
+#: with the whole file still `102 passed` (#11258 review round 9 `P2`, measured).
+_RESIDUAL_UNIT_WAIVER_ARMS = (r"units?", r"kg", r"mi", r"mos", r"millisecs?")
+
+#: ⛔ THE VOCABULARY THE WAIVER MUST WITHHOLD ON, named independently of the arms
+#: so that DELETING an arm cannot delete the spelling that would have caught it
+#: (#11258 review round 9 `P2`, MEASURED: with the samples derived from
+#: `_RESIDUAL_UNIT_WAIVER_ARMS` alone, dropping `kg` also dropped `kg` from the
+#: sample list and all `103 passed`). The test asserts BOTH directions: every
+#: spelling here is withheld, and every arm declares a spelling that is exercised.
+_RESIDUAL_WAIVER_REQUIRED_SPELLINGS = (
+    "units", "unit", "kg", "mi", "mos", "millisec", "millisecs")
+
+#: ⛔ THE `(?<!['’])` GUARDS ARE PINNED BY THEIR OWN FALSIFIERS (#11258 review
+#: round 9 `P2`, MEASURED): `\b` treats `'` as a boundary, so without them the
+#: bare `m`/`s` arms arm on a contraction. Each guard owns a sentence that flips:
+#: `I'm confident the pair is no longer fused` is GREEN with the `m` guard and RED
+#: without it; `the pair's refusal is no longer fused` is GREEN with the `s` guard
+#: and RED without it (in `_RESIDUAL_OPENNESS`); and in the WITHHOLD set,
+#: `the spelling list is unchanged; I'm confident it stays so` is WAIVED with the
+#: guard and WITHHELD without. All three are asserted in
+#: `test_every_waiver_withhold_arm_earns_its_place`.
+#: ⚠️ A round-9 finding quoted `I'm confident the ADJACENCY half is no longer
+#: fused` as proof the guards were unnecessary: that sentence carries a class
+#: ANCHOR, so it reds in BOTH configurations and demonstrated nothing. The two
+#: sentences above are the ones that flip, and they are the same two this guard
+#: was originally justified with — the guard was right, its stated proof was
+#: imprecise.
 _RESIDUAL_WAIVER_WITHHOLD = re.compile(
     _RESIDUAL_CLASS_ANCHOR.pattern
-    + r"|\b(?:units?|unit\s+word|kg|mi|mos|millisec|millisecs)\b"
+    + r"|\b(?:" + "|".join(_RESIDUAL_UNIT_WAIVER_ARMS) + r")\b"
     + r"|(?<!['\u2019])\b[ms]\b",
     re.I)
 
@@ -1554,6 +1582,7 @@ _RESIDUAL_OPENNESS = (
     r"\b(?:adjacency|the\s+half|carve-?out|value\s+class|numeric\s+side|"
     r"time[- ]unit)\b[^.;]{0,80}?"
     + _NO_LONGER_WINDOW + r"(?:fused|fusing)\b",
+
     r"\b(?:units?|unit\s+word|second|seconds|minute|minutes|hour|hours|day|days|"
     r"week|weeks|month|months|mos|year|years|mile|miles|mi|millisecond|"
     r"milliseconds|millisec|millisecs|min|mins|ms|sec|secs|hr|hrs|km|kg|"
@@ -2278,6 +2307,15 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the SPELLING gap is open because `kg` is no longer fused",
     "the SPELLING gap is open because `mi` is no longer fused",
     "the SPELLING gap is open because `mos` is no longer fused",
+    # ⛔ AND THE FLOOR'S `no longer <participle>` ARM HAS ITS OWN FALSIFIER
+    # (#11258 review round 9 `P2`, MEASURED): replacing that pattern with `(?!)`
+    # left the WHOLE FILE `102 passed`, so the arm was unpinned. These three are
+    # FLOOR-EXCLUSIVE — the waived sentence carries `spelling`, names no class
+    # anchor, and the unanchored openness arm requires a unit SUBJECT — so each
+    # is RED only because of the floor (verified by disarming it at runtime).
+    "the SPELLING gap is no longer fused.",
+    "the SPELLING gap is no longer judged.",
+    "the SPELLING gap is no longer retained.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -2442,6 +2480,60 @@ def _reds(text: str) -> bool:
     return False
 
 
+def test_every_waiver_withhold_arm_earns_its_place():
+    r"""Each guard the WAIVER carries is pinned by an assertion only IT can satisfy.
+
+    ⛔ WHY THIS TEST EXISTS (#11258 review round 9 `P2`, MEASURED): SIX guards in
+    this family could be DELETED at the previous head with the whole file still
+    `102 passed` — the two subsumed unit spellings (`unit\s+word` and
+    `millisec`), the withhold set's contraction lookbehind, `_RESIDUAL_OPENNESS`'s
+    `m` lookbehind, its `s` lookbehind, and `_SPELLING_FLOOR`'s `no longer …` arm.
+    An END-TO-END verdict cannot pin them, because the verdict is an OR over
+    several arms: a deleted branch is covered by a sibling and the mutation that
+    should have red became GREEN-through-OR. So each guard is pinned at the
+    CONTRACT IT OWNS — `_is_honest_spelling` for the waiver (does it withhold?),
+    `_RESIDUAL_OPENNESS` for each bare-token guard (does it match?) — where the
+    disarmed guard is the only thing deciding the assertion. The floor's arm is
+    pinned the other way, by the three floor-exclusive entries in
+    `_RESIDUAL_REOPENING_MUTATIONS`.
+    """
+    # 1. THE UNIT SPELLINGS. The waiver must WITHHOLD on every spelling the unit
+    #    arm reads. ⛔ TWO DECLARATIONS, AND BOTH DIRECTIONS ARE MEASURED: the
+    #    REQUIRED spellings are named independently of the arms (so deleting an
+    #    arm cannot delete the spelling that catches it — dropping `kg` from a
+    #    derived-only list left all `103 passed`, MEASURED), and the samples are
+    #    ALSO derived from the supplied code so an arm that is declared but not
+    #    actually armed reds here (#11258 review round 9 `P2`, MEASURED: adding
+    #    `fortnights?` to a hand-written sample list left `103 passed`).
+    assert _RESIDUAL_UNIT_WAIVER_ARMS, "the withhold set carries no unit spelling"
+    samples = (*_RESIDUAL_WAIVER_REQUIRED_SPELLINGS,
+               *[a.replace("?", "") for a in _RESIDUAL_UNIT_WAIVER_ARMS])
+    waived = [s for s in samples
+              if _is_honest_spelling(
+                  f"the spelling gap is open because {s} is no longer fused")]
+    assert waived == [], (
+        "these unit spellings were WAIVED by the honest-`spelling` waiver, so a "
+        "reopening that names the class by its own unit spelling passes the "
+        f"gate: {waived}")
+    # 2. THE CONTRACTION LOOKBEHINDS, at the contract each one owns. ⛔ TWO
+    #    ASSERTIONS, ONE PER ALTERNATIVE: a single sentence supplying only `m`
+    #    leaves the `s` guard unpinned (#11258 review round 9 `P2`, MEASURED:
+    #    removing only the `s` lookbehind kept all `103 passed`).
+    contraction = "the spelling list is unchanged; I'm confident it stays so"
+    assert _is_honest_spelling(contraction), (
+        "the waiver WITHHELD on a contraction — `\\b` treats `'` as a boundary, so "
+        "the bare `m`/`s` arms need their `(?<!['’])` guards or the artifact's own "
+        f"vocabulary is false-blocked: {contraction!r}")
+    for opened in ("I'm confident the pair is no longer fused",
+                   "the pair's refusal is no longer fused"):
+        matched = [p for p in _RESIDUAL_OPENNESS if re.search(p, opened, re.I)]
+        assert matched == [], (
+            "the unanchored openness arm read a CONTRACTION as a unit token — "
+            "`I'm` supplies the `m` and `pair's` supplies the `s`, so a sentence "
+            f"about a DIFFERENT subject is refused (false block): {opened!r} "
+            f"matched {matched}")
+
+
 def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     """#11223: the pin's own proof list, executable — every mutation must RED.
 
@@ -2477,10 +2569,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 113, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 116, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (113), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (116 — raised with the three floor-exclusive `no longer <participle>` shapes), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
