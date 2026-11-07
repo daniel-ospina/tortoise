@@ -2145,7 +2145,7 @@ it COMPARED, and `record-restore` then RESTORES it), so an UNSCOPED version of t
 this change's own §17.2 stated it, *"no shipped route clears the PROPERTY while keeping the entity"*, since amended to the
 anchor-scoped wording that is live there now — would have sent that
 operator to `tortoise_delete`, which REMOVES the node and journals the delete that drops its record row, when a
-clear-and-keep route shipped. ⛔ That quotation is of the AMENDED revision, not of the entry above: this `#10394` entry never
+clear-and-keep route shipped. ⛔ That quotation is of the SUPERSEDED revision, not of the entry above: this `#10394` entry never
 said "the PROPERTY" and never sent an operator to `tortoise_delete`, and `STORAGE-ARCHITECTURE.md` §17.2 at the merged
 tree states the bound per row rather than quoting the superseded phrase.
 

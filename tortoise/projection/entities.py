@@ -2034,8 +2034,8 @@ class _EntityHandlers:
         # holding that property no longer reproduces it. Accepted because the
         # owner rule says the property must not exist, no in-tree producer ever
         # emitted the key on this event (`api.add_document` takes no such
-        # parameter), and no shipped route clears the PROPERTY while KEEPING the
-        # entity: `tortoise_delete` reaches the node only by REMOVING it, and
+        # parameter), and no shipped route clears the PROPERTY **on either ANCHOR**
+        # while KEEPING the entity: `tortoise_delete` reaches the node only by REMOVING it, and
         # journals the delete that drops its record row. What DOES exist is
         # removed destructively by a full restore's whole-graph wipe — which
         # clears it where the L2 name rule admits the target

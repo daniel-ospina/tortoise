@@ -702,18 +702,23 @@ def reconcile_record_and_cache(
     `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3), ⚠️ and
     refused PRE-WIPE on a production server graph name, #2944's L2 guard; or a
     graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today;
-    ⚠️ a ``:Point`` copy is the exception that IS repairable in place —
+    ⚠️ a ``:Point`` copy is repairable in place ON THE ROWS WHERE THE RECORD STILL
+    HOLDS THE TEXT (the module docstring's (5) states the per-row bound and its
+    only-copy edge) —
     ``update_point(<id>, story_arc=None)`` clears the property and keeps the
-    node (measured; see the module docstring's (5); pinned by
-    `test_the_point_clear_removes_the_prose_and_keeps_the_node` — both the clear
-    and what a replay of the creation record restores).
+    node (measured; pinned by
+    `test_the_point_clear_removes_the_prose_and_keeps_the_node` — the clear, and
+    the creation FOLD a journal replay routes through; ``rebuild_all``'s routing
+    of that fold is unpinned).
     ⛔ NOT ``#10017``'s purge: ``tools/purge_legacy_turns.py`` deletes legacy
     episodic turn ``:Point``s — a different population, though a legacy turn
     ``:Point`` that carries the prose is cleared by it, by node deletion — and
     it never matches ``:Source``/``:Event``; what it contributes is durability
     for those ``:Point`` copies (its journaled turn removals stop a replay
     resurrecting them), not the clearing of this class. Never a destructive one
-    for the ``:Point`` half — it has the non-destructive route named above.
+    for the ``:Point`` half — it has the non-destructive route named above, on the
+    rows where the record still holds the text (where it does not, that clear
+    destroys the only copy and is not a repair at all).
     Nothing here performs either. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
