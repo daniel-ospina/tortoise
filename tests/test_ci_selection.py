@@ -991,23 +991,38 @@ def _in_tree_files_the_site_guard_opens() -> set[str]:
 
     `_site_assets_the_icon_guard_reads` covers one half of the guard's population: the
     files a PAGE points at. This covers the other half — the fixtures it reads straight
-    off disk by literal path, `(self.WEB / "logo.png").read_bytes()`. A file the guard
-    OPENS is a subject exactly as a linked one is: if editing its bytes cannot select
-    the guard, the assertion that reads it is unowned (the #1349/#3332/#3616 class).
+    off disk. A file the guard OPENS is a subject exactly as a linked one is: if editing
+    its bytes cannot select the guard, the assertion that reads it is unowned (the
+    #1349/#3332/#3616 class).
 
     `website/logo.png` is why this exists. It is the PNG whose IDAT carries `FF D9`,
     the witness that isolates "the JPEG walk was applied to a PNG", and NO page links
     it as an icon — `test_the_wordmark_is_never_used_as_an_icon` requires that no page
-    does — so the page-derived population structurally cannot include it. Deriving it
-    from the source rather than from a hand-list is the same reason the linked set is
-    derived: a seventh fixture read by a future guard is covered the day it lands.
+    does — so the page-derived half structurally cannot include it.
+
+    ⛔ TWO SHAPES ARE RESOLVED, and the boundary is stated rather than implied:
+    a literal path (`(self.WEB / "assets" / "og-tortoise.jpg")`) and a class constant
+    holding a literal (`self.ICON_PNG = "favicon.png"`, read as
+    `(self.WEB / self.ICON_PNG)`). NOT resolved: a name bound at runtime — today the
+    `(self.WEB / n).read_bytes()` comprehension over `(self.ICON_PNG, self.ICON_APPLE)`.
+    That is deliberate and not a coverage hole: a runtime-bound reader takes its names
+    from the same constants the constant pass already resolves, and the pages link the
+    files it reads, so the linked half owns it. A NEW witness stored in a shape this
+    pass cannot see would be unowned, which is what the `website/logo.png` floor below
+    exists to keep visible.
     """
     src = (REPO / "tests" / "test_website_static.py").read_text()
+    consts = dict(re.findall(r'^\s+([A-Z][A-Z0-9_]*)\s*=\s*"([^"\n]+)"\s*$', src, re.M))
     found: set[str] = set()
     for match in re.finditer(
             r'\.WEB\s*/\s*((?:"[^"\n]+"\s*/\s*)*"[^"\n]+")\s*\)\s*\.read_bytes\(\)',
             src):
         rel = "/".join(re.findall(r'"([^"\n]+)"', match.group(1)))
+        if rel and (REPO / "website" / rel).is_file():
+            found.add(f"website/{rel}")
+    for name in re.findall(
+            r'\.WEB\s*/\s*(?:self|cls)\.([A-Z][A-Z0-9_]*)\s*\)\s*\.read_bytes\(\)', src):
+        rel = consts.get(name)
         if rel and (REPO / "website" / rel).is_file():
             found.add(f"website/{rel}")
     return found
@@ -1066,12 +1081,17 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     assert "website/logo.png" in opened, (
         f"the guard's opened-file derivation lost `website/logo.png` (derived: "
         f"{sorted(opened)}) — either the guard no longer opens that witness by a "
-        "literal `(self.WEB / \"…\").read_bytes()` path (re-derive the entries in "
-        "this test and in SOURCE_PATTERNS['onboarding'], keeping the coverage), or the "
-        "derivation's regex stopped matching the guard's expression shape")
-    assert opened - derived, (
-        "every file the guard opens is also linked by a page, so the witness half of "
-        "this ratchet is testing nothing — keep the assertion, but re-derive it")
+        "shape this derivation resolves (a literal `(self.WEB / \"…\")` path or a "
+        "`self.CONSTANT = \"…\"` read; re-derive the entries in this test and in "
+        "SOURCE_PATTERNS['onboarding'] and keep the coverage), or the derivation's "
+        "regex stopped matching the guard's expression shape")
+    # NOT asserted: `opened - derived`. The two halves MAY overlap legitimately — a page
+    # that adopts the wordmark as its own `og:image` puts it in the linked half too, and
+    # `test_the_wordmark_is_never_used_as_an_icon` forbids it only as an ICON. Overlap
+    # costs nothing (the loop below covers the union); an assertion here would red that
+    # honest page edit and tell its author to "re-derive" an assertion that is simply
+    # redundant the moment they do, which pushes them to delete the witness half.
+    assert opened, "the opened-file derivation found nothing — the ratchet's other half is vacuous"
     for changed in sorted(derived | opened):
         assert (REPO / changed).is_file(), f"the asset this test guards is gone: {changed}"
         r = _sel([changed])
