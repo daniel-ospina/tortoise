@@ -5281,16 +5281,20 @@ class Test4051ChargeCoversTheLoopShape:
         # capture-spent window reporting `commit_ingest_bytes` here). The class
         # above asserts on the same field for the same reason.
         #
-        # `.get` all the way down, deliberately NOT `["detail"]["resource"]`:
-        # every OTHER limiter in this module returns a STRING `detail`
-        # (`RateLimitMiddleware`: "Rate limit exceeded. …"), so subscripting
-        # would raise `TypeError` before this message could print — and "some
-        # other limiter refused" is precisely the case this assertion exists to
-        # report legibly.
-        assert (r.json().get("detail") or {}).get("resource") == (
-            "commit_ingest_bytes"), (
-            f"the refusal does not name the ingest window: "
-            f"{r.json().get('detail')!r}")
+        # `detail` is a DICT on the ingest refusal, a STRING on
+        # `RateLimitMiddleware` (`hosted_api.py` — "Rate limit exceeded. …"), and
+        # a dict WITHOUT `resource` on the login/signup IP buckets
+        # (`_check_ip_bucket_rate_limit(detail: str | dict, …)`, passed
+        # `{"error_code": …}`). So it is bound and TYPE-CHECKED, not walked with
+        # `.get`: a bare `["detail"]["resource"]` raises `TypeError` on a str, and
+        # `(detail or {}).get(…)` raises `AttributeError` on a non-empty one —
+        # either would throw before this message printed, and "some other limiter
+        # refused" is precisely the case the assertion exists to report
+        # legibly.
+        detail = r.json().get("detail")
+        assert (isinstance(detail, dict)
+                and detail.get("resource") == "commit_ingest_bytes"), (
+            f"the refusal does not name the ingest window: {detail!r}")
 
     def test_a_flat_collection_lane_is_charged_for_every_node_it_mints(
             self, client, monkeypatch):
@@ -5390,10 +5394,10 @@ class Test4051ChargeCoversTheLoopShape:
 
         ⚠️ It drives `quota.commit_ingest_admit` — the real predicate — instead
         of dividing the allowance by the charge. The derivation happens to agree
-        today (the comparison is inclusive, `used + charge <= limit`), but a
-        derivation would stay green through an inclusive→exclusive change while
-        the enforced count moved to 2,559, which is exactly the stale-pinned-
-        number failure this leg exists to prevent.
+        today (the comparison is inclusive, `bucket_used + charge <= limit`),
+        but a derivation would stay green through an inclusive→exclusive change
+        while the enforced count moved to 2,559, which is exactly the
+        stale-pinned-number failure this leg exists to prevent.
 
         ⛔ This does not claim the total is bounded — it is not, and that is §4.
         It states the RATE of the only ORG-LEVEL bound, in numbers. The per-KEY
