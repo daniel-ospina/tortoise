@@ -1215,7 +1215,12 @@ def parity_difference(cache_props: Mapping[str, Any],
       ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
       carries must NOT be restored at all — copy that prose out first, because the
       wipe destroys the only copy (§17.2, `#11325`); ⚠️ a ``:Point``
-      copy has a NON-destructive one:
+      copy has a NON-destructive one, **on the same per-row test** — only where the
+      record still HOLDS the text for that session (the point's own ``props`` tail,
+      or ``public.session_narrative.narrative``); where neither carries it the
+      node's copy is the ONLY one and the clear deletes it, because the
+      ``rebuild_all`` that would put it back is refused PRE-WIPE on a production
+      name:
       ``update_point(<id>, story_arc=None)`` clears the property and keeps the
       node (measured; ``record_reconcile``'s module docstring states the door);
       ``#10017``'s purge clears only TURN-SHAPED legacy episodic ``:Point``

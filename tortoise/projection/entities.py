@@ -2048,7 +2048,10 @@ class _EntityHandlers:
         # a graph-side `REMOVE n.story_arc` is issued by nobody;
         # `update_entity(…, story_arc=None)` is REFUSED here as server-managed
         # (the `:Point` half DOES have an in-place clear,
-        # `update_point(<id>, story_arc=None)` — #11325); `#10017`'s purge is
+        # `update_point(<id>, story_arc=None)` — #11325, and only on the rows where
+        # the record still holds the text: `public.session_narrative.narrative`, or
+        # the point's own `props` tail — where neither carries it the node's copy is
+        # the ONLY one and that clear deletes the prose); `#10017`'s purge is
         # the legacy turn `:Point` population and never matches a `:Source`
         # (`#11325`).
         #

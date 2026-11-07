@@ -174,7 +174,12 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
   and ``update_point``'s ``SET n += $props`` REMOVES a property set to ``None``;
   the journal records the ``None``, and the same live door is bound by the MCP
-  tool ``tortoise_update_point``). ⚠️ **Its durability is FOLD-DEPENDENT, and the
+  tool ``tortoise_update_point``) — ⚠️ **and ONLY on the rows where the record still
+  HOLDS the text** (``public.session_narrative.narrative`` for the session, or the
+  point's own ``props`` tail): where neither carries it the point's copy is the ONLY
+  one, and NO clear may be applied to it — on a production name the ``rebuild_all``
+  that would put it back is REFUSED PRE-WIPE, so the clear there deletes the prose
+  rather than repairing the cache. ⚠️ **Its durability is FOLD-DEPENDENT, and the
   bound is the JOURNAL one**: ``_revise_point``'s SET list is a closed set that
   names no ``story_arc`` clause, and the creation fold's open-set passthrough
   (``_persist_extra_props``, which ``_revise_point`` never calls) skips a ``None``
@@ -208,8 +213,10 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   rows where the record holds the text, so a graph holding ANY row whose PROSE
   the record does not carry must NOT be restored at all — copy that prose out
   first. ⛔ Not
-  "no IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
-  clear — what is missing on those two ANCHORS is a route that KEEPS the value. ⚠️ No shipped
+  "no IN-PLACE repair": a targeted ``REMOVE`` IS in place — and destructive, and
+  issued by no instrument — and every targeted CLEAR on those two ANCHORS is
+  REFUSED (``update_entity(…, story_arc=None)`` raises on BOTH); what is missing
+  there is a route that KEEPS the value. ⚠️ No shipped
   instrument performs that removal for THIS class: ``#10017``'s purge
   (``tools/purge_legacy_turns.py``) is the precedent on a DIFFERENT population
   (legacy episodic turn ``:Point``s — a ``DETACH DELETE``) and names no

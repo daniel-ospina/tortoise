@@ -460,7 +460,11 @@ restore's whole-graph wipe on either ANCHOR (⚠️ refused PRE-WIPE on a produc
 `#2944`'s L2 guard; ⚠️ BOTH are destructive and the WIPE cannot be row-scoped — `_wipe_all_nodes` is
 `MATCH (n) DETACH DELETE n`, so a graph holding ANY row whose PROSE neither
 `public.{source,event}.story_arc` nor `public.session_narrative.narrative` carries must NOT be
-restored at all: copy that prose out first, `STORAGE-ARCHITECTURE.md` §17.2, `#11325`) — ⚠️ **except on a `:Point`, which has a non-destructive one**:
+restored at all: copy that prose out first, `STORAGE-ARCHITECTURE.md` §17.2, `#11325`) — ⚠️ **and on a `:Point` a clear is available in place,**
+**subject to the same per-row test** (clear only where the record still HOLDS the text for that session —
+the point's own `props` tail or `public.session_narrative.narrative`; where neither carries it the node's
+copy is the ONLY one and the clear deletes it, because the `rebuild_all` that would put it back is refused
+PRE-WIPE on a production name):
 `update_point(<id>, story_arc=None)` clears the property and keeps the node (measured; the `None` passes
 `_refuse_unpaired_narrative` and `SET n += $props` removes a `None`-valued key — but JOURNAL-bound only: the
 `PointRevised` fold has no `story_arc` clause and the creation fold's open-set passthrough drops a `None`, so a
