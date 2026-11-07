@@ -43,6 +43,17 @@ claims:
 | `test_an_unreadable_surface_is_named_not_silently_excluded` | the `UNMEASURED` rule, applied to the walk | a file the walk could not read is folded into a measured `False` |
 | `test_every_unresolved_writer_carries_a_census_class` | the census and the unresolved set are the SAME SET, in both directions, LIVE | a writer this tree holds is unresolved and nothing says which of the three honest classes it is in — or a census entry outlives its hole, so `exempt` counts an instrument false positive that no longer exists |
 | `test_a_prose_MENTION_of_an_embedding_write_is_classed_exempt_not_a_hole` | `exempt`'s own definition — *"merely MENTIONS one in a comment/docstring (the instrument's own false positives)"* | `main` lands a fold whose COMMENT quotes `embedding=…` and the census, which must be an EXACT set match, has no class for the writer the needle then reports (measured: `#8488`/`#10523` → `tortoise.projection::_apply_one`) — or the fold grows a REAL vector write, so `exempt` stops describing it |
+| `test_the_census_reports_BYTES_for_an_UNINDEXED_label` | `#11088`'s Indicator — *"vector count **and bytes** per label"* — on the labels it is about | the byte figure is derived from the covering index's `dimension`, so the four UNINDEXED labels (the removable payload, and the whole reason the issue exists) report `UNMEASURED(no VECTOR index)` while the stored width sits already-probed one branch above |
+| `test_every_affected_entity_type_is_derived_from_the_ONE_mapping` | the surface question is a SET of `entity_type` values, not a label count | `document`+`source` → `:Source` and `point`+`operator` → `:Point` collapse to one name each (or a label no type reaches starts claiming one), so the consequence is stated for the wrong population. ⚠️ It pins the VALUES, so a second table with identical content would pass — the regression it can see is a mapping collapse, which is the likely one |
+| `test_the_census_states_the_consequence_of_removing_each_label` | the row's `affected_entity_types` / `removal_changes_query_results`, and `surface_consequence.requested_not_performed` | a census reads as an authorisation (`requested_not_performed` absent or `false`), a no-query-path label is listed as a surface consequence, or the whole thing goes through the write-capable verb |
+| `test_an_unreadable_catalogue_row_is_not_an_unindexed_label` | `#11088` round-1 P1/P2: a row's three consequence cells must AGREE | `removal_changes_query_results` is derived from pre-override locals, so a row whose `indexed`/`unindexed` read `UNMEASURED` publishes a `True` consequence (and enters `surface_consequence`), and its payload says "NO covering index" for a catalogue it could not read |
+| `test_an_UNMEASURED_consequence_is_CARRIED_not_dropped` | the under-reporting channel, `surface_consequence.unmeasured_labels` | a label whose consequence is `UNMEASURED` is skipped like a `False`, so `entity_types_whose_query_results_change` reads as the whole population while it is only the measured part |
+| `test_an_unresolvable_leg_method_reports_UNMEASURED_not_an_EMPTY_surface` | round-2 P2: a rename must not read as "no tool is affected" | `VECTOR_LEG_SDK_METHOD` stops resolving, both sets empty, and the surface reports `[]` — a measured-looking "no MCP tool can pass `entity_type`" — with no `UNMEASURED` channel |
+| `test_the_surface_named_is_the_one_that_can_pass_entity_type` | the CALLERS, derived from the registry **and** the handler AST **and** the SDK's own fixed-type call sites | the `sdk_method` binding alone is used, so `tortoise_query` (bound to `paginated_query`, yet forwarding a `text=` argument to `tortoise_fts_query(entity_type=…)`) is missing — the direction that UNDERSTATES a surface change |
+| `test_a_tool_whose_SDK_method_fixes_entity_type_is_named` | the THIRD entrant source, and the default it must resolve before reading any call site | a tool whose SDK method names the type itself (`tortoise_recall` → `object`, `tortoise_search_sessions` → `event`) is named by neither the registry nor the handler scan, and a one-pass walk reports a defaulted call as `UNKNOWN` |
+| `test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure` | `#11088` round 7 P2: one row's width is not the label's | `stored × width × 4` multiplies ONE sampled row across every row, so a mixed-width label (an `EMBEDDING_DIM` rotation) publishes a wrong byte figure with no UNMEASURED signal |
+| `test_the_census_reports_EVERY_index_KIND_not_only_VECTOR` | §3.1's *"the same run settles it"* — the FULLTEXT datum the run promised to answer | the catalogue parse keeps VECTOR rows only, so whether a lexically-matching query survives a removal is not in the answer, while the doc says it is |
+| `test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING` | E2E D9 (`04-plan.md` §7) on a real engine: `Point` indexed, the four served labels unindexed **with bytes**, and the graph's visible shape unchanged across the call (⚠️ a corroborating observation — the READ-ONLY verb is what forbids the write) | the census mutates the graph it measures (labels / node counts / edges / the index catalogue / per-label embedding counts), or an unindexed label loses its `entity_type` set |
 | `test_the_census_guard_has_teeth_on_an_INJECTED_map` | the same guard's teeth, without pinning this head | the guard goes vacuous when #5090's remainder lands and this tree holds no unresolved writer |
 | `test_a_duplicate_identity_paints_no_census_note` | #10541's census population | a `duplicate` identity is counted as a census member, so a census is painted over a population that cannot hold a key for it |
 | `test_the_census_note_names_only_the_unresolved_producers` | the same population, in the other direction | a classed unresolved producer stops being named, or a duplicate is counted alongside it |
@@ -61,6 +72,7 @@ measurement-only; the instrument is read-only and its pin must be too.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import subprocess
@@ -786,7 +798,24 @@ class _CensusGraph:
             rows = [[self._vectors.get(label, (0, None))[0]]]
         elif "RETURN n.embedding" in cypher:
             label = cypher.split("MATCH (n:")[1].split(")")[0].strip("`")
-            rows = [[self._vectors.get(label, (0, None))[1]]]
+            samples = self._vectors.get(label, (0, None))[1]
+            # A LIST OF VECTORS is several sampled rows (the width probe reads
+            # more than one); a single vector is one row. Without this a test
+            # could not model the mixed-width label `WIDTH_PROBE_SAMPLES`
+            # exists to refuse (#11088 review round 7, P2).
+            if samples and isinstance(samples[0], list):
+                rows = [[v] for v in samples]
+            else:
+                rows = [[samples]]
+            # ⛔ HONOUR THE `LIMIT` the production query issues. Returning every
+            # sample regardless made the mixed-width test pass with
+            # `WIDTH_PROBE_SAMPLES = 1` — i.e. with the exact single-row bug it
+            # exists to catch — so the test could not fail on a regression
+            # (review round 9, P2: a verification gate with no discriminating
+            # power).
+            limit = cypher.rsplit("LIMIT", 1)[-1].strip()
+            if limit.isdigit():
+                rows = rows[:int(limit)]
         else:
             rows = []
         return type("_R", (), {"result_set": rows})()
@@ -1045,6 +1074,50 @@ def test_an_unreadable_catalogue_row_is_not_an_unindexed_label():
     row = census["labels"]["Point"]
     assert isinstance(row["indexed"], str) and row["indexed"].startswith("UNMEASURED"), row
     assert str(row["unindexed"]).startswith("UNMEASURED"), row
+    # ⛔ #11088 review round 1, P1: `changes` was computed from the LOCALS, and
+    # an unreadable catalogue row leaves `covering` empty — so the `else:
+    # unindexed = stored` branch fabricated full coverage and this row asserted
+    # a surface consequence (and entered `surface_consequence`) while its own
+    # `unindexed` cell three lines up read UNMEASURED. Same for the byte figure,
+    # whose `not covering` arm then said "NO covering index" (P2): `covering` is
+    # empty both because there is no index AND because the row could not be
+    # read, and those are different facts.
+    assert str(row["removal_changes_query_results"]).startswith("UNMEASURED"), row
+    assert str(row["payload"]["derived_payload_B"]).startswith("UNMEASURED"), row
+    assert "NO covering index" not in str(row["payload"]), row
+    assert "Point" not in {a["label"] for a in
+                           census["surface_consequence"]["labels"]}, (
+        "a label whose coverage is unreadable must not be published as a "
+        f"measured surface consequence: {census['surface_consequence']}")
+
+
+def test_an_UNMEASURED_consequence_is_CARRIED_not_dropped():
+    """A hole in one label must not silently shrink the affected set.
+
+    ⛔ #11088 review round 1, P1: `surface_consequence` skipped every row whose
+    `removal_changes_query_results` was not `True`, so an unmeasurable label
+    simply vanished — `entity_types_whose_query_results_change` printed `[]` —
+    while the doc calls UNDER-reporting the dangerous direction (a surface
+    request whose consequence is understated is one the owner can approve by
+    mistake). Reachable on a live engine: a per-label count that times out, and
+    a backtick-bearing label (which `_cypher_label`'s own docstring records as
+    failing closed into `stored=UNMEASURED(...)`).
+    """
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Object"],
+        vectors={"Object": ("boom", None)},  # the count query could not answer
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                 graph_names=["g"])
+    row = census["labels"]["Object"]
+    assert str(row["removal_changes_query_results"]).startswith("UNMEASURED"), row
+    sc = census["surface_consequence"]
+    assert sc["entity_types_whose_query_results_change"] == [], sc
+    assert [e["label"] for e in sc["unmeasured_labels"]] == ["Object"], (
+        f"an unmeasured consequence was DROPPED, so the affected set reads as "
+        f"complete when it is not: {sc}")
+    assert sc["unmeasured_labels"][0]["entity_types"] == ["object"], sc
 
 
 def test_an_UNATTRIBUTABLE_catalogue_row_holds_EVERY_label_UNMEASURED():
@@ -2757,3 +2830,561 @@ def test_row_one_is_PARTIAL_when_a_duplicate_identity_collided(
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
     row = probe.score_rule_bullet()
     assert row.verdict == "PARTIAL", f"a duplicate identity must hold: {row.verdict!r}"
+
+
+# ── #11088: the census names the `entity_type` values, not just the labels ──
+
+
+class _NoWriteCensusGraph(_CensusGraph):
+    """A fake on which the write-capable verb is a FAILURE.
+
+    The census's doctrine is "stores nothing", and `graph.query` is
+    write-CAPABLE — the read-only verb is what makes the doctrine the engine's
+    rule instead of this file's memory. A census that reaches for `query` on
+    this fake raises instead of quietly storing.
+    """
+
+    def query(self, cypher, params=None, timeout=None):
+        raise AssertionError(
+            f"the census issued a read through the WRITE-CAPABLE verb: {cypher[:90]}")
+
+
+def test_every_affected_entity_type_is_derived_from_the_ONE_mapping():
+    """`label` is not `entity_type`, in BOTH directions (#11088).
+
+    The mapping is one-to-many and that is the whole finding: `:Source` answers
+    for `document` AND `source`, `:Point` for `point` AND `operator`. A census
+    that reported only labels would state the wrong population for the surface
+    question it exists to answer — and it must come from
+    `security.entity_label`, never from a second table here.
+    """
+    assert probe.affected_entity_types("Event") == ["event"]
+    assert probe.affected_entity_types("Object") == ["object"]
+    assert probe.affected_entity_types("Source") == ["document", "source"], (
+        "two entity types reach :Source — a label-only census under-counts them")
+    assert probe.affected_entity_types("Point") == ["operator", "point"], (
+        "`operator` is served from :Point (#172), so removing Point's vectors "
+        "would change a query that names no point")
+    assert probe.affected_entity_types("Chunk") == [], (
+        "a label no entity_type translates to has NO query path — it must read "
+        "as affected-for-nobody, not be omitted")
+
+
+def test_the_census_states_the_consequence_of_removing_each_label():
+    """The count is not the consequence; the SET of entity types is (#11088).
+
+    Every row carries `affected_entity_types` and
+    `removal_changes_query_results`, the surface block names the tools derived
+    from the registry — and the whole census goes through the READ-ONLY verb.
+    """
+    graph = _NoWriteCensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point", "Object", "Source", "Chunk"],
+        vectors={"Point": (3, [0.0] * 384),
+                 "Object": (2, [0.0] * 384),
+                 "Source": (1, [0.0] * 384),
+                 "Chunk": (4, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                 graph_names=["g"])
+
+    obj = census["labels"]["Object"]
+    assert obj["stored"] == 2, obj
+    assert obj["unindexed"] == 2, obj
+    assert obj["affected_entity_types"] == ["object"], obj
+    assert obj["removal_changes_query_results"] is True, obj
+
+    # `:Source` is served by TWO entity types, so BOTH change.
+    src = census["labels"]["Source"]
+    assert src["affected_entity_types"] == ["document", "source"], src
+
+    # The indexed label changes nothing.
+    point = census["labels"]["Point"]
+    assert point["indexed"] is True and point["unindexed"] == 0, point
+    assert point["removal_changes_query_results"] is False, point
+
+    # A stored, unindexed label NO entity_type reaches: reported, and it is not
+    # a surface change because nothing queries it.
+    chunk = census["labels"]["Chunk"]
+    assert chunk["stored"] == 4 and chunk["unindexed"] == 4, chunk
+    assert chunk["affected_entity_types"] == [], chunk
+    assert chunk["removal_changes_query_results"] is False, chunk
+
+    sc = census["surface_consequence"]
+    assert sc["requested_not_performed"] is True, (
+        "a census must never read as an authorisation — the removal is an "
+        "MCP/SDK surface change (#11088 / AGENTS.md)")
+    assert sc["entity_types_whose_query_results_change"] == \
+        ["document", "object", "source"], sc
+    assert {a["label"] for a in sc["labels"]} == {"Object", "Source"}, sc
+    assert "Chunk" not in {a["label"] for a in sc["labels"]}, (
+        "a label with no query path is not a surface consequence")
+
+    # ⛔ EVERY entrant, and WHICH of them actually change (review round 7, P1):
+    # `tortoise_recall` reaches `:Object` (affected) and `:Point` (indexed, so
+    # not); the `:Point`-only tools are entrants with NO change — printing them
+    # as affected would over-report as surely as dropping them under-reported.
+    by_tool = {e["tool"]: e for e in sc["surface"] if "tool" in e}
+    assert by_tool["tortoise_recall"]["reaches_affected_labels"] == ["object"], \
+        by_tool["tortoise_recall"]
+    assert by_tool["tortoise_suggest_entry_points"]["reaches_affected_labels"] == \
+        [], by_tool["tortoise_suggest_entry_points"]
+    assert by_tool["tortoise_search"]["reaches_affected_labels"] == \
+        "any (the caller chooses)", by_tool["tortoise_search"]
+    # `:Event` is not part of THIS fixture's affected set, so the sessions tool —
+    # which asks the leg for `event` — correctly reads NO change here.
+    assert by_tool["tortoise_search_sessions"]["reaches_affected_labels"] == [], \
+        by_tool["tortoise_search_sessions"]
+
+    # …and with an affected `:Event`, it does — the same derivation, one graph
+    # over, so the pair is pinned rather than assumed.
+    event_graph = _NoWriteCensusGraph(
+        catalogue=[], labels=["Event"],
+        vectors={"Event": (2, [0.0] * 384)},
+    )
+    event_sc = probe.vector_census(event_graph, "g2",
+                                   at="2026-11-05T00:00:00Z",
+                                   graph_names=["g2"])["surface_consequence"]
+    event_tools = {e["tool"]: e for e in event_sc["surface"] if "tool" in e}
+    assert event_tools["tortoise_search_sessions"]["reaches_affected_labels"] == \
+        ["event"], event_tools["tortoise_search_sessions"]
+
+
+def test_the_census_reports_BYTES_for_an_UNINDEXED_label():
+    """⛔ The population this issue exists to quantify had no byte figure.
+
+    Measured failure this pins: the payload was derived from the covering
+    index's `dimension`, so the four UNINDEXED labels — the removable payload,
+    and the whole reason #11088 is filed — reported
+    `UNMEASURED(no VECTOR index on embedding)`. The stored WIDTH is already
+    probed one line above (the `#4280` cross-check needs it), so the number was
+    in hand and not printed. `#11088`'s own Indicator asks for "vector count and
+    bytes per label"; before this, the labels it is about had no bytes at all.
+
+    The guard is NOT weakened: an unmeasurable width still refuses, and an
+    indexed label whose width disagrees with the index dimension still refuses.
+    """
+    graph = _NoWriteCensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point", "Object"],
+        vectors={"Point": (1, [0.0] * 384), "Object": (2, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                 graph_names=["g"])
+    obj = census["labels"]["Object"]["payload"]
+    assert obj["derived_payload_B"] == 2 * 384 * 4, (
+        f"an unindexed label has no bytes figure: {obj!r} — the stored width "
+        "was probed and ignored")
+    assert "probed width" in obj["how"], obj
+
+    # …and the refusal survives: an unprobeable width is still UNMEASURED.
+    graph = _NoWriteCensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Object"],
+        vectors={"Object": (2, None)},
+    )
+    censored = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                   graph_names=["g"])
+    assert str(censored["labels"]["Object"]["payload"]["derived_payload_B"]
+               ).startswith("UNMEASURED"), censored
+
+    # …and a COVERING index whose `dimension` cell is unreadable is NOT the
+    # "no index" case: the row reports `indexed: true`, so its `how` must not
+    # say "NO covering index" (review finding, P2 — `dim is None` conflated the
+    # two, and the row contradicted its own `vector_indexes_on_label`).
+    graph = _NoWriteCensusGraph(
+        catalogue=[_index_row("Point", "embedding", None)],
+        labels=["Point"],
+        vectors={"Point": (5, [0.0] * 384)},
+    )
+    covered = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                  graph_names=["g"])["labels"]["Point"]
+    assert covered["indexed"] is True, covered
+    assert "NO covering index" not in str(covered["payload"]), (
+        f"a row reporting indexed=True claims it has no covering index: {covered}")
+    assert str(covered["payload"]["derived_payload_B"]).startswith("UNMEASURED"), (
+        f"an unreadable index dimension must not yield a verified byte figure: {covered}")
+
+
+def test_the_surface_named_is_the_one_that_can_pass_entity_type():
+    """The callers, derived from the registry and the handler AST (#11088).
+
+    ⛔ The `sdk_method` binding ALONE under-reports: `tortoise_query` binds
+    `paginated_query` (its structural arm) and still forwards a `text=` argument
+    to `tortoise_fts_query(entity_type=…)`. A census built on the binding names
+    ONE tool where the surface has two — the direction that UNDERSTATES the
+    consequence of a removal, which is the direction that gets a surface change
+    approved by mistake.
+    """
+    surface = probe.vector_leg_surface()
+    named = {t["tool"] for t in surface if "tool" in t}
+    assert {"tortoise_search", "tortoise_query"} <= named, (
+        f"the surface census missed a tool that can pass entity_type: {surface}")
+    # ⛔ AND the third entrant class (#11088 review round 7, P1): a tool whose
+    # SDK method names the type itself. `tortoise_recall`'s DEFAULT mode calls
+    # `recall_state`, which asks the leg for `:Object`; `tortoise_search_sessions`
+    # asks for `:Event`. Neither forwards `entity_type`, so both sources above
+    # miss them — and dropping them understates the approval request.
+    recall = next(t for t in surface if t.get("tool") == "tortoise_recall")
+    assert "object" in recall["entity_types"], (
+        f"tortoise_recall's default state read queries :Object and is not named: {recall}")
+    sessions = next(t for t in surface
+                    if t.get("tool") == "tortoise_search_sessions")
+    assert sessions["entity_types"] == ["event"], sessions
+    for entry in surface:
+        if "tool" in entry:
+            assert entry["takes_entity_type"] is True, entry
+    search = next(t for t in surface if t.get("tool") == "tortoise_search")
+    assert search["rest"] == "GET /v1/search", search
+
+
+def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
+    """The THIRD source, and the default it must resolve first (#11088 round 7, P1).
+
+    A handler that never forwards `entity_type` can still reach the leg, because
+    the SDK method it calls names the type (`recall_state` → `object`,
+    `search_sessions` → `event`). A call that OMITS the kwarg runs the SDK's own
+    default, which is an entrant too — so the derivation must read the default
+    from the leg's SIGNATURE before it reads any call site. A one-pass walk
+    reached `suggest_entry_points` first and reported
+    `UNKNOWN(no declared default found)` for a call whose type is `point`: an
+    order-dependent answer is not a measurement.
+    """
+    methods, error = probe._sdk_methods_on_vector_leg()
+    assert error is None, error
+    assert methods["recall_state"] == {"object", "point"}, methods
+    assert methods["search_sessions"] == {"event"}, methods
+    assert methods["suggest_entry_points"] == {"point"}, (
+        "a call that omits entity_type runs the SDK default, and it must be "
+        f"resolved from the signature, not reported as UNKNOWN: {methods}")
+    assert probe.VECTOR_LEG_SDK_METHOD not in methods, (
+        "the leg was named as its own entrant")
+
+
+def test_a_label_with_MIXED_stored_widths_refuses_the_byte_figure():
+    """One row's width is not the label's (#11088 review round 7, P2).
+
+    A graph that went through an `EMBEDDING_DIM` rotation holds vectors of two
+    widths. `stored × width × 4` then multiplies ONE sampled row's size across
+    every row — measured 5×1024 + 1×384 → 24,576 B reported for a true 22,016 B —
+    which is wrong in an unbounded direction, in the figure the issue exists to
+    produce, with nothing marking it as estimated. The module's posture is
+    UNMEASURED when the inputs disagree, and here they do.
+    """
+    # The minority width FIRST, so the `LIMIT WIDTH_PROBE_SAMPLES` window
+    # contains it — the fake honours the LIMIT, so where the odd row sits
+    # decides whether the probe can see it (the residual is pinned below).
+    graph = _CensusGraph(
+        catalogue=[],
+        labels=["Object"],
+        vectors={"Object": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)},
+    )
+    row = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                              graph_names=["g"])["labels"]["Object"]
+    assert str(row["payload"]["derived_payload_B"]).startswith("UNMEASURED"), (
+        f"a mixed-width label published a byte figure extrapolated from one row: {row}")
+    assert "disagree" in str(row["payload"]["derived_payload_B"]), row
+    # …and the COUNT is unaffected: it is a count of rows, not a width.
+    assert row["unindexed"] == 6, row
+
+
+def test_the_mixed_width_refusal_needs_MORE_THAN_ONE_sample(monkeypatch):
+    """The width fix's own discriminating power (#11088 review round 9, P2).
+
+    With `WIDTH_PROBE_SAMPLES = 1` the single-row bug returns: the first sampled
+    row's width is multiplied across the label and the figure reads as measured.
+    Pinning BOTH directions is what makes the refusal attributable to the
+    multi-row probe rather than to the fixture.
+    """
+    vectors = {"Object": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)}
+    graph = _CensusGraph(catalogue=[], labels=["Object"], vectors=vectors)
+    row = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                              graph_names=["g"])["labels"]["Object"]
+    assert str(row["payload"]["derived_payload_B"]).startswith("UNMEASURED"), row
+
+    # ⚠️ THE DECLARED RESIDUAL: a sample window that misses the minority width
+    # cannot refuse (5 of 6, minority last). The figure then stands, and `how`
+    # must say how many rows it came from — the sample size is what keeps it an
+    # observation rather than an implied exhaustive check.
+    late = {"Object": (6, [[0.0] * 1024] * 5 + [[0.0] * 384])}
+    residual = probe.vector_census(
+        _CensusGraph(catalogue=[], labels=["Object"], vectors=late),
+        "g", at="2026-11-05T00:00:00Z", graph_names=["g"])["labels"]["Object"]
+    assert residual["payload"]["derived_payload_B"] == 6 * 1024 * 4, residual
+    assert "5 sampled row(s)" in residual["payload"]["how"], residual["payload"]
+    assert "minority" in residual["payload"]["how"], residual["payload"]
+
+    # …and with a SINGLE sample the same fixture reports a measured-looking
+    # figure from one row: the regression this test must be able to see.
+    monkeypatch.setattr(probe, "WIDTH_PROBE_SAMPLES", 1)
+    one = probe.vector_census(
+        _CensusGraph(catalogue=[], labels=["Object"], vectors=vectors),
+        "g", at="2026-11-05T00:00:00Z", graph_names=["g"])["labels"]["Object"]
+    assert one["payload"]["derived_payload_B"] == 6 * 384 * 4, (
+        "with a single sample the first row's width is multiplied across the "
+        f"label — that is the regression this test must be able to see: {one}")
+
+
+def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():
+    """No removable vector, nothing changes — including for the caller-chosen
+    tools (#11088 review round 9, P2).
+
+    A graph whose only label is indexed yields an empty affected set, and the
+    pass-through branch used to print "any (the caller chooses)" anyway, naming
+    `tortoise_search`/`tortoise_query` as changing on a graph where a removal
+    would change nothing.
+    """
+    graph = _CensusGraph(
+        catalogue=[_index_row("Point", "embedding", 384)],
+        labels=["Point"], vectors={"Point": (3, [0.0] * 384)},
+    )
+    sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                             graph_names=["g"])["surface_consequence"]
+    assert sc["entity_types_whose_query_results_change"] == [], sc
+    assert {e["tool"]: e["reaches_affected_labels"] for e in sc["surface"]
+            if "tool" in e and e["reaches_affected_labels"]} == {}, (
+        "a tool was reported as changing on a graph with nothing to remove: "
+        f"{sc['surface']}")
+
+
+def test_a_non_literal_entity_type_is_UNMEASURED_not_a_measured_no(
+        monkeypatch):
+    """An `UNKNOWN(...)` member must not intersect to `[]` (#11088 round 9, P2).
+
+    `_types_for` reports a non-literal argument as `UNKNOWN(<expr>)`, never
+    guessed. Intersecting that string with the affected types yields `[]`, which
+    the printer drops — an unmeasured consequence published as a measured "does
+    not change", the direction the module calls dangerous.
+    """
+    graph = _CensusGraph(
+        catalogue=[], labels=["Object"], vectors={"Object": (2, [0.0] * 384)},
+    )
+    monkeypatch.setattr(
+        probe, "_sdk_methods_on_vector_leg",
+        lambda: ({"recall_state": {"UNKNOWN(entity_type_var)"}}, None))
+    sc = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                             graph_names=["g"])["surface_consequence"]
+    recall = next(e for e in sc["surface"] if e.get("tool") == "tortoise_recall")
+    assert str(recall["reaches_affected_labels"]).startswith("UNMEASURED"), recall
+
+
+def test_a_tool_that_reaches_the_leg_through_a_HELPER_is_named():
+    """A private helper must not hide a tool (#11088 review round 9, P2).
+
+    `review_connections` → `_review_add`/`_review_prune` → `_review_pool` → the
+    leg. Keying the scan on the ENCLOSING function named only `_review_pool`,
+    which is not a `TOOL_REGISTRY.sdk_method`, so the tool vanished from the
+    caller list with no `UNMEASURED` entry anywhere.
+    """
+    methods, error = probe._sdk_methods_on_vector_leg()
+    assert error is None, error
+    assert methods["review_connections"] == {"point"}, methods
+    named = {e["tool"] for e in probe.vector_leg_surface() if "tool" in e}
+    assert "tortoise_review_connections" in named, sorted(named)
+
+
+def test_the_census_reports_EVERY_index_KIND_not_only_VECTOR():
+    """§3.1 says the run settles the FTS question — so the run must answer it.
+
+    Whether `:Source` carries a FULLTEXT index decides if a lexically-matching
+    query survives a vector removal, and `STORAGE-ARCHITECTURE.md` §12.1b's
+    dated inventory disagrees with the declared DDL on exactly that. The parse
+    kept VECTOR rows only, so the census promised a datum it never read
+    (#11088 review round 7, P2).
+    """
+    fulltext = ["Source", ["_searchText"], {"_searchText": ["FULLTEXT"]},
+                {}, "english", [], "NODE", "OPERATIONAL", {}]
+    graph = _CensusGraph(
+        catalogue=[_index_row("Object", "embedding", 384), fulltext],
+        labels=["Object", "Source"],
+        vectors={"Object": (1, [0.0] * 384), "Source": (2, [0.0] * 384)},
+    )
+    census = probe.vector_census(graph, "g", at="2026-11-05T00:00:00Z",
+                                 graph_names=["g"])
+    assert census["labels"]["Source"]["indexes_on_label"] == {
+        "FULLTEXT": ["_searchText"]}, census["labels"]["Source"]
+    assert census["labels"]["Object"]["indexes_on_label"] == {
+        "VECTOR": ["embedding"]}, census["labels"]["Object"]
+    # The vector coverage columns are UNCHANGED by the fuller record: a
+    # FULLTEXT index is not a vector index.
+    assert census["labels"]["Source"]["indexed"] is False
+    assert census["labels"]["Source"]["unindexed"] == 2
+
+    # ⛔ The TEXT line, not only the field: the first version put the closing
+    # paren on the whole join instead of on each entry, so two non-VECTOR kinds
+    # printed `FULLTEXT(a, RANGE(b)` — malformed in the one output a reader
+    # quotes into an approval request, and invisible to a single-kind fixture
+    # (verification gate, P2).
+    assert probe._non_vector_indexes_line(
+        {"FULLTEXT": ["name"], "RANGE": ["created"]}
+    ) == "other indexes on this label: FULLTEXT(name), RANGE(created)"
+    assert probe._non_vector_indexes_line({"VECTOR": ["embedding"]}) == "", (
+        "a VECTOR-only label needs no extra line — `indexed=` already says it")
+    assert probe._non_vector_indexes_line("UNMEASURED(x)").startswith("⛔ indexes:")
+
+
+@pytest.mark.parametrize("dotted", [probe.VECTOR_LEG_RUNNER,
+                                    f"{probe.VECTOR_LEG_SDK_METHOD}"])
+def test_every_name_the_census_hardcodes_still_RESOLVES(dotted):
+    """A hardcoded name must not outlive the thing it names (review, P3).
+
+    `VECTOR_LEG_SDK_METHOD` and `VECTOR_LEG_RUNNER` are the two strings the
+    census prints as the PATH a surface change travels. A rename in
+    `tortoise/sdk.py` or `tortoise/search_engine.py` would leave the census
+    quoting a method that no longer exists — a stale claim in exactly the place
+    a reader goes to check the consequence. `takes_entity_type` already reds on
+    the SDK rename; this pins both, and the runner had no pin at all.
+    """
+    import importlib
+
+    if dotted.startswith("tortoise."):
+        module_name, _, attr = dotted.rpartition(".")
+        module = importlib.import_module(module_name)
+    else:
+        from tortoise.sdk import TortoiseSDK as module  # the class, not a module
+        attr = dotted
+    assert hasattr(module, attr), (
+        f"the census prints `{dotted}` as the vector leg path, and it does not "
+        "resolve — a rename landed without updating the instrument")
+
+
+def test_an_unresolvable_leg_method_reports_UNMEASURED_not_an_EMPTY_surface(
+        monkeypatch):
+    """A broken name must not read as "no tool is affected" (review round 2, P2).
+
+    An unresolvable `VECTOR_LEG_SDK_METHOD` empties BOTH the binding set and the
+    handler set, so `out` was `[]` — while `takes`, correctly computed to
+    `UNMEASURED(...)` in that case, had no entry to ride on and was discarded.
+    The surface then read as a measured "no MCP tool can pass `entity_type`"
+    beside a non-empty `entity_types_whose_query_results_change`: the
+    under-reporting direction, produced by the very drift the resolution pin
+    above exists to catch (a pin protects the repo, not the tool as shipped).
+    """
+    monkeypatch.setattr(probe, "VECTOR_LEG_SDK_METHOD", "no_such_sdk_method")
+    surface = probe.vector_leg_surface()
+    assert surface, "a broken leg method produced an EMPTY surface (unmeasured reads as empty)"
+    assert any("tool" not in entry and str(entry.get("tools", "")).startswith(
+        "UNMEASURED") for entry in surface), surface
+
+
+def test_the_LIVE_census_names_the_unindexed_labels_and_writes_NOTHING():
+    """E2E D9 (`04-plan.md` §7): the census, on a real engine (#11088).
+
+    Three claims, none of which a fake can carry:
+
+    1. `Point` reports **indexed** and the served-but-unindexed labels report
+       **unindexed with a byte figure** — the population the issue exists to
+       quantify, measured rather than inferred from an inventory.
+    2. the census **writes nothing**: the label set, the node counts, the edge
+       count, the engine's catalogue and every per-label embedding count are
+       IDENTICAL across the call (verification row 1 of #11088). ⚠️ This
+       snapshot is a corroborating observation, not the proof — it cannot see a
+       same-shape property mutation. The proof is the READ-ONLY verb:
+       `GRAPH.RO_QUERY` is rejected server-side for a write, and
+       `_NoWriteCensusGraph` fails the test on any use of `graph.query`;
+    3. each label's `entity_type` values are named, and the surface block lists
+       exactly the ones whose query results would change.
+
+    Skips VISIBLY without a live URI (`_live_utils._skip_unless_live_uri`), never
+    early-return-green (#942).
+    """
+    from tests import _live_utils
+
+    _live_utils._skip_unless_live_uri()
+
+    import uuid
+
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    uri = os.environ["TORTOISE_DB_URI"]
+    db, _names = probe._connect(uri)
+    name = f"census11088_{uuid.uuid4().hex[:12]}"
+    graph = db.select_graph(name)
+    labelled = ("Point", "Event", "Object", "Source", "Subject")
+    vector = [0.1] * EMBEDDING_DIM
+
+    def _create_vector_index() -> None:
+        """The product's own two index forms, in its own order (`_ensure_indexes`)."""
+        try:
+            graph.query(
+                f"CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+                f"{EMBEDDING_DIM}, 'cosine')")
+        except Exception:
+            graph.query(
+                "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
+                f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
+                "similarityFunction: 'cosine'}")
+
+    def _snapshot() -> dict:
+        """Everything the census must leave untouched."""
+        return {
+            "labels": sorted(r[0] for r in graph.ro_query(
+                "CALL db.labels()").result_set or []),
+            "nodes": graph.ro_query("MATCH (n) RETURN count(n)").result_set[0][0],
+            "edges": graph.ro_query("MATCH ()-[e]->() RETURN count(e)"
+                                    ).result_set[0][0],
+            "catalogue": sorted(
+                [r[0], str(r[2])] for r in
+                graph.ro_query("CALL db.indexes()").result_set or []),
+            "per_label": {
+                lab: graph.ro_query(
+                    f"MATCH (n:{lab}) WHERE n.embedding IS NOT NULL "
+                    "RETURN count(n)").result_set[0][0]
+                for lab in labelled
+            },
+        }
+
+    try:
+        _create_vector_index()
+        for lab in labelled:
+            graph.query(
+                f"CREATE (n:{lab} {{id: $id}}) SET n.embedding = vecf32($v)",
+                params={"id": f"census-{lab.lower()}", "v": vector})
+        names_after = db.list_graphs()
+
+        before = _snapshot()
+        census = probe.vector_census(graph, name, graph_names=names_after)
+        after = _snapshot()
+
+        # ── 2. the census writes NOTHING ──────────────────────────────────
+        assert before == after, (
+            "the census changed the graph — the one thing it must never do:\n"
+            f"before={before}\nafter={after}")
+        assert census["catalogue"] == "CALL db.indexes()", census
+
+        # ── 1. indexed vs unindexed, with BYTES on both ───────────────────
+        point = census["labels"]["Point"]
+        assert point["indexed"] is True, point
+        assert point["unindexed"] == 0, point
+        assert point["payload"]["derived_payload_B"] == EMBEDDING_DIM * 4, point
+
+        for lab, ets in (("Event", ["event"]), ("Object", ["object"]),
+                         ("Source", ["document", "source"]),
+                         ("Subject", ["subject"])):
+            row = census["labels"][lab]
+            assert row["stored"] == 1, row
+            assert row["indexed"] is False, row
+            assert row["unindexed"] == 1, row
+            assert row["payload"]["derived_payload_B"] == EMBEDDING_DIM * 4, (
+                f"an unindexed label has no bytes figure: {row!r}")
+            # ── 3. the entity_type values, not just the label ─────────────
+            assert row["affected_entity_types"] == ets, row
+            assert row["removal_changes_query_results"] is True, row
+
+        sc = census["surface_consequence"]
+        assert sc["requested_not_performed"] is True, sc
+        # ⛔ FOUR labels, and `Source` counts TWICE (`document` + `source`) while
+        # `Point` counts ZERO (it is indexed, so removing nothing changes
+        # nothing). `subject` is in the set because the LABEL is measured to
+        # hold a vector — #11088 leaves *"what Source/Subject actually hold"* to
+        # this census rather than assuming the 2026-09-24 inventory, and the
+        # answer is that they hold vectors and are served, so both are affected.
+        assert sc["entity_types_whose_query_results_change"] == [
+            "document", "event", "object", "source", "subject"], sc
+        assert {a["label"] for a in sc["labels"]} == {
+            "Event", "Object", "Source", "Subject"}, sc
+    finally:
+        # Cleanup must not mask a failed assertion (a fake on the failure path
+        # would replace the real one). `contextlib.suppress`, not try/pass.
+        with contextlib.suppress(Exception):
+            graph.delete()
