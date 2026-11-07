@@ -914,6 +914,10 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
     # figures instead of re-derived here.)
     assert (sum(i["s2_items"] for i in pri["inputs"])
             == pri["summary"]["composition"]["legacy"]["s2_items"])
+    # ⛔ BOTH copies of the population, not "at least one": the figure is stated in
+    # the verdict cell AND under *What this does not measure*, and rewriting only
+    # the second to a THIRD value (231 → 232) stayed green (#11385 review P3).
+    assert "231 of the 266 items" in flat_all, "the second copy of the population"
 
     assert (f"Re-run (`ab-20261107T024226Z`): "
             f"{_thousands(prs['sum_legacy_out_tokens'])} → "
@@ -1006,6 +1010,36 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # the census row's label wraps the subtraction, so match on the word
         assert rows["census"] == (lg["corrected_by_s4"] - lg["verbatim_reemissions"],
                                   0), rows
+
+        # ⛔ THE HEADLINE REDUCTION WAS PINNED IN ONLY ONE OF ITS FOUR RENDERINGS.
+        # `−93.78 %` occurs exactly once, in the run-to-run-spread parenthetical,
+        # so the TITLE and the VERDICT-TABLE CELL — the two surfaces a reader
+        # actually reads — were unguarded. Measured at this head: mutating the
+        # title `−93.8` → `−94.8`, or the verdict cell `−93.8` → `−93.4`, each
+        # left the suite green — the same false-pass class the 1-dp-fallback
+        # removal was supposed to close, because removing a tolerant fallback
+        # does not PINS the 1-dp renderings (#11385 review P1). Parse the CELL
+        # and pin its figures against the primary summary; pin the title too.
+        verdict = None
+        for table in _tables(readme):
+            for label, cells in table.items():
+                if "S4 output size per chunk drops" in label and cells:
+                    verdict = cells[0]
+        assert verdict is not None, "the verdict row is gone"
+        assert (f"**−{s['token_weighted_reduction'] * 100:.1f} %** token-weighted"
+                in verdict), verdict
+        assert (f"median **−{s['median_session_reduction'] * 100:.1f} %**"
+                in verdict), verdict
+        assert (f"worst session **−{s['min_session_reduction'] * 100:.2f} %**"
+                in verdict), verdict
+        assert (f"best **−{s['max_session_reduction'] * 100:.1f} %**"
+                in verdict), verdict
+        assert (f"{_thousands(s['sum_legacy_out_tokens'])} → "
+                f"{_thousands(s['sum_delta_out_tokens'])} output tokens"
+                in verdict), verdict
+        # the TITLE states the same reduction in its own 1-dp rendering
+        assert (f"measured: −{s['token_weighted_reduction'] * 100:.1f} %"
+                in flat_all), "the title's reduction drifted"
         # the census-vs-mask divergence, as the SENTENCE that states it
         census = lg["corrected_by_s4"] - lg["verbatim_reemissions"]
         recorded = sum(a["legacy"]["corrected_items"]["recorded"]
@@ -1187,6 +1221,29 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
     # review P3). Pin the CLAUSE.
     assert "35 `operators` are never offered" in flat, (
         "the row must say WHY it is 231 — the 35 never-offered operators")
+    # ⛔ The routing surface's FIGURES were unpinned copies too: the row states
+    # `verbatim_reemissions` 201 → 0, `corrected_by_s4` 266 → 0, `s4_items`
+    # 278 → 6, the median / worst / best and the token pair. Rewriting `278 → 276`
+    # in the row left the suite green — and the docstring above argues the row
+    # matters *because* it is read FIRST, which applies to its numbers, not only
+    # its prose (#11385 review P3). Recomputed from the primary artifact.
+    _pri = json.loads(_PRIMARY.read_text())
+    _ps = _pri["summary"]
+    _plg = _ps["composition"]["legacy"]
+    _pdl = _ps["composition"]["delta"]
+    for _fig in (
+        f"`verbatim_reemissions` (items re-typed unchanged — the tax itself) "
+        f"**{_plg['verbatim_reemissions']} → 0**",
+        f"`corrected_by_s4` **{_plg['corrected_by_s4']} → 0**",
+        f"`s4_items` emitted **{_plg['s4_items']} → {_pdl['s4_items']}**",
+        f"median −{_ps['median_session_reduction'] * 100:.1f} %",
+        f"worst session −{_ps['min_session_reduction'] * 100:.2f} %",
+        f"best −{_ps['max_session_reduction'] * 100:.1f} %",
+        f"**{_thousands(_ps['sum_legacy_out_tokens'])} → "
+        f"{_thousands(_ps['sum_delta_out_tokens'])} output tokens, "
+        f"−{_ps['token_weighted_reduction'] * 100:.2f} %**",
+    ):
+        assert _fig in flat, ("the index row's figure drifted: " + _fig)
 
 
 def _paren_depth_ok(text: str) -> bool:
@@ -1226,10 +1283,16 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     # the whole suite green, so the README's "the instrument emits **6**" had no
     # guard — and the count is exactly what a reader uses to know the artifact
     # list is short, i.e. the part that must not drift silently (#11385 review
-    # P3). The artifacts carry 5 and the instrument 6, and the difference is ONE
-    # ADDED entry (the 266-of-311 narrowing, split out of the first caveat) plus
-    # one REWRITTEN entry (the S3 caveat, which absorbed the 231-of-266 population
-    # fact) — NOT the "5 + 2" the README used to claim.
+    # P3). The artifacts carry 5 and the instrument 6. The mapping, diffed entry
+    # by entry against the artifact-producing commit, is ONE ADDED plus TWO
+    # EDITED — not "one added plus one rewritten", and nothing was "split out of
+    # the first caveat" (there was no `CAVEATS` constant then):
+    #   instrument[0] = artifact[0] EXTENDED with "(the 4 tax-surface sections)"
+    #   instrument[1] NEW (the 266-of-311 narrowing)
+    #   instrument[2] = artifact[1]   (identical)
+    #   instrument[3] = artifact[2]   REWRITTEN (absorbed 231-of-266 / the 35
+    #                                  operators, replacing the CEILING wording)
+    #   instrument[4], [5] = artifact[3], [4]   (identical)
     _artifact_caveats = json.loads(_PRIMARY.read_text())["caveats"]
     assert len(_artifact_caveats) == 5, len(_artifact_caveats)
     assert len(tool.CAVEATS) == 6, len(tool.CAVEATS)
