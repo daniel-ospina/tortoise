@@ -694,3 +694,86 @@ def test_the_PRODUCTION_tagged_note_is_the_not_a_target_annotation(monkeypatch):
     for key in ("claim_points", "typed", "statement", "null"):
         assert str(census["A4"][key]).startswith("UNMEASURED("), (key, census["A4"][key])
     assert census["A5"]["subjects"] == 0, "a broken A4 row discarded A5's measured number"
+
+
+# ── 4b. the census block is COMMITTED, so it carries no credentials ────────
+
+#: A credentialed URI in the shape this probe is actually handed: the fleet's lane URI is
+#: `docker://:pw@host:port/graph`, and the hosted `live-v4` graph adds user and password the same
+#: way (`from_uri` semantics). The password is the sentinel every assertion below looks for.
+CREDENTIALED_URI = "docker://:hunter2@live-v4.internal:6379/capstone_measure_abcd1234"
+
+#: The query table for a graph with NOTHING in it: every `A`-row query answers zero, so the census
+#: completes and a test that uses it is about the block's SHAPE, never about a thrown row.
+_EMPTY_ROWS: dict = {
+    "MATCH (a:Object)-[r]->(b:Object) RETURN type(r) AS t, a.objectKind AS ak": [],
+    "MATCH (a:Object)-[r]->(b:Object) RETURN type(r) AS t, count(*) AS n": [],
+    "WHERE n.pointKind = 'statement' RETURN count(n)": [[0]],
+    "AND n.eventId IS NOT NULL RETURN count(n)": [[0]],
+    "WHERE n.pointKind = 'statement' RETURN count(DISTINCT n)": [[0]],
+    "coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false)": [[0]],
+    "coalesce(n.pointKind, 'NULL')": [],
+    "MATCH (n:Subject) RETURN count(n)": [[0]],
+    "RETURN type(r) AS t, count(DISTINCT r) AS n": [],
+    "WHERE n.pointKind = 'statement'": [[0]],
+}
+
+
+def _census_over(monkeypatch, probe, graph, uri: str = CREDENTIALED_URI) -> dict:
+    """`a_row_census` with the projection faked — no DB, no container, no network."""
+    from tortoise import projection as projection_module
+
+    class _Projection:
+        def __init__(self):
+            self.g = graph
+
+    monkeypatch.setattr(projection_module.FalkorProjection, "from_uri",
+                        classmethod(lambda cls, _uri: _Projection()))
+    return probe.a_row_census(uri)
+
+
+def test_the_census_block_carries_no_connection_uri_at_all(monkeypatch):
+    """⛔ FAILS IF the block gains a `uri` key — the committed-log credential leak (#10982 review F1).
+
+    The block is `json.dumps`-ed WHOLE into `capstone-measured-<sha>.log`, which is committed to a
+    public repository, so a URI on it is the graph's host, user and password in git. Not even a
+    redacted one: traceability is `run.graph`, which the record already carries.
+    """
+    probe = _probe()
+    census = _census_over(monkeypatch, probe, _FakeGraph(_EMPTY_ROWS))
+    assert "uri" not in census, "the machine record embeds this dict whole — no URI key, redacted or not"
+    blob = json.dumps(census)
+    assert "hunter2" not in blob, blob
+    assert CREDENTIALED_URI not in blob, blob
+    assert "hunter2" not in "\n".join(probe.a_row_census_lines(census))
+
+
+def test_a_census_row_that_throws_does_not_echo_the_credentials(monkeypatch):
+    """⛔ FAILS IF a driver/projection exception is emitted VERBATIM into the committed log.
+
+    A refused connection is the likeliest way this block meets a real exception, and a driver
+    message quotes the URI it could not reach — `f"{exc}"` was the second path, beside the `uri`
+    key, by which the password reached the artefact.
+    """
+
+    class _Breaks(_FakeGraph):
+        def query(self, cypher: str):
+            raise RuntimeError(f"ConnectionRefused: could not reach {CREDENTIALED_URI}")
+
+    probe = _probe()
+    census = _census_over(monkeypatch, probe, _Breaks({}))
+    blob = json.dumps(census)
+    assert "hunter2" not in blob, blob
+    assert CREDENTIALED_URI not in blob, blob
+    # …and the failure is still NAMED with its cause: a scrub that hides the row is the other defect.
+    assert "UNMEASURED(" in blob and "ConnectionRefused" in blob, blob
+    assert "hunter2" not in "\n".join(probe.a_row_census_lines(census))
+
+
+def test_the_census_error_reason_scrubs_the_uri_userinfo():
+    """FAILS IF `census_reason` stops scrubbing — it is the `main()` fallback's only message."""
+    probe = _probe()
+    reason = probe.census_reason(RuntimeError(f"cannot connect to {CREDENTIALED_URI}"))
+    assert "hunter2" not in reason, reason
+    assert "***" in reason, reason
+    assert reason.startswith("RuntimeError: "), reason

@@ -2347,6 +2347,26 @@ def unmeasured(what: str) -> str:
     return f"UNMEASURED({what})"
 
 
+def census_reason(exc: BaseException) -> str:
+    """A caught exception rendered for a COMMITTED artefact (`#10982` review, F1).
+
+    ⛔ The log this block travels in is committed to a public repository, and
+    ``TORTOISE_DB_URI`` is a credential-bearing string — ``docker://:pw@host:6379/g``,
+    and for the hosted ``live-v4`` graph the URI carries host, port, user and
+    password (``from_uri`` semantics). An exception raised by a driver or a
+    projection routinely echoes the URI it failed to reach, so ``f"{exc}"`` is a
+    credential path into ``capstone-measured-<sha>.log``.
+
+    The scrub is the repo's OWN rule, not a second one: ``tortoise.security``
+    carries the URI-userinfo pattern ``://[^@\\s]*@ -> ://***@`` and
+    ``redact_error`` is its public form (class name + redacted message). It is
+    stdlib-only by design, so importing it here costs the probe nothing.
+    """
+    from tortoise.security import redact_error
+
+    return redact_error(exc)
+
+
 def _a1_object_edges(projection) -> dict:
     """`object→object` edges BY TYPE and BY ENDPOINT KIND (`A1`)."""
     by_type = [
@@ -2549,14 +2569,20 @@ def a_row_census(uri: str) -> dict:
     from tortoise.projection import FalkorProjection
 
     projection = FalkorProjection.from_uri(uri)
-    result: dict = {"uri": uri, "criteria": list(A_CRITERIA)}
+    # ⛔ NO `uri` KEY (`#10982` review, F1). This dict is `json.dumps`-ed WHOLE into the
+    # committed machine record, and the URI carries the graph's credentials — so the
+    # block must not carry it even redacted. The E-census keeps a `uri` internally
+    # (`census()`) but the machine record PROJECTS six keys out of it and never emits
+    # it; traceability for THIS block is `run.graph`, which the record already states.
+    result: dict = {"criteria": list(A_CRITERIA)}
 
     def row(name: str, fn, empty: dict) -> dict:
         try:
             return fn(projection)
         except Exception as exc:  # the row is named; the rest of the census still reports
-            reason = unmeasured(
-                f"{name}'s queries could not run — {type(exc).__name__}: {exc}")
+            # ⛔ `census_reason`, never `{exc}`: an infra exception can echo the
+            # credential-bearing URI, and this block is committed (review F1).
+            reason = unmeasured(f"{name}'s queries could not run — {census_reason(exc)}")
             # ⛔ NOT the zero skeleton: a numeric `0` under a key a real measurement also occupies
             # reads as a MEASURED ABSENCE and scores the row RED on an infrastructure failure —
             # the exact number this block exists to not print (#10982 review cycle 2, finding 2).
@@ -2606,7 +2632,8 @@ def a_row_census(uri: str) -> dict:
     try:
         tagged["edges"] = _tagged_edges(projection)
     except Exception as exc:  # the row is named; the rest of the census still reports
-        tagged["edges"] = unmeasured(f"TAGGED's query could not run — {type(exc).__name__}: {exc}")
+        tagged["edges"] = unmeasured(
+            f"TAGGED's query could not run — {census_reason(exc)}")
     result["TAGGED"] = tagged
     return result
 
@@ -3618,7 +3645,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         a_census = a_row_census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
     except Exception as exc:  # the E-rows must still be scored and the gap named
-        a_census = {"error": f"{type(exc).__name__}: {exc}", "criteria": list(A_CRITERIA)}
+        # ⛔ `census_reason`, not the raw exception: `from_uri` failures quote the URI
+        # they were handed, and this string lands in the COMMITTED record (review F1).
+        a_census = {"error": census_reason(exc), "criteria": list(A_CRITERIA)}
     observed, unobserved = observe_steps(runs, census_data)
     # #10215: the same split the run probe's G5 emits, read from the SAME frozen
     # record — so a GREEN row from this probe is no longer refused for S2.3.
