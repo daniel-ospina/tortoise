@@ -3638,6 +3638,21 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             "the ADJACENCY half no longer fails open.",
             "the ADJACENCY half never fails open.",
             "the ADJACENCY half does not fail open.",
+            # ⛔ AND THE MIXED-CLAUSE FLOOR'S OWN PROOFS (round 26, MEASURED): the
+            # five mixed `spelling`+truthful shapes were the ONLY proofs that the
+            # per-clause floor pass runs in the MIXED form, and they had no
+            # membership entry — so replacing all five with five OTHER reopenings
+            # (length 162, uniqueness 162, every membership string above intact)
+            # and then DELETING the pass left the whole proof GREEN: the pass was
+            # DELETABLE WHILE GREEN, the rounds-17/18 `P0` class, in the fix for
+            # the round-26 `P1` itself. Membership is the only thing that blocks
+            # SUBSTITUTION (see the round-9/11/19/20/22/25 entries), so each shape
+            # is named here rather than left to the length floor.
+            "the SPELLING gap is reopened, and the pair is fused.",
+            "the SPELLING gap is unclosed, and the pair is fused.",
+            "the SPELLING gap no longer fuses, and the pair is fused.",
+            "the SPELLING gap is open again, and the pair is fused.",
+            "the SPELLING gap opens again, and the ADJACENCY half is closed by the tables.",
             "the SPELLING gap has never been closed, and the ADJACENCY half is closed by the tables.",):
         assert (required in _RESIDUAL_REOPENING_MUTATIONS
                 or required in _RESIDUAL_TRUTHFUL_STATEMENTS), (
