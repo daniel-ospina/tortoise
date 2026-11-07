@@ -51,10 +51,14 @@ claim and a slogan:
   (`probe._embedding_writers`), so a container key at MODULE or CLASS scope is ABSENT no matter which
   module it sits in — pinned as `INVISIBLE_SHAPES`' `module_scope_container_key` and
   `class_scope_container_key`. This shape was invisible to the
-  instrument's clause regex until `#11274`, so a writer using it added nothing to the population and
-  this register's guard stayed green over it; discovery now decides it on the AST, and the four
-  live instances it had been missing (`api::add_point`, `consistency::_graph_fingerprint`,
-  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here. ⚠️ "Every module discovery
+  instrument's clause regex until `#11274`, so a writer carrying NOTHING ELSE the regex matches
+  added nothing to the population and this register's guard stayed green over it; discovery now
+  decides it on the AST, and the four live instances it had been missing (`api::add_point`,
+  `consistency::_graph_fingerprint`, `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are
+  declared here. ⚠️ `sdk::_journal_event_raw_write` is NOT such a writer and is not evidence the
+  shape was seen: it holds the same container key and was already in the population because
+  `_EMBED_WRITE` matches the `embedding=None` in its SIGNATURE (stated again below).
+  ⚠️ "Every module discovery
   walks" is not every module in `tortoise/`: the walk SKIPS `tortoise/embeddings.py` on purpose (the
   seam primitives are not write paths), and two functions there use exactly this form —
   `stamp_journal_embedding` (`payload["embedding"] = vec`) and `_drop_journalled_embedding`

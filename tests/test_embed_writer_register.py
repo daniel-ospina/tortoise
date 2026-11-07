@@ -22,12 +22,17 @@ outside the walk (`tortoise/embeddings.py` is skipped on purpose, which is why
 still absent); when its module will not parse (discovery carries one `UNPARSEABLE:<rel>` row and
 enumerates none of that module's writers); when the store sits at MODULE or CLASS scope, since the
 walk visits `def`s only — pinned as `module_scope_container_key` and `class_scope_container_key`
-below; and when its NAME collides with another `def` in the same module (discovery replaces that
-key's KIND with `"duplicate"`, which is outside `NEEDS_A_DECLARATION` — so such a writer owes no
-declaration, and the guard PINS that the population holds none rather than reading the class as
-acceptable). `#11274` owns widening it. ⚠️ This list enumerates what makes the DISCOVERED MAP
-unable to name a writer; it is not a list of every reason a writer can escape a declaration —
-`gated` and `producer` escape it too, by design, and are stated in the register instead.
+below. `#11274` owns widening it. ⚠️ Together with the name-collision case below, this enumerates
+what makes the DISCOVERED MAP unable to NAME OR CLASSIFY a writer; it is not a list of every
+reason a writer can escape a declaration — `gated` and `producer` escape it too, by design, and are
+stated in the register instead.
+
+⚠️ A NAME-COLLIDING writer is the one case here that is NEITHER absent NOR declarable: two
+same-named `def`s in one module leave the KEY IN the map with its KIND replaced by `"duplicate"`
+(`probe._embedding_writers`'s `_put`), which is outside `NEEDS_A_DECLARATION` — so it owes no
+declaration while its class is UNRESOLVED (it may or may not store a vector the gate sees). The
+guard PINS that the population holds none rather than reading the class as acceptable; a writer
+being IN the map is not the same thing as being classifiable.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (read `WRITER_CENSUS`
 for the class counts rather than a number restated here — the #11274 widening moved them) but left
@@ -91,8 +96,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 MODULE_FILE = Path(register.__file__).resolve()
 
 #: The three writers `#11085` names as carrying **no declared exemption in the product at all**
-#: before this change (`tools/dod_5090_probe.py`'s census comment: *"the other three carry NO
-#: declared exemption"*). This list is the issue's own acceptance, spelled out so it cannot be
+#: before this change (`tools/dod_5090_probe.py`'s census comment, quoted verbatim: *"The other
+#: three (`restore_graph`, `_event_plain_merge`, `_rebuild_all_replay`) carried NO declared
+#: exemption in the PRODUCT until `#11085`"* — the `in the PRODUCT` clause is the distinction this
+#: file exists to draw, so do not shorten it). This list is the issue's own acceptance, spelled out
+#: so it cannot be
 #: satisfied by declaring three unrelated writers.
 THE_THREE = (
     "tortoise.hosted_backup::restore_graph",
@@ -362,10 +370,11 @@ def test_the_register_names_the_shapes_its_discovery_cannot_see():
     """`#11274`: the guard is exactly as wide as discovery — so its blind spots are NAMED.
 
     A register whose claim is "an undeclared writer cannot bypass silently" is only as true as the
-    filter that populates it. Of the shapes the INSTRUMENT names, one is now DECIDED (the literal
-    container key, `probe._writes_an_embedding`) and one is deliberately not
-    (`UNDECIDABLE_WRITE_SHAPES`, map-merges); the shapes neither the regex nor the AST pass can
-    decide are pinned as data in `INVISIBLE_SHAPES` below, so this docstring does not count them:
+    filter that populates it. The INSTRUMENT names these write shapes, and no COUNT is written here
+    because it moves: the CLAUSE shape (`probe._EMBED_WRITE`) and the CONTAINER KEY
+    (`probe._writes_an_embedding`) are DECIDED, the MAP-MERGE (`probe.UNDECIDABLE_WRITE_SHAPES`)
+    is deliberately not; the shapes neither pass can decide are pinned as data in `INVISIBLE_SHAPES`
+    below, so this docstring does not count them:
 
     * CONTAINER KEYS are decided on the AST (`probe._writes_an_embedding`), so they must NOT be in
       the blind list any more;
