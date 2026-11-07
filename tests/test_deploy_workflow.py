@@ -4593,7 +4593,27 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
                 # a class it must NOT red. Measured: the r8 injection control ("and
                 # `ff6379eb2` is what the note said") stays REFUSED.
                 r"(?!\s*(?:not|never)\b)"
-                r"(?!\s+(?:an?\s+)?(?:ancestor|descendant|predecessor|successor)\b)",
+                r"(?!\s+(?:an?\s+)?(?:ancestor|descendant|predecessor|successor)\b)"
+                # ⛔ …AND NOT WHEN THE COMPLEMENT IS A NAMED *OTHER* SUBJECT (#11191 review
+                # r18, P1 — MEASURED false RED, a REGRESSION against `origin/main`).
+                # "`ff6379eb2` is the #9601 merge" names a DIFFERENT subject in the
+                # complement (`#9601`), which the docstring above already states is not
+                # this predicate; the PREDICATE direction carries that `#\d+` skip and the
+                # SUBJECT direction did not, so the same proposition was graded opposite
+                # ways by word order — a truthful fronted clause was refused while its
+                # unfronted twin stayed green:
+                #   "Immediately before #9548, `047c91f7a` is the tree; `ff6379eb2` is the
+                #    #9601 merge."                                  -> REFUSED (must accept)
+                #   "`047c91f7a` is the tree immediately before #9548; `ff6379eb2` is the
+                #    #9601 merge."                                  -> accepted
+                # That is the contract's own A3 row holding in one word order only.
+                # ⛔ …AND THE GAP IS THE ONE THE PREDICATE DIRECTION READS, not one word
+                # (#11191 review r18, P2 — MEASURED): a bare `\s+` lookahead only saw the
+                # UNDECORATED spelling, so `is STILL the #9601 merge` and `is ACTUALLY the
+                # #9601 merge` were still refused while `origin/main` accepts them — the
+                # same asymmetry, one adverb out. The predicate direction already allows a
+                # 60-char copula gap, so the subject direction reads the same span.
+                r"(?!\s+[^.;\u2014\u2013]{0,30}?#\d+)",
                 text,
                 re.I,
             )
@@ -4923,9 +4943,35 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #: (#11191 review, A2, P1 — measured): with the previous sentence-wide window,
     #: `"ff6379eb2` is not the arming commit; the tree before #9548 is `ff6379eb2`."
     #: passed, because the denial of one proposition exempted the assertion in the next.
+    #: ⛔ THE GAP AFTER THE NEGATOR MAY NOT CROSS A COORDINATE, AND IT IS NOT A
+    #: 40-CHARACTER CUTOFF (#11191 review r18, P1 — MEASURED false RED, a REGRESSION
+    #: against `origin/main`). The window was `[^.;—–]{0,40}?`, i.e. a DISTANCE cutoff —
+    #: the class this predicate's own structural decision 3 refuses (`:5426`, "REFERENCE,
+    #: NOT TOKENS OR DISTANCE … a distance cutoff refused the sentence a fixer should
+    #: write") — and the control that pins the natural repair GREEN (`:6451`) is written in
+    #: the SHORTER quoted spelling, so it passed while the ordinary sentence did not. One
+    #: adverb overflows the old cap (45 gap characters, 51 counting the negator):
+    #:   "`ff6379eb2` is not what the note means by the tree before #9548; that tree is
+    #:    `047c91f7a`."                                             -> accepted (33 chars)
+    #:   "… by the tree IMMEDIATELY before #9548 …"                     -> REFUSED (45 chars)
+    #: ⛔ …AND THE BOUND IS A COORDINATE, NOT THE COMMA (#11191 review r18, P1 — MEASURED
+    #: both ways). Banning EVERY comma refused the incise denial — the spelling a fixer
+    #: writes after reading this pin's own failure message, and one `origin/main` accepts:
+    #:   "`ff6379eb2` is not, in fact, the tree before #9548."          -> REFUSED (must accept)
+    #: So exactly ONE comma-delimited incise is admitted, and the class has to keep every
+    #: real splice out: `:`, `;`, `.`, a dash and parentheses are coordinate/sentence
+    #: boundaries, and the borrow crosses a COLON when only the comma is banned:
+    #:   "`ff6379eb2` is not the #9601 merge: the row names the tree before #9548 as
+    #:    `ff6379eb2`."                                        -> ACCEPTED with the comma ban
+    #: A comma splice of a SECOND predication is still refused, which is the r11 class:
+    #:   "`ff6379eb2` is not the #9601 merge, the tree before #9548 is `ff6379eb2`."
+    _DENIAL_GAP = (
+        r"(?:,\s*[^,;:.\u2014\u2013()]{1,40},\s*)?"
+        r"[^,;:.\u2014\u2013()]{0,90}?"
+    )
     _DENIED_BY_SHA = re.compile(
         r"\b(?:047c91f7a|ff6379eb2)\b[^.;\u2014\u2013]{0,30}?" + _NEG
-        + r"[^.;\u2014\u2013]{0,40}?" + _PHRASE_RE,
+        + _DENIAL_GAP + _PHRASE_RE,
         re.I,
     )
     #: A denial IN THE PREDICATE POSITION: `not` must be followed directly by the
@@ -5208,7 +5254,26 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         r"(?:calls|called|describes|described|names|named|states|stated|says|said|"
         r"holds|held|treats|treated|reads|records|recorded)"
         r"|(?:does|do|did)\s+not\s+(?:call|describe|name|state|say|hold|treat|read|record))\b"
-        r"[^.;\u2014\u2013]{0,30}?" + re.escape(_FALSE_TREE),
+        r"[^.;\u2014\u2013]{0,30}?" + re.escape(_FALSE_TREE)
+        # ⛔ …AND THE RETIRED OBJECT MUST NOT BE RE-QUALIFIED AS THE ONLY ONE (#11191
+        # review r18, P1 — MEASURED fail-open). "never calls X anything OTHER THAN the
+        # tree before #9548" negates the negation and therefore ASSERTS the attribution —
+        # every arm that reads a denial as a correction has this double-negation hole
+        # somewhere, and this one paid for it. Measured ACCEPTED at `e51fe7a37` while
+        # `origin/main` REFUSES it, and the same sentence spliced into §A8's own cell left
+        # the full suite GREEN (the pin defeated on the cell it guards):
+        #   "The note never calls `ff6379eb2` anything other than the tree before #9548."
+        # The complement may not be turned into an EXCLUSIVE comparison by a phrase that
+        # reverses the verb: `anything other than`, `any … other than`, `nothing but` —
+        # ⛔ AND THE SET IS A COMPARATOR SET, NOT ONE SPELLING (#11191 review r18, P2 —
+        # MEASURED): `anything besides` and `anything except` assert the attribution just
+        # as `anything other than` does, and both were ACCEPTED while `origin/main`
+        # REFUSES them; the `any …` arm also only fired on the literal word `any`. A
+        # determiner plus up to two words (`any tree other than`) is what a writer actually
+        # puts there, and a predicate cannot fit in that span — which is what keeps this
+        # from absorbing the retirement it exists to admit.
+        + r"(?!\s+(?:(?:anything|nothing|a|an|the|any|no)\s+(?:\w+\s+){0,2})?"
+        r"(?:other\s+than|but|except|besides|beyond|short\s+of)\b)",
         re.I,
     )
     #: A denial of the INFERENCE the claim is used to draw — "That `ff6379eb2` is the
@@ -5241,6 +5306,22 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         r"(?:mean|imply|establish|show|prove)\b",
         re.I,
     )
+    #: ⛔ A CORRECTION THAT REVERSES THE TRUTH IS THE CLAIM, NOT A CORRECTION OF IT (#11191
+    #: review r18, P1 — MEASURED fail-open, and it defeated the pin on §A8's own cell). Every
+    #: exemption arm in this predicate fires on "the TRUE tree is named" or "a correction
+    #: verb is present", and a sentence can do BOTH while putting the defect back:
+    #:   "The tree immediately before #9548 is `047c91f7a`, corrected to `ff6379eb2`."
+    #:   "**NOT** the tree immediately before #9548 (that is `047c91f7a`, the arming
+    #:    commit's parent), `047c91f7a` is the tree before #9548, corrected to
+    #:    `ff6379eb2`."                                        -> both ACCEPTED; full suite GREEN
+    #: The direction test is `_CORRECTION_VERB`'s: the correction's OBJECT decides, never the
+    #: proximity of a true sha. Applied as a VETO over the clause rather than as another
+    #: exemption, because it removes the defect rather than granting a pass.
+    _RECORRECTED_TO_FALSE = re.compile(
+        r"\b(?:corrected|replaced|superseded|changed)\s+(?:to|with)\s*[`*_]{0,3}"
+        + re.escape(_FALSE_TREE),
+        re.I,
+    )
     #: A CORRECTION VERB, admissible as a correction only when the clause also names the
     #: TRUE tree — "the row that said … is now corrected to `047c91f7a`", "replaced with
     #: `047c91f7a`", "is disproven by `047c91f7a`". Requiring the true tree is what
@@ -5251,8 +5332,21 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         # the INVERSE spelling — "…is `ff6379eb2`, CORRECTED FROM `047c91f7a`" and
         # "…replaced BY `047c91f7a`" — i.e. the defect paid for with a true-sha alibi. Only
         # the direction that RETIRES the attribution is admitted.
-        r"\b(?:(?:corrected|replaced|superseded)\s+(?:to|with)"
-        r"|(?:disproven|disproved|refuted)\s+by|retracted|falsified)\b",
+        # ⛔ …AND THE TARGET IS THE TRUE TREE, NOT "SOMEWHERE IN THE SPAN" (#11191 review
+        # r18, P1 — MEASURED fail-open). r13 removed the wrong PREPOSITIONS but left the
+        # object unbound, so the complementary inverse spelling still passed: a sentence
+        # that states the true tree and then `corrected TO` the FALSE one had BOTH a
+        # correction verb and the true tree in its span, and the caller's `re.search` bought
+        # the exemption:
+        #   "The tree immediately before #9548 is `047c91f7a`, corrected to `ff6379eb2`."
+        #   -> ACCEPTED at `e51fe7a37`, and GREEN inside §A8's own cell with the full suite
+        # The verb now carries its OBJECT, so the arm can only fire on the direction that
+        # retires the false attribution. `retracted|falsified` stay object-free on purpose:
+        # they retire the claim itself, not an attribution, so they need no target.
+        r"\b(?:(?:corrected|replaced|superseded)\s+(?:to|with)\s*[`*_]{0,3}"
+        + re.escape(_TRUE_TREE)
+        + r"|(?:disproven|disproved|refuted)\s+by\s*[`*_]{0,3}" + re.escape(_TRUE_TREE)
+        + r"|retracted|falsified)\b",
         re.I,
     )
     #: The INVERTED form: "the tree (immediately) before #9548 IS `ff6379eb2`", and its
@@ -5678,8 +5772,33 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 return True
             if _INFERENCE_DENIAL.search(own):  # "does not mean the census is 5"
                 return True
-            if _CORRECTION_VERB.search(own) and re.search(_TRUE_TREE, own, re.I):
-                return True  # "… is now corrected to `047c91f7a`"
+            # ⛔ A CORRECTION WHOSE OBJECT IS THE FALSE TREE IS THE CLAIM, NOT A CORRECTION OF
+            # IT (#11191 review r18, P1 — MEASURED fail-open, and it defeated the pin on
+            # §A8's own cell). It is a VETO rather than another exemption: if the clause
+            # corrects TO the false tree, the clause asserts the defect whatever else it
+            # says, so no exemption below may buy it back.
+            # ⛔ …AND IT RUNS BESIDE THE DENIAL ARMS, NOT ABOVE THEM (#11191 review r18, P1 —
+            # MEASURED false RED, a REGRESSION against `origin/main`). Placed first, the veto
+            # fired on a RETIRED object and refused a truthful sentence whose FINAL object is
+            # the true tree, and on any aside that merely mentions the false one:
+            #   "The tree before #9548 was first corrected to `ff6379eb2`, then corrected to
+            #    `047c91f7a`."                                        -> REFUSED (must accept)
+            #   "`ff6379eb2` is not the tree before #9548 (the row was corrected to
+            #    `ff6379eb2` by mistake)."                            -> REFUSED (must accept)
+            # So: a denial of THIS occurrence wins (the arms above), asides are blanked (they
+            # name a different proposition, the rule the referent cascade already applies), and
+            # a correction that follows the false object undoes it.
+            _veto_region = _PAREN.sub(lambda _m: " " * len(_m.group(0)), clause)
+            _veto_region = _INCISE.sub(lambda _m: " " * len(_m.group(0)), _veto_region)
+            _recorrected = _RECORRECTED_TO_FALSE.search(_veto_region)
+            if _recorrected and not _CORRECTION_VERB.search(_veto_region[_recorrected.end() :]):
+                return False
+            if _CORRECTION_VERB.search(own):  # "… is now corrected to `047c91f7a`"
+                # The arm carries its own object (`_CORRECTION_VERB`), so the true tree no
+                # longer has to be searched for in the span — that search is what admitted
+                # `corrected to <false>` whenever the true tree was named earlier in the
+                # same span (#11191 review r18, P1 — measured fail-open).
+                return True
             # 3. THE CLAIM ITSELF — the false sha adjacent to the phrase, in either order,
             #    with no copula required ("5 lines immediately before #9548 at
             #    `ff6379eb2`" — the pre-fix row's own idiom). Checked BEFORE the referent
@@ -5720,7 +5839,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                     : _inv_true.group(0).lower().rfind(_TRUE_TREE)
                 ]
                 _inv_between = re.sub(_PHRASE_RE, " ", _inv_between, flags=re.I)
-                if not _third_sha_in_clause(_inv_between):
+                if not _third_sha_in_clause(_inv_between) and not _RECORRECTED_TO_FALSE.search(clause):
                     return True  # "the tree before #9548 IS `047c91f7a`"
             # 4. A REFERENT. The phrase refers to the nearest sha written before it — that
             #    is what apposition and attribution mean in prose, with no distance
@@ -6372,6 +6491,55 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the arm refuses a DENIAL-shaped correction — `is not what ... means` is a "
         "repair, and banning that phrasing reds the fix (#11064 review r17, P3):\n  "
         + "\n  ".join(_refused_denials)
+    )
+    # ⛔ ONE CONTROL PER FIXED DIRECTION (#11191 review r18, P1 — MEASURED vacuity). The
+    # r18 changes to this predicate were made without a test-body hunk, so REVERTING ANY
+    # OF THEM LEFT THE SUITE GREEN — the standard this file states for itself at `:7626`
+    # and labels P1 at `:6335`. Each spelling below is a sentence that was measured WRONG
+    # at `e51fe7a37`; each now flips with the arm it pins. BOTH directions are pinned,
+    # because every one of these arms has produced an opposite-proposition bug when only
+    # one direction was written down.
+    _r18_admitted = (
+        # the fronted `#9601` twin: the SUBJECT direction must skip a named other subject
+        # exactly as the PREDICATE direction already did, one adverb or not.
+        "Immediately before #9548, `047c91f7a` is the tree; `ff6379eb2` is the #9601 merge.",
+        "Immediately before #9548, `047c91f7a` is the tree; `ff6379eb2` is still the #9601 merge.",
+        # the INCISE denial the comma ban refused: `main` accepts it, and it is the spelling
+        # a fixer writes after reading this pin's own failure message.
+        "`ff6379eb2` is not, in fact, the tree before #9548.",
+        # a correction whose FINAL object is the true tree is a correction, not the defect.
+        "The tree before #9548 was first corrected to `ff6379eb2`, then corrected to `047c91f7a`.",
+        # an aside names a different proposition — the rule the referent cascade applies.
+        "`ff6379eb2` is not the tree before #9548 (the row was corrected to `ff6379eb2` by mistake).",
+    )
+    _r18_reds = [s for s in _r18_admitted if _refuses_before_9548(s)]
+    assert not _r18_reds, (
+        "the r18 arms refuse a truthful sentence `origin/main` accepts (false RED):\n  "
+        + "\n  ".join(_r18_reds)
+    )
+    _r18_refused = (
+        # a double negation REVERSES the retirement: the object may not be re-qualified as
+        # the only one, and the comparator set is closed, not a single spelling.
+        "The note never calls `ff6379eb2` anything other than the tree before #9548.",
+        "The note never calls `ff6379eb2` anything besides the tree before #9548.",
+        # the direction of a correction is the claim: `corrected TO <false>` asserts the
+        # defect whatever true tree the sentence also names (this one defeated the pin on
+        # §A8's own cell with the full suite green).
+        "The tree immediately before #9548 is `047c91f7a`, corrected to `ff6379eb2`.",
+        # a denial may not be BORROWED across a coordinate — the comma is not the only one.
+        "`ff6379eb2` is not the #9601 merge: the row names the tree before #9548 as `ff6379eb2`.",
+        # ⛔ THE VETO'S OWN CONTROL (#11191 review r18, P1 — MEASURED over-determined
+        # without it). The two spellings above are ALSO refused by the `_INVERTED_TRUE`
+        # branch's check, so deleting the veto left this block GREEN — while the artefact
+        # splice that puts the same clause inside §A8's cell went from 1 failed to 111
+        # passed. This sentence exempts through the REFERENT rule (the phrase is followed by
+        # a comma, not a copula), which is the path only the veto closes.
+        "`047c91f7a` is the tree before #9548, corrected to `ff6379eb2`.",
+    )
+    _r18_left_open = [s for s in _r18_refused if not _refuses_before_9548(s)]
+    assert not _r18_left_open, (
+        "the r18 arms admit a false claim `origin/main` refuses (fail-open):\n  "
+        + "\n  ".join(_r18_left_open)
     )
     # ⛔ … and the exemption may not be a bare SUBSTRING test (#11191 round 2, P2).
     # Naming the true sha while still asserting the false equivalence is the defect,
