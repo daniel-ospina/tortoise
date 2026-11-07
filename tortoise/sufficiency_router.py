@@ -1346,7 +1346,7 @@ class SummaryUnit:
             # a re-verification disagreeing about the class is §12.4's incorrect
             # promotion as an OVERWRITE). Unvalidated, an unhashable class made
             # that refusal escape as `TypeError: unhashable type` FROM THE SET
-            # LITERAL — not the `ValueError` the docstring documents — and a
+            # LITERAL — not the `ValueError` §12.5b's contract documents — and a
             # ``None`` class raised `TypeError: '<' not supported …` from
             # ``sorted`` before this message sorted by ``repr``. Either way the
             # caller's documented ``except ValueError`` recovery missed it and

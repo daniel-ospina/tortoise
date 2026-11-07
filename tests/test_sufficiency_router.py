@@ -1153,11 +1153,15 @@ def test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it() -> 
 # what makes §12.8 item 4's "escalation is a permanent tax rather than an
 # investment" true.
 #
-# Each test below is RED on the pre-fix module: every one that passes
-# `already_written` raises `TypeError: unexpected keyword argument` there, and the
-# one that reads the new field reddens on the missing `already_persisted`. So the
-# red-first evidence is the whole set, not a sample — measured by loading
-# `origin/main`'s module in place of this one: 15 failed, 212 passed (227 total).
+# Each test below is RED on the pre-fix module. Measured by loading `origin/main`'s
+# module in place of this one — 16 failed, 211 passed (227 total) — and the 16 break
+# down EXACTLY as: 12 x `TypeError: unexpected keyword argument 'already_written'`,
+# 1 x `AssertionError: Regex pattern did not match` (the bare-key test asserts the
+# refusal MESSAGE, so the interpreter's own TypeError lands inside its
+# `pytest.raises`), 1 x `AttributeError: no attribute 'already_persisted'`, and 2 x
+# `Failed: DID NOT RAISE ValueError` (the `SummaryUnit` class-invariant tests —
+# `main` has no class check to drop). So the red-first evidence is the whole set,
+# not a sample.
 # (`settled`'s own SEMANTICS are not proved by that run — none of these tests
 # reaches it pre-fix; they are held by the `settled = not units` revert, which
 # reddens three of them.)
@@ -1405,12 +1409,16 @@ def test_a_summary_unit_without_a_claim_class_is_refused_not_built() -> None:
     """The CLASS is load-bearing since the loop landed, and it was unvalidated.
 
     ``SummaryUnit.__post_init__`` checked the span, the claim, ``derived`` and the
-    ``unit_key`` — not the class. Two consequences, both measured: a store row
-    with ``claim_class=None`` (or an unhashable one from a JSON row) made the
-    store-contradiction refusal escape as ``TypeError`` from ``sorted`` /
-    ``unhashable type`` instead of the documented ``ValueError``, and
-    ``plan_writeback`` would happily MINT a unit whose class is ``None``. Fail
-    closed at the type, next to the other invariants.
+    ``unit_key`` — not the class. Two consequences, both measured on a mutant that
+    drops only this check: an unhashable class (a JSON row's ``list``) made the
+    store-contradiction refusal escape as ``TypeError: unhashable type`` raised
+    while building the message's SET LITERAL — not ``sorted``, which sorts by
+    ``repr`` precisely so a class that is merely unorderable cannot do this — and
+    a ``None`` class raised ``TypeError: '<' not supported …`` from ``sorted``
+    only BEFORE that ``key=repr`` landed. Either way the caller's documented
+    ``except ValueError`` recovery missed it, and ``plan_writeback`` would happily
+    MINT a unit whose class is ``None``. Fail closed at the type, next to the
+    other invariants.
     """
     span = _span()
     with pytest.raises(ValueError, match="claim class"):
