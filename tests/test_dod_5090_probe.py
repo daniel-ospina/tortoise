@@ -655,13 +655,23 @@ def test_the_instrument_is_selected_by_its_own_subjects():
     `eval`), and why `tools/dod_5090_probe.py` needs a `CORE_ALSO` entry (a
     `tools/`-only diff is swallowed by NON_PYTHON_PREFIXES before the fallback
     runs, so it selected 70 unrelated files and not this one).
+
+    ⛔ `#11444`: `tortoise/embed_writer_register.py` is now a SUBJECT of this
+    file's own scoring — row 1 reads it — so it must SELECT this file too. It
+    currently selects through the `core` fallback (it matches no named
+    SOURCE_PATTERNS entry, which `ci-surfaces.yml` records at its
+    `test_embed_writer_register.py` row); pinned here so a future named match
+    that REPLACES the fallback cannot silently stop selecting the instrument
+    whose row now depends on it. Taken from `#11463`'s tree when this PR was kept
+    over it in the `#11444` dedupe, so its one unique guard is not lost.
     """
     import ci_selection
 
     manifest = ci_selection.load_manifest()
     for subject in ("tortoise/embed_gate.py", "tortoise/value_gate.py",
                     "tortoise/embeddings.py", "tortoise/search_engine.py",
-                    "tortoise/security.py", "tools/dod_5090_probe.py"):
+                    "tortoise/security.py", "tools/dod_5090_probe.py",
+                    "tortoise/embed_writer_register.py"):
         selected = ci_selection.select([subject], "pull_request", manifest)
         assert "test_dod_5090_probe.py" in selected["test_files"], (
             f"a {subject}-only diff does not select this file — its falsifiers "
