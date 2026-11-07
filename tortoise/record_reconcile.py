@@ -821,9 +821,12 @@ def log_result(result: RecordReconcileResult,
         # record-owned: the §9.1/D1 pair the narrowing DECLINES (the record
         # holds it, its repair is the IN-PLACE reconciler #11070 — ⛔ not a
         # re-projection, whose write is additive —) and the not-projectable
-        # column (the record holds it and the graph must NOT — its repair is
-        # #10017's purge). Calling them all "owned" sends the operator to the
-        # wrong repair.
+        # column (the record holds it and the graph must NOT — its repair is a
+        # full restore's wipe where the graph is a test one, or an explicit
+        # REMOVE n.story_arc on the anchor; ⛔ not `#10017`, which purges turn
+        # `:Point`s only — the module docstring's distinction, restated here
+        # because this rendered line is the operator's pointer). Calling them
+        # all "owned" sends the operator to the wrong repair.
         line += (f" [graph_only={result.graph_only_total} cache-held "
                  f"property occurrence(s) not compared ({names}{more})]")
     verdict = result.verdict()
