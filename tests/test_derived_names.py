@@ -778,31 +778,26 @@ def _raw_client_call_positions(source: str) -> list[int]:
             # usable). Gate OPEN on the conventional name rather than silently
             # returning no sites for the whole file.
             names.add("FalkorDB")
-    if not names:
-        # NO import statement resolved a name — but the file may still construct a
-        # raw client, because `falkordb` can arrive by a route the parser does not
-        # read: `import falkordb.falkordb` (a dotted statement),
-        # `fdb = pytest.importorskip("falkordb")`, a `try:`/`except ImportError:`
-        # pair, a star-import alias, or any future spelling. Returning `[]` here
-        # made such a file INVISIBLE while the census reported clean — the same
-        # gate-off class rounds 2 and 3 closed (#11217 review P2s). So: if the
-        # masked source mentions `falkordb` at all, gate OPEN on the conventional
-        # name and let the ownership decision judge the sites it finds.
-        #
-        # Cost measured before taking it: over the corpus this newly judges ZERO
-        # sites (no non-exempt file mentions `falkordb` without also matching an
-        # import statement), so it adds no false BLOCK.
-        if not re.search(r"\bfalkordb\b", masked):
-            return []
-        # A QUALIFIED construction must be matchable too when the gate opened this
-        # way: the route that brings `falkordb` in also decides the spelling used
-        # to construct from it — `fdb.FalkorDB` after
-        # `import falkordb.falkordb as fdb`, or `falkordb.falkordb.FalkorDB` after
-        # the plain dotted import. A bare `FalkorDB` alone left each of those at
-        # `sites=0` (round-4 P2).
-        pattern = r"(?:[A-Za-z_]\w*\.)*FalkorDB"
+    qualified = r"(?:[A-Za-z_]\w*\.)*FalkorDB"
+    if names:
+        # ALWAYS OR in the qualified form. A file can resolve an import name AND
+        # still construct through a SECOND route the statement parser cannot see
+        # — `from falkordb import FalkorDB` plus
+        # `fdb = pytest.importorskip("falkordb")`, where the DETACHing call is
+        # `fdb.FalkorDB(...)`. Restricting the match to the resolved names left
+        # that construction invisible (#11217 round-5 review P2, measured
+        # `sites=0`).
+        pattern = "|".join(
+            [re.escape(n) for n in sorted(names)] + [qualified])
     else:
-        pattern = "|".join(re.escape(n) for n in sorted(names))
+        # The module name may appear only inside a STRING — `fdb =
+        # pytest.importorskip("falkordb")`, `importlib.import_module("falkordb")`
+        # — which masking erases, so this trigger reads the RAW source. A comment
+        # naming it also opens the gate, which is harmless: it only widens the
+        # construction match, and a file with no construction yields no site.
+        if not re.search(r"\bfalkordb\b", source):
+            return []
+        pattern = qualified
     return [m.start()
             for m in re.finditer(rf"(?<![\w.])(?:{pattern})\s*\(", masked)]
 
@@ -2121,6 +2116,23 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         "importorskip": (
             "import pytest\nfalkordb = pytest.importorskip(\"falkordb\")\n",
             "falkordb.FalkorDB"),
+        # Round-5 P2: the module name lives ONLY inside a string, so the trigger
+        # has to read the RAW source — masking erased it and the whole file went
+        # invisible. Bound to a local that is NOT named `falkordb`, which is what
+        # defeated the masked trigger AND the resolved-name pattern.
+        "importorskip, aliased": (
+            "import pytest\nfdb = pytest.importorskip(\"falkordb\")\n",
+            "fdb.FalkorDB"),
+        "import_module, aliased": (
+            "import importlib\nfdb = importlib.import_module(\"falkordb\")\n",
+            "fdb.FalkorDB"),
+        # A RESOLVED name plus a second, unreadable alias: `names` is non-empty
+        # here, so the fallback never fires — the qualified form must be ORed
+        # into the resolved pattern or this construction stays invisible.
+        "resolved name + aliased importorskip": (
+            "from falkordb import FalkorDB\n"
+            "import pytest\nfdb = pytest.importorskip(\"falkordb\")\n",
+            "fdb.FalkorDB"),
     }
     site = tmp_path / "test_spelling.py"
     for label, (header, construct) in spellings.items():

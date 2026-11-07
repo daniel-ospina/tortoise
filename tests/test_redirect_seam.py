@@ -594,9 +594,35 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     assert getattr(original, "__name__", "") != "_thread_start_inherit_stem", (
         "Thread.start was double-wrapped: the installed stamp calls ANOTHER "
         f"stamp ({original!r}) instead of the original threading start")
-    proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
-    assert threading.Thread.start is installed, \
-        "a re-invoked installer re-wrapped Thread.start despite the marker"
+    # (c) THE MARKER is what makes a re-invocation a no-op, and FUNCTION
+    # IDENTITY cannot show it: re-assigning the same stamp object changes nothing
+    # either way, and `_TEST_SESSION_ACTIVE` is False in this test (set in (a)),
+    # so the installer returns on its FIRST condition and never reads the marker.
+    # Measured (#11217 round-5 review P2): deleting
+    # `and not getattr(threading.Thread, "_tortoise_stamp_installed", False)` from
+    # `install_thread_stamp` left this assertion GREEN. So assert the marker's
+    # EFFECT with a decoy, in both directions.
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", True)
+
+    def _decoy(self, *args, **kwargs):  # parked on Thread.start; must survive
+        raise AssertionError("the decoy start ran — the installer replaced it")
+
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
+        "conftest did not leave the install marker set"
+    monkeypatch.setattr(threading.Thread, "start", _decoy)
+    proj_mod.install_thread_stamp()  # marker PRESENT → must not install
+    assert threading.Thread.start is _decoy, \
+        "the marker did not stop a re-invoked installer re-wrapping Thread.start"
+
+    # Negative direction: with the marker GONE the installer MUST install. Without
+    # this pair the marker clause is unpinned and can be deleted silently.
+    monkeypatch.delattr(threading.Thread, "_tortoise_stamp_installed",
+                        raising=False)
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
+        "with the marker gone the installer did not install the stamp"
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
+        "the installer installed the stamp but did not set the marker"
 
 
 def test_a_RELOAD_keeps_the_REAL_Thread_start():
