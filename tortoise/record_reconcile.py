@@ -165,7 +165,11 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   names no ``story_arc`` clause, and the creation fold's open-set passthrough
   (``_persist_extra_props``, which ``_revise_point`` never calls) skips a ``None``
   by design — so a ``rebuild_all`` over a journal whose CREATION record carried
-  the prose RESTORES it, and that is ``#10429``'s replay half. The RECORD→CACHE
+  the prose RESTORES it, and that is ``#10429``'s replay half. ⚠️ On a graph the
+  rebuild can REACH: it asks the same L2 name guard as the restore
+  (``_assert_test_graph``, refused PRE-WIPE on every production name), so a
+  production server graph refuses the replay and the clear is durable there. The
+  RECORD→CACHE
   lane does the opposite (the ``PointRevised`` patch stores
   ``props.story_arc = null``, ``_props_from_row`` returns it, and
   ``node_statement`` renders ``SET n += $props``, where a null REMOVES the key),
@@ -837,10 +841,15 @@ def log_result(result: RecordReconcileResult,
         # production SERVER graph name, #2944 L2 — or a graph-side
         # REMOVE n.story_arc that no instrument ships today; ⚠️ on a `:Point` the
         # clear is `update_point(<id>, story_arc=None)`, which keeps the node and
-        # needs no wipe — though it is JOURNAL-durable only: a `rebuild_all` over a
-        # journal whose creation record carried the prose restores it (#10429),
-        # while the RECORD→CACHE rebuild replays the stored null and keeps it
-        # clear); #10017's purge is a DIFFERENT population — legacy episodic turn
+        # needs no wipe — though its durability is the JOURNAL's only: a
+        # `rebuild_all` over a journal whose creation record carried the prose
+        # restores it (#10429), while the RECORD→CACHE rebuild replays the stored
+        # null and keeps it clear. ⚠️ That is the bound's REACH, not an absolute:
+        # `rebuild_all` asks the SAME L2 name guard as the restore
+        # (`_assert_test_graph`, "REFUSING to run bulk DETACH DELETE on non-test
+        # graph", unconditional per #2944), so on a production server graph the
+        # replay is refused PRE-WIPE and the clear IS durable there); #10017's
+        # purge is a DIFFERENT population — legacy episodic turn
         # :Points — and names no story_arc. Calling them all "owned" sends the
         # operator to the wrong repair.
         line += (f" [graph_only={result.graph_only_total} cache-held "
