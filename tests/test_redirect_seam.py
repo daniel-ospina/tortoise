@@ -572,12 +572,53 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
         "the test-stem stamp must appear exactly ONCE in the installed "
         f"Thread.start chain (found {len(stamps)}; installed {installed!r}; "
         f"chain {chain!r}) — absent means worker threads lose the per-thread "
-        "test-module attribution #1686 depends on, twice means the installer "
-        "re-ran without the marker guard"
+        "test-module attribution #1686 depends on. A SECOND occurrence is not "
+        "reachable here and so is not claimed: `install_thread_stamp` ASSIGNS "
+        "(`Thread.start = _thread_start_inherit_stem`) rather than chaining, and "
+        "the walk cuts a cycle — the idempotence arm below is the one that "
+        "detects a re-wrap"
     )
     proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
     assert threading.Thread.start is installed, \
         "re-invoked installer double-wrapped Thread.start"
+
+
+def test_the_install_idempotence_arm_has_teeth(monkeypatch):
+    """Drive the re-invocation assertion above with a CHAINING installer and
+    require it to red.
+
+    The real installer only ever ASSIGNS, so on an unwrapped tree re-running it
+    is an identity no-op even with the marker guard deleted — the assertion
+    above cannot fire there. What it CAN and must catch is the shape a
+    "guard removed" repair actually takes once a third-party wrapper exists:
+    wrapping whatever is installed, every time, which grows the chain and
+    changes the installed callable. Without this the arm is unproven, and an
+    unproven pin is a rubber stamp (#2656's class).
+    """
+    import threading as _threading
+
+    from tortoise import projection as proj_mod
+
+    saved_start = _threading.Thread.start
+
+    def _chaining_install() -> None:
+        prev = _threading.Thread.start
+
+        def chained(self, *args, **kwargs):
+            return prev(self, *args, **kwargs)
+
+        _threading.Thread.start = chained
+
+    try:
+        installed = _threading.Thread.start
+        monkeypatch.setattr(proj_mod, "install_thread_stamp", _chaining_install)
+        proj_mod.install_thread_stamp()
+        assert _threading.Thread.start is not installed, (
+            "the idempotence arm is vacuous: a chaining installer left "
+            "Thread.start identical, so the pin cannot detect a re-wrap"
+        )
+    finally:
+        _threading.Thread.start = saved_start
 
 
 def _installed_start_chain() -> list:
