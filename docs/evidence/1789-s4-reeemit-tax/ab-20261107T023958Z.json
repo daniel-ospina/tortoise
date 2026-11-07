@@ -1,0 +1,2082 @@
+{
+ "instrument": "tools/s4_reeemit_tax.py",
+ "issue": "#1789",
+ "measured_at": "2026-11-07T02:42:24Z",
+ "model_id": "deepseek-v4-flash",
+ "receipt_dir": "tests/eval/write_path/receipts/7947-arms-2026-10-18",
+ "embeds_arm": "narrative",
+ "contracts": {
+  "legacy": "S4_TMPL (complete-list re-emit) \u2014 TORTOISE_S4_DELTA=0",
+  "delta": "S4_TMPL_DELTA (gaps + corrections only) \u2014 shipped default"
+ },
+ "inputs": [
+  {
+   "session": "wp01_quarry_debug",
+   "receipt": "tests/eval/write_path/receipts/7947-arms-2026-10-18/wp01_quarry_debug.arms.json",
+   "s2_items": 44,
+   "s2_reference": {
+    "completion_tokens": 5266,
+    "prompt_tokens": 9310
+   },
+   "turns": 26
+  },
+  {
+   "session": "wp02_lumen_refactor",
+   "receipt": "tests/eval/write_path/receipts/7947-arms-2026-10-18/wp02_lumen_refactor.arms.json",
+   "s2_items": 41,
+   "s2_reference": {
+    "completion_tokens": 4424,
+    "prompt_tokens": 9068
+   },
+   "turns": 22
+  },
+  {
+   "session": "wp03_ember_design",
+   "receipt": "tests/eval/write_path/receipts/7947-arms-2026-10-18/wp03_ember_design.arms.json",
+   "s2_items": 39,
+   "s2_reference": {
+    "completion_tokens": 4130,
+    "prompt_tokens": 9066
+   },
+   "turns": 24
+  },
+  {
+   "session": "wp04_aurora_perf",
+   "receipt": "tests/eval/write_path/receipts/7947-arms-2026-10-18/wp04_aurora_perf.arms.json",
+   "s2_items": 33,
+   "s2_reference": {
+    "completion_tokens": 4187,
+    "prompt_tokens": 8849
+   },
+   "turns": 20
+  },
+  {
+   "session": "wp05_retro_writeup",
+   "receipt": "tests/eval/write_path/receipts/7947-arms-2026-10-18/wp05_retro_writeup.arms.json",
+   "s2_items": 49,
+   "s2_reference": {
+    "completion_tokens": 5453,
+    "prompt_tokens": 9002
+   },
+   "turns": 23
+  },
+  {
+   "session": "wp06_quarry_rollout",
+   "receipt": "tests/eval/write_path/receipts/7947-arms-2026-10-18/wp06_quarry_rollout.arms.json",
+   "s2_items": 29,
+   "s2_reference": {
+    "completion_tokens": 3263,
+    "prompt_tokens": 8728
+   },
+   "turns": 22
+  },
+  {
+   "session": "wp07_bluepeak_followup",
+   "receipt": "tests/eval/write_path/receipts/7947-arms-2026-10-18/wp07_bluepeak_followup.arms.json",
+   "s2_items": 31,
+   "s2_reference": {
+    "completion_tokens": 3542,
+    "prompt_tokens": 8876
+   },
+   "turns": 22
+  }
+ ],
+ "arms": [
+  {
+   "session": "wp01_quarry_debug",
+   "legacy": {
+    "arm": "legacy",
+    "delta": false,
+    "out_tokens": 5794,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 17186,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": null,
+    "s4_delta_reemit_suspect": null,
+    "escalation_out_tokens": 0,
+    "s2_items": 44,
+    "s4_items": 47,
+    "merged_items": 47,
+    "verbatim_reemissions": 33,
+    "corrected_by_s4": 44,
+    "added_by_s4": 3,
+    "kept_from_s2": 0,
+    "added_items": {
+     "count": 3,
+     "candidates": 3,
+     "recorded": 3,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "points",
+       "key": "poin:points | the hydrate stage shares the same code as the wire stage but was audited and found clean",
+       "content": "The hydrate stage shares the same code as the wire stage but was audited and found clean",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "operators",
+       "key": "oper:op | the lease is keyed by batch id with a thirty-second expiry and a compare-and-swap update on completion | the retry loop added in the batch runner bypassed ",
+       "content": "",
+       "kind": null,
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "operators",
+       "key": "oper:op | a retry path that does not re-establish ownership before processing silently defeats any downstream completion check; ownership must be claimed before work",
+       "content": "",
+       "kind": null,
+       "lifecycle": null,
+       "supersedes": null
+      }
+     ]
+    },
+    "corrected_items": {
+     "count": 11,
+     "candidates": 11,
+     "recorded": 11,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "entities",
+       "key": "enti:entity | halcyon event archive re-ingest | workitem",
+       "content": "Halcyon event archive re-ingest",
+       "kind": "core:WorkItem",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | wire stage | workflow",
+       "content": "wire stage",
+       "kind": "core:workflow",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | hydrate stage | workflow",
+       "content": "hydrate stage",
+       "kind": "core:workflow",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | batch runner retry loop | code",
+       "content": "batch runner retry loop",
+       "kind": "dev:code",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | single-owner batch lease | strategy",
+       "content": "single-owner batch lease",
+       "kind": "core:strategy",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | distributed lock service | tool",
+       "content": "distributed lock service",
+       "kind": "core:tool",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | lease table migration | workitem",
+       "content": "lease table migration",
+       "kind": "core:WorkItem",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | ingest queue service | tool",
+       "content": "ingest queue service",
+       "kind": "core:tool",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | maya chen | naturalperson",
+       "content": "Maya Chen",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | tomas | naturalperson",
+       "content": "Tomas",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | old platform group | team",
+       "content": "old platform group",
+       "kind": "core:team",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      }
+     ]
+    },
+    "elapsed_s": 23.04
+   },
+   "delta": {
+    "arm": "delta",
+    "delta": true,
+    "out_tokens": 101,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 17428,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": false,
+    "s4_delta_reemit_suspect": false,
+    "escalation_out_tokens": 0,
+    "s2_items": 44,
+    "s4_items": 0,
+    "merged_items": 44,
+    "verbatim_reemissions": 0,
+    "corrected_by_s4": 0,
+    "added_by_s4": 0,
+    "kept_from_s2": 44,
+    "added_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "corrected_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "elapsed_s": 1.76
+   }
+  },
+  {
+   "session": "wp02_lumen_refactor",
+   "legacy": {
+    "arm": "legacy",
+    "delta": false,
+    "out_tokens": 4391,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 15736,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": null,
+    "s4_delta_reemit_suspect": null,
+    "escalation_out_tokens": 0,
+    "s2_items": 41,
+    "s4_items": 41,
+    "merged_items": 41,
+    "verbatim_reemissions": 32,
+    "corrected_by_s4": 41,
+    "added_by_s4": 0,
+    "kept_from_s2": 0,
+    "added_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "corrected_items": {
+     "count": 9,
+     "candidates": 9,
+     "recorded": 9,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "entities",
+       "key": "enti:entity | lumen auth migration | project",
+       "content": "lumen auth migration",
+       "kind": "core:Project",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | per-graph api keys | strategy",
+       "content": "per-graph API keys",
+       "kind": "core:strategy",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | tt_ key prefix | standard",
+       "content": "tt_ key prefix",
+       "kind": "core:standard",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | bluepeak logistics | customer",
+       "content": "Bluepeak Logistics",
+       "kind": "product-strategy:customer",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | priya | naturalperson",
+       "content": "Priya",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | per-graph key table | feature",
+       "content": "per-graph key table",
+       "kind": "product-strategy:feature",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | admin settings screen | tool",
+       "content": "admin settings screen",
+       "kind": "core:tool",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "changed"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | cross-team token incident | incident",
+       "content": "cross-team token incident",
+       "kind": "dev:incident",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | sandbox org | organization",
+       "content": "sandbox org",
+       "kind": "core:organization",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      }
+     ]
+    },
+    "elapsed_s": 16.95
+   },
+   "delta": {
+    "arm": "delta",
+    "delta": true,
+    "out_tokens": 138,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 15978,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": false,
+    "s4_delta_reemit_suspect": false,
+    "escalation_out_tokens": 0,
+    "s2_items": 41,
+    "s4_items": 0,
+    "merged_items": 41,
+    "verbatim_reemissions": 0,
+    "corrected_by_s4": 0,
+    "added_by_s4": 0,
+    "kept_from_s2": 41,
+    "added_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "corrected_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "elapsed_s": 1.84
+   }
+  },
+  {
+   "session": "wp03_ember_design",
+   "legacy": {
+    "arm": "legacy",
+    "delta": false,
+    "out_tokens": 4633,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 15309,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": null,
+    "s4_delta_reemit_suspect": null,
+    "escalation_out_tokens": 0,
+    "s2_items": 39,
+    "s4_items": 42,
+    "merged_items": 42,
+    "verbatim_reemissions": 28,
+    "corrected_by_s4": 39,
+    "added_by_s4": 3,
+    "kept_from_s2": 0,
+    "added_items": {
+     "count": 3,
+     "candidates": 3,
+     "recorded": 3,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "points",
+       "key": "poin:points | an ownership-based router's obvious weakness is that services with no owner row would otherwise fall through, which is why the default-rotation fallbac",
+       "content": "An ownership-based router's obvious weakness is that services with no owner row would otherwise fall through, which is why the default-rotation fallback exists",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "points",
+       "key": "poin:points | the severity preflight is the noise-reduction-at-the-source lever, as opposed to merely routing noise better",
+       "content": "The severity preflight is the noise-reduction-at-the-source lever, as opposed to merely routing noise better",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "operators",
+       "key": "oper:op | a service with no owner row falls to the default rotation and is flagged in the weekly ownership report, so no alert is silently dropped | an ownership-bas",
+       "content": "",
+       "kind": null,
+       "lifecycle": null,
+       "supersedes": null
+      }
+     ]
+    },
+    "corrected_items": {
+     "count": 11,
+     "candidates": 11,
+     "recorded": 11,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "entities",
+       "key": "enti:entity | ember alerting redesign | project",
+       "content": "ember alerting redesign",
+       "kind": "core:Project",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | lumen service ownership table | standard",
+       "content": "lumen service ownership table",
+       "kind": "core:standard",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | ownership-based alert routing | workflow",
+       "content": "ownership-based alert routing",
+       "kind": "core:workflow",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | default rotation fallback | workflow",
+       "content": "default rotation fallback",
+       "kind": "core:workflow",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | severity preflight | workflow",
+       "content": "severity preflight",
+       "kind": "core:workflow",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | maintenance window auto-suppress | workflow",
+       "content": "maintenance window auto-suppress",
+       "kind": "core:workflow",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | human-owned maintenance window declarations | workflow",
+       "content": "human-owned maintenance window declarations",
+       "kind": "core:workflow",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | morning digest | workflow",
+       "content": "morning digest",
+       "kind": "core:workflow",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | ownership-table migration | plan",
+       "content": "ownership-table migration",
+       "kind": "core:plan",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | four actionable pages per week | target",
+       "content": "four actionable pages per week",
+       "kind": "core:target",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | ember design doc | other",
+       "content": "ember design doc",
+       "kind": "core:other",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      }
+     ]
+    },
+    "elapsed_s": 17.82
+   },
+   "delta": {
+    "arm": "delta",
+    "delta": true,
+    "out_tokens": 93,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 15551,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": false,
+    "s4_delta_reemit_suspect": false,
+    "escalation_out_tokens": 0,
+    "s2_items": 39,
+    "s4_items": 0,
+    "merged_items": 39,
+    "verbatim_reemissions": 0,
+    "corrected_by_s4": 0,
+    "added_by_s4": 0,
+    "kept_from_s2": 39,
+    "added_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "corrected_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "elapsed_s": 1.89
+   }
+  },
+  {
+   "session": "wp04_aurora_perf",
+   "legacy": {
+    "arm": "legacy",
+    "delta": false,
+    "out_tokens": 4302,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 15360,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": null,
+    "s4_delta_reemit_suspect": null,
+    "escalation_out_tokens": 0,
+    "s2_items": 33,
+    "s4_items": 33,
+    "merged_items": 33,
+    "verbatim_reemissions": 30,
+    "corrected_by_s4": 33,
+    "added_by_s4": 0,
+    "kept_from_s2": 0,
+    "added_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "corrected_items": {
+     "count": 3,
+     "candidates": 3,
+     "recorded": 3,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "entities",
+       "key": "enti:entity | related-memory sidebar | feature",
+       "content": "related-memory sidebar",
+       "kind": "product-strategy:feature",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | aurora dashboard load endpoint | feature",
+       "content": "aurora dashboard load endpoint",
+       "kind": "product-strategy:feature",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | aurora dashboard perf review | workflow",
+       "content": "aurora dashboard perf review",
+       "kind": "core:workflow",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      }
+     ]
+    },
+    "elapsed_s": 16.69
+   },
+   "delta": {
+    "arm": "delta",
+    "delta": true,
+    "out_tokens": 94,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 15602,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": false,
+    "s4_delta_reemit_suspect": false,
+    "escalation_out_tokens": 0,
+    "s2_items": 33,
+    "s4_items": 0,
+    "merged_items": 33,
+    "verbatim_reemissions": 0,
+    "corrected_by_s4": 0,
+    "added_by_s4": 0,
+    "kept_from_s2": 33,
+    "added_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "corrected_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "elapsed_s": 1.69
+   }
+  },
+  {
+   "session": "wp05_retro_writeup",
+   "legacy": {
+    "arm": "legacy",
+    "delta": false,
+    "out_tokens": 6521,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 17711,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": null,
+    "s4_delta_reemit_suspect": null,
+    "escalation_out_tokens": 0,
+    "s2_items": 49,
+    "s4_items": 53,
+    "merged_items": 53,
+    "verbatim_reemissions": 32,
+    "corrected_by_s4": 49,
+    "added_by_s4": 4,
+    "kept_from_s2": 0,
+    "added_items": {
+     "count": 4,
+     "candidates": 4,
+     "recorded": 4,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "points",
+       "key": "poin:points | the bluepeak retro is published company-wide",
+       "content": "The Bluepeak retro is published company-wide",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "points",
+       "key": "poin:points | aisha pushed the team to check the config diff instead of the search index, which is where the real cause was found",
+       "content": "Aisha pushed the team to check the config diff instead of the search index, which is where the real cause was found",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "points",
+       "key": "poin:points | both follow-up actions \u2014 the pre-deploy partition check and the config diff visibility \u2014 were proposed by nora",
+       "content": "Both follow-up actions \u2014 the pre-deploy partition check and the config diff visibility \u2014 were proposed by Nora",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "operators",
+       "key": "oper:op | the rollback went smoothly because the deploy tooling kept the previous config one click away | the bluepeak search outage ran from 9:12am to 12:53pm on 20",
+       "content": "",
+       "kind": null,
+       "lifecycle": null,
+       "supersedes": null
+      }
+     ]
+    },
+    "corrected_items": {
+     "count": 17,
+     "candidates": 17,
+     "recorded": 17,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "entities",
+       "key": "enti:entity | bluepeak search incident | incident",
+       "content": "Bluepeak search incident",
+       "kind": "dev:incident",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | config partition | bug",
+       "content": "config partition",
+       "kind": "dev:bug",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | search index misdiagnosis | bug",
+       "content": "search index misdiagnosis",
+       "kind": "dev:bug",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | config rollback to previous partition | runbook",
+       "content": "config rollback to previous partition",
+       "kind": "dev:runbook",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | pre-deploy partition weight check | issue",
+       "content": "pre-deploy partition weight check",
+       "kind": "dev:issue",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | config diff visibility in deploy review | issue",
+       "content": "config diff visibility in deploy review",
+       "kind": "dev:issue",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | shard capacity review | issue",
+       "content": "shard capacity review",
+       "kind": "dev:issue",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | search slo | indicator",
+       "content": "search SLO",
+       "kind": "dev:indicator",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | bluepeak service credit | agreement",
+       "content": "Bluepeak service credit",
+       "kind": "core:agreement",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | incident writeups opt-out by default | rule",
+       "content": "incident writeups opt-out by default",
+       "kind": "agent-ops:rule",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | maya | naturalperson",
+       "content": "Maya",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | diego | naturalperson",
+       "content": "Diego",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | priya | naturalperson",
+       "content": "Priya",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | aisha | naturalperson",
+       "content": "Aisha",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | nora | naturalperson",
+       "content": "Nora",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | sam | naturalperson",
+       "content": "Sam",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | search team | team",
+       "content": "search team",
+       "kind": "core:team",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      }
+     ]
+    },
+    "elapsed_s": 24.77
+   },
+   "delta": {
+    "arm": "delta",
+    "delta": true,
+    "out_tokens": 968,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 17953,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": false,
+    "s4_delta_reemit_suspect": false,
+    "escalation_out_tokens": 0,
+    "s2_items": 49,
+    "s4_items": 3,
+    "merged_items": 52,
+    "verbatim_reemissions": 0,
+    "corrected_by_s4": 0,
+    "added_by_s4": 3,
+    "kept_from_s2": 49,
+    "added_items": {
+     "count": 3,
+     "candidates": 3,
+     "recorded": 3,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "points",
+       "key": "poin:points | the bluepeak retro was published company-wide under the opt-out-by-default writeup policy",
+       "content": "The Bluepeak retro was published company-wide under the opt-out-by-default writeup policy",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "points",
+       "key": "poin:points | aisha pushed the team to check the config diff instead of the search index, which is where the real cause was found",
+       "content": "Aisha pushed the team to check the config diff instead of the search index, which is where the real cause was found",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "points",
+       "key": "poin:points | both follow-up actions were proposed by nora",
+       "content": "Both follow-up actions were proposed by Nora",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      }
+     ]
+    },
+    "corrected_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "elapsed_s": 5.07
+   }
+  },
+  {
+   "session": "wp06_quarry_rollout",
+   "legacy": {
+    "arm": "legacy",
+    "delta": false,
+    "out_tokens": 3162,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 13549,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": null,
+    "s4_delta_reemit_suspect": null,
+    "escalation_out_tokens": 0,
+    "s2_items": 29,
+    "s4_items": 29,
+    "merged_items": 29,
+    "verbatim_reemissions": 17,
+    "corrected_by_s4": 29,
+    "added_by_s4": 0,
+    "kept_from_s2": 0,
+    "added_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "corrected_items": {
+     "count": 12,
+     "candidates": 12,
+     "recorded": 12,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "entities",
+       "key": "enti:entity | the lease-before-claim fix | code",
+       "content": "the lease-before-claim fix",
+       "kind": "dev:code",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | the chaos harness | tool",
+       "content": "the chaos harness",
+       "kind": "core:tool",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | the lease cas | code",
+       "content": "the lease CAS",
+       "kind": "dev:code",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | the global kill flag | tool",
+       "content": "the global kill flag",
+       "kind": "core:tool",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | the per-service flags | tool",
+       "content": "the per-service flags",
+       "kind": "core:tool",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | the runbook | runbook",
+       "content": "the runbook",
+       "kind": "dev:runbook",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | the ingest queue service | other",
+       "content": "the ingest queue service",
+       "kind": "core:other",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | maya | naturalperson",
+       "content": "Maya",
+       "kind": "core:naturalPerson",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | the lease migration | code",
+       "content": "the lease migration",
+       "kind": "dev:code",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | the october freeze | target",
+       "content": "the October freeze",
+       "kind": "core:target",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "entities",
+       "key": "enti:entity | the september 30 cutoff | target",
+       "content": "the September 30 cutoff",
+       "kind": "core:target",
+       "lifecycle": "unchanged",
+       "supersedes": null,
+       "changed_fields": [
+        "lifecycle"
+       ],
+       "s2_before": {
+        "lifecycle": "created"
+       },
+       "s4_after": {
+        "lifecycle": "unchanged"
+       }
+      },
+      {
+       "section": "events",
+       "key": "even:events | the chaos harness run killed a lease-holding worker mid-batch across four shards and every batch was claimed exactly once after lease expiry, with no d",
+       "content": "The chaos harness run killed a lease-holding worker mid-batch across four shards and every batch was claimed exactly once after lease expiry, with no duplicates",
+       "kind": "core:experiment",
+       "lifecycle": null,
+       "supersedes": null,
+       "changed_fields": [
+        "slots"
+       ],
+       "s2_before": {
+        "slots": "{'subject': [{'name': 'the chaos harness', 'kind': 'core:tool', 'confidence': 0.9}], 'object': [{'name': 'the lease-before-claim fix', 'kind': 'core:code', 'con"
+       },
+       "s4_after": {
+        "slots": "{'subject': [{'name': 'the chaos harness', 'kind': 'core:tool', 'confidence': 0.9}], 'object': [{'name': 'the lease-before-claim fix', 'kind': 'dev:code', 'conf"
+       }
+      }
+     ]
+    },
+    "elapsed_s": 12.46
+   },
+   "delta": {
+    "arm": "delta",
+    "delta": true,
+    "out_tokens": 114,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 13791,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": false,
+    "s4_delta_reemit_suspect": false,
+    "escalation_out_tokens": 0,
+    "s2_items": 29,
+    "s4_items": 0,
+    "merged_items": 29,
+    "verbatim_reemissions": 0,
+    "corrected_by_s4": 0,
+    "added_by_s4": 0,
+    "kept_from_s2": 29,
+    "added_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "corrected_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "elapsed_s": 1.96
+   }
+  },
+  {
+   "session": "wp07_bluepeak_followup",
+   "legacy": {
+    "arm": "legacy",
+    "delta": false,
+    "out_tokens": 3984,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 14350,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": null,
+    "s4_delta_reemit_suspect": null,
+    "escalation_out_tokens": 0,
+    "s2_items": 31,
+    "s4_items": 33,
+    "merged_items": 33,
+    "verbatim_reemissions": 29,
+    "corrected_by_s4": 31,
+    "added_by_s4": 2,
+    "kept_from_s2": 0,
+    "added_items": {
+     "count": 2,
+     "candidates": 2,
+     "recorded": 2,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "points",
+       "key": "poin:points | the lease behaved as designed under the drifted clock: it expired early, a second worker claimed the batch, and the hydrate side saw the duplicate",
+       "content": "The lease behaved as designed under the drifted clock: it expired early, a second worker claimed the batch, and the hydrate side saw the duplicate",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "operators",
+       "key": "oper:op | any lease expiry landing inside the grace window is logged internally, so the grace bounds the skew hazard without making the lease lax | clock skew betwee",
+       "content": "",
+       "kind": null,
+       "lifecycle": null,
+       "supersedes": null
+      }
+     ]
+    },
+    "corrected_items": {
+     "count": 2,
+     "candidates": 1,
+     "recorded": 1,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 1,
+     "items": [
+      {
+       "section": "entities",
+       "key": "enti:entity | per-service flags | tool",
+       "content": "per-service flags",
+       "kind": "core:tool",
+       "lifecycle": "created",
+       "supersedes": "s2-ent-1",
+       "changed_fields": [
+        "supersedes"
+       ],
+       "s2_before": {
+        "supersedes": "global flag"
+       },
+       "s4_after": {
+        "supersedes": "s2-ent-1"
+       }
+      }
+     ]
+    },
+    "elapsed_s": 15.96
+   },
+   "delta": {
+    "arm": "delta",
+    "delta": true,
+    "out_tokens": 530,
+    "basis": "stats.cost.completion_tokens",
+    "prompt_tokens": 14592,
+    "truncated": false,
+    "finish_reason": "stop",
+    "attempts": 1,
+    "s4_delta_empty": false,
+    "s4_delta_reemit_suspect": false,
+    "escalation_out_tokens": 0,
+    "s2_items": 31,
+    "s4_items": 3,
+    "merged_items": 34,
+    "verbatim_reemissions": 0,
+    "corrected_by_s4": 0,
+    "added_by_s4": 3,
+    "kept_from_s2": 31,
+    "added_items": {
+     "count": 3,
+     "candidates": 3,
+     "recorded": 3,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": [
+      {
+       "section": "points",
+       "key": "poin:points | the lease behaved as designed under a drifted clock: it expired early, a second worker claimed the batch, and the hydrate side saw the duplicate",
+       "content": "The lease behaved as designed under a drifted clock: it expired early, a second worker claimed the batch, and the hydrate side saw the duplicate",
+       "kind": "statement",
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "operators",
+       "key": "oper:op | the bluepeak region clock drifted eleven seconds, which is exactly the six-minute duplicate window on the hydrate queue | the lease behaved as designed und",
+       "content": "",
+       "kind": null,
+       "lifecycle": null,
+       "supersedes": null
+      },
+      {
+       "section": "operators",
+       "key": "oper:op | the skew-tolerant lease grace period shipped to every region on 2026-10-09, so a lagging region's renewal cannot clobber a live lease and the clock-skew ri",
+       "content": "",
+       "kind": null,
+       "lifecycle": null,
+       "supersedes": null
+      }
+     ]
+    },
+    "corrected_items": {
+     "count": 0,
+     "candidates": 0,
+     "recorded": 0,
+     "cap": 40,
+     "cap_hit": false,
+     "cap_dropped": 0,
+     "unclassified": 0,
+     "items": []
+    },
+    "elapsed_s": 3.48
+   }
+  }
+ ],
+ "summary": {
+  "sessions_measured": 7,
+  "sessions_attempted": 7,
+  "sum_legacy_out_tokens": 32787,
+  "sum_delta_out_tokens": 2038,
+  "token_weighted_reduction": 0.9378,
+  "median_session_reduction": 0.9686,
+  "min_session_reduction": 0.8516,
+  "max_session_reduction": 0.9826,
+  "composition": {
+   "legacy": {
+    "s2_items": 266,
+    "s4_items": 278,
+    "merged_items": 278,
+    "added_by_s4": 12,
+    "corrected_by_s4": 266,
+    "verbatim_reemissions": 201
+   },
+   "delta": {
+    "s2_items": 266,
+    "s4_items": 6,
+    "merged_items": 272,
+    "added_by_s4": 6,
+    "corrected_by_s4": 0,
+    "verbatim_reemissions": 0
+   }
+  },
+  "rows": [
+   {
+    "session": "wp01_quarry_debug",
+    "legacy_out_tokens": 5794,
+    "delta_out_tokens": 101,
+    "reduction": 0.9826,
+    "legacy_truncated": false,
+    "delta_truncated": false,
+    "legacy_s4_items": 47,
+    "delta_s4_items": 0,
+    "s2_items": 44,
+    "delta_verbatim_reemissions": 0,
+    "delta_added_by_s4": 0,
+    "delta_corrected_by_s4": 0,
+    "delta_corrected_items": 0,
+    "legacy_error": null,
+    "delta_error": null
+   },
+   {
+    "session": "wp02_lumen_refactor",
+    "legacy_out_tokens": 4391,
+    "delta_out_tokens": 138,
+    "reduction": 0.9686,
+    "legacy_truncated": false,
+    "delta_truncated": false,
+    "legacy_s4_items": 41,
+    "delta_s4_items": 0,
+    "s2_items": 41,
+    "delta_verbatim_reemissions": 0,
+    "delta_added_by_s4": 0,
+    "delta_corrected_by_s4": 0,
+    "delta_corrected_items": 0,
+    "legacy_error": null,
+    "delta_error": null
+   },
+   {
+    "session": "wp03_ember_design",
+    "legacy_out_tokens": 4633,
+    "delta_out_tokens": 93,
+    "reduction": 0.9799,
+    "legacy_truncated": false,
+    "delta_truncated": false,
+    "legacy_s4_items": 42,
+    "delta_s4_items": 0,
+    "s2_items": 39,
+    "delta_verbatim_reemissions": 0,
+    "delta_added_by_s4": 0,
+    "delta_corrected_by_s4": 0,
+    "delta_corrected_items": 0,
+    "legacy_error": null,
+    "delta_error": null
+   },
+   {
+    "session": "wp04_aurora_perf",
+    "legacy_out_tokens": 4302,
+    "delta_out_tokens": 94,
+    "reduction": 0.9781,
+    "legacy_truncated": false,
+    "delta_truncated": false,
+    "legacy_s4_items": 33,
+    "delta_s4_items": 0,
+    "s2_items": 33,
+    "delta_verbatim_reemissions": 0,
+    "delta_added_by_s4": 0,
+    "delta_corrected_by_s4": 0,
+    "delta_corrected_items": 0,
+    "legacy_error": null,
+    "delta_error": null
+   },
+   {
+    "session": "wp05_retro_writeup",
+    "legacy_out_tokens": 6521,
+    "delta_out_tokens": 968,
+    "reduction": 0.8516,
+    "legacy_truncated": false,
+    "delta_truncated": false,
+    "legacy_s4_items": 53,
+    "delta_s4_items": 3,
+    "s2_items": 49,
+    "delta_verbatim_reemissions": 0,
+    "delta_added_by_s4": 3,
+    "delta_corrected_by_s4": 0,
+    "delta_corrected_items": 0,
+    "legacy_error": null,
+    "delta_error": null
+   },
+   {
+    "session": "wp06_quarry_rollout",
+    "legacy_out_tokens": 3162,
+    "delta_out_tokens": 114,
+    "reduction": 0.9639,
+    "legacy_truncated": false,
+    "delta_truncated": false,
+    "legacy_s4_items": 29,
+    "delta_s4_items": 0,
+    "s2_items": 29,
+    "delta_verbatim_reemissions": 0,
+    "delta_added_by_s4": 0,
+    "delta_corrected_by_s4": 0,
+    "delta_corrected_items": 0,
+    "legacy_error": null,
+    "delta_error": null
+   },
+   {
+    "session": "wp07_bluepeak_followup",
+    "legacy_out_tokens": 3984,
+    "delta_out_tokens": 530,
+    "reduction": 0.867,
+    "legacy_truncated": false,
+    "delta_truncated": false,
+    "legacy_s4_items": 33,
+    "delta_s4_items": 3,
+    "s2_items": 31,
+    "delta_verbatim_reemissions": 0,
+    "delta_added_by_s4": 3,
+    "delta_corrected_by_s4": 0,
+    "delta_corrected_items": 0,
+    "legacy_error": null,
+    "delta_error": null
+   }
+  ]
+ },
+ "caveats": [
+  "Measured per-session S4 output tokens on RECORDED real S2 geometry; both arms get the same INPUT CONTENT, but the delta contract's own instruction is longer, so the delta arm's prompt is +242 tokens in every session of these runs \u2014 a small POSITIVE input cost, not a saving. The delta measured here is therefore the whole contract's effect, and the prompt did not get cheaper.",
+  "One call per arm per session (no production-run composition): model compliance in the wild is not measured here \u2014 it is OBSERVABLE per row via verbatim_reemissions / added_by_s4 / corrected_by_s4 / s4_delta_reemit_suspect.",
+  "The S3 search block is reconstructed from the session's own S2 list and is NOT production geometry: extract_session_v2 runs S3 (search_graph) BEFORE S4 and writes the session's items only afterwards (execute_embed), so production S4 sees bounded PREVIOUS-graph hits (max_queries=15 x limit=3, the capture's own turn echoes dropped). Relabelling the session's own list as already-in-the-graph is the maximally gap-SUPPRESSING input for a delta contract, so the measured saving is a CEILING and the delta arm's added_by_s4 / s4_items read as a floor.",
+  "model_id is the model REQUESTED; the served id is not recorded here.",
+  "Accuracy / chunk@20 are the eval lane's gates and are NOT measured here."
+ ]
+}
