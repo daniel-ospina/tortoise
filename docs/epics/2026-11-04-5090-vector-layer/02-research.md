@@ -178,11 +178,11 @@ comparables now say what that measurement will probably show, and how to run it:
 
 > *"**No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists … and this step list has no home for it. S2.3's kNN path **silently assumes every candidate is embedded.** ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list."*
 
-**⇒ So the epic's S1 was under-specified — but not in the way this section first said.** Arming a default does not resolve G2: the step list is the **eight steps of §4.1** — `S0`, `S1`, `S2.1`, `S2.2`, `S2.3`, `S3`, `S5`, `S6` (⛔ *"There is no S4 — do not restore one"*) — and **none of them is an EMBED decision**. `S2.2` is the VET/`DISCARD` point; the EMBED question ("is this row worth an embedding?") has no home at all. That is a **step-list** gap, and no flag can close it.
+**⇒ So the epic's S1 was under-specified — but not in the way this section first said.** Arming a default does not resolve G2: the step list is the **eight steps of §4.1** — `S0`, `S1`, `S2.1`, `S2.2`, `S2.3`, `S3`, `S5`, `S6` (⛔ *"There is no S4 — do not restore one"*) — and **none of them is an EMBED decision**. `S2.2` is the VET/`DISCARD` point; the EMBED question ("is this row worth an embedding?") has no home **in that step list** — its only home is the embedding submission seam in code (see the write path above). That is a **step-list** gap, and no flag can close it.
 
 ### ✅ The VALUE gate's default half is ALREADY satisfied (`#10996`)
 
-This section first claimed *"the VALUE gate is off too"*. ⛔ **That was false at this head**, and it is the defect this repository keeps re-earning: a design-document citation believed over the code. §S2.2's citations predate `#10996`, which **flipped the value gate ON**.
+This section first claimed *"the VALUE gate is off too"*. ⛔ **That was false at this head.** §S2.2 never said otherwise — it *requires* the mechanical half to default ON. The stale teacher was a **code docstring**: `tortoise/embed_gate.py`'s *"The flag (off by default)"* line was read as covering **both** flags, when the very next sentence of that docstring says `TORTOISE_VALUE_GATE` *"was the third member of that precedent until `#10996` flipped it ON by default"*. `#10996` (`277a559b1`) is an ancestor of this head, and its follow-up `7ca0c0ff4` had to fix the docstrings that still taught the old precedent.
 
 Verified at this head:
 
@@ -202,14 +202,18 @@ This section first repeated v4's wiring note as an open defect. At this head the
 
 ⇒ `DISCARD` already precedes `EMBED`. (`classify_consolidation` is a per-point dedup API, not the pruning site — citing it for this was wrong twice over.) v4's wiring note still **reads** as outstanding because its citations belong to the `c79ba1cf2` pin; that passage is stale at this head, and re-asserting it here is how the stale claim would have propagated.
 
+⚠️ **And it has already propagated to a child.** `#11086`'s body still carries the superseded premise (*"`S2.3 — CLASSIFY` collects from `embed_list` … while `classify_consolidation` never removes items from it … A `DISCARD` would therefore still be classified, and still be embedded."*). The epic doc can only stop the NEXT copy; the issue body is what a lane building S1 reads as its brief, so correcting it there is part of S1, not a follow-up.
+
 ### The ordering, as two live constraints (v4 §4.2, §S2.2)
 
 | constraint | source |
 |---|---|
-| both gates stay **subordinate to VET** | v4 §S2.2: the gates are the mechanical half of the step whose adversarial question is VET's |
+| the **value** predicate stays **subordinate to VET** | v4 §S2.2: the predicate is the mechanical half of the step whose adversarial question is VET's, and its flag switches that pass on (`vet_enabled` folds `_value_gate_enabled()`) |
 | **EMBED before `execute_embed`** | v4 §4.2's order table: the embed pass is last, and `classify_consolidation` lives **inside** it (`tortoise/extractor_v2.py`) |
 
-(`DISCARD` before `EMBED` is the third, and it is **implemented** — see above.)
+⚠️ **Not** both: `embed_gate_enabled()` reads only `TORTOISE_EMBED_GATE` and is **not** folded into `vet_enabled`, so the EMBED point is not subordinate to VET — it sits at the embedding submission seam (`embeddings.encode_for_row`, storage §12.2a), a different step from `S2.2`. A lane that folded it in on the strength of "one rule set, two enforcement points" would be inventing a subordination no source records.
+
+(The other ordering constraint, `DISCARD` before `EMBED`, is **implemented** — see above.)
 
 ### Two v4 passages that CONFIRM the epic's sequencing
 
@@ -218,7 +222,7 @@ This section first repeated v4's wiring note as an open defect. At this head the
 
 ### What this changes for the epic
 
-- **S1 / #11086** — arms `TORTOISE_EMBED_GATE` (the second enforcement point) and gives the EMBED decision a home in the step list (**G2**). It does **not** need `TORTOISE_VALUE_GATE` set: that is already ON by default since `#10996` (`03-scope.md`, S1).
+- **S1 / #11086** — arms `TORTOISE_EMBED_GATE` (the second enforcement point) and gives the EMBED decision a home in the step list (**G2**). It does **not** need `TORTOISE_VALUE_GATE` set: that is already ON by default since `#10996` (`03-scope.md`, S1). ⚠️ The issue body must ALSO have its two superseded premises corrected — the value gate is no longer off by default, and a `DISCARD` no longer reaches `S2.3`/`execute_embed`.
 - **S3 / #11088** — states that it removes **vectors**, never rows, and cites the 48%-precision measurement as the reason that distinction is not negotiable (`03-scope.md`, S3; the issue body carries the same).
 - **V1 stays out of scope** and unaffected: v4 is silent on where the index lives, and §14.3 remains the decision's home.
 
