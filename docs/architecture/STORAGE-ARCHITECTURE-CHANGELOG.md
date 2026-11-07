@@ -2139,9 +2139,11 @@ way round: the patch stores `props.story_arc = null`, `_props_from_row` returns 
 the MCP tool `tortoise_update_point`. A `:Point` carrying the
 prose whose record tail does NOT also carry it is a `graph_only` occurrence of THIS count (`:Point`'s placeable set
 omits `story_arc`, §17.2; ⚠️ where the tail DOES carry it, `_partition_cache_owned`'s `keep |= set(record_props)` makes
-it COMPARED, and `record-restore` then RESTORES it), so the sentence's
-unscoped "the PROPERTY" sent that operator to `tortoise_delete` — which REMOVES the node and journals the delete that
-drops its record row — when a clear-and-keep route shipped.
+it COMPARED, and `record-restore` then RESTORES it), so an UNSCOPED version of this correction — as this PR's own
+§17.2 DRAFT stated it ("no shipped route clears the PROPERTY while keeping the entity") — would have sent that
+operator to `tortoise_delete`, which REMOVES the node and journals the delete that drops its record row, when a
+clear-and-keep route shipped. ⛔ That quotation is of the DRAFT, not of the entry above: this `#10394` entry never
+said "the PROPERTY" and never sent an operator to `tortoise_delete`.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED
