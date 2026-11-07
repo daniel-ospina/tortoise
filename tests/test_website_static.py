@@ -4940,57 +4940,113 @@ class TestSiteIconAndSocialPreviewContract:
                 rel = ln.get("rel", "").lower().split()
                 if not any("icon" in token for token in rel):
                     continue
-                href = urljoin("https://site.invalid/", ln.get("href", ""))
-                assert "/logo.png" not in urlsplit(href).path, (
-                    f"{page.name} uses the wordmark as an icon: rel={ln.get('rel')!r} "
-                    f"href={ln.get('href')!r}")
-                # ⛔ THE BLACKLIST ABOVE IS ONE FILENAME WIDE. The property it is about
-                # is "a tab icon must be square" — a browser squashes a wide image into
-                # the square slot — and a filename test cannot see
-                # `assets/premiselabs-logo.png`, which is 160x98 and is the same wordmark
-                # by another name (measured: it passed this guard while `logo.png` was
-                # refused). Read the bytes instead.
-                # ⛔ AND THE BYTES ARE READ FOR EVERY FORMAT, NOT JUST `.png`: gating on
-                # one extension is the same one-rule-wide hole one level down — measured,
-                # `rel="icon" href="/assets/og-tortoise.jpg"` (1200x630) passed every
-                # icon assertion, and so did a href naming a file that does not exist.
-                path_part = urlsplit(href).path
-                # ⛔ EXISTENCE FIRST, BEFORE ANY FORMAT EXEMPTION. The `.svg` exemption
-                # below is about having no intrinsic pixel box to squash — it is NOT a
-                # licence to skip the file check, and an early `continue` that did so let
-                # a page link a nonexistent vector icon while this guard reported green
-                # (measured: `href="/assets/nope.svg"` passed, the only format that did).
-                target = self.WEB / path_part.lstrip("/")
-                assert target.is_file(), (
-                    f"{page.name} links an icon this site does not serve ({path_part}) — "
+                violation = self._icon_target_violation(page.name, ln)
+                assert violation is None, violation
+
+    @classmethod
+    def _icon_target_violation(cls, page_name: str, link: dict) -> str | None:
+        """Why an ICON link's TARGET is not a usable tab icon; None means it is.
+
+        Split out of the guard above for the reason `_declared_sizes_violation` is: every
+        page in this tree links three valid icons, so inlined the whole check was executed
+        only by CORRECT input. Measured: restoring the existence check to AFTER the `.svg`
+        exemption (the pre-fix order) kept every test green while `href="/assets/nope.svg"`
+        silently passed — the same "proved with a hand-run probe, pinned by nothing"
+        defect this class exists to end. `test_the_icon_target_guard_reads_existence_and_
+        shape` drives each branch with a synthetic link set.
+
+        ⛔ THE BLACKLIST IS ONE FILENAME WIDE. The property it is about is "a tab icon
+        must be square" — a browser squashes a wide image into the square slot — and a
+        filename test cannot see `assets/premiselabs-logo.png`, which is 160x98 and is the
+        same wordmark by another name (measured: it passed while `logo.png` was refused).
+        So the TARGET IS READ.
+        ⛔ AND THE BYTES ARE READ FOR EVERY FORMAT, NOT JUST `.png`: gating on one
+        extension is the same one-rule-wide hole one level down — measured,
+        `rel="icon" href="/assets/og-tortoise.jpg"` (1200x630) passed every icon
+        assertion, and so did a href naming a file that does not exist.
+        ⛔ AND EXISTENCE COMES FIRST, BEFORE ANY FORMAT EXEMPTION. The `.svg` exemption is
+        about having no intrinsic pixel box to squash — it is NOT a licence to skip the
+        file check, and an early `continue` that did so let a page link a nonexistent
+        vector icon while this guard reported green (measured: the only format that did).
+        """
+        path_part = urlsplit(urljoin("https://site.invalid/", link.get("href", ""))).path
+        assert "/logo.png" not in path_part, (
+            f"{page_name} uses the wordmark as an icon: rel={link.get('rel')!r} "
+            f"href={link.get('href')!r}")
+        target = cls.WEB / path_part.lstrip("/")
+        if not target.is_file():
+            return (f"{page_name} links an icon this site does not serve ({path_part}) — "
                     "the tab draws nothing")
-                if path_part.endswith(".svg"):
-                    # A vector icon has no intrinsic pixel box to squash — the tab sizes
-                    # it from the viewBox — so it is EXEMPT BY NAME rather than skipped
-                    # silently by an extension filter.
-                    continue
-                raw = target.read_bytes()
-                if raw[:8] == b"\x89PNG\r\n\x1a\n":
-                    w, h = self._png_size(raw)
-                elif raw[:2] == b"\xff\xd8":
-                    w, h = self._jpeg_size(raw)
-                elif raw[:4] == b"\x00\x00\x01\x00":
-                    # The ICO's directory entries are the slots a renderer reserves, so
-                    # each of them must be square too.
-                    for entry in self._ico_entries(raw):
-                        assert entry["declared"][0] == entry["declared"][1], (
-                            f"{page.name} uses {path_part} as a tab icon and its "
+        if path_part.endswith(".svg"):
+            # A vector icon has no intrinsic pixel box to squash — the tab sizes it from
+            # the viewBox — so it is EXEMPT BY NAME from the shape check, above.
+            return None
+        raw = target.read_bytes()
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = cls._png_size(raw)
+        elif raw[:2] == b"\xff\xd8":
+            w, h = cls._jpeg_size(raw)
+        elif raw[:4] == b"\x00\x00\x01\x00":
+            # The ICO's directory entries are the slots a renderer reserves, so each of
+            # them must be square too.
+            for entry in cls._ico_entries(raw):
+                if entry["declared"][0] != entry["declared"][1]:
+                    return (f"{page_name} uses {path_part} as a tab icon and its "
                             f"{entry['declared'][0]}x{entry['declared'][1]} directory "
                             "entry is not square — that icon is drawn squashed")
-                    continue
-                else:
-                    raise AssertionError(
-                        f"{page.name} uses {path_part} as a tab icon; this guard reads "
-                        "PNG, JPEG and ICO, and exempts only .svg — add a reader rather "
-                        "than leaving the tab unchecked")
-                assert w == h, (
-                    f"{page.name} uses a {w}x{h} non-square image as a tab icon "
+            return None
+        else:
+            raise AssertionError(
+                f"{page_name} uses {path_part} as a tab icon; this guard reads PNG, JPEG "
+                "and ICO, and exempts only .svg — add a reader rather than leaving the "
+                "tab unchecked")
+        if w != h:
+            return (f"{page_name} uses a {w}x{h} non-square image as a tab icon "
                     f"({path_part}) — the tab squashes it into a square")
+        return None
+
+    def test_the_icon_target_guard_reads_existence_and_shape(self):
+        """NON-VACUITY for `_icon_target_violation`, driven by a synthetic link set.
+
+        Every page links three valid icons, so on the real population this predicate is
+        only ever run against input that passes — a regression in any branch is
+        unobservable. MEASURED before this test existed: moving the existence check back
+        below the `.svg` exemption left all 13 icon/card tests green while
+        `href="/assets/nope.svg"` was accepted. Each edge is pinned in BOTH directions.
+        """
+        for link in ({"rel": "icon", "href": "/favicon.png"},
+                     {"rel": "icon", "href": "/favicon.png?v=2"},
+                     {"rel": "icon", "href": "/apple-touch-icon.png"},
+                     {"rel": "icon", "href": "/favicon.ico"}):
+            assert self._icon_target_violation("page.html", link) is None, (
+                f"a valid icon link was reded: {link}")
+
+        for missing in ("/assets/nope.png", "/assets/nope.svg"):
+            violation = self._icon_target_violation(
+                "page.html", {"rel": "icon", "href": missing}) or ""
+            assert "does not serve" in violation, (
+                f"an icon link to a missing file ({missing}) was accepted — the format "
+                "exemption must come AFTER the existence check, measured: an early "
+                f"`.svg` continue re-opened exactly this. Got: {violation!r}")
+
+        wide = self._icon_target_violation(
+            "page.html", {"rel": "icon", "href": "/assets/og-tortoise.jpg"}) or ""
+        assert "non-square" in wide, (
+            "a 1200x630 JPEG used as a tab icon was accepted — the shape check is "
+            f"`.png`-only again. Got: {wide!r}")
+
+        wordmark = self._icon_target_violation(
+            "page.html", {"rel": "icon", "href": "/assets/premiselabs-logo.png"}) or ""
+        assert "non-square" in wordmark, (
+            "a 160x98 wordmark was accepted as a tab icon — the filename blacklist is the "
+            f"only rule again. Got: {wordmark!r}")
+
+        try:
+            self._icon_target_violation("page.html", {"rel": "icon", "href": "/logo.png"})
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("the wordmark was accepted as a tab icon")
 
     # --- 2. the preview resolves and is the size it claims ---------------
 
