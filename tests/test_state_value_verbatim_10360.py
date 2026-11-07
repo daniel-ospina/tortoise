@@ -2245,8 +2245,8 @@ def _assert_the_row_names_its_closure(row: str) -> None:
     # ⛔ AND `(d) THE` IS NOT THE BOUND EITHER (#11223, MEASURED: that block is
     # 10,019 chars and does not contain the row's own `(d2)` clause, so a
     # reopening appended after it was never read at all — the position a lane
-    # actually appends in). The scan is now REGION-WIDE, over the residual list's
-    # marker → the end of the row; the class anchor is what keeps a truthful
+    # actually appends in). The scan is now REGION-WIDE, from the row's own
+    # `  - id: ` entry → the next entry; the class anchor is what keeps a truthful
     # statement about some OTHER subject from tripping it, and the closed-claim
     # rule stays scoped to `(d)` where that claim lives.
     # The block's own structural half is asserted here; the reopening half lives
