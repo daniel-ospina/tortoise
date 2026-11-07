@@ -1062,3 +1062,90 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
     two_stack = _stamp_problems(second)
     assert any("double wrap" in p for p in two_stack), two_stack
     assert len(two_stack) == len(set(two_stack)), f"duplicate violations: {two_stack}"
+
+
+def test_the_ORIGINAL_the_stamp_reads_is_not_itself_a_stamp():
+    """#11217: `_ORIG_THREAD_START` must be the REAL `Thread.start`, not our stamp.
+
+    This closes the blind spot `_thread_start_stamp_violations` states about
+    itself: that walk follows `__wrapped__` links, and our wrapper is a plain
+    ``def`` that publishes none, so the chain stops at it and the delegate is
+    NEVER inspected. A delegate that IS a stamp is not "still one layer" — it is
+    UNBOUNDED: the stamp reads `_ORIG_THREAD_START` at CALL time, so it calls
+    itself and every `Thread.start()` raises `RecursionError`.
+
+    That state is reachable, which is why it is pinned rather than reasoned
+    about: `importlib.reload` re-executes the module body into its EXISTING
+    dict, so a bare `_ORIG_THREAD_START = threading.Thread.start` on a reload
+    rebinds the name to whatever the class attribute is THEN — the stamp.
+    `tortoise/projection/__init__.py` therefore keeps the captured original
+    (``globals().get("_ORIG_THREAD_START") or threading.Thread.start``), and
+    `test_a_RELOAD_keeps_the_REAL_Thread_start` observes that across a real
+    reload in a subprocess.
+
+    Read from the MODULE's dict, never from the installed function's
+    `__globals__`: with a third-party layer on top (sentry's `@wraps` wrapper)
+    that namespace is the WRAPPER's, which is the reading that made the removed
+    identity assertion wrong in the first place (#11430). `_is_stamp` is the
+    right predicate for the same reason — a `__name__` comparison reports a
+    vendor wrapper as a stamp (a FALSE RED); `_is_stamp` reads
+    ``__globals__['__name__']``, which `functools.wraps` cannot forge.
+    """
+    from tortoise import projection as proj_mod
+
+    original = proj_mod.__dict__.get("_ORIG_THREAD_START")
+    assert original is not None, (
+        "tortoise.projection has no `_ORIG_THREAD_START` — the stamp's original "
+        "capture is gone, so a reload rebinds it to the stamp")
+    assert not _is_stamp(original), (
+        "Thread.start's stamp reads another STAMP as the original — the reload "
+        "re-bound `_ORIG_THREAD_START` instead of keeping the real one, so every "
+        f"thread creation recurses ({original!r})")
+
+
+def test_a_RELOAD_keeps_the_REAL_Thread_start():
+    """#11217 round-4 review P2: the reload arm must be OBSERVED, not asserted.
+
+    `importlib.reload` re-executes the module body into its EXISTING dict. If the
+    body captures `_ORIG_THREAD_START = threading.Thread.start` unconditionally,
+    then on a reload that name is rebound to the STAMP — which the stamp reads at
+    CALL time, so it calls itself and every `Thread.start()` raises
+    `RecursionError`. The module captures once (`globals().get(...) or …`).
+
+    Nothing else in the tree reloads `tortoise.projection`, so without this test
+    reverting the guard leaves the ENTIRE suite green while reload breaks all
+    thread creation — measured (#11217 round-4 review: an import hook that
+    restored the bare assignment passed every assertion in this file).
+
+    Runs in a SUBPROCESS on purpose: a reload resets `_TEST_SESSION_ACTIVE` and
+    re-executes module state, which must not leak into the parent session.
+    """
+    script = (
+        "import importlib, os, threading\n"
+        "os.environ['TORTOISE_TEST_MODE'] = '1'\n"
+        "import tortoise.projection as proj\n"
+        "real = threading.Thread.start\n"
+        "proj._TEST_SESSION_ACTIVE = True\n"
+        "proj.install_thread_stamp()\n"
+        "assert threading.Thread.start is not real, 'installer did not run'\n"
+        "importlib.reload(proj)\n"
+        "if proj._ORIG_THREAD_START is not real:\n"
+        "    raise SystemExit('RELOAD_REBOUND_THE_ORIGINAL')\n"
+        "t = threading.Thread(target=lambda: None)\n"
+        "t.start(); t.join()\n"
+        "print('RELOAD_OK')\n"
+    )
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = dict(os.environ)
+    env.pop("TORTOISE_TEST_DB", None)
+    env.pop("TORTOISE_DB_URI", None)
+    proc = subprocess.run(
+        [sys.executable, "-c", script], cwd=root, env=env,
+        capture_output=True, text=True, timeout=180)
+    assert proc.returncode == 0, (
+        "a reload of tortoise.projection broke thread creation — the module body "
+        "must KEEP the captured original, not rebind it to the stamp. "
+        f"stdout={proc.stdout!r} stderr={proc.stderr[-800:]!r}")
+    assert "RELOAD_OK" in proc.stdout, (
+        f"the reload probe did not reach its assertion: {proc.stdout!r} "
+        f"{proc.stderr[-800:]!r}")
