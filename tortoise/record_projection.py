@@ -2095,7 +2095,7 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     once per journal record, so every record re-read and re-regex-parsed all
     fifteen migration files (`record_writer` priced it at "~4 ms of plan
     materialization"). The cache keeps the correctness property and drops the
-    price by keying on each migration file's `(mtime_ns, size, inode, ctime_ns)`
+    price by keying on each migration file's `(name, mtime_ns, size, inode, ctime_ns)`
     (:func:`_migrations_fingerprint`), so an edit, an addition or a removal is a
     cache MISS — the S6 surface's requirement that a cached column map cannot
     diverge from the live schema silently. Refreshing costs one stat pass
