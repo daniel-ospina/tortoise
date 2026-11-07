@@ -4151,9 +4151,26 @@ def duplicate_entries(manifest: dict) -> list[str]:
 
     #5373: this is a GATE FAILURE, not a note. `config/ci-surfaces.yml` carries
     `merge=union`, which keeps BOTH sides' lines for a conflicting hunk — so a
-    duplicate same-surface entry is exactly what union emits when two lanes append
-    the same registration, and a note would let it in silently. Cross-surface (dual)
-    registration is still deliberate; only same-surface repeats are reported.
+    duplicate same-surface entry can be exactly what a merge emits, and a note
+    would let it in silently. Cross-surface (dual) registration is still
+    deliberate; only same-surface repeats are reported.
+
+    ⛔ Do NOT read a duplicate as proof that a union merge ran, and do not expect
+    a byte-identical row to collapse. MEASURED on real merges: the SAME row
+    appended at two DIFFERENT positions survives as TWO rows, with the attribute
+    set and with it unset alike (`git check-attr merge -- f.yml` ->
+    `f.yml: merge: union` / `f.yml: merge: unspecified`), because nothing
+    reconciles independent appends. Only the SAME change made in
+    the SAME place collapses to one copy, and that is git's ordinary
+    identical-change resolution, not a property of `union` (it collapses with the
+    attribute and without it). Three identical rows landed on `main` on
+    2026-11-06 from three lanes appending this row at three different anchors
+    (#3153), not from the driver.
+
+    ⚠️ The older "byte-identical additions dedupe" framing in
+    `tools/registry_integrity.py` has been corrected to match the measurements
+    above (it said the different-anchor case could not duplicate; it does), so
+    that module now states the same rule and may be cited alongside this one.
 
     Each offending name is reported ONCE however many times it repeats, so the
     count is a count of distinct problems.
