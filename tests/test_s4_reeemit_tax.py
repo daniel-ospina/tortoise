@@ -1653,7 +1653,15 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     assert len(_artifact_caveats) == 5, len(_artifact_caveats)
     assert len(tool.CAVEATS) == 6, len(tool.CAVEATS)
     assert len(tool.CAVEATS) == len(_artifact_caveats) + 1
-    assert len(json.loads(_RERUN.read_text())["caveats"]) == len(_artifact_caveats)
+    # ⛔ THE RE-RUN ARTIFACT IS A THIRD COPY, and comparing it by LENGTH alone
+    # left it outside every pin: reverting ONLY `ab-20261107T024226Z.json`'s
+    # `caveats[0]` to the refuted sentence stayed 37/37 GREEN (#11385 review
+    # P2). Both runs are emitted by ONE instrument, so their caveat lists must
+    # be EQUAL — not merely the same length.
+    _rer_caveats = json.loads(_RERUN.read_text())["caveats"]
+    assert _rer_caveats == _artifact_caveats, (
+        "the re-run artifact's caveats must equal the primary's — a divergence "
+        "means one copy was edited alone", _rer_caveats)
     # ⛔ the MAPPING, entry by entry — the note has been wrong twice (first
     # "5 + 2", then "one added plus one rewritten"), and neither the README's
     # counts nor the "ONE ADDED plus TWO EDITED" claim was enforced: `emits
@@ -1670,10 +1678,17 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     # ⛔ THE INPUT-SIDE CORRECTION (#11385 post-rebase review P1). The equality
     # above only holds whatever the string SAYS, so a revert of this correction
     # in BOTH copies stayed green — and the artifact's copy is the one a reader
-    # meets first. Pinned three ways: the artifact sentence must state the input
-    # cost with the DERIVED per-session figure (a regeneration that moves it reds
-    # here), the instrument must carry the same figure, and the refuted
-    # "identical prompt" claim is banned by `_REFUTED_DIRECTION_PHRASES`.
+    # meets first. Pinned three ways over ALL THREE copies: each must state the
+    # input cost with the DERIVED per-session figure (a regeneration that moves
+    # it reds here), each must carry the same figure and scope, and each is
+    # scanned for the refuted framings.
+    # ⛔ CORRECTION (#11385 review P3): the previous wording here said the
+    # refuted "identical prompt" claim was banned by `_REFUTED_DIRECTION_PHRASES`.
+    # It was not — that tuple's only consumer is
+    # `test_the_tool_docstring_and_the_readme_paraphrase_carry_the_floor_direction`,
+    # which scans `search_from_s2.__doc__` and so never saw a caveat at all.
+    # Deleting the entry left 37/37 GREEN. The ban is applied to the three
+    # CAVEAT copies HERE, where the claim actually lived.
     _pri_c = json.loads(_PRIMARY.read_text())
     _per_c = {a["delta"]["prompt_tokens"] - a["legacy"]["prompt_tokens"]
               for a in _pri_c["arms"]}
@@ -1682,6 +1697,7 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     assert [a["delta"]["prompt_tokens"] - a["legacy"]["prompt_tokens"]
             for a in json.loads(_RERUN.read_text())["arms"]] == [_per_c] * len(_pri_c["arms"])
     for _copy, _text in (("artifact caveats[0]", _artifact_caveats[0]),
+                        ("re-run caveats[0]", _rer_caveats[0]),
                         ("tool.CAVEATS[0]", tool.CAVEATS[0])):
         assert f"+{_per_c} tokens in every session" in _text, (
             f"{_copy} must state the measured input cost", _text)
@@ -1689,6 +1705,9 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
             f"{_copy} must say the input side is a cost, not a saving", _text)
         assert "same INPUT CONTENT" in _text, (
             f"{_copy} must scope what IS identical (content, not length)", _text)
+        for _phrase in _REFUTED_DIRECTION_PHRASES:
+            assert _phrase not in _text, (
+                f"{_copy} still asserts a refuted framing: {_phrase!r}", _text)
     assert tool.CAVEATS[2] == _artifact_caveats[1], "CAVEATS[2] == artifact[1]"
     assert tool.CAVEATS[4:] == tuple(_artifact_caveats[3:]), (
         "the tail must be the artifacts' own entries, unchanged")
@@ -1710,7 +1729,12 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
 #: The phrases the direction retraction removed from this PR's prose. They are
 #: banned as a CLASS — the README copy, the index row, the emitted caveats and
 #: the tool docstring are four copies of the same sentence, and each round of
-#: this review found a copy the pins could not see (#11385 review P3).
+#: this review found a copy the pins could not see (#11385 review P3). ⚠️ The
+#: TUPLE is shared; the CONSUMERS differ — this module's `search_from_s2.__doc__`
+#: scan below covers the docstring only, and the three caveat copies are scanned
+#: in `test_the_emitted_caveats_carry_the_corrected_population_and_direction`.
+#: A reader should not assume one consumer covers every copy (that assumption is
+#: exactly the defect #11385 review P3 found).
 _REFUTED_DIRECTION_PHRASES = (
     "cannot do better on that channel",
     "cannot do better on this channel",
@@ -1719,13 +1743,14 @@ _REFUTED_DIRECTION_PHRASES = (
     "no room to add",
     "than it will usually find in production",
     "all 266 items offered",
-    # ⛔ The input-side claim, banned as a CLASS for the same reason the direction
-    # phrases above are: it lived in FOUR copies (instrument `CAVEATS[0]`, both
-    # artifacts' `caveats[0]`, and the sentence the README had to add to refute
-    # it) and the artifact copies are the ones a reader meets FIRST — the
-    # artifact asserted identical prompts while its own `prompt_tokens` rows
-    # recorded +242 per session, and no pin saw it because the README pin reads
-    # the README (#11385 post-rebase review P1).
+    # ⛔ The input-side claim, banned over the CAVEAT copies — `_REFUTED_
+    # DIRECTION_PHRASES`'s own consumer scans only `search_from_s2.__doc__`, so
+    # adding the entry there alone enforced nothing (#11385 review P3); it is
+    # applied to all three caveat copies in
+    # `test_the_emitted_caveats_carry_the_corrected_population_and_direction`.
+    # It is NOT applied to the README on purpose: `README.md:30` has to QUOTE the
+    # refuted sentence to record the correction, so a ban there would red the one
+    # document that must cite it.
     "the prompt inputs are identical",
 )
 
