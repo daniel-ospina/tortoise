@@ -21,9 +21,11 @@ the artifact's absence or shape rather than its content — a synthesised
 one for the cannot-answer legs (4); one patched seam the arm requires (15); or
 the shipped source read as an AST — the interpreter guard's exit code, which no
 runtime fixture can produce (1). That is 51 negative controls plus 5 positives:
-four read the shipped page, and the fifth is the positive half of a pair —
-`test_an_ancestor_anchor_passes_on_the_same_repo`, counted in the `git` bucket
-because that is the fixture it drives. 56 in all, which is every test function.
+three read the shipped page whole, a fourth
+(`test_every_status_token_is_in_the_vocabulary`) reads the closed-vocabulary
+CONSTANT rather than the page — see below — and the fifth is the positive half of
+a pair, `test_an_ancestor_anchor_passes_on_the_same_repo`, counted in the `git`
+bucket because that is the fixture it drives. 56 in all, which is every test function.
 Never a fixture that could not fail, and each test's docstring states (a) the
 exact value/state that makes it fail and (b) why that state is reachable. A guard
 whose negative case cannot be reached is a test that cannot fail — it proves the

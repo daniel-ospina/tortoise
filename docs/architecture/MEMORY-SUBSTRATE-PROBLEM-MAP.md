@@ -363,9 +363,10 @@ The checker re-measures, offline and without network access:
 5. **Summary counts** — §2's three `| STATUS | n |` rows, its `Total tracked`
    row, its five per-workstream `**N of M fixed**` cells (each bound to its
    workstream BY LABEL, so a mislabelled row cannot pass), and the page's opening
-   abstract (`**N fixed and N open**`, read from the body above `## 1.` — the
-   frontmatter carries `measured_at_commit`/`measured_at` and its siblings, not
-   the headline) all equal the rows below. A summary that drifts from its own table is the same defect class as
+   abstract (`**N fixed and N open**`, read from the text above `## 1.` — the
+   frontmatter and the opening blockquote alike, so a headline placed in either
+   IS read; the frontmatter carries `measured_at_commit`/`measured_at` and their
+   siblings, not the headline) all equal the rows below. A summary that drifts from its own table is the same defect class as
    the missing `content_hash` this map's Pattern 1 names. The READ SET is
    exactly those counts plus the index row's headline (`check_registration`);
    every other count the page prints is listed in the residuals below.

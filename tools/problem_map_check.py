@@ -693,9 +693,10 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
     if headline is None:
         if _HEADLINE.search(text):
             errors.append(
-                "the `**N fixed and N open**` headline sits outside the opening "
-                "abstract (above `## 1.`), where it is not read — move it into "
-                "the abstract or reword the abstract to carry it"
+                "the `**N fixed and N open**` headline sits BELOW `## 1.`, and "
+                "only the text above that marker is read (frontmatter and opening "
+                "abstract alike), so a headline further down is never compared — "
+                "move it into the abstract or reword the abstract to carry it"
             )
         else:
             errors.append("the page carries no `**N fixed and N open**` headline")
