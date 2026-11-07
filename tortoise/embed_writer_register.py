@@ -47,10 +47,14 @@ no wider. Two write shapes are worth naming, because the difference is the diffe
 claim and a slogan:
 
 * **Container keys are SEEN — the LITERAL-ASSIGNMENT form** (`record["embedding"] = …`), for every
-  module discovery walks AND inside a `def`: the walk visits `def`s only
-  (`probe._embedding_writers`), so a container key at MODULE or CLASS scope is ABSENT no matter which
-  module it sits in — pinned as `INVISIBLE_SHAPES`' `module_scope_container_key` and
-  `class_scope_container_key`. This shape was invisible to the
+  module discovery walks AND inside a `def`: the walk visits `def`s
+  (`probe._embedding_writers`), so a container key in a MODULE body or in a MODULE-LEVEL CLASS body
+  is ABSENT wherever that module sits — pinned as `INVISIBLE_SHAPES`'
+  `module_scope_container_key` and `class_scope_container_key`. ⛔ The scope that decides this is the
+  WALK's, not the `class` keyword: a class body nested inside a `def` is part of that def's SUBTREE,
+  so the AST pass does reach it and that writer is declared — pinned as the `class_inside_a_def`
+  control, because "CLASS scope is absent" read as a statement about `class` over-claims in exactly
+  the direction this paragraph exists to avoid. This shape was invisible to the
   instrument's clause regex until `#11274`, so a writer carrying NOTHING ELSE the instrument
   matches — neither the `_EMBED_WRITE` regex nor a recognised producer call (`encode_for_row`,
   `encode_for_store`, `compute_session_embedding`) — added nothing to the population and this

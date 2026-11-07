@@ -20,9 +20,11 @@ it already moved inside this PR's own review — but every one of them shares a 
 outside the walk (`tortoise/embeddings.py` is skipped on purpose, which is why
 `stamp_journal_embedding` / `_drop_journalled_embedding` hold a DECIDABLE container key and are
 still absent); when its module will not parse (discovery carries one `UNPARSEABLE:<rel>` row and
-enumerates none of that module's writers); when the store sits at MODULE or CLASS scope, since the
-walk visits `def`s only — pinned as `module_scope_container_key` and `class_scope_container_key`
-below. `#11274` owns widening it. ⚠️ Together with the name-collision case below, this enumerates
+enumerates none of that module's writers); when the store sits in a MODULE body or a MODULE-LEVEL
+class body, since the walk visits `def`s (and, by subtree, whatever those `def`s contain) — pinned
+as `module_scope_container_key` and `class_scope_container_key`
+below, with `class_inside_a_def` as the opposite-expectation control that keeps the word
+`class` from being read as the boundary. `#11274` owns widening it. ⚠️ Together with the name-collision case below, this enumerates
 what makes the DISCOVERED MAP unable to NAME OR CLASSIFY a writer; it is not a list of every
 reason a writer can escape a declaration — `gated` and `producer` escape it too, by design, and are
 stated in the register instead.
@@ -825,12 +827,17 @@ INVISIBLE_SHAPES = {
         'def w(rec, props, v):\n'
         '    rec._emit_event("X", **{**props, "embedding": v})\n'
     ),
-    # A container-key store at MODULE or CLASS scope (round-14 review): the walk visits `def`s only
-    # (`probe._embedding_writers` iterates `FunctionDef`/`AsyncFunctionDef`), so the literal-slice
-    # AST pass is never applied to it and `_EMBED_WRITE` has no function source to read. It is a
-    # further reason a writer can be absent while holding a perfectly DECIDABLE key, so it is
-    # pinned here rather than left to the header's prose — BOTH positions, because a widening that
-    # reached one of them alone would leave the other described rather than pinned (round-15 review).
+    # A container-key store in a MODULE body or a MODULE-LEVEL class body (round-14 review): the walk
+    # visits `def`s (`probe._embedding_writers` iterates `FunctionDef`/`AsyncFunctionDef`), so the
+    # literal-slice AST pass is never applied to it and `_EMBED_WRITE` has no function source to
+    # read. It is a further reason a writer can be absent while holding a perfectly DECIDABLE key,
+    # so it is pinned here rather than left to the header's prose — BOTH positions, because a
+    # widening that reached one of them alone would leave the other described rather than pinned
+    # (round-15 review).
+    # ⛔ The scope is the WALK's, not the `class` keyword: a class body nested inside a `def` is
+    # part of that def's SUBTREE, so the AST pass DOES reach it and the writer is CAUGHT — pinned by
+    # the `class_inside_a_def` POSITIVE control below, so neither half of this entry can be read as
+    # covering the other (round-16 review measured the over-claim on a scratch root).
     "module_scope_container_key": (
         'REC = {}\nREC["embedding"] = [0.25, 0.5]\n'
     ),
@@ -874,14 +881,37 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
         # the CONTAINER-KEY shape `#11274` added; if this stops being decided, the widening
         # regressed and the register's population shrank silently.
         "container_key": 'def w(rec, e):\n    rec["embedding"] = e\n',
+        # The OTHER half of the class-scope entry below, with the OPPOSITE expectation: a class body
+        # nested inside a `def` lies in that def's SUBTREE, so the walk reaches it and the writer is
+        # CAUGHT. Without this row, "a container key in a MODULE-LEVEL class body is absent" and
+        # "CLASS scope is absent" are indistinguishable — and it was the second reading that stood in
+        # the register until round 16, over-claiming by exactly the difference this control measures.
+        "class_inside_a_def": (
+            'def outer():\n    class C:\n        REC = {}\n        REC["embedding"] = [0.25, 0.5]\n'
+        '    return C\n'
+        'outer()\n'
+        'def w(rec, e):\n    rec["embedding"] = e\n'
+    ),
     }
+    detected_by_shape: dict[str, dict] = {}
     for name, body in controls.items():
         detected = probe._embedding_writers(_scratch_root(tmp_path, name, body))
+        detected_by_shape[name] = detected
         assert detected, (
             f"the detector found nothing in a scratch module using the {name!r} shape — either "
             "discovery regressed or its root handling changed; repair the detector, do not "
             "delete this control"
         )
+    # The nested-class control must be CAUGHT, not merely seen: `unresolved_write` is in
+    # `NEEDS_A_DECLARATION`, so this row pins the half of the class-scope claim the register used to
+    # over-state. Asserted here rather than folded into the loop above, because `detected` being
+    # truthy would also be satisfied by a row discovery dropped into `gated`.
+    nested = detected_by_shape["class_inside_a_def"]
+    assert "tortoise.m::outer" in nested and nested["tortoise.m::outer"]["kind"] == "unresolved_write", (
+        "a container-key store inside a `def`-nested class body is no longer CAUGHT as "
+        f"`unresolved_write` ({nested}) — the register's class-scope caveat now over-claims in the "
+        "other direction; repair discovery or restate the caveat, do not drop this row"
+    )
     for shape, body in INVISIBLE_SHAPES.items():
         found = probe._embedding_writers(_scratch_root(tmp_path, shape, body))
         assert not found, (
