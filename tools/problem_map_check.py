@@ -634,7 +634,7 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
         census prose, whose second clause additionally needs to know which row is
         an epic — the tracker half this guard refuses to read.
 
-    Both are listed in §9. Nothing here claims otherwise.
+    All three are listed in §9. Nothing here claims otherwise.
     """
     errors: list[str] = []
     section = _section(text, _SUMMARY_SECTION)

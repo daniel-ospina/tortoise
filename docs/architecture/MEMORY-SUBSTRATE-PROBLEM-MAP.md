@@ -324,9 +324,11 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q  # the
 
 The `TORTOISE_TEST_CARVE_OUT=1` is not decoration: this suite is DB-free, and on
 a box with no database the default conftest refuses the run outright
-(`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — 54 errors, measured
-at this head), which reads as the guard being broken rather than the target being
-absent.
+(`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — one refusal per
+collected test, 57 errors at the head `measured_at_commit` names), which reads as
+the guard being broken rather than the target being absent. That `57` is a
+narrated count nothing reads (see the residuals below), which is why it is
+anchored to a commit rather than derived from one.
 
 The checker re-measures, offline and without network access:
 
@@ -405,7 +407,7 @@ rounding:**
   `test_a_corrupt_object_store_reads_as_no_answer_not_as_drift`, so a reword is
   caught by that control rather than by a reader.
 - **The ENUMERATED and prose counts — §1's census sentence, §2's cell text, §8,
-  §10.** The counts §2
+  §10, and §9's own refusal count.** The counts §2
   states as a table cell ARE compared (the three status rows, the total, the five
   per-workstream cells, the abstract). What is not compared is every count
   narrated inside a sentence: §2's `(#2787 OPEN: …)`, `**#2730, #2782 and #2684
@@ -416,7 +418,9 @@ rounding:**
   read — so a guard that parsed those sentences would be a spelling trap rather
   than a check. Measured at this head: flip `#2684` to VERIFIED-FIXED and correct
   the counts the guard DOES read, and §2's narrated sentence goes stale with every
-  check green. That is the residual, named rather than dressed up.
+  check green. That is the residual, named rather than dressed up. §9's own
+  `57 errors` is the same class: a prose count anchored to `measured_at_commit`
+  rather than derived, and nothing in the checker reads it.
 - **The `#2730`-class error.** A row can be VERIFIED-FIXED with a docs-only
   anchor and a prose pin (that is what this page shipped first, at #2730). The
   guard passed it. Only a reviewer reading the anchor *as a fix* catches it, which

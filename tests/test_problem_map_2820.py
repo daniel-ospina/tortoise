@@ -11,20 +11,32 @@ No network, no DB, no `gh`: the TRACKER half of the map is deliberately not
 guarded (a status is a dated fact — §9 of the document says so), so nothing here
 depends on GitHub.
 
-EVERY NEGATIVE CONTROL TAKES ONE OF FOUR SHAPES — a mutated copy of the artifact
-it grades; a throwaway directory it drives real `git` in (a repo, or deliberately
-one that is NOT, for the cannot-answer legs); one patched seam the arm requires;
-or the shipped source read as an AST (the interpreter guard's exit code, which no
-runtime fixture can produce) — never a fixture that could not fail — and each
-test's docstring states (a) the exact value/state that makes it fail and (b) why
-that state is reachable. A guard whose negative case cannot be reached is a test
-that cannot fail — it proves the code ran, not that the tree agrees with the
-document. The four POSITIVE controls read the shipped artifact whole and assert
-its agreed state — `test_the_shipped_map_is_clean`, the taxonomy sums
-(`test_the_taxonomy_counts_are_what_the_summary_declares`), the CLI's
-agree-or-declare contract (`test_the_cli_agrees_or_declares_itself_unverified`)
-and the closed vocabulary (`test_every_status_token_is_in_the_vocabulary`) — and
-are named as such rather than counted as negative controls.
+EVERY NEGATIVE CONTROL TAKES ONE OF FIVE SHAPES, and the census below is derived
+mechanically from this file (56 test functions at the head this landed on, counted
+with the anchored grep), not asserted: a mutated copy of the shipped artifact it
+grades (23); a stand-in artifact written FROM SCRATCH for an arm whose failure is
+the artifact's absence or shape rather than its content — a synthesised
+`docs/00_index.md`, a path that does not exist, a directory, a non-UTF-8 file
+(9); a throwaway directory it drives real `git` in, a repo or deliberately NOT
+one for the cannot-answer legs (5); one patched seam the arm requires (14); or
+the shipped source read as an AST — the interpreter guard's exit code, which no
+runtime fixture can produce (1). That is 52 negative controls plus the 4 positives.
+Never a fixture that could not fail, and each test's docstring states (a) the
+exact value/state that makes it fail and (b) why that state is reachable. A guard
+whose negative case cannot be reached is a test that cannot fail — it proves the
+code ran, not that the tree agrees with the document.
+
+The positive controls are named, and what makes each one positive is stated
+rather than assumed: `test_the_shipped_map_is_clean` and the taxonomy sums
+(`test_the_taxonomy_counts_are_what_the_summary_declares`) read the shipped page
+whole and assert its agreed state, and
+`test_the_cli_agrees_or_declares_itself_unverified` does the same through the CLI.
+`test_every_status_token_is_in_the_vocabulary` is the CLOSED-VOCABULARY control
+and reads the module constant, not the page — it holds the vocabulary and the
+document together only because the guard reads that same constant, and calling it
+an artifact reader would be the kind of claim this file exists to refuse. Other
+controls come in positive/negative pairs and say which half they are in their own
+docstrings (e.g. `test_an_ancestor_anchor_passes_on_the_same_repo`).
 
 Registered in `config/ci-surfaces.yml` (`manifest-integrity` fails on an
 unregistered test file; a docs-only edit runs `tier1` only, which is why the file
@@ -394,6 +406,30 @@ def test_a_mislabelled_workstream_row_cannot_pass_on_position(tmp_path):
     assert any("WS-C" in e or "workstream labels" in e for e in errors), errors
 
 
+def test_an_UNKNOWN_workstream_label_is_reported_not_a_KeyError(tmp_path):
+    """Fails if the label SET is not validated before the counts are bound to it.
+
+    Reachable, and uncovered until review caught it: `WS-A` renamed to `WS-F`
+    leaves five counts in place, so the ARITY check passes and `WORKSTREAMS[name]`
+    raises `KeyError` out of `run()` — a traceback, exit 1, the code this tool
+    defines as DRIFT about a document that is merely mislabelled. The sibling
+    control above swaps two labels, which preserves the label set `{A,B,C,D,E}`,
+    so it exercises the count-by-label BINDING and never reaches this branch.
+    Measured with the branch deleted: this control FAILS with `KeyError: 'WS-F'`
+    escaping `run()` while the other 57 pass — so the mutant is caught here and
+    nowhere else.
+    """
+    copy = _doc_copy(tmp_path)
+    text = copy.read_text(encoding="utf-8")
+    renamed = text.replace("| WS-A write-path integrity", "| WS-F write-path integrity", 1)
+    assert renamed != text, "fixture no longer finds the WS-A row label"
+    copy.write_text(renamed, encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any(
+        "unknown ['WS-F']" in e and "missing ['WS-A']" in e for e in errors
+    ), errors
+
+
 def test_two_abstract_headlines_are_reported_as_ambiguous(tmp_path):
     """Fails if a decoy headline above the real one is silently preferred.
 
@@ -414,12 +450,16 @@ def test_two_abstract_headlines_are_reported_as_ambiguous(tmp_path):
     assert any("ambiguous" in e for e in errors), errors
 
 
-def test_the_frontmatter_headline_must_agree_with_the_tables(tmp_path):
-    """Fails when the page's own "**21 fixed and 5 open**" headline goes stale.
+def test_the_ABSTRACT_headline_must_agree_with_the_tables(tmp_path):
+    """Fails when the page's own "**21 fixed and 5 open**" abstract goes stale.
 
-    Reachable: that sentence is the one most readers quote (it is the abstract of
-    the whole page), and it was not compared to anything before this control — a
-    row moving in §3–§7 left it stating the opposite of the table below it.
+    Reachable: that sentence is the one most readers quote (it is the opening
+    blockquote of the whole page), and it was not compared to anything before this
+    control — a row moving in §3–§7 left it stating the opposite of the table
+    below it. The scope is the body ABOVE `## 1.`, NOT the frontmatter: the
+    frontmatter carries only `measured_at_commit`/`measured_at`, which is why the
+    arm reads `text.split("## 1.", 1)[0]` and why this control is named for the
+    abstract rather than for a frontmatter field that does not hold it.
     """
     copy = _doc_copy(tmp_path)
     text = copy.read_text(encoding="utf-8")
