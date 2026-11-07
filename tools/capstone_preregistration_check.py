@@ -391,7 +391,13 @@ COMPARATORS = ("<=", ">=", "<", ">", "=", "≤", "≥")
 #: A threshold that declares itself a REGISTERED NON-BAR (`UNMEASURED(<ground>)`, §3.1's A4 row).
 #: Such a cell is complete only when its ground names an issue (`#NNNN`) that gates the row — and the
 #: floor clause beside it may never be what satisfies the numeric arm (see `check_completeness`).
-REGISTERED_NO_BAR = re.compile(r"\bUNMEASURED\(")
+#: ⛔ WHITESPACE-TOLERANT (`\s*`), because the prose spelling `UNMEASURED (ground)` is the natural
+#: one and a literal `UNMEASURED(` let it FALL THROUGH to the numeric arms, where the floor clause
+#: beside it supplied both comparator and number — so a REQUIRED row (`E1`) reading
+#: `UNMEASURED (…) above the floor of `>= 30`…` left the gate at OK with no bar at all. Measured
+#: on a copied evidence dir at #11331 review round 6: exit 0/OK with the space, exit 1 without it.
+#: The ONE definition, so every reader of this cell agrees with the branch that decides it.
+REGISTERED_NO_BAR = re.compile(r"\bUNMEASURED\s*\(")
 #: The `… above the floor of `` >= 30 `` …` clause a threshold cell may carry *beside* its bar.
 #: STRIPPED before the comparator test on a registered non-bar, because a floor is a refusal
 #: boundary and not a bar (§3.7, §7 item 1). ⛔ It strips the COMPARATOR THE FLOOR OWNS, not a run of
@@ -3818,7 +3824,7 @@ def check_completeness(rows: list[dict[str, str]]) -> list[str]:
             # INDEPENDENT of the arm above, never `elif`: a cell can name its owner decision and
             # STILL smuggle a comparator out of the floor clause, and that is the mutation this
             # half exists to catch.
-            if any(c in FLOOR_CLAUSE.sub("", plain).split("UNMEASURED(", 1)[-1]
+            if any(c in REGISTERED_NO_BAR.split(FLOOR_CLAUSE.sub("", plain), 1)[-1]
                    for c in COMPARATORS):
                 failures.append(
                     f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
