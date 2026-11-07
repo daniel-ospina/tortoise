@@ -3992,7 +3992,14 @@ class TestTheMitigationLedger:
             "Fly.io` step still stages — the deploy would re-arm the mitigation. "
             + proc.stdout
         )
-        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert proc.returncode == 0, (
+            "the shipped ledger's entry is not honoured by the shipped deploy — if the "
+            "gate says `MITIGATION LAPSED`, an entry's `expires` has passed: delete it "
+            "or re-affirm it. The clock is UNPINNED here on purpose (the deploy's own "
+            "resolution), so that red is the mechanism working, not this test rotting.\n"
+            + proc.stdout
+            + proc.stderr
+        )
         # …and the gate named the shipped file it read and how many entries it acted
         # on. That pins "the gate read the shipped LEDGER", not "the seam was
         # honoured": REAL_LEDGER is the same path as the gate's DEFAULT_LEDGER, so this
