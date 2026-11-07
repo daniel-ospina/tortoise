@@ -157,7 +157,7 @@ from tortoise.session_reinjection import (  # C4 (#2517): product rules
     DEFAULT_REINJECTION_SEED_SESSIONS,
     DEFAULT_REINJECTION_SEED_WINDOW,
     DEFAULT_REINJECTION_TOTAL_ITEMS,
-    _is_real_session_id,  # #10540 R10 — the SPLICE needs the SEED's own guard
+    _is_real_session_id,  # #10540 R11 — the splice's ANCHOR MAP needs it
 )
 
 from . import encode_cache, evidence
