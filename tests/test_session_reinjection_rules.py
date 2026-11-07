@@ -1032,11 +1032,14 @@ def test_wire_identity_is_stripped_like_the_reader_names_it():
     identity, and on WHICH one — the two authorities answer that question,
     and an unstripped pool leg split them.
 
-    MEASURED before this: ``session_key_of({"id":"p","sessionId":"  "})
-    -> "  "`` while ``hit_session_id`` returned ``""``, and
-    ``_is_real_session_id("  ")`` is True — so ``seeded_sessions`` returned a
-    ``SeededSession(session_id="  ")``: a seed, a graph fetch, and a census
-    entry for a session the reader calls UNKNOWN. And a padded
+    MEASURED with the camel leg added but BEFORE the ``strip()`` (this PR's
+    first commit, ``40c4d85578``): ``session_key_of({"id":"p",
+    "sessionId":"  "}) -> "  "`` while ``hit_session_id`` returned ``""``,
+    and ``_is_real_session_id("  ")`` is True — so ``seeded_sessions``
+    returned a ``SeededSession(session_id="  ")``: a seed, a graph fetch, and
+    a census entry for a session the reader calls UNKNOWN. (At
+    ``origin/main`` there is no camel leg at all, so the hit was a phantom —
+    that is the neighbouring test's baseline, not this one's.) And a padded
     ``" S1 "`` keyed ``" S1 "`` where the reader named ``S1``, so the seed
     could never equal the ``:Session`` id the fetch groups by. Both spend the
     bounded fetch budget on a group the merge then drops.

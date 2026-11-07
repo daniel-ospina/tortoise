@@ -122,6 +122,7 @@ from tortoise.retrieval import (
     _validity_marker,  # noqa: F401 — re-exported for the eval tests
     render_context,
     resolve_pool_size,
+    session_key_of,  # #10540 — the SPLICE must key the pool the same way the SEED does
 )
 from tortoise.retrieval import (
     TOKEN_ESTIMATOR as _TOKEN_ESTIMATOR,  # noqa: F401
@@ -1046,15 +1047,23 @@ def _tr_complete_sessions(
         # session block is complete and contiguous; base order is otherwise
         # untouched (a session with no fetched material keeps its hits where
         # they were).
+        #
+        # #10540: keyed through the POOL AUTHORITY, never the raw snake prop.
+        # ``seeded_sessions`` above keys through ``retrieval.session_key_of``,
+        # which resolves a product turn hit from its wire ``sessionId``; a
+        # splice that read ``h.get("session_id")`` matched NOTHING on a
+        # camel-only pool, so the arm fetched, reported ``seeded: N`` and
+        # injected zero. On an eval pool both resolve to the same snake id, so
+        # this is a no-op there (the #8713 census cannot move).
         last_index: dict[str, int] = {}
         for i, h in enumerate(pool):
-            sid = h.get("session_id") or ""
+            sid = session_key_of(h)
             if sid in added:
                 last_index[sid] = i
         merged: list[dict] = []
         for i, h in enumerate(pool):
             merged.append(h)
-            sid = h.get("session_id") or ""
+            sid = session_key_of(h)
             if added and last_index.get(sid) == i:
                 merged.extend(added.pop(sid))
         report["sessions"] = len(last_index)
