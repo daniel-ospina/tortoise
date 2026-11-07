@@ -278,6 +278,13 @@ def check_pins(repo: Path, rows: list[Row]) -> list[str]:
                 errors.append(f"#{row.issue}: pin {pin!r} does not exist at this head")
                 continue
             if not path.is_file():
+                # A DIRECTORY satisfies `exists()` and pins nothing: no assertion
+                # lives in it, so a row could be VERIFIED-FIXED against it and
+                # never fail. Silent `continue` here until review found it (#5).
+                errors.append(
+                    f"#{row.issue}: pin {pin!r} is not a file — a pin must be an "
+                    f"artifact that fails if the fix is undone"
+                )
                 continue
             if pin.startswith("tests/") and pin.endswith(".py"):
                 body = path.read_text(encoding="utf-8", errors="replace")

@@ -115,7 +115,7 @@ graph — or is lost later. No error is raised.*
 | #2813 | v2 product capture silently drops the E3 fields (`quote`/`when`/`search_keys`/`source_turn_id`) while the eval lane passes them, so benchmarks look healthy and the product persists none | VERIFIED-FIXED | `0643bba86` | `tests/test_capture_session.py` |
 | #2795 | `rebuild_all` drops live-only props (`amount`, `currency`, `search_keys`, `content_hash`) — the live writer and the replay writer keep different field lists | VERIFIED-FIXED | `37d5ef00c` | `tests/test_ingest_rebuild_durability.py` |
 | #2814 | `rebuild_all` wipes **all** nodes including config (`:PackManifest`/`:PackInstall`), so per-graph config cannot survive the recovery path | VERIFIED-FIXED | `b586fab83` | `tests/test_rebuild_config_preservation.py` |
-| #2788 | the Event arbitrary-prop lane advertises event-carried state that nothing reads (and the commit path forbids) | VERIFIED-FIXED | `ed02cfbb2` | `tests/test_event_state_carrier_2788.py` |
+| #2788 | the Event arbitrary-prop lane advertises event-carried state (as filed: "that nothing reads"; the tree's answer, recorded in the anchor, is that `name` has **one** reader — `sdk.backfill_about_entities` — while `eventStatus`/`createdAt` have none) and the commit path forbids the keys | VERIFIED-FIXED | `ed02cfbb2` | `tests/test_event_state_carrier_2788.py` |
 | #2742 | `CORE_SOURCE_KINDS` snapshots `SOURCE_KIND_DEFAULTS` at import, so a runtime `register_source_kind_default()` is invisible to the Layer-1 gate | VERIFIED-FIXED | `2b2156f3f` | `tests/test_source_kind_runtime_registration.py` |
 
 **Note on the class, not just the rows.** All five are the same shape and all
@@ -304,8 +304,10 @@ The checker re-measures, offline and without network access:
 rounding:**
 
 - **The status *prose* of a row, and the tracker state.** Those are dated facts;
-  the guard refuses to pretend it can read GitHub. §2 and §8 are dated and carry
-  the commit they were read at.
+  the guard refuses to pretend it can read GitHub. §2 carries the DATE it was read
+  and §8 carries neither date nor commit — the commit for the whole page is the
+  frontmatter's `measured_at_commit`, restated in §10. Do not read §2 or §8 as
+  self-dating.
 - **Anchor RELEVANCE.** The guard proves an anchor exists and is merged. It cannot
   prove the commit is *the fix* — a lane once cited a merge that mentioned nothing
   of the issue (this page carried exactly that defect until review caught it on
@@ -327,7 +329,7 @@ rounding:**
 
 ## 10. Provenance
 
-- The map's content is **#2820**'s (2026-09-10); its four patterns, six
+- The map's content is **#2820**'s (2026-09-10); its four patterns, five
   workstreams and 26 entries are unchanged here.
 - The statuses, anchors and pins were re-measured against `23d227c53` (2026-11-06)
   by reading the tree, the history, and the tracker — never the issue's own body.

@@ -212,6 +212,21 @@ def test_a_pin_that_is_a_test_module_without_tests_is_drift(tmp_path):
     assert any("#2788" in e and "pins nothing" in e for e in errors), errors
 
 
+def test_a_pin_that_is_a_DIRECTORY_is_drift(tmp_path):
+    """Fails when a pin points at a directory instead of a file.
+
+    Reachable, and found by the FIFTH review round: `exists()` is true for a
+    directory, so the pin check silently accepted one — a row could be
+    VERIFIED-FIXED against `tests/` and nothing in that row could ever fail. The
+    check now reports a non-file pin.
+    """
+    copy = _doc_copy(tmp_path)
+    text = _rewrite_row(copy.read_text(), 2813, "`tests/test_capture_session.py`", "`tests/`")
+    copy.write_text(text, encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("#2813" in e and "is not a file" in e for e in errors), errors
+
+
 def test_a_summary_count_that_disagrees_with_the_table_is_drift(tmp_path):
     """Fails when §2's total is edited without the rows.
 
