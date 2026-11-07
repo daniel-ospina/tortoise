@@ -713,18 +713,21 @@ def session_key_of(hit: dict) -> str:
       ``n.sessionId`` / the snake prop / the ``:Session`` ``CONTAINS`` edge
       and then POPs the snake key, so a TURN hit carries the CAMEL key
       ALONE (:func:`hit_session_id` names the same two sources). Before
-      this the authority read the snake ``session_id`` only, so every
-      product TURN hit — the grain the C4 arm EXPANDS — keyed as a phantom
-      and ``seeded_sessions`` dropped it, so no turn hit could seed its own
+      this the authority read the snake ``session_id`` only, so a PRODUCT
+      turn hit — the grain the C4 arm EXPANDS — keyed as a phantom and
+      ``seeded_sessions`` dropped it: no turn hit could seed its own
       session, and ``reinjection_merge_order`` could not find a turn-seeded
-      session's own base ranks (the injected group fell to the defensive
-      tail). What this fixes is the SEED's blindness at the turn grain, NOT
-      the arm's measured effect: #8713's own receipt records the arm firing
-      on the EVAL grain (``seeded_sessions: 354``, ``injected_total_merged:
-      617/617 at cap10``, ``recall_all@5 0.6761 → 0.8592``), so the arm was
-      never globally inert — on a product TURN pool it could not seed at
-      all. The identity the READER
-      already renders (``hit_session_id``) was dropped one layer below it;
+      session's own base ranks. What this fixes is the SEED's blindness at
+      the turn grain, NOT the arm's measured effect: #8713's own receipt
+      records the arm firing on the EVAL grain (``seeded_sessions: 354``,
+      ``injected_total_merged: 617/617 at cap10``, ``recall_all@5 0.6761 →
+      0.8592``), so the arm was never globally inert — on a product TURN
+      pool it could not seed at all. Pre-change there was no seed and
+      therefore no fetch, so no injected group existed to place; and a
+      group whose key the merge does not expect is DROPPED, not tailed
+      (see ``session_reinjection.source_session_chunk_pass``). The identity
+      the READER already renders (``hit_session_id``) was dropped one layer
+      below it;
     * else the hit's OWN ``id`` ⇒ ``idx:point:{id}``: two identity-less hits
       are two DISTINCT entities and must not share a bucket. Before #3591
       both read ``idx:-1``, so the C5 per-session cap
@@ -757,22 +760,29 @@ def session_key_of(hit: dict) -> str:
     branch today falls back only because it carries no identity in a
     spelling this function reads.
 
-    ⛔ Not sanitized, deliberately, and the reason is NOT that filtering
-    would make a hit unseedable — the opposite: ``hit_session_id`` applies
-    ``_safe_session_tag`` (which also STRIPS surrounding whitespace), so a
-    hand-built hit whose camel id is ``" sessA "`` is named ``sessA`` by the
-    reader while this function returns the padded string, which can never
-    equal the fetch's own group key ``coalesce(p.session_id, s.id)`` and so
-    lands the injected group in the merge's defensive tail. Sanitizing here
-    would FIX that case. It is left out because it is a separate, measured
-    change to key semantics: this key is a DICT KEY and a comparison
+    ⛔ Not FILTERED — but the camel leg IS ``strip()``ped, and the two are
+    different questions. The reason to leave the ALLOWLIST out is NOT that
+    filtering would make a hit unseedable — the opposite: ``hit_session_id``
+    applies ``_safe_session_tag`` (strip + allowlist), so a hand-built hit
+    whose camel id is ``" sessA "`` is named ``sessA`` by the reader while
+    an unstripped pool key is the padded string, which can never equal the
+    fetch's own group key ``coalesce(p.session_id, s.id)`` — the seed is
+    spent and the injected group is then DROPPED (groups are built over
+    ``seed_order``: ``session_reinjection.reinjection_merge_order``), not
+    tailed. A whitespace-only id is worse than useless in the same
+    direction: the reader calls it UNKNOWN and the pool would seed it.
+
+    So the WHITESPACE half is closed here — ``strip()`` on this leg only,
+    which moves NO existing key (a padded or whitespace-only camel value
+    was a PHANTOM before this leg existed) and refuses nothing the reader
+    can name; a value that is only whitespace falls through to the per-hit
+    bucket, i.e. it fails closed. The ALLOWLIST half is deliberately NOT
+    applied here: folding the render sanitizer into the pool identity
+    would silently move the key of every odd-shaped id on every lane at
+    once — a backlog item, not a rider on this fix. There is no injection
+    surface to close either way: this key is a DICT KEY and a comparison
     operand, never interpolated into Cypher and never rendered (the render
-    and the wire go through ``hit_session_id``), so there is no injection
-    surface to close, the real fetch already sanitizes before the hit is
-    built (``sdk.tortoise_fts_query``), and folding the render sanitizer
-    into the pool identity would silently move the key of every padded or
-    odd-shaped id on every lane at once — a backlog item, not a rider on
-    this fix.
+    and the wire go through ``hit_session_id``).
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all
@@ -787,8 +797,10 @@ def session_key_of(hit: dict) -> str:
     if index is not None:
         return f"idx:{index}"
     wire_id = hit.get("sessionId")
-    if isinstance(wire_id, str) and wire_id:
-        return wire_id
+    if isinstance(wire_id, str):
+        wire_id = wire_id.strip()
+        if wire_id:
+            return wire_id
     point_id = hit.get("id")
     if point_id:
         return f"idx:point:{point_id}"

@@ -275,7 +275,8 @@ def _is_real_session_id(key: str) -> bool:
     injected group only for a key present in ``seed_order`` (the seeds'
     own ``session_id``), so an ``idx:N`` bucket key — which names no graph
     session and can never equal that anchor — would spend the fetch budget
-    on a group that could only land in the defensive tail."""
+    on a group the merge then DROPS (see ``source_session_chunk_pass``'s
+    group-key clause: groups are built over ``seed_order`` alone)."""
     return bool(key) and not key.startswith("idx:")
 
 
@@ -382,10 +383,16 @@ def source_session_chunk_pass(
       * The group key returned is ``coalesce(p.session_id, s.id)``: the
         eval's dataset session id when the point carries one (it always
         does), the ``:Session`` id in the product (a product turn carries
-        no ``session_id``). A key absent from the caller's ``seed_order``
-        (reachable only via a Session reached through a shared seed) lands
-        in ``reinjection_merge_order``'s defensive tail rather than after
-        its own base rank.
+        no ``session_id``). ⚠️ A key ABSENT from the caller's ``seed_order``
+        (reachable through a shared seed — one Point contained by several
+        ``:Session`` nodes — or a Point whose own camel ``sessionId`` prop
+        names a different session than the one containing it) is **DROPPED**,
+        not tailed: :func:`reinjection_merge_order` builds its groups by
+        iterating ``seed_order``, so such rows are fetched, charged to the
+        per-session/total budget, and then never spliced. The only signal is
+        ``total`` (which counts them) against what actually reached the
+        merged pool. That function's defensive tail keeps a SEEDED session
+        with no base rank; it does not rescue an unseeded group key.
 
     Default ``chunk_kind`` is :data:`~tortoise.retrieval.TURN_POINT_KIND`,
     the product's verbatim material; passing

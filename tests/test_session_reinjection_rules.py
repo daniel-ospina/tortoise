@@ -1022,6 +1022,42 @@ def test_wire_identity_never_moves_an_existing_key():
     # a non-string / empty wire value is not an identity
     assert session_key_of({"id": "e4", "sessionId": None}) == "idx:point:e4"
     assert session_key_of({"id": "e5", "sessionId": ""}) == "idx:point:e5"
+    # non-str spellings are refused by the isinstance guard, not stringified
+    for junk in (0, 5, True, {"a": 1}, ["s"]):
+        assert session_key_of({"id": "e6", "sessionId": junk}) == "idx:point:e6"
+
+
+def test_wire_identity_is_stripped_like_the_reader_names_it():
+    """#10540: the pool key and the reader must agree on whether a hit HAS an
+    identity, and on WHICH one — the two authorities answer that question,
+    and an unstripped pool leg split them.
+
+    MEASURED before this: ``session_key_of({"id":"p","sessionId":"  "})
+    -> "  "`` while ``hit_session_id`` returned ``""``, and
+    ``_is_real_session_id("  ")`` is True — so ``seeded_sessions`` returned a
+    ``SeededSession(session_id="  ")``: a seed, a graph fetch, and a census
+    entry for a session the reader calls UNKNOWN. And a padded
+    ``" S1 "`` keyed ``" S1 "`` where the reader named ``S1``, so the seed
+    could never equal the ``:Session`` id the fetch groups by. Both spend the
+    bounded fetch budget on a group the merge then drops.
+
+    Stripping is not filtering: the reader's ALLOWLIST is deliberately not
+    applied here (``session_key_of``'s docstring says why), so this pins the
+    whitespace half only.
+    """
+    assert session_key_of({"id": "p", "sessionId": "  "}) == "idx:point:p"
+    assert session_key_of({"id": "p", "sessionId": "\t\n"}) == "idx:point:p"
+    assert session_key_of({"id": "p", "sessionId": " S1 "}) == "S1"
+    assert session_key_of({"id": "p", "sessionId": "S1"}) == "S1"
+    # the two authorities agree on both the existence and the value
+    for sid in ("S1", " S1 ", "  "):
+        hit = {"id": "p", "sessionId": sid}
+        key = session_key_of(hit)
+        assert retrieval.hit_session_id(hit) in ("", key)
+        assert (key == "idx:point:p") == (retrieval.hit_session_id(hit) == "")
+    # a whitespace-only identity fails CLOSED: no seed, nothing fetched
+    assert seeded_sessions([{"id": "p", "sessionId": "  "}],
+                           window=5, limit=5) == []
 
 
 def test_injected_group_anchors_on_its_own_sessions_product_base_ranks():
