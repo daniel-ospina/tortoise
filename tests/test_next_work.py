@@ -72,6 +72,22 @@ queue_rules:
       - check-success=test-isolation
 """
 
+#: The fleet's work-unit rule, as BYTES (#10951). `collect()` drives the SHIPPED
+#: `POOL_JQ` from agent-infra's `refresh-candidates.sh`, which is gitignored
+#: machine-local state (#9475) and therefore ABSENT on a runner — so a module that
+#: called `collect()` without pinning the rule would be green on a box with the
+#: `scripts/` symlink and red on CI (measured by a reviewer: 1 failed on the runner
+#: shape, with every row withheld). Pinned to the stated mirror, for every test in
+#: this module, so the module is hermetic: no DB, no network, no `gh`, no agent-infra.
+FIXTURE_RULE = Path(__file__).resolve().parent / "fixtures" / "10951" / "pool-rule.sh"
+
+
+@pytest.fixture(autouse=True)
+def _pin_the_population_rule(monkeypatch):
+    monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", str(FIXTURE_RULE))
+    monkeypatch.delenv("NEXT_WORK_POPULATION", raising=False)
+
+
 CFG = parse_config(CONFIG_TEXT)
 REQUIRED = list(CFG.required_checks)
 

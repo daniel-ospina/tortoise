@@ -407,7 +407,10 @@ class Snapshot:
         # a raw AttributeError inside INCOMPLETE — fail-closed, but as the diagnostic
         # class this door exists to turn into a NAMED refusal.
         raw_population = raw.get("population")
-        if not isinstance(raw_population, dict):
+        if "population" not in raw:
+            # ABSENT is the separate INCOMPLETE case below — not a wrong type.
+            snap.population = {}
+        elif not isinstance(raw_population, dict):
             snap.unreadable.append(
                 f"population: the snapshot's population is "
                 f"{type(raw_population).__name__}, not a map — no row's eligibility is provable"
@@ -423,6 +426,12 @@ class Snapshot:
         # surface. That is the same defect one level up: an absent measurement
         # granted as a pass. ABSENT is INCOMPLETE (exit 2); an EMPTY map is a real
         # answer from a real measurement and is honoured.
+        if "population" in raw and not (snap.population_source or "").strip():
+            # ⛔ A REPLAY THAT CARRIES VERDICTS BUT NO SOURCE IS STILL A REPLAY
+            # (#10951 review, follow-up). Without this the provenance line — the
+            # one thing that lets a closer tell a DEPLOYED measurement from a
+            # carried-forward one — was silent on exactly the replays.
+            snap.population_source = "REPLAY — verdicts from the snapshot's own map"
         if "population" not in raw:
             snap.population_absent = True
             snap.population_source = (
@@ -677,7 +686,10 @@ def _normalise_shapes(raw: dict[str, Any], snap: Snapshot) -> None:
         # arm die with `explode input must be a string`, which would surface as an
         # UNREADABLE population and withhold the ENTIRE queue for one malformed
         # element — a false block. A nameless label declares nothing, so it
-        # normalises to the empty name (matched by no arm) and is recorded.
+        # normalises to the empty name (matched by no arm) and is RECORDED: the rule
+        # survives, but the run is INCOMPLETE (exit 2), because a field that cannot
+        # be read is not an absent one. Two different promises — "the rule does not
+        # die" and "the run is clean" — and this makes the first without the second.
         if isinstance(row.get("labels"), list):
             names: list[dict[str, Any]] = []
             for label in row["labels"]:
@@ -2665,11 +2677,25 @@ def render(
             + "\n  A surface the decision depends on could not be read, so no unit's freedom is provable."
         )
     elif pick is None:
-        out.append(
-            "  NONE — no unit is pickable: every measured one is held, superseded, or a "
-            "duplicate of a row already offered (or the queue is empty). That is an "
-            "answer, not an error."
-        )
+        # ⛔ NAME THE CLASS THAT ACTUALLY WITHHELD (#10951 review, follow-up). The
+        # sentence listed "held, superseded, or a duplicate" — so a queue whose whole
+        # population was withheld by the work-unit rule was described by three causes,
+        # none of which applied, which is the same misdescription the stolen-target
+        # finding was filed for.
+        withholds = sorted({u.reason for u in units if u.reason in REASONS_WITHHELD})
+        if withholds:
+            out.append(
+                "  NONE — no unit is pickable: every measured one is withheld as "
+                + ", ".join(withholds)
+                + " (a queue whose rows are containers, declared constraints, assigned "
+                "or otherwise not units is an ANSWER, not an error)."
+            )
+        else:
+            out.append(
+                "  NONE — no unit is pickable: every measured one is held, superseded, or a "
+                "duplicate of a row already offered (or the queue is empty). That is an "
+                "answer, not an error."
+            )
     else:
         out.append(f"  TOP       {_label(pick)}  ({pick.priority}, {pick.reason}, position {pick.position})")
         cmd = next_command(pick, repo)
