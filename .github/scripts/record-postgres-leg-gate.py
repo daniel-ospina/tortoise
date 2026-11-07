@@ -47,6 +47,25 @@ ARMED_LEG_FILES = frozenset({
     "test_9555_narrative_carrier",
 })
 
+#: ⛔ THE CASES WITH NO `ARMED_LEG_PREFIX` NAME, required BY NAME (#11429 review
+#: cycle 2). The capstone's legs are named per DoD item (`test_D8_…`), so neither
+#: rule above can see them: a whole-file deselect is caught by
+#: `ARMED_LEG_FILES` only for the two files named there, and for the capstone
+#: nothing catches it at all — the workflow still LISTS the file, so a
+#: `-k "not D8"` / `--deselect …::test_D8_…` (the ordinary way a flaky leg is
+#: quarantined) leaves `tests/test_9567_record_capstone.py` in the pytest argument
+#: list, records NO skip, and the required job goes green with D8 — the only
+#: restore drill on any CI leg — never executed. Measured before this rule: a
+#: junit from the job's own armed legs plus the capstone run `-k "not D8"`
+#: (tests=133, skipped=0, no D8 case) was CERTIFIED, exit 0.
+#:
+#: Each entry is `case name` -> the wrong outcome its absence produces.
+REQUIRED_CASES = {
+    "test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires":
+        "the record's restore drill (#9567 D8) never ran — the durable artifact "
+        "is not proven restorable on this leg, and a `-k` filter hides it",
+}
+
 
 def _leg_module(case) -> str:
     """The MODULE an armed leg belongs to — bare name, no path, no package.
@@ -131,6 +150,11 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
             "(#9551)")
     if failed:
         problems.append(f"{failed} failing/erroring leg(s) — see the run step")
+    present = {case.get("name", "") for case in root.iter("testcase")}
+    for required, why in sorted(REQUIRED_CASES.items()):
+        if required not in present:
+            problems.append(
+                f"required leg {required} did not run — {why} (#11429)")
     return stats, problems
 
 

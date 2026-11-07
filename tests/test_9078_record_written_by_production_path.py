@@ -3850,7 +3850,7 @@ def yaml_jobs():
 #: because the gate attributes an armed leg to its FILE and requires one from each
 #: — a fixture whose classnames collapse to one module would certify a run the
 #: gate exists to refuse (PR #9862 review round 3).
-_JUNIT_GREEN = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
+_JUNIT_GREEN = """<testsuites><testsuite name="pytest" tests="4" failures="0" \
  errors="0" skipped="0">
   <testcase classname="tests.test_9078_record_written_by_production_path" \
             name="test_the_public_capture_path_writes_the_record"/>
@@ -3858,6 +3858,25 @@ _JUNIT_GREEN = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
             name="test_the_public_capture_path_writes_the_epistemic_layer"/>
   <testcase classname="tests.test_9555_narrative_carrier" \
             name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone" \
+            name="test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires"/>
+</testsuite></testsuites>"""
+
+#: ⛔ THE `-k "not D8"` SHAPE (#11429 review cycle 2): every other rule is
+#: satisfied — both armed files ran, nothing skipped, nothing failed — and the
+#: capstone FILE is still in the job's pytest argument list, so the workflow-text
+#: pin is green too. Only a required CASE can see it. This is exactly what a lane
+#: does to quarantine a flaky leg.
+_JUNIT_D8_QUARANTINED = """<testsuites><testsuite name="pytest" tests="3" \
+ failures="0" errors="0" skipped="0">
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
+            name="test_the_public_capture_path_writes_the_record"/>
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
+            name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+  <testcase classname="tests.test_9555_narrative_carrier" \
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone" \
+            name="test_D1_every_record_table_exists_on_the_armed_record"/>
 </testsuite></testsuites>"""
 
 #: ⛔ THE HOLE a flat leg count cannot see: three armed legs, ALL from one file.
@@ -3877,7 +3896,7 @@ _JUNIT_ONE_FILE = """<testsuites><testsuite name="pytest" tests="3" failures="0"
 #: SKIPPED and pytest exited 0 — a run that certified nothing. One green leg from
 #: the OTHER file keeps the per-file rule satisfied, so the ONLY problem this
 #: fixture can produce is the skip itself.
-_JUNIT_REAL_SKIP = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
+_JUNIT_REAL_SKIP = """<testsuites><testsuite name="pytest" tests="4" failures="0" \
  errors="0" skipped="2">
   <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_record">
@@ -3889,13 +3908,15 @@ _JUNIT_REAL_SKIP = """<testsuites><testsuite name="pytest" tests="3" failures="0
   </testcase>
   <testcase classname="tests.test_9555_narrative_carrier"
             name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone"
+            name="test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires"/>
 </testsuite></testsuites>"""
 
 #: A strict xfail of one armed leg (the engine-dependency pin). It is recorded
 #: as `type="pytest.xfail"` AND counted in the suite's `skipped` attribute, so a
 #: gate that read the attribute would red this required job for a database that
 #: armed perfectly.
-_JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
+_JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="4" failures="0" \
  errors="0" skipped="1">
   <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_record"/>
@@ -3905,6 +3926,8 @@ _JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
   </testcase>
   <testcase classname="tests.test_9555_narrative_carrier"
             name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone"
+            name="test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires"/>
 </testsuite></testsuites>"""
 
 #: One leg deselected out of the run — the Postgres proof never happened.
@@ -4007,6 +4030,23 @@ def test_the_arm_gate_reds_when_the_WRONG_two_files_contributed(tmp_path):
     errors = _gate_errors(result)
     assert any("test_9555_narrative_carrier" in line for line in errors), errors
     assert "from_files=2" in result.stdout, result.stdout
+
+
+def test_the_arm_gate_reds_when_the_D8_drill_is_QUARANTINED(tmp_path):
+    """⛔ The `-k "not D8"` route (#11429 review cycle 2).
+
+    Every other rule is satisfied: both armed files ran, nothing skipped, nothing
+    failed, and the capstone FILE is still named in the job's pytest argument
+    list. That is precisely what quarantining a flaky leg looks like, and it must
+    not certify — D8 is the only restore drill on any CI leg.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_D8_QUARANTINED)
+
+    assert result.returncode == 1, (
+        "the gate certified a run in which the D8 drill was deselected — a `-k` "
+        f"filter hides it:\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any("required leg test_D8_" in line for line in errors), errors
 
 
 def test_the_arm_gate_passes_a_green_armed_run(tmp_path):

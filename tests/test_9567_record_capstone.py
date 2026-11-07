@@ -78,13 +78,35 @@ SCRATCH_DB_ENV = "TEST_RECORD_SCRATCH_URI"
 #: Measured 2026-11-06: `pg_dump (PostgreSQL) 16.15` inside `postgres:16` — so
 #: "this box has no `pg_dump`" is not a reason to skip D8 (#9567 §1 of comment
 #: 6690574287), it is a reason to borrow the record's own image.
-#: The CANDIDATE ORDER is the provision action's own (`image_candidates()` in
+#: The CANDIDATES are the provision action's own (`image_candidates()` in
 #: `.github/actions/postgres-provision/provision.sh`): mirror first, upstream
-#: second, and a locally-present image before any pull — the action resolves that
-#: way so a rate-limited or unreachable mirror cannot fail a job that needs no
-#: pull (#7867), and a single hard-coded reference here would reintroduce exactly
-#: that failure at test time.
+#: second, each tried against the local daemon before any pull, because a
+#: rate-limited or unreachable mirror must not fail a job that needs no pull
+#: (#7867). This list is resolved through the SAME two steps (inspect on every
+#: candidate first, then pull each in order) — a single hard-coded reference here
+#: would reintroduce the failure the action's resolution exists to avoid.
 CLIENT_IMAGES = ("mirror.gcr.io/postgres:16", "postgres:16")
+
+#: The tables the drill's verdict must cover, declared HERE rather than read from
+#: `record_tables()`. A set compared against `record_tables()` on both sides is
+#: the same call twice and can never fail (`compare_row_counts` builds its `names`
+#: from that same function), so the mutation it was supposed to catch — a table
+#: dropped from `THE_RECORD_TABLES`, which removes it from the dump AND from the
+#: comparison in one edit, leaving a green verdict — would have been invisible
+#: (#11429 review cycle 2). This tuple is the record's ten tables as the capstone
+#: states them; a table that disappears from the drill reds here by name.
+RECORD_TABLES_DECLARED = (
+    "event",
+    "journal_event",
+    "node_identity",
+    "object",
+    "point",
+    "relation",
+    "session",
+    "session_narrative",
+    "source",
+    "subject",
+)
 
 #: One drill's wall clock (dump + encrypt + upload + download + decrypt + restore
 #: + two counts). `record_backup.RECORD_SUBPROCESS_TIMEOUT_S` bounds the drill's
@@ -520,36 +542,53 @@ def _pg_client_runner(workdir: Path):
     `--network host` because the provision action binds 127.0.0.1 (a container's
     own loopback is not the host's), and the workdir is mounted because the dump
     is written to a host path that `pg_restore` then reads back. Only `PG*`
-    variables are forwarded: the drill's env is libpq's coordinates plus
-    PATH/HOME, and forwarding the host's PATH/HOME into the container would be a
-    second, pointless difference from the default runner.
+    variables are forwarded, by NAME (`--env KEY`, with the value taken from the
+    docker CLIENT's own environment): passing `--env KEY=VALUE` would put the
+    record's password in this process's argv, which is the exposure
+    `record_backup`'s env-only design exists to prevent — argv is public, and it
+    lands in `ps`, shell history and crash reports.
     """
     if shutil.which("pg_dump") and shutil.which("pg_restore"):
         return None
 
-    image = next(
-        (
-            candidate
-            for candidate in CLIENT_IMAGES
-            if subprocess.run(
-                ["docker", "image", "inspect", candidate], capture_output=True
-            ).returncode
-            == 0
-        ),
-        CLIENT_IMAGES[-1],
-    )
+    image = _client_image()
 
     def run(argv, *, env=None, capture_output=True, text=True, timeout=None, **_ignored):
+        forwarded = {key: value for key, value in (env or {}).items() if key.startswith("PG")}
         cmd = ["docker", "run", "--rm", "--network", "host", "-v", f"{workdir}:{workdir}"]
-        for key, value in sorted((env or {}).items()):
-            if key.startswith("PG"):
-                cmd += ["-e", f"{key}={value}"]
+        for key in sorted(forwarded):
+            cmd += ["--env", key]
         cmd += [image, *argv]
         return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout or _CLIENT_TIMEOUT_S
+            cmd,
+            env={**forwarded, **({"PATH": os.environ["PATH"]} if "PATH" in os.environ else {})},
+            capture_output=True,
+            text=True,
+            timeout=timeout or _CLIENT_TIMEOUT_S,
         )
 
     return run
+
+
+def _client_image() -> str:
+    """The client-binary image: local presence first, then a pull per candidate.
+
+    The action's `provision.sh:86-101` does exactly this in two passes, and the
+    two-pass shape is the point: a warm daemon serves every candidate without a
+    registry call, and only when none is present does a pull happen — mirror
+    first, upstream second (#7867). Falling straight back to `postgres:16` would
+    make this leg bypass the mirror whenever neither image was local, which is the
+    rate-limit shape the resolution exists to avoid.
+    """
+    for candidate in CLIENT_IMAGES:
+        if subprocess.run(
+            ["docker", "image", "inspect", candidate], capture_output=True
+        ).returncode == 0:
+            return candidate
+    for candidate in CLIENT_IMAGES:
+        if subprocess.run(["docker", "pull", candidate], capture_output=True).returncode == 0:
+            return candidate
+    return CLIENT_IMAGES[-1]
 
 
 @dataclass
@@ -622,20 +661,24 @@ def test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires(
     Two halves in one run, because the second is the first's falsifier: a green
     that cannot be broken on purpose is not evidence.
 
-      1. `verdict == "RESTORED"`, with no record table holding FEWER rows than the
-         source read — per table, never a total (a total hides a table that lost
-         rows to one that gained them). ⚠️ The upper bound is deliberately the
-         DRILL's, not this test's: acceptance there is the window
-         `[min(source, source_after), max(source, source_after, cut)]`
-         (`compare_row_counts`, #9601 review cycle 4), `cut` is not exposed per
-         table, and asserting `restored == source` would red a healthy artifact on
-         a live record — the false red that window exists to remove.
+      1. `verdict == "RESTORED"` over the DECLARED table set — the drill's own
+         verdict, and the set compared against the ten tables this file names
+         rather than against the function the drill used to build it.
       2. delete one table's rows in the RESTORED copy and require the module's own
-         `verify_restore` to RED, naming the table.
+         `verify_restore` to RED, naming the table and its number.
 
-    Falsifier for (1): drop a table from `record_tables()` (the dump no longer
-    covers it) → the per-table assertion above reds naming it. Pointing the drill
-    at the record itself is the OTHER falsifier, and it is a refusal by design
+    ⛔ What is deliberately NOT restated: the drill's per-table bound. Acceptance
+    there is the window `[min(source, source_after), max(source, source_after,
+    cut)]` (`compare_row_counts`, #9601 review cycle 4), `cut` is not exposed per
+    table, and a leg that re-derived it would red a healthy artifact on a live
+    record — the false red that window exists to remove. `RESTORED` IS that
+    assertion; repeating it here in a weaker form would only look like coverage.
+
+    Falsifier: drop a table from `THE_RECORD_TABLES` (`tortoise/record_backup.py`)
+    → it leaves the dump's `--table=` list and the comparison together, so the
+    drill still says `RESTORED` — and the DECLARED set above reds naming the
+    table, which is the only assertion that can see it. Pointing the drill at the
+    record itself is the other falsifier, and it is a refusal by design
     (`refuse_same_database`) — which is why this leg needs a second server rather
     than a second database on one.
     """
@@ -644,20 +687,10 @@ def test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires(
     verdict = drilled.verdict
     assert verdict["verdict"] == "RESTORED", verdict
     assert verdict["scratch_reset"] is True, verdict
-    assert verdict["row_total"] > 0, (
-        "the drill reported RESTORED over an artifact with no rows — a pass that proves nothing"
+    assert set(verdict["tables"]) == set(RECORD_TABLES_DECLARED), (
+        f"the drill measured {sorted(verdict['tables'])}, which is not the record's "
+        f"table set {sorted(RECORD_TABLES_DECLARED)}"
     )
-    tables = verdict["tables"]
-    assert set(tables) == set(rb.record_tables()), (
-        f"the drill measured {sorted(tables)}, which is not the record's table set "
-        f"{sorted(rb.record_tables())}"
-    )
-    for table, row in tables.items():
-        floor = min(row["source"], row["source_after"])
-        assert row["restored"] >= floor, (
-            f"{table}: the restored record holds {row['restored']} of the source's "
-            f"{row['source']} rows — a table LOST rows ({row})"
-        )
 
     # ── the falsifier: the same counting step, on a copy that lost a table ──
     source_counts = rb.record_row_counts(armed.dsn)
