@@ -6476,6 +6476,39 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                     ) and _arming_id.search(_rest) is not None
 
                 return all(_admits(_named) for _named in _SHA_LIKE_RE.finditer(_rest))
+            #: ⛔ THE PHRASE'S OWN OBJECT — a copula that belongs to the phrase, then a sha
+            #: within 40 characters of it. Deliberately NOT "any third sha in the clause"
+            #: (r27 P2): the clause-wide test refused the two truthful sentences above, and
+            #: a wider window would swallow `not the retired <sha>` / `thirteen commits
+            #: after <sha>` — a denial or a MEASUREMENT of a different tree, not the claim.
+            _PHRASE_OBJECT = re.compile(
+                r"\b(?:is|was|means|denotes|refers?\s+to)\b[^.;\u2014\u2013]{0,40}?"
+                r"[`\"']?([0-9a-f]{7,40})\b",
+                re.I,
+            )
+
+            def _third_sha_is_phrases_object(
+                _norm: str, _phrase: re.Match[str], _clause_end: int
+            ) -> bool:
+                """True when the phrase's OWN copula takes a non-true, non-arming sha as object.
+
+                The A1 defect in its inverted word order — "the tree immediately before #9548
+                IS `<sha>`" — where `<sha>` is neither `047c91f7a` (the true tree) nor
+                `785bb2b59` (the arming commit, an ancestor). Read from the phrase forward to
+                the end of its clause, so a third tree named in an EARLIER clause (the r27
+                fail-open) cannot answer for it, and a denial/measurement beside the object
+                (r27 P2) is not read as the object at all.
+                """
+                _tail = _norm[_phrase.end() : _clause_end]
+                for _m in _PHRASE_OBJECT.finditer(_tail):
+                    _tok = _m.group(1).lower()
+                    if _TRUE_TREE.startswith(_tok) or _tok.startswith(_TRUE_TREE):
+                        continue
+                    if "785bb2b59".startswith(_tok) or _tok.startswith("785bb2b59"):
+                        continue
+                    return True
+                return False
+
             if preceding:
                 # ⛔ PREFIX, not equality (#11191 review round 2, P1 — measured): a
                 # FULL 40-hex referent (what `git rev-parse` prints) was REFUSED,
@@ -6522,11 +6555,29 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                         #    `c5cbcbb4f`."                                  -> ACCEPTED
                         # `c5cbcbb4f` IS the doc's own retired pre-#9548 attribution, so the
                         # pin reported the cell verified while the cell asserted the decay it
-                        # exists to catch. `_third_sha_in_clause` is the guard the arming-sha
-                        # branch below already applies (r12); this is the same guard on the
-                        # branch it was missing from, NOT a new spelling list. Deleting it
-                        # REDDENS the `_true_referent_third` control block.
-                        and not _third_sha_in_clause(clause)
+                        # exists to catch. Deleting this guard REDDENS the
+                        # `_true_referent_third` control block (mutation-verified at the head
+                        # that introduced it, `fff3ce3cdc` — NOT at `198ed21b8c`, which has
+                        # neither the guard nor that control block).
+                        # ⛔ THE GUARD IS THE PHRASE'S **OBJECT**, NOT "any third sha in the
+                        # clause" (#11191 review r27, P2 — MEASURED false RED, the half of
+                        # this rule `_third_sha_in_clause` gets wrong when widened): the
+                        # clause-wide form refused two TRUTHS that `origin/main` and
+                        # `198ed21b8c` both accept, and it keyed the verdict on WORD ORDER —
+                        #   "`047c91f7a` is the tree immediately before #9548, not the
+                        #    retired `c5cbcbb4f`."                        -> REFUSED (must accept)
+                        #   "`047c91f7a` is the tree immediately before #9548, thirteen
+                        #    commits after `c5cbcbb4f`."                  -> REFUSED (must accept)
+                        # while the attributive twin stayed GREEN — the exact class the
+                        # mirror control below forbids. `not`/`after` there deny or measure a
+                        # DIFFERENT tree; only the phrase's own copula OBJECT is the defect.
+                        # …AND `origin/main` ACCEPTS all four shapes below (it has no third-sha
+                        # guard at all), so this narrowing is a deliberate departure FROM main
+                        # — the fail-open is the direction that cannot be let stand — and NOT
+                        # an agreement with it. Say it that way: the file's standing
+                        # false-RED criterion is "`origin/main` accepts it", so an overstated
+                        # claim here invites a future revert of a guard that is right.
+                        and not _third_sha_is_phrases_object(norm, phrase, clause_end)
                     )
                     # ⛔ THE ARMING COMMIT'S OWN SHA IS NOT A TREE REFERENT (#11191
                     # review r11, P1 — MEASURED false RED, and a regression against
@@ -8645,6 +8696,28 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the phrase-first spelling of the same third tree is ACCEPTED — the verdict must "
         "not key on word order (#11191 review r27, P1)"
     )
+    # ⛔ …AND THE FALSE-RED DIRECTION OF THE SAME GUARD (#11191 review r27, P2 — MEASURED at
+    # `fff3ce3cdc`): the clause-wide form of the guard ("any third sha in the phrase's
+    # clause") refused BOTH of these while the attributive twin stayed GREEN, i.e. it keyed
+    # the verdict on word order — the class the mirror control above forbids. Both are
+    # TRUTHS (`047c91f7a` IS the pre-#9548 tree; `git rev-list --count c5cbcbb4f..047c91f7a`
+    # = 13) and both are ACCEPTED by `origin/main` and by `198ed21b8c`. The fix replaced the
+    # clause-wide test with the phrase's own copula OBJECT (`_third_sha_is_phrases_object`),
+    # so a denial or a MEASUREMENT of a different tree is not read as the claim.
+    for _true_with_third_beside in (
+        "`047c91f7a` is the tree immediately before #9548, not the retired `c5cbcbb4f`.",
+        "`047c91f7a` is the tree immediately before #9548, thirteen commits after "
+        "`c5cbcbb4f`.",
+        "The tree immediately before #9548 is `047c91f7a`, not the retired `c5cbcbb4f`.",
+        "`047c91f7a` is the arming commit's parent; the tree before #9548 reads 10 lines, "
+        "unlike `c5cbcbb4f` at `d5c71a470`.",
+    ):
+        assert not _refuses_before_9548(_true_with_third_beside), (
+            f"REFUSED: {_true_with_third_beside!r}\n"
+            "the phrase names the TRUE tree and only DENIES or MEASURES another one beside "
+            "it — refusing this is the false-RED class #11187 names verbatim, and it keyed "
+            "the verdict on word order (#11191 review r27, P2)"
+        )
     # …and the TRUE copula, including the arming commit or an aside between the copula and
     # its object, must stay green in every spelling.
     for _true_copula in (
