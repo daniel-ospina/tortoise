@@ -9924,6 +9924,7 @@ durations:
   # The 56 -> 58 gap is (three arms − one function) = 2, exactly as the
   # header above says. One count per head, in
   # The 54 -> 56 gap is (three arms − one function) = 2, exactly as the
+  # The 55 -> 57 gap is (three arms − one function) = 2, exactly as the
   # header above says.) One count per head, in
   # FUNCTIONS, measured per commit
   # (`git show <sha>:tests/test_problem_map_2820.py | grep -c '^def test_'`):
@@ -9959,7 +9960,7 @@ durations:
   # `test_the_abstract_headline_must_agree_with_the_tables`: §2's five
   # per-workstream "**N of M fixed**" cells and the page's own "**21 fixed and
   # 5 open**" headline were printed counts NOTHING compared — with a row
-  # flipped to OPEN and the four status cells edited to match, the pre-fix
+  # flipped to OPEN and the status cells edited to match, the pre-fix
   # guard returned NO errors over a §2 contradicting its WS-B table), each
   # mutation-verified -> 54 once round 4's two controls landed
   # (`test_a_mislabelled_workstream_row_cannot_pass_on_position`: a
