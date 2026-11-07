@@ -274,8 +274,33 @@ def test_both_arms_get_identical_inputs(tmp_path):
     sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
     model = _FakeModel({"entities": [], "events": [], "points": [],
                         "operators": []})
-    tool.run_arm(model, sess, "legacy")
-    tool.run_arm(model, sess, "delta")
+    # ⛔ THE CALL SITE, not just its rendered consequence. The README claims
+    # `run_s4` threads `delta` and nothing else, and cites THIS test for it —
+    # but everything below is satisfied by a call that also passes a second
+    # arm-dependent keyword: it would only make `system` differ MORE. Measured:
+    # adding `core_only=(arm == "delta")` at the instrument's call left the
+    # whole suite green (#11385 review P2). So the kwargs themselves are
+    # captured and compared.
+    _seen: list[dict] = []
+    _real = tool.x.run_s4
+
+    def _spy(*a, **kw):
+        _seen.append(dict(kw))
+        return _real(*a, **kw)
+
+    tool.x.run_s4 = _spy
+    try:
+        tool.run_arm(model, sess, "legacy")
+        tool.run_arm(model, sess, "delta")
+    finally:
+        tool.x.run_s4 = _real
+    assert len(_seen) == 2, _seen
+    _legacy_kw, _delta_kw = _seen
+    assert set(_legacy_kw) == set(_delta_kw), (_legacy_kw, _delta_kw)
+    assert {k: v for k, v in _legacy_kw.items() if k != "delta"} == {
+        k: v for k, v in _delta_kw.items() if k != "delta"}, (
+            "`delta` must be the ONLY arm-dependent argument", _legacy_kw, _delta_kw)
+    assert _legacy_kw["delta"] is False and _delta_kw["delta"] is True
     assert len(model.calls) == 2
     legacy, delta = model.calls
     # the TEMPLATE lives in `system` (the user message is the same constant)
@@ -1123,6 +1148,25 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         assert (_zero_tok, _tax_tok) == (540, 1498), (_zero_tok, _tax_tok)
         assert (f"cost **{_thousands(_tax_tok)}**" in flat_all), _tax_tok
         assert (f"the other **{_thousands(_zero_tok)}**" in flat_all), _zero_tok
+        # ⛔ BOTH RUNS' halves of the floor sentence. Only the primary's were
+        # derived, so the re-run's `1 480` and `567` were typed figures that
+        # could drift while `2 047` (which their sum makes) stayed pinned —
+        # `1 490` and `568` each left 36/36 green (#11385 review P2).
+        _zero_rer = sum(a["delta"]["out_tokens"] for a in rer["arms"]
+                        if (a["delta"].get("s4_items") or 0) == 0)
+        _tax_rer = sum(a["delta"]["out_tokens"] for a in rer["arms"]) - _zero_rer
+        assert (f"cost **{_thousands(_tax_tok)}** (primary) / "
+                f"**{_thousands(_tax_rer)}** (re-run)") in flat_all, (
+                    _tax_tok, _tax_rer)
+        assert (f"the other **{_thousands(_zero_tok)}** / "
+                f"**{_thousands(_zero_rer)}** tokens") in flat_all, (
+                    _zero_tok, _zero_rer)
+        # ⛔ the census total, where the summary paragraph first states it:
+        # `65` -> `64` there stayed green because only the LATER copy ("against
+        # the census's 65") was pinned (#11385 review P2).
+        _census = lg["corrected_by_s4"] - lg["verbatim_reemissions"]
+        assert (f"Up to **{_census} corrections per 7 sessions**"
+                in flat_all), _census
         assert "the delta RESPONSES that carried tax-surface items" in flat_all
         assert "upper bound on the DELTA ARM's tax-surface component" in flat_all
         assert "it bounds production" in flat_all
@@ -1182,6 +1226,18 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         assert (n_lifecycle, n_slots, n_super) == (62, 1, 1), (
             n_lifecycle, n_slots, n_super)
         assert not any({"content", "name"} & set(i["changed_fields"]) for i in pairs)
+        # ⛔ the TRANSITION breakdown beside the total: the README states
+        # "(61 + 1)", and `61` -> `60` there stayed green while the total 62 and
+        # the index row's own copy were pinned (#11385 review P2).
+        _trans: dict[tuple[str, str], int] = {}
+        for i in pairs:
+            if i["changed_fields"] == ["lifecycle"]:
+                _k = (i["s2_before"]["lifecycle"], i["s4_after"]["lifecycle"])
+                _trans[_k] = _trans.get(_k, 0) + 1
+        assert sum(_trans.values()) == n_lifecycle, (_trans, n_lifecycle)
+        assert (f"`unchanged` ({_trans[('created', 'unchanged')]} + "
+                f"{_trans[('changed', 'unchanged')]})") in " ".join(readme.split()), (
+                    _trans, "the lifecycle transition breakdown drifted")
         # ⛔ BOTH columns: the table states the primary AND the re-run count, so
         # pinning only the first leaves the second editable (#11385 review P2).
         want = _partition(pri)
