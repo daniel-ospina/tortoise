@@ -717,6 +717,50 @@ def test_a_cat_file_that_cannot_answer_withholds_the_verdict(monkeypatch):
     assert report.code == 2
 
 
+def test_a_signalled_cat_file_is_no_answer_not_a_missing_object(monkeypatch):
+    """Fails if `commit_exists` is a DENY-list over one sentinel instead of an allow-list.
+
+    `cat-file -e` has exactly two verdicts (0 = present, 128 = no such object / not
+    a commit). Every other rc is "git did not answer", and the ones that actually
+    occur are NOT exceptions `_git` can catch: a child killed by a signal returns a
+    NEGATIVE rc (`-9` for SIGKILL/OOM, `-15` for SIGTERM — measured), and a PATH
+    wrapper's own exit code is arbitrary. Mapping those to `False` reproduces the
+    exact defect the sentinel was added for: 29 DRIFT errors, exit 1, about a
+    correct document.
+    """
+    def _fake_run(argv, **kwargs):
+        if "cat-file" in argv:
+            # A SIGKILL'd child: subprocess.run RETURNS this, it does not raise.
+            return pmc.subprocess.CompletedProcess(
+                args=argv, returncode=-9, stdout="", stderr=""
+            )
+        if "--is-shallow-repository" in argv:
+            return pmc.subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="false\n", stderr=""
+            )
+        return pmc.subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr(pmc.subprocess, "run", _fake_run)
+    assert pmc.commit_exists(REPO, "deadbeefdeadbeef") is None
+
+    report = pmc.run(REPO, DOC)
+    assert report.errors == [], report.errors[:3]
+    assert report.code == 2
+
+    # …and git's REAL negative verdict still answers `False`, so the allow-list
+    # cannot be satisfied by sending every non-zero rc to `None`.
+    monkeypatch.setattr(
+        pmc.subprocess,
+        "run",
+        lambda argv, **kw: pmc.subprocess.CompletedProcess(
+            args=argv, returncode=128, stdout="", stderr=""
+        ),
+    )
+    assert pmc.commit_exists(REPO, "deadbeefdeadbeef") is False
+
+
 def test_git_absent_is_a_state_error_not_a_traceback(monkeypatch):
     """Fails if a `git` that cannot be EXECUTED escapes as python's exit 1.
 

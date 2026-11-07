@@ -126,8 +126,11 @@ _TOTAL = re.compile(r"^\|\s*\*\*Total tracked\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|",
 _DEF_TEST = re.compile(r"^\s*(?:async\s+)?def test_", re.MULTILINE)
 
 #: The rc `_git` mints when git could not RUN (absent, or the call timed
-#: out) — distinct from any rc git itself returns, so a caller can tell
-#: "no answer" from git's own negative verdict (1 = no, 128 = bad object).
+#: out). It is a sentinel, NOT a verdict: `cat-file -e` has exactly two verdicts
+#: (0 = present, 128 = no such object / not a commit) and `merge-base
+#: --is-ancestor` two (0 = ancestor, 1 = not). Everything else — this sentinel, a
+#: negative rc from a child killed by a signal, 129 for a usage error, a wrapper
+#: that exits 1 — is "git did not answer", and every caller maps it to `None`.
 _GIT_UNRUNNABLE = 127
 
 
@@ -251,18 +254,23 @@ def commit_exists(repo: Path, sha: str) -> bool | None:
     rc = _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode
     if rc == 0:
         return True
-    if rc == _GIT_UNRUNNABLE:
-        return None
-    return False
+    if rc == 128:
+        # git's ONLY negative verdict for `cat-file -e`: no such object, or the
+        # object is not a commit (`<tree>^{commit}` peels to one and exits 128).
+        # Measured: missing object -> 128.
+        return False
+    return None
 
 
 def is_ancestor(repo: Path, sha: str) -> bool | None:
     """True/False, or **None** when git could not answer.
 
-    `merge-base --is-ancestor` exits 1 for "not an ancestor" and 128 for "that is
-    not a commit / HEAD is unborn / the repo is unreadable". Collapsing both to
-    `False` reported a git FAILURE as `the fix did not land on this branch` — a
-    drift claim with a wrong cause — so the unanswerable case is separated and
+    An ALLOW-LIST, not a deny-list: `merge-base --is-ancestor` has exactly two
+    verdicts — 0 (an ancestor) and 1 (not) — and everything else (128 for "that is
+    not a commit / unborn HEAD / unreadable object store", a negative rc from a
+    signalled child, a wrapper's own exit code) is "git did not answer".
+    Collapsing those to `False` reported a git FAILURE as `the fix did not land on
+    this branch` — a drift claim with a wrong cause — so they are separated and
     routed to UNVERIFIED, the same direction `is_shallow`'s `None` is.
     """
     res = _git(repo, "merge-base", "--is-ancestor", sha, "HEAD")
