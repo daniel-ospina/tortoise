@@ -29,7 +29,10 @@ Rules (the map's own §8 states them; this file is the enforcement):
   appears in the child table.
 * **R5** every seam named by `04-plan.md` §5–§7 appears in the crosswalk, every
   surface a crosswalk row names has a row in the surface table, and no crosswalk
-  row leaves its surface cell naming nothing (R1 and R4 carry the same arm).
+  row leaves its surface cell naming nothing. R1 and R4 carry the equivalent
+  **intent** over the whole row; R5 must read the surface CELL, because a
+  crosswalk row's note cell may legitimately name another surface (§6.4's does),
+  and the whole-row form was measured not to fire.
 
 A surface row is refused (exit 2) unless it has exactly 7 cells. A cell delimiter
 is a pipe carrying an EVEN run of preceding backslashes (CommonMark parity), so a
@@ -356,18 +359,38 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     # its seam token, so its violation message is unchanged. (A surface number
     # typed a digit OFF still lands on a real row, so R5 does NOT catch that; its
     # wording is "names a surface with no row in §1", and that is all it claims.)
-    # The header row is the first `|` line; its surface cell is the word
-    # `surface(s)`, so it is skipped by position and not by a label test.
-    header_seen = False
-    for line in crosswalk.splitlines():
+    # Grade the crosswalk TABLE, not every `|` line in §5: the section may carry a
+    # second, ordinary table, and grading its rows as seams reds the REQUIRED `docs`
+    # job on a docs-only edit that improves the map (measured: a legit 2-column table
+    # appended to §5 produced three false `R5 …: names no surface` violations).
+    #
+    # The header is identified by the SEPARATOR THAT FOLLOWS IT, not by being the
+    # first `|` line. A positional skip was one-shot for the whole section, so
+    # deleting the header line made the first DATA row the "header" and left it
+    # ungraded — two document edits (drop the header, blank a cell) graded CLEAN
+    # (measured). Re-armed per table, a deleted header just leaves the first row
+    # graded like any other.
+    table_lines = crosswalk.splitlines()
+    rows: list[str] = []
+    for line in table_lines:
         if not line.startswith("|"):
+            if rows:
+                break  # a non-table line ends the table
             continue
         row = cells(line)
-        if not row or all(set(cell) <= {"-", ":", ""} for cell in row):
-            continue  # the header separator
-        if not header_seen:
-            header_seen = True
-            continue  # the header itself
+        if row and all(set(cell) <= {"-", ":", ""} for cell in row):
+            # Drop the header this separator proves — but only when the row above
+            # really is a header. With the header DELETED, the row above is a data
+            # row, and dropping it unconditionally left that row ungraded (measured:
+            # header deleted + §5 row 1's cell blanked graded CLEAN).
+            if rows and _is_crosswalk_header(rows[-1]):
+                rows = rows[:-1]
+            continue  # the table continues below its separator
+        rows.append(line)
+    for line in rows:
+        row = cells(line)
+        if not row:
+            continue
         label = row[0] or "?"
         # A crosswalk row that names NO surface was the third "names nothing" hole:
         # R1 (`:279`) and R4 (`:306`) both carry the arm, R5 did not, so blanking
@@ -444,6 +467,35 @@ def _rewrite_row(text: str, sf: str, column: int, value: str) -> str:
         out.append(line)
     if not hit:
         raise AssertionError(f"self-test mutation target {sf} not found")
+    return "".join(out)
+
+
+#: The surface-cell values a crosswalk HEADER carries. Used only to decide whether
+#: the row above a separator is a header, so a deleted header cannot make a DATA
+#: row ungraded.
+_HEADER_SURFACE_CELLS = frozenset({"surface(s)", "surfaces", "surface"})
+
+
+def _is_crosswalk_header(line: str) -> bool:
+    """True when this `|` line is the crosswalk's header row, judged by CONTENT."""
+    row = cells(line)
+    if not row:
+        return False
+    surface_cell = row[2].strip().lower() if len(row) > 2 else ""
+    return surface_cell in _HEADER_SURFACE_CELLS or row[0].strip() == "plan §"
+
+
+def _insert_before(text: str, prefix: str, inserted: str) -> str:
+    """Insert a whole line before the first line starting with `prefix`."""
+    out: list[str] = []
+    hit = False
+    for line in text.splitlines(keepends=True):
+        if not hit and line.startswith(prefix):
+            out.append(inserted if inserted.endswith("\n") else inserted + "\n")
+            hit = True
+        out.append(line)
+    if not hit:
+        raise AssertionError(f"self-test mutation target {prefix!r} not found")
     return "".join(out)
 
 
@@ -583,8 +635,21 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         # the same edit. Both the rename and the blank graded CLEAN (measured), so a
         # shrinker could shed the D1–D13 → surface enumeration by re-labelling the
         # row it emptied. This case fails if the arm ever regains a `§` gate.
+        # This one guards the §7 PIN (the rename removes the pinned seam), not the
+        # every-row arm — the case below guards that.
         "rename the §7 label AND blank its surface cell (a row the gate cannot see)",
         lambda t: _rename_and_blank_crosswalk_row(t, "§7", "7"),
+        "violation",
+    ),
+    (
+        # The every-row arm, and the case that fails if it ever regains a `§` gate:
+        # a crosswalk row whose label carries no `§`, with a blank surface cell. Under
+        # a label gate this edit graded CLEAN (measured); it must be refused. The
+        # rename case above is satisfied by the PIN, so it cannot guard this.
+        "add a crosswalk row with no `§` label and a blank surface cell",
+        lambda t: _insert_before(
+            t, "| §6.4 |", "| extra row | a row the gate must still read |  | note |"
+        ),
         "violation",
     ),
     (
@@ -634,7 +699,7 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 #: exit 0 (measured), which is the false PASS this arm exists to prevent. The
 #: map's own residual covers a THREE-place edit (row + pin + case together), so
 #: the shrink that is two places short of that must still be loud.
-MIN_SELF_TEST_MUTATIONS = 14
+MIN_SELF_TEST_MUTATIONS = 15
 
 
 def self_test(text: str) -> int:

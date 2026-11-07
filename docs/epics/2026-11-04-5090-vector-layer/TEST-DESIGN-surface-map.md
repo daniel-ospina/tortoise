@@ -196,16 +196,17 @@ test-design-map-check: CLEAN — every rule holds
   ok   retype a crosswalk surface as one that has no row → violation (R5 §6.4: names SF99, which has no surface row)
   ok   blank the §6.4 surface cell (a crosswalk row that names nothing) → violation (R5 §6.4: names no surface)
   ok   rename the §7 label AND blank its surface cell (a row the gate cannot see) → violation (R5 §7: missing from the §5/§6 crosswalk)
+  ok   add a crosswalk row with no `§` label and a blank surface cell → violation (R5 extra row: names no surface)
   ok   splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   splice a `\\|` into SF2's contract cell (escaped backslash + REAL delimiter) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   delete the child table's section heading → refusal (section `## 4.` is missing — cannot check the map)
-self-test: 14/14 mutation(s) refused — the checker is not a rubber stamp
+self-test: 15/15 mutation(s) refused — the checker is not a rubber stamp
 ```
 
 The `--self-test` arm exists because a checker that passes on everything is worse than no checker:
-it applies the fourteen mutations an editor actually makes (remove a row, **remove a row and every mention
+it applies the fifteen mutations an editor actually makes (remove a row, **remove a row and every mention
 of it**, blank a cell, blank a **crosswalk** row's surface cell, **rename a crosswalk row and blank its
-cell**, restate a failure as a mechanism, retype a
+cell**, **add a crosswalk row with no `§` label and a blank cell**, restate a failure as a mechanism, retype a
 layer as a mechanism, retype a crosswalk surface as one that has no row, **splice a raw `|` into a cell**,
 **splice a `\\|` into a cell**, drop a child, drop a capability, forget a seam, destroy the section
 structure) to an in-memory
@@ -222,7 +223,7 @@ refusal cases report it. ⚠️ State the mechanism rather than overclaiming it:
 that a `|`-splitting relaxation **reds the arm**, not that the exact-7 refusal is the only rule that
 could notice. ⚠️ The floor is why re-opening the false PASS is no longer a one-place edit: at the
 shipped floor, deleting the width case alone exits 1
-(`self-test: 13 mutation(s) registered, at least 14 required`), and deleting it, **reverting the width
+(`self-test: 14 mutation(s) registered, at least 15 required`), and deleting it, **reverting the width
 rule's `!= 7` to `< 7`**, *and* lowering the floor to the population that is left still exits 1, because
 the parity case beside it catches the same relaxation. ⚠️ Name all three edits: deleting the case and
 lowering the floor alone leaves the **rule** intact, so the parity case is still refused by the rule it
@@ -259,7 +260,7 @@ constant: an interior drop reads `SF1..SF15`, while dropping SF1 reads `SF2..SF1
 reads `SF1..SF14` (measured) — grep the `SF<n>` that moved, not the range. Dropping SF13 from the pin **and** building the consistent
 shrink reds the self-test too, because emptying §6.4's surface cell now trips `R5 §6.4: names no
 surface` — before that arm existed the same edit was the one case the arm reported as `NOT caught`
-(measured: `1/12` before, `14/14 refused` after). The pin is silent only when the shrink edits it
+(measured: `1/12` before, `15/15 refused` after). The pin is silent only when the shrink edits it
 **consistently with the row** *and* the row it empties is not a crosswalk row R5 reads — the
 three-place edit the last bullet measures. The two arms therefore cover different surfaces, and the
 honest limit is:
@@ -268,7 +269,7 @@ honest limit is:
   alone** — delete a surface row, **every mention of it** (R1/R4/R5 all referentially check what they
   read, so a row cannot go alone) *and* drop it from `SURFACES` — stays **green on both arms**
   (measured on SF5 and on SF12: `14 surface(s) · 5 capabilit(y/ies) · 6 child(ren) · 10/10 plan seam(s)
-  crosswalked · layers=…` then `CLEAN — every rule holds`, exit 0, *and* `14/14 mutation(s) refused`,
+  crosswalked · layers=…` then `CLEAN — every rule holds`, exit 0, *and* `15/15 mutation(s) refused`,
   exit 0). **Nine** of the fifteen surfaces are in this class (SF3, SF4, SF5, SF6, SF7, SF8, SF9, SF12,
   SF14 — SF1 and SF11 red on the R5 arm, because their §5 cells name one surface each), and it is the
   case the paragraph above
@@ -276,7 +277,7 @@ honest limit is:
   mentions are gone the **pin is the edit neither arm sees**.
 - **For SF2, SF10 or SF13 — the three surfaces a mutation targets — the arm reds one step EARLIER**, on
   the self-test arm. Delete the row those cases target and the cases become `UNTESTABLE` rather than
-  "not caught" (measured: SF13 `2/14 case(s) UNTESTABLE`, SF2 `4/14`, SF10 `1/14` — each exit 1, and
+  "not caught" (measured: SF13 `2/15 case(s) UNTESTABLE`, SF2 `4/15`, SF10 `1/15` — each exit 1, and
   the summary line names a moved mutation target instead of accusing the checker), before any case is
   deleted.
 - **SF15 reds one step earlier too, on the CHECK arm** — it is the one surface a child names and
@@ -284,8 +285,8 @@ honest limit is:
   leaves C1 touching no surface, so `R4 #11084: touches no surface` fires (exit 1) before the pin or
   any case is involved — which is why the silent class is nine, not ten.
 - **The floor is what stops the green being bought back.** Also deleting the cases that name the surface
-  (SF13 has three: two delete-row cases and the `#11088` child-row case) leaves `10 mutation(s)
-  registered, at least 14 required`, exit 1 — so a shrink is red once it touches a named surface, but
+  (SF13 has three: two delete-row cases and the `#11088` child-row case) leaves `12 mutation(s)
+  registered, at least 15 required`, exit 1 — so a shrink is red once it touches a named surface, but
   `MIN_SELF_TEST_MUTATIONS` is not the first thing to fire, and it reds a shrunk population instead of
   printing a reassuring `self-test: 0/0 … not a rubber stamp`.
 
