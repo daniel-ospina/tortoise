@@ -1,8 +1,11 @@
 # tests/test_redirect_seam.py
 """Unit surface: the class-level URI-aware redirect (epic #1647 Task 1)."""
+import functools
 import os
 import subprocess
 import sys
+import threading
+import types
 
 import pytest
 
@@ -446,6 +449,69 @@ def test_loopback_predicate_single_source():
 # non-exempt case stubs falkordb.FalkorDB).
 
 
+_STAMP_NAME = "_thread_start_inherit_stem"
+
+
+def _is_stamp(fn) -> bool:
+    """True when ``fn`` is a Thread.start test-stem stamp (#1686/#11430).
+
+    Identified by ``__globals__``, NEVER by ``__name__``/``__module__``:
+    ``functools.wraps`` copies those onto a FOREIGN wrapper. ``sentry_sdk``'s
+    ``ThreadingIntegration`` replaces ``Thread.start`` with
+    ``@wraps(old_start) def sentry_start(...)`` — so after any test initialises
+    the real SDK, ``Thread.start`` is a function *named*
+    ``_thread_start_inherit_stem`` *from* ``tortoise.projection`` that is not the
+    module's function object (#11430). A name/module test calls that a double
+    wrap; an identity test does too; both are wrong — the stamp is the inner
+    link and still runs.
+    """
+    g = getattr(fn, "__globals__", None)
+    return (isinstance(g, dict)
+            and g.get("__name__") == "tortoise.projection"
+            and getattr(fn, "__name__", None) == _STAMP_NAME)
+
+
+def _stamp_links(start) -> list:
+    """Every frame of ``start``'s ``__wrapped__`` chain that is OUR stamp."""
+    links, fn = [], start
+    while fn is not None:
+        if _is_stamp(fn):
+            links.append(fn)
+        fn = getattr(fn, "__wrapped__", None)
+    return links
+
+
+def _stamp_problems(start) -> list[str]:
+    """The install invariant on ``Thread.start``, as a list of violations.
+
+    Two facts, and both are needed because they catch disjoint states:
+
+    1. exactly ONE of our stamps is in the chain — zero means the installer
+       never ran; two means one execution of the module stacked its stamp on
+       another's.
+    2. the stamp's ``_ORIG_THREAD_START`` is not itself a stamp. This is the
+       genuine double wrap the class marker exists to prevent: after a module
+       reload the reloaded module captures ``_ORIG_THREAD_START = Thread.start``
+       (the PREVIOUS stamp), so a re-install wraps a wrapper. Identity cannot
+       see it — ``Thread.start`` and the reloaded module's function are then the
+       SAME object, which is why the identity assertion this replaced was blind
+       in exactly the case its message named (#11430).
+    """
+    links = _stamp_links(start)
+    problems = []
+    if len(links) != 1:
+        problems.append(
+            "expected exactly ONE test-stem stamp in the Thread.start chain, "
+            f"found {len(links)} (0 = never installed; 2+ = a stamp stacked on a stamp)")
+    for link in links:
+        delegate = link.__globals__.get("_ORIG_THREAD_START")
+        if _is_stamp(delegate):
+            problems.append(
+                "a test-stem stamp delegates to ANOTHER stamp — a genuine "
+                "double wrap (module reloaded, then re-installed)")
+    return problems
+
+
 def _assert_probe(results: list, expected_stem: str | None, embedded: bool) -> None:
     """Shared probe assertion: exactly one probe result with the expected
     inherited stem + embedded flag + a graph name."""
@@ -550,11 +616,67 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
 
     # (b) install idempotence: conftest installed the wrapper at session
     # start (install_thread_stamp called after _TEST_SESSION_ACTIVE=True),
-    # the marker is set, and re-invoking the installer is a no-op.
+    # the marker is set, and re-invoking the installer is a no-op. The check is
+    # CHAIN-based, not identity-based: a vendor integration may legitimately
+    # wrap Thread.start on top of our stamp, and `@wraps` copies our name onto
+    # it, so identity (and any name/module test) reports a double wrap that
+    # never happened (#11430).
     assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
         "Thread.start stamp not installed in the test session"
-    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
-        "Thread.start was double-wrapped (installer re-ran without the marker guard)"
+    problems = _stamp_problems(threading.Thread.start)
+    assert problems == [], f"Thread.start stamp invariant broken: {problems}"
+    chain_before = _stamp_links(threading.Thread.start)
     proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
-    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
-        "re-invoked installer double-wrapped Thread.start"
+    assert _stamp_links(threading.Thread.start) == chain_before, \
+        "re-invoked installer changed Thread.start's stamp chain (double wrap)"
+
+
+def test_the_double_wrap_verdict_reads_the_CHAIN_not_the_identity():
+    """#11430: the two states the removed identity assert confused.
+
+    The assert was `threading.Thread.start is proj_mod._thread_start_inherit_stem`,
+    with the message "installer re-ran without the marker guard". It is wrong in
+    both directions:
+
+    (1) FALSE RED — a vendor wrapper over a healthy stamp. Once any test
+        initialises the real ``sentry_sdk``, its ``ThreadingIntegration``
+        replaces ``Thread.start`` with ``@wraps(old_start) def sentry_start(...)``
+        over our stamp. Our installer never re-ran; the stamp still runs first.
+        This is the measured `test (b)` red of the #11368 run (job
+        128410663087), reproduced by running
+        `tests/test_11092_sentry_loop_stall.py tests/test_redirect_seam.py` in
+        ONE pytest process.
+    (2) FALSE GREEN — a genuine double wrap. After a module reload the reloaded
+        module captures ``_ORIG_THREAD_START = Thread.start`` (the PREVIOUS
+        stamp), so re-installing stacks a stamp on a stamp — and
+        ``Thread.start`` then IS the module's function object, so identity is
+        TRUE and the check the message promised cannot see it.
+    """
+    links = _stamp_links(threading.Thread.start)
+    assert len(links) == 1, links
+    stamp = links[0]
+
+    # (1) the VENDOR shape: `functools.wraps` copies our name AND module onto the
+    # vendor's function, exactly as sentry_sdk's integration does.
+    @functools.wraps(stamp)
+    def sentry_start(self, *a, **k):  # pragma: no cover - shape, never called
+        return stamp(self, *a, **k)
+
+    assert sentry_start.__name__ == _STAMP_NAME
+    assert sentry_start.__module__ == "tortoise.projection"
+    assert sentry_start is not stamp, "the removed identity assert called this a double wrap"
+    vendor_problems = _stamp_problems(sentry_start)
+    assert vendor_problems == [], \
+        f"a vendor wrapper over a healthy stamp is not a double wrap: {vendor_problems}"
+
+    # (2) the GENUINE double wrap: a stamp whose `_ORIG_THREAD_START` is the
+    # previous stamp — the state a reload + re-install creates.
+    reloaded = types.FunctionType(
+        stamp.__code__,
+        {"__name__": "tortoise.projection", "_ORIG_THREAD_START": stamp},
+        _STAMP_NAME,
+    )
+    assert _is_stamp(reloaded) and reloaded is not stamp
+    problems = _stamp_problems(reloaded)
+    assert problems, "a stamp stacked on a stamp MUST be reported as a double wrap"
+    assert any("double wrap" in p for p in problems), problems
