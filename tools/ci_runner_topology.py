@@ -351,17 +351,24 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
         r for r in runners if r.serves_fallback and r.online and r.host == HOST_LABEL_X64
         and PLATFORM_LINUX in r.labels
     ]
-    if any(r.serves_fallback and r.online for r in runners) and not serving:
+    carriers = [r for r in runners if r.serves_fallback]
+    if carriers and not serving:
+        # ⛔ COUNT THE CARRIERS, NOT THE SERVERS. Printing `len(serving)` (which is 0 by
+        # construction here) said "0 runner(s) carry 'ubuntu-latest'" next to rule 1 naming the
+        # runner that carries it — and said it while claiming none is x64, when the carrier's own
+        # host label was X64 (a Windows or offline x64 box). Two counts, two different questions.
         found.append(
             Violation(
                 kind=VIOLATION_NO_X64_FALLBACK,
                 runner="<pool>",
                 why=(
-                    f"{len(serving)} runner(s) carry {FALLBACK_LABEL!r} and NOT ONE of them is "
-                    f"x64, while {sum(1 for r in runners if r.host == HOST_LABEL_X64)} x64 "
-                    f"runner(s) are registered. Every `{FALLBACK_LABEL}` job that does not reach "
-                    f"GitHub-hosted therefore queues or is mis-served. REMEDY: attach "
-                    f"{FALLBACK_LABEL!r} to the x64 pool."
+                    f"{len(carriers)} runner(s) carry {FALLBACK_LABEL!r} and NOT ONE of them can "
+                    f"serve it (none is an ONLINE x64 Linux runner), while "
+                    f"{sum(1 for r in runners if r.host == HOST_LABEL_X64)} x64 runner(s) are "
+                    f"registered. Every `{FALLBACK_LABEL}` job that does not reach GitHub-hosted "
+                    f"therefore queues or is mis-served. REMEDY: attach {FALLBACK_LABEL!r} to the "
+                    f"pool's ONLINE x64 Linux runners, and strip it from any carrier that "
+                    f"cannot serve it."
                 ),
             )
         )
@@ -728,7 +735,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 queued_oldest_seconds=fetch_oldest_queued_seconds(args.repo),
                 engage=engage,
             )
-        except (SystemExit, json.JSONDecodeError, KeyError, ValueError) as exc:
+        except (SystemExit, OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
             # `--paginate` can also yield a truncated stream (JSONDecodeError) or a malformed page
             # (KeyError/ValueError); catching only SystemExit let those abort AFTER the writes with
             # a traceback, losing the one record that matters: what was written, and that it is
@@ -770,17 +777,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             # nobody measured inverts the doctrine this file states — "I could not look must
             # never be the last word". So the gate's kind wins only over a real verdict.
             already_unmeasured = post["verdict"] == VIOLATION_UNMEASURED_EMPTY_POOL
-            post = {
-                **post,
-                "ok": False,
-                "verdict": VIOLATION_UNMEASURED_EMPTY_POOL if already_unmeasured else VIOLATION_ENGAGE_NO_X64_SERVER,
-                "violations": [*post["violations"], gate],
-            }
-            print(
-                f"❌ {VIOLATION_ENGAGE_NO_X64_SERVER}: no online x64 runner serves "
-                f"{FALLBACK_LABEL!r} after the write — engage delivered NO capacity.",
-                file=sys.stderr,
-            )
+            if already_unmeasured:
+                # ⛔ A READ FAILURE IS NOT A CAPACITY READING. Appending the gate's violation (and
+                # printing its `❌`) asserted a measured capacity defect about a pool nobody read,
+                # while the comment above claimed the opposite. Keep the read failure, keep
+                # `ok: false`, and say nothing about capacity.
+                print(
+                    f"❌ {VIOLATION_UNMEASURED_EMPTY_POOL}: the read-back returned no runners — "
+                    f"capacity is UNMEASURED, so this reconcile is not verified.",
+                    file=sys.stderr,
+                )
+            else:
+                post = {
+                    **post,
+                    "ok": False,
+                    "verdict": VIOLATION_ENGAGE_NO_X64_SERVER,
+                    "violations": [*post["violations"], gate],
+                }
+                print(
+                    f"❌ {VIOLATION_ENGAGE_NO_X64_SERVER}: no online x64 runner serves "
+                    f"{FALLBACK_LABEL!r} after the write — engage delivered NO capacity.",
+                    file=sys.stderr,
+                )
 
     payload = {
         "ok": ok,
@@ -805,14 +823,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         for name, why in sorted(pending.unclassified.items()):
             print(f"  ⚠️  {name}: left untouched — {why}")
         if post is not None:
-            hosts = post["census"]["by_host"]
             # ⛔ THE COUNT MUST USE THE GATE'S DEFINITION. `census`'s `serving_fallback` has no
             # `online` filter (deliberately: it is a raw census), so printing it here produced
             # "x64 serving=1" directly below "❌ no online x64 runner serves it". The render is what
             # a human acts on, so it counts what the gate counts.
             x64_serving = len(serving_post)
-            others_serving = sum(
-                b.get("serving_fallback", 0) for host, b in hosts.items() if host != HOST_LABEL_X64
+            # ⛔ THE SAME DEFINITION ON BOTH HALVES OF ONE LINE. `census`'s per-host
+            # `serving_fallback` has no `online` filter, so summing it printed `non-x64 serving=1`
+            # for an OFFLINE ARM64 carrier while the x64 half said 0 — two definitions, one line.
+            others_serving = len(
+                [r for r in post_runners if r.online and r.serves_fallback and r.host != HOST_LABEL_X64]
             )
             print(
                 f"post-state verdict: {post['verdict']} "

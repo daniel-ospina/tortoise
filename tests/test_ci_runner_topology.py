@@ -518,9 +518,9 @@ def test_an_engage_that_cannot_reach_an_online_x64_runner_is_not_a_success(monke
             ]
         }
     )
-    assert topo.check(armed_but_offline)["ok"] is True, (
-        "precondition: this pool has NO check violation — the gate must be what catches it"
-    )
+    # RULE 2 also fires here (a carrier exists, none can serve it) — which is the correct reading
+    # after the predicate widening: `check` now reports this pool, where before it said nothing at
+    # all. The engage gate is still what separates "armed but dead" from "delivered capacity".
     for pool in (arm_only, offline_x64, armed_but_offline):
         reads = [pool, pool]  # the write takes, and the pool still cannot serve
         monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO, _r=reads: _r.pop(0))
@@ -676,7 +676,9 @@ def test_an_offline_only_carrier_with_an_absorbing_queue_is_reported_as_starvati
         }
     )
     report = topo.check(pool, queued_oldest_seconds=999_999)
-    assert report["ok"] is True, "an armed-but-offline pool is not one of the two violations"
+    # `NO_X64_FALLBACK` also names it now (a carrier exists, none can serve it) — before the
+    # predicate widening this pool produced NO signal from `check` at all.
+    assert topo.VIOLATION_NO_X64_FALLBACK in [v["kind"] for v in report["violations"]], report
     assert report["starvation_suspected"] is True, (
         "an attached label that no ONLINE runner can serve, with an absorbing queue, must be reported"
     )
@@ -797,3 +799,74 @@ def test_a_transport_failure_on_one_runner_does_not_abort_the_other_writes(monke
     by_name = {r["runner"]: r for r in records}
     assert by_name["a-runner"]["applied"] is False and "transport" in by_name["a-runner"]["error"]
     assert by_name["b-runner"]["applied"] is True, "one failure must not stop the reconcile"
+
+
+# ---------------------- the post-state render uses ONE definition on both halves
+def test_the_post_state_render_counts_only_what_the_gate_counts(monkeypatch, capsys):
+    """REGRESSION (#10912 review round 4, P2): the render's x64 half used the gate's online-filtered
+    set while its non-x64 half summed `census`'s UNFILTERED `serving_fallback` — so an OFFLINE ARM64
+    carrier printed `non-x64 serving=1` on the same line whose x64 half said 0. (And the x64 half
+    itself was unpinned: reverting it to census's count left all 31 tests green.)
+    """
+    pool = topo.parse_runners(
+        {
+            "runners": [
+                # BOTH carriers offline: `census` counts 2 serving, the gate (and therefore the
+                # render) must count 0. One pool where the two definitions disagree is the only
+                # shape that can tell them apart.
+                _runner(1, "pi-runner-x64-1", [*X64, topo.FALLBACK_LABEL], status="offline"),
+                _runner(2, "pi-runner-vm-2", ARM64_FALLBACK, status="offline"),
+            ]
+        }
+    )
+    reads = [pool, pool]  # the write lands on a pool that still cannot serve
+    monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO, _r=reads: _r.pop(0))
+    monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
+    monkeypatch.setattr(
+        topo,
+        "apply_plan",
+        lambda pending, *, dry_run, repo=topo.REPO: [
+            {"runner": n, "id": rid, "before": b, "after": a, "applied": True}
+            for n, (rid, b, a) in pending.changes.items()
+        ],
+    )
+    topo.main(["apply"])
+    out = capsys.readouterr().out
+    assert "x64 serving=0" in out, (
+        f"the x64 carrier is OFFLINE — census counts it, the gate does not, and the render must "
+        f"agree with the gate that produced the ❌ beside it: {out}"
+    )
+    assert "non-x64 serving=0" in out, (
+        f"an OFFLINE ARM64 carrier is not serving anything — the two halves of this line must use "
+        f"one definition: {out}"
+    )
+
+
+def test_the_read_back_survives_a_missing_gh_binary(monkeypatch, capsys):
+    """REGRESSION (#10912 review round 4, P2): the write loop learned to record an OSError but the
+    READ-BACK did not catch it, so `gh` disappearing between the write and the read (or ENOMEM)
+    killed the run with a traceback AFTER the writes, printing no payload at all.
+    """
+    pre = measured()
+    calls = {"n": 0}
+
+    def _fetch(repo=topo.REPO):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return pre
+        raise FileNotFoundError(2, "No such file or directory: 'gh'")
+
+    monkeypatch.setattr(topo, "fetch_runners", _fetch)
+    monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
+    monkeypatch.setattr(
+        topo,
+        "apply_plan",
+        lambda pending, *, dry_run, repo=topo.REPO: [
+            {"runner": n, "id": rid, "before": b, "after": a, "applied": True}
+            for n, (rid, b, a) in pending.changes.items()
+        ],
+    )
+    rc = topo.main(["apply"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "UNVERIFIED" in err, f"a transport failure on the read-back must be reported, not raised: {err}"
