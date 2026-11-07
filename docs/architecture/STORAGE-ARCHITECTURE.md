@@ -124,15 +124,16 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > traversal, writes and EP stay in FalkorDB, so a query reads seeds from Postgres and walks them in the graph. See
 > `docs/architecture/SEARCH-ARCHITECTURE.md`, which also **resolves V1** (§14.3).
 >
-> **NARROWED — "keep the limit in falkor high":** the cache stays **complete for beta**, and becomes a **bounded
-> window once M2 measures it** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5), sized by the tier's 30 %-of-price cost budget (a complete graph is $8.75/tenant against a
+> **NARROWED — "keep the limit in falkor high":** the cache stays **complete through private-beta**, and becomes a **bounded
+> window only after M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9), sized by the tier's 30 %-of-price cost budget (a complete graph is $8.75/tenant against a
 > $5.70 budget, and density cannot divide a per-tenant line). So the full cache is retained *temporarily*, not
 > indefinitely.
 >
-> **OVERRIDES:** §2.0's *"keep the limit in falkor high"* — the 30 %-of-price budget makes a complete cache unaffordable at any density, and the
+> **OVERRIDES:** §2.0's *"keep the limit in falkor high"* — the 30 %-of-price storage target ($5.70 of a $19 price, strictly tighter than §1's
+> < $9 total-cost ceiling — `SEARCH-ARCHITECTURE.md` §7 states both) makes a complete cache unaffordable at any density, and the
 > vector index is 467× cheaper per byte on disk *at the 8 GB tier's $43.75/GB-month, after the 75 % rule, against Postgres disk at $0.125/GB — the same
 > comparison §17.4 states as 584× (pure RATE) and 778.7× (with that density headroom); 467× is the 8 GB tier's basis*, so the cache is bounded by a
-> budget-derived window once M2 measures it (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5).
+> budget-derived window only after M2 measures retrieval quality (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9).
 
 **This is the governing decision for this document.** Everything below is either (a) the reasoning behind it, or (b) the work that remains.
 
@@ -979,7 +980,7 @@ FalkorDB requires **the entire graph in RAM** — 140 MB × $73/GB/month ≈ **$
 
 **Cost of a vector for every Source we have: 2,193 × 2.05 KB ≈ 4.4 MB — about 3% of the 140 MB.** *(2.05 KB is the **resident** figure: 1.50 KB of payload plus its share of HNSW index overhead. The 1.50 KB above is the **stored** row.)*
 
-**⇒ But the instinct points at the real heavyweight, and it is not the summaries — it is the vectors we ALREADY store.** See §12.1b, and the open decision at §12.1c.
+**⇒ But the instinct points at the real heavyweight, and it is not the summaries — it is the vectors we ALREADY store.** See §12.1b, and the decision at §12.1c (**resolved 2026-11-07**).
 
 #### What is NOT a problem: latency (measured 2026-09-24)
 
@@ -1502,7 +1503,7 @@ follows is the evidence each ruling rests on, which is design.
 
   **✅ OWNER RULING 2026-09-23: KEEP the stored edges — and the stored-vs-derived question is DEFERRED to post-launch, not left open.** *"we haven't launched yet, so unanswerable. keep them for now, we optimise with users."* **The unknown above is unanswerable before launch — there is no usage to count.** So: **keep the stored edges; revisit once there are users and real call data.** ⚠️ **The deferral costs only storage — ~3 MB, per §11.1 — so deferring is genuinely cheap, and it is the right call: it buys the option back for the price of nothing.**
 - **Fan-out caps** — **`#5010`** — nothing in our write path bounds how many edges one entity accumulates (`config/ci-surfaces.yml` at **123**, `durations map` at 111, `the admin-merge rail` at 70, `cal-trigger.py` at 64, `the plan doc` at 63). Hindsight caps at **200** and drops the arm under budget pressure. **Initial value: 200** (owner, 2026-09-23). **§11.5 carries the rationale.** It is a **guard rail, not an optimisation** — it binds nothing today (worst hub is 123) and is refined with real usage.
-- ⭐ **The unindexed embeddings (V3, §12.1b).** **MEASURED ON THE LIVE GRAPH: the unindexed-embeddings defect is real, and its home is the V1/§12.1c decision** (`#4997`). `CALL db.indexes()` confirms **exactly one vector index — `Point.embedding`**; `Object`, `Event`, `Source`, `Subject`, `Document` have **none**. **12,657 stored vectors (`:Object` 7,859 + `:Event` 4,798), ≈19 MB, 13.5% of THAT 141 MB graph** (both readings 2026-09-24, §12.1b; the graph is 195 MB at the 2026-11-04 reading, §14.3, and no post-2026-09-24 vector count exists), **are paid for and unindexed** — and they full-scan at **16.96 ms vs 4.97 ms** while `leg_trace.reason` reported **`ok`** (the trace records the mechanism). **The mechanism is a drift, not an oversight:** `#172` made the *query* label-generic; `_ensure_indexes()` still hardcodes `'Point'`. **Two readings, one ruling: stop storing them, or make index creation label-generic.** **This is the one candidate that is a *defect* rather than a design question.**
+- ⭐ **The unindexed embeddings (V3, §12.1b).** **MEASURED ON THE LIVE GRAPH: the unindexed-embeddings defect is real, and its home is the V1/§12.1c decision (resolved 2026-11-07 — the vectors move, the indexing work remains) (`#4997`). `CALL db.indexes()` confirms **exactly one vector index — `Point.embedding`**; `Object`, `Event`, `Source`, `Subject`, `Document` have **none**. **12,657 stored vectors (`:Object` 7,859 + `:Event` 4,798), ≈19 MB, 13.5% of THAT 141 MB graph** (both readings 2026-09-24, §12.1b; the graph is 195 MB at the 2026-11-04 reading, §14.3, and no post-2026-09-24 vector count exists), **are paid for and unindexed** — and they full-scan at **16.96 ms vs 4.97 ms** while `leg_trace.reason` reported **`ok`** (the trace records the mechanism). **The mechanism is a drift, not an oversight:** `#172` made the *query* label-generic; `_ensure_indexes()` still hardcodes `'Point'`. **Two readings, one ruling: stop storing them, or make index creation label-generic.** **This is the one candidate that is a *defect* rather than a design question.**
 
 ---
 
@@ -1532,7 +1533,7 @@ follows is the evidence each ruling rests on, which is design.
 **The ruling (owner, 2026-10-08, §2.0):** *"we do hybrid now, data goes to postgres and it's loaded to hot (falkor); for now we keep the limit in falkor high…"*
 
 > ⛔ **Split by the 2026-11-07 ruling — see §2.0's marker.** The dual-store read path is adopted (search in Postgres,
-> traversal in the graph); the full cache is retained through private-beta and bounded once M2 measures it (`SEARCH-ARCHITECTURE.md` §1.5).
+> traversal in the graph); the full cache is retained through private-beta and bounded only after M2 measures retrieval quality (`SEARCH-ARCHITECTURE.md` §1.5, §9).
 
 **FalkorDB stays hosted, and there is still no engine rewrite. What changes is its ROLE:**
 

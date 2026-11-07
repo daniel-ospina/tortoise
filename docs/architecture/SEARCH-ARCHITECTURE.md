@@ -40,8 +40,7 @@ an **output** we measure from real tenants, never an input. An earlier draft siz
 estimated "structure ≈ 17% of the graph"; that figure was a subtraction across three measurements and two
 different tenants, taken from a total the vendor's own field list shows is incomplete (FalkorDB's memory
 readout is blind to the vector index, which lives in a separate module). A published FalkorDB breakdown
-puts non-index structure at **41 %**. **The range is 17–44 % and it is unmeasured; it is not an input to
-anything here.**
+puts non-index structure at **41 %**. **Our own share is unmeasured** — the earlier 17 % figure is deleted, the 41 % is a vendor-published breakdown of a *different* population (a graph without our label mix), and **no range we could state would be one**. It is not an input to anything here.
 
 **⚠️ PROVENANCE — the EXTERNAL figures this document leans on.** Each of the following is a **third-party published measurement, not ours and not reproduced here**: the **41 %** non-index structure; the **0.0015 nDCG@10** spread at 381,559 vectors; the **0-of-10** filtered-ANN result and its **0.975/0.847** relax-order recall; the **8–23 nDCG@10** Postgres-FTS-vs-BM25 gap; the cache studies behind §7's policy table (**62.4 %** naive-pinning miss vs **60.2 %** LRU, and 1-/2-hop closure prefetch raising hit ratio); and the **4.9–5.9×** rebuild-peak range. They are cited by RESULT — their specific citations are **owed before this document is quoted as measurement evidence**, and the fix is to attach them, not to drop the claims. **Anything that reads as *our* measurement names its pin inline**, and a figure with neither a citation nor a pin is not evidence yet.
 
@@ -221,6 +220,14 @@ the ranker refuses to order on.
 (30 % of $19). Density cannot fix that — density divides the *fixed* lines, and this is a per-tenant line.
 **The window is what makes the pricing work at scale.**
 
+⚠️ **Where the $5.70 comes from, because the document it amends records a different ceiling.** `STORAGE-ARCHITECTURE.md` §1
+records the product constraint as *"a $19 price with < $9 total cost per user"*, and its M2 row prices against a
+"$9 → $19 budget"; the **30 %-of-price** target here is the owner's 2026-11-07 sizing rule for the **storage line**,
+and it is **strictly tighter** than that ceiling ($5.70 < $9). Both are quoted so neither is mistaken for the other:
+against the total-cost ceiling a complete graph is **~97 % of it**, against the storage target it is **154 %** — and
+the target is what governs the window. **The target's own recorded home is owed**; until it is recorded, this section
+and §2.0's marker cite it as an owner ruling of that date rather than as a derived figure.
+
 **⚠️ Why it is nonetheless NOT armed at private-beta (§1.5):** it is unmeasured. The bounded-cache
 literature measures latency and hit rate, not answer quality, and the best trace-aware policy reached ~54 %
 hit rate for 2-hop expansions — so arming it on a guess is exactly the quality risk this document ranks
@@ -242,7 +249,7 @@ makes EP recomputation exact (§6.3).
 | **window-local touch counters + admission control** | recency beats static degree ranking, and adaptive policies beat every static one measured; eviction must be budget-triggered, not per-request, or the cycle "demote a leaf → the next query needs it → re-materialise → evict another leaf" becomes a storm. ⚠️ **The counter is WINDOW-LOCAL cache state — a different artifact from `tortoise/read_ledger.py`.** That ledger is TENANT-WIDE and is explicitly not a product input: `STORAGE-ARCHITECTURE.md` §17.4.6 states that reading it for any product decision *"would be a violation"* (it exists to measure `f`). Wiring it as the eviction signal is exactly the violation it names. |
 | **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **measured**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~300–460 MB, and the engine has **no per-graph memory cap**. This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each) |
 | **a walk materialises its seeds first** | search returns ids from Postgres; a non-resident seed must be written into the graph before traversing — a write on the query path, which is why the headroom above is mandatory |
-| **label what was truncated** | a confidence within 2 hops of a truncated boundary is **refused** (`degraded: "insufficient_graph"`); beyond that it may be returned as `degraded: "truncated_boundary"`. The shipped residency marker (`residency.py`, `not-hot`, `TORTOISE_RESIDENCY`) is this mechanism, and it is currently OFF |
+| **label what was truncated** | a confidence within 2 hops of a truncated boundary is **refused**; beyond that it may be returned as degraded. ⚠️ **The two reason strings this rule needs are OWED, not shipped** — `degraded: "insufficient_graph"` / `degraded: "truncated_boundary"` appear nowhere in the tree at this head, and `STATUS-VOCABULARY` (`STORAGE-ARCHITECTURE.md` §17.2) records `degraded` as one of four terms whose own text forbids a fifth, so the *reason* has to attach to `degraded` rather than mint a term. **Required before private-beta (§1.5).** What DOES exist is the marker's on/off mechanism (`residency.py`, `not-hot`, `TORTOISE_RESIDENCY`) and it is currently OFF |
 
 ⚠️ **The honesty item:** the bounded-cache literature measures **latency and hit rate, not answer
 quality**, and the best trace-aware policy reached ~54 % hit rate for 2-hop expansions. **Whether a
