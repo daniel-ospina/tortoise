@@ -447,40 +447,31 @@ done
 #      reads `[]` + a sha (c4a369b011) here while PR **10850** — CLOSED, `mergedAt: null` — opens with
 #      `Closes #10812.`. Read `includeClosedPrs:true` (the block below the loop) before calling a row
 #      arm 2, or the recipe re-creates the very mistake it exists to prevent, one arm over.
-#   3. empty + commit_id = null => a close NOT attributable to any PR (#11021: [] and null). ⚠️ "manual" is
+#   3. empty + commit_id = null => no MERGED PR named it, and nothing in the tree attributes the close
+#      (#11021: [] and null). ⛔ "MERGED" is load-bearing HERE TOO, for arm 2's reason: #8447 reads
+#      `[]` + null + a human actor, yet PR **10562** — CLOSED, `mergedAt: null` — opens with
+#      `Closes #8447`, so a PR DOES name that close and only the default read hides it. Read
+#      `includeClosedPrs:true` here as well before writing the word "manual". ⚠️ "manual" is
 #      a partial label — a bot or a `not_planned` close reads the same [] + null — so the loop below prints
 #      the closed event's `actor` beside the sha: #11021's is a human (daniel-ospina), one second after
 #      #11211 merged, which is what makes the word a checked fact rather than an assumption.
 # ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 reads null in two of its four examples. And an
-#   empty closingIssuesReferences is not evidence either: that PR-body field stays empty in arms 2 and 3.
-# The matrix above is this loop's OUTPUT, not prose — arm 1's four named issues, plus one arm 2 and
-# one arm 3, plus #10812 (the counter-example that NARROWS arm 2 below: it reads `[]` here and a sha,
-# which is why the arm-2 test is "no MERGED PR named it" and not "no PR named it"). Every issue AND
-# every PR the arms name is read here, and so are the facts that are neither an issue nor a PR —
-# arm 2's commit message, and arm 1's user-linked filter with the schema names it rests on — so no
-# row, and no equality a row rests on, is asserted without a command:
-for n in 11001 10997 10684 10698 10999 11021 10812; do
+#   empty closingIssuesReferences on the MERGED PR is not evidence either: that PR-body field stays empty
+#   in arms 2 and 3 while the PR merged (#11205 -> []). ⛔ It is NOT empty on a CLOSED-UNMERGED PR —
+#   #10850 reads [10812] and #10562 reads [8447] — so there it corroborates nothing either way; the field
+#   that stays empty is the ISSUE-side one above, and that is the one this section reads.
+# The loop BELOW re-derives every row above — arm 1's four named issues, one arm 2, one arm 3, and the
+# two counter-examples that NARROW arms 2 and 3 (#10812 and #8447: each reads `[]` here, and each is
+# named by a PR that never merged, which is why both tests say "MERGED" rather than "no PR"). Every
+# issue AND every PR the arms name is read here, and so are the facts that are neither an issue nor a
+# PR — arm 2's commit message, and arm 1's user-linked filter with the schema names it rests on — so
+# no row, and no equality a row rests on, is asserted without a command:
+for n in 11001 10997 10684 10698 10999 11021 10812 8447; do
   echo "#$n"
   gh issue view $n --json state,closedByPullRequestsReferences --jq '[.closedByPullRequestsReferences[].number]'
   gh api "repos/daniel-ospina/tortoise/issues/$n/timeline?per_page=100" --paginate \
     --jq '.[] | select(.event=="closed") | {created_at, commit_id, actor: .actor.login}'
 done
-                                                          # ⛔ the `closedByPullRequestsReferences` line
-                                                          # above is the DEFAULT read: MERGED-PR references
-                                                          # only. The same field with `includeClosedPrs:true`
-                                                          # is the full set — #10997 gains 11281 (CLOSED,
-                                                          # never merged) beside [11212], and #10812 goes
-                                                          # from `[]` to [10850] (CLOSED), the row whose
-                                                          # `[]` + sha would otherwise read as arm 2:
-for n in 10997 10812; do
-  echo "#$n — includeClosedPrs:true"
-  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state}}}}}" \
-    --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
-done
-gh pr view 10850 --json state,mergedAt,body \
-  --jq '{state, mergedAt, firstLine: (.body|split("\n")[0])}'   # CLOSED, null, "Closes #10812." — the
-                                                          # body keyword a closed-unmerged PR still carries,
-                                                          # and the default read above cannot see it
                                                           # ⛔ --paginate is MANDATORY: without it gh
                                                           # returns only the FIRST 100 events, and the
                                                           # closed event is one line among many — a close
@@ -494,6 +485,25 @@ gh pr view 10850 --json state,mergedAt,body \
                                                           # count drifts, and quoting one is how this note
                                                           # got it wrong twice. A truncated check is worse
                                                           # than none.
+                                                          # ⛔ the `closedByPullRequestsReferences` line
+                                                          # above is the DEFAULT read: MERGED-PR references
+                                                          # only. The same field with `includeClosedPrs:true`
+                                                          # is the full set — #10997 gains 11281 (CLOSED,
+                                                          # never merged) beside [11212], #10812 goes from
+                                                          # `[]` to [10850] (CLOSED), and #8447 is the same
+                                                          # shape one arm over: it reads `[]` + null, which
+                                                          # is arm 3's test, yet 10562 (CLOSED, never merged)
+                                                          # is in the set. The two PRs' first body lines are
+                                                          # the keywords that read cannot see:
+for n in 10997 10812 8447; do
+  echo "#$n — includeClosedPrs:true"
+  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state}}}}}" \
+    --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
+done
+gh pr view 10850 --json state,mergedAt,body \
+  --jq '{state, mergedAt, firstLine: (.body|split("\n")[0])}'   # CLOSED, null, "Closes #10812."
+gh pr view 10562 --json state,mergedAt,body \
+  --jq '{state, mergedAt, firstLine: (.body|split("\n")[0])}'   # CLOSED, null, "Closes #8447"
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
