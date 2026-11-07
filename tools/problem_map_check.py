@@ -24,7 +24,8 @@ What it re-measures, offline, from the tree in front of it:
      anchor was an unrelated merge that mentioned neither the issue nor the
      failing suite — the fix is to read the anchor, and #2749 now cites the two
      commits that actually closed its two root causes).
-  4. **Pins resolve** — every pin path exists, and a pin that is a test module
+  4. **Pins resolve** — every pin path exists, resolves to a FILE (a directory
+     satisfies `exists()` and pins nothing), and a pin that is a test module
      contains a `def test_`. A pin whose file survives but whose assertions were
      deleted pins nothing, which is the failure mode the pin column exists for.
   5. **Summary counts** — the numbers in §2 equal the rows that follow. A summary
@@ -280,7 +281,7 @@ def check_pins(repo: Path, rows: list[Row]) -> list[str]:
             if not path.is_file():
                 # A DIRECTORY satisfies `exists()` and pins nothing: no assertion
                 # lives in it, so a row could be VERIFIED-FIXED against it and
-                # never fail. Silent `continue` here until review found it (#5).
+                # never fail. Silent `continue` here until PR #11384's review round 5 found it.
                 errors.append(
                     f"#{row.issue}: pin {pin!r} is not a file — a pin must be an "
                     f"artifact that fails if the fix is undone"

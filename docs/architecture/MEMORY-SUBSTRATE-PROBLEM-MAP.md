@@ -291,9 +291,10 @@ The checker re-measures, offline and without network access:
    confirms, and (when history is available) is an **ancestor of `HEAD`**. In a
    shallow clone this is reported as UNVERIFIED rather than drift: the document is
    not wrong, the clone is shallow.
-4. **Pins resolve** — every pin path exists, and a pin that is a test module
-   actually contains a `def test_` (a pin whose file survives but whose assertions
-   were deleted pins nothing).
+4. **Pins resolve** — every pin path exists, resolves to a **file** (a directory
+   satisfies `exists()` and pins nothing), and a pin that is a test module actually
+   contains a `def test_` (a pin whose file survives but whose assertions were
+   deleted pins nothing).
 5. **Summary counts** — the numbers in §2 equal the rows that follow. A summary
    that drifts from its own table is the same defect class as the missing
    `content_hash` this map's Pattern 1 names.
@@ -313,7 +314,7 @@ rounding:**
   of the issue (this page carried exactly that defect until review caught it on
   #2749, whose anchor is now the two commits that actually closed its two root
   causes). Reading the anchor is the reviewer's job.
-- **Pin RELEVANCE.** The guard proves a pin exists and, for a test module, that it
+- **Pin RELEVANCE.** The guard proves a pin exists as a FILE and, for a test module, that it
   declares at least one test function (`^\s*(async )?def test_` — a pytest
   FIXTURE named `test_*` satisfies that floor too, e.g. `tests/conftest.py:1048`).
   It cannot prove the tests assert *this* defect: a pin pointed at a module whose
