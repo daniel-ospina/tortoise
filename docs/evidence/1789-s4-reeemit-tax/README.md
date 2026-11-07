@@ -48,7 +48,7 @@ Task 10 (fresh 50-question E2E) was never run, so the delta contract's
 
 | issue target | measured | verdict |
 |---|---|---|
-| **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 787 → 2 038 output tokens over 7 sessions); median **−96.9 %**, worst session **−85.16 %**, best **−98.3 %** | **MET**, 2.3× the threshold; each of the 7 sessions clears 40 % on its own. ⚠️ **This is not production's saving, and its DIRECTION is not established by this artifact** — see *What this does not measure*: the reconstructed S3 block offers the delta arm all 266 S2 items as already existing, which is the **maximum** correction opportunity (the arm took none: 0 collisions) while it is the **minimum** for gaps — so one channel is measured at its most favourable input and the other at its least, and the aggregate could be either |
+| **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 787 → 2 038 output tokens over 7 sessions); median **−96.9 %**, worst session **−85.16 %**, best **−98.3 %** | **MET**, 2.3× the threshold; each of the 7 sessions clears 40 % on its own. ⚠️ **This is not production's saving, and its DIRECTION is not established by this artifact** — see *What this does not measure*: the reconstructed S3 block offers the delta arm **231 of the 266** S2 items as already existing — the block renders entities/points/events only, so the 35 `operators` items are never offered (in production too), and their correction channel is structurally zero — which is the **maximum** correction opportunity for those 231 (the arm took none: 0 collisions, which is therefore *not* evidence about operator corrections) while it is the **minimum** for gaps — so one channel is measured at its most favourable input and the other at its least, and the aggregate could be either |
 | truncation rate → near 0 | `truncated=False` on **14/14** arm calls, `attempts=1` | ⚠️ **NOT EVIDENCED.** The largest output either arm produced (7 814 tokens) is **under half** the 16 000-token default (`_S2_S4_MAX_TOKENS`), so this geometry has no plausible route to truncation and a null here is an artefact of the harness, not a measurement of the rate. ⚠️ The effective cap is `_stage_cap(_S2_S4_MAX_TOKENS)`, which is env-overridable (`TORTOISE_EXTRACTOR_MAX_TOKENS`) and is **not recorded in the artifact** — so the margin is stated against the DEFAULT, and a box with the override set would need its own reading. What the artifact does record is the outcome (`truncated: false` on every call). That target needs the eval lane's geometry. |
 | accuracy ≥ 0.826 / chunk@20 ≥ 0.738 | **not measured here** — the eval lane's gates | see *What this does not measure* |
 
@@ -98,7 +98,12 @@ at this head writes them, the committed artifacts do not carry them.
 write-path eval receipts (`tests/eval/write_path/receipts/7947-arms-2026-10-18/`):
 real S1 stories and real S2 embed lists (29–49 items per session across
 entities/events/points/operators; the recorded S2 output those sessions cost is
-**3 263–5 453 tokens, median 4 187**, per `inputs[].s2_reference`). ⚠️ The `id`
+**3 263–5 453 tokens, median 4 187**, per `inputs[].s2_reference`). ⚠️ The embed
+list handed to `run_s4` is the **4 tax-surface sections** — 266 of the 311 items
+the receipts record; `chain_notes` (7) and `link_before_create` (38) are not in
+the prompt. Both arms see the same narrowed list, so the A/B stays
+single-variable, but the narrowing shrinks the legacy arm's re-emit target and so
+**understates** the measured reduction. ⚠️ The `id`
 values in the reconstructed search block are **synthetic** (`s2-ent-0`, …) — the
 receipts record no graph ids — so an output field that COPIES an id can only be
 an echo of the instrument's own alias, and is discounted below.
@@ -219,7 +224,9 @@ artifact.
 
   - the **correction** channel is measured at its *production maximum*:
     `S4_TMPL_DELTA` emits a correction only where the search shows the item
-    already exists, and the reconstruction says all 266 S2 items exist — the
+    already exists, and the reconstruction offers 231 of the 266 items as
+    existing (the block renders entities/points/events only — the 35 `operators`
+    are never shown, in production too) — the
     delta arm nevertheless emitted **0** corrections in all 7 sessions of both
     runs. Production can only offer fewer, so this channel cannot be better there.
   - the **gap** channel is measured at its *minimum*: an input that says
@@ -232,7 +239,9 @@ artifact.
   one sign: the measured −93.8 % is the contract's effect under ONE fixed input.
   Take the two arms separately, because the two channels do not share a sign.
   Inside the **delta** arm the correction channel cannot *shrink its output* —
-  it is measured at its production maximum (all 266 items offered as existing)
+  it is measured at its production maximum **for the 231 items the block can
+  offer** (the 35 `operators` are never rendered, in production too, so this
+  channel is structurally zero for them)
   and already emits nothing (0), so production has no room to add to it — while
   its gap channel can only *grow it*, since that channel is measured at its
   **minimum**. So the delta arm's production cost is ≥ the measured 2 038: its
@@ -277,7 +286,7 @@ corrected items with the cap/census accounting above, composition totals, and th
 per-arm `s4_delta_empty` / `s4_delta_reemit_suspect` flags derived with
 production's own predicates) and `ab-20261107T024226Z.json` (the re-run).
 
-Instrument tests: `tests/test_s4_reeemit_tax.py` (**33** tests, offline, fake
+Instrument tests: `tests/test_s4_reeemit_tax.py` (**34** tests, offline, fake
 model) — they pin the ways a number like this goes wrong silently: a vacuous A/B, the
 two arms receiving different inputs, a mis-attributed cost (a per-call total
 rather than the final call; `null` rather than 0 when the provider reports

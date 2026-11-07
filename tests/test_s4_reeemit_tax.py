@@ -492,6 +492,34 @@ def test_a_failed_arm_keeps_the_SPEND_it_incurred(tmp_path, monkeypatch):
     assert row["basis"] == "stats.cost.completion_tokens"
 
 
+def test_prompt_tokens_are_the_ACCUMULATED_total_not_the_last_call(
+        tmp_path, monkeypatch):
+    """⛔ `stats["prompt_tokens"]` is a PER-CALL snapshot (`_complete` overwrites
+    it on every call), while `out_tokens` beside it is an accumulated TOTAL with
+    a `basis` string precisely because a final-call read under-counts the
+    expensive arms. Reading the snapshot published a last-call number under the
+    same name a total carries — invisible while every arm makes one call (both
+    committed runs do) and wrong on the FIRST retried arm, which is the shape
+    this instrument exists to get right. `_accumulate_call_cost` sums the same
+    field into `stats["cost"]["prompt_tokens"]`, so the row must read that
+    (#11385 review P3).
+    """
+    def _two_calls(model, *a, **kw):
+        stats = kw["stats"]
+        # the accumulator sums BOTH calls; the snapshot keeps only the last one
+        stats.setdefault("cost", {}).update(
+            {"calls": 2, "completion_tokens": 300, "prompt_tokens": 4000})
+        stats.update(prompt_tokens=1500, completion_tokens=200, attempts=2)
+        return {}
+
+    monkeypatch.setattr(tool.x, "run_s4", _two_calls)
+    sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
+    row = tool.run_arm(object(), sess, "legacy")
+
+    assert row["prompt_tokens"] == 4000, (
+        "the accumulated total (4000), not the last call's snapshot (1500)")
+
+
 def test_search_block_is_reconstructed_from_the_s2_list(tmp_path):
     """Both arms must see the SAME search results — that is what keeps the A/B
     single-variable.

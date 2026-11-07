@@ -187,11 +187,22 @@ graph, so S4's search results are the S2 items themselves").
     search" condition the plan excludes from compliance reads, and it would
     change both arms' behaviour) — but the reconstruction is the MAXIMALLY
     gap-SUPPRESSING input for a delta contract while being the MAXIMALLY
-    correction-FRIENDLY one (it says every S2 item already exists, and a delta
-    correction is emitted only where the search shows that), so the two value
-    channels are measured at opposite extremes and the aggregate's DIRECTION is
-    not established: neither a ceiling nor a floor, just the effect under this
-    input.
+    correction-FRIENDLY one (it says every S2 item it OFFERS already exists,
+    and a delta correction is emitted only where the search shows that), so the
+    two value channels are measured at opposite extremes and the aggregate's
+    DIRECTION is not established: neither a ceiling nor a floor, just the effect
+    under this input.
+
+    ⛔ IT OFFERS 231 OF THE 266, NOT ALL 266 (#11385 review P2): this function
+    returns ``entities`` / ``points`` / ``events`` only, and
+    ``_render_search_results`` has no ``operators`` section either — in
+    production too. The 7 receipts carry 84 entities + 33 events + 114 points +
+    35 ``operators`` = 266, so the 35 operator items are never shown, their
+    correction channel is STRUCTURALLY ZERO for this input, and the delta arm's
+    0 collisions is NOT evidence that it declined operator corrections. The
+    direction argument is unaffected (production's block is a subset of this
+    one, so the reasoning still holds) — the COUNT is, and an earlier revision of
+    the evidence document said "all 266".
 
     ⛔ THE IDS ARE SYNTHETIC (`s2-ent-0`, `s2-pt-1`, …): the receipts record no
     graph ids. Production would offer real node ids (or none), so any output
@@ -221,6 +232,24 @@ graph, so S4's search results are the S2 items themselves").
 
 
 # ── token accounting ───────────────────────────────────────────────────────
+
+
+def prompt_tokens_total(stats: dict) -> int:
+    """TOTAL prompt tokens over every successful call, from the ACCUMULATOR.
+
+    ⛔ ``stats["prompt_tokens"]`` is a PER-CALL snapshot: ``_complete``
+    overwrites it on every call (``tortoise/extractor_v2.py``, the
+    ``stats.update(...)`` on the success path, whose own comment says the token
+    fields stay per-call because other readers treat them as a snapshot). Beside
+    ``out_tokens`` — an accumulated TOTAL with a ``basis`` string precisely
+    because a final-call read under-counts exactly the expensive arms — that
+    snapshot would mix a last-call number with a sum under two names that read
+    alike. Invisible in the committed runs (one call per arm) and wrong on the
+    first retried arm, so the row reads the accumulator
+    ``_accumulate_call_cost`` sums into ``stats["cost"]["prompt_tokens"]``
+    (#11385 review P3).
+    """
+    return int((stats.get("cost") or {}).get("prompt_tokens") or 0)
 
 
 def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
@@ -340,7 +369,7 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
             "error": f"{type(e).__name__}: {e}"[:400],
             "out_tokens": spent,
             "basis": spend_basis,
-            "prompt_tokens": int(stats.get("prompt_tokens") or 0),
+            "prompt_tokens": prompt_tokens_total(stats),
             "truncated": bool(stats.get("truncated")),
             # ⛔ the raised-attempt case the docstring's residual describes IS
             # this branch, so the row that most needs these two numbers is the
@@ -374,7 +403,7 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
     row.update({
         "out_tokens": out_tokens,
         "basis": basis,
-        "prompt_tokens": int(stats.get("prompt_tokens") or 0),
+        "prompt_tokens": prompt_tokens_total(stats),
         "truncated": bool(stats.get("truncated")),
         "finish_reason": stats.get("finish_reason"),
         "attempts": int(stats.get("attempts") or 0),
@@ -628,18 +657,18 @@ def compare(pairs: list[dict]) -> dict:
     # for a tokenless / rejected-count / deadline-aborted / incomplete-recovery
     # call), so counting errors alone reported "nothing excluded" in exactly the
     # shape the null polarity exists to create (#11385 review P2).
-    failed = None  # set below, once `usable` is known
-    usable = [r for r in rows
-              if r["reduction"] is not None
-              and not r.get("legacy_error") and not r.get("delta_error")]
-    # the SAME filter, expressed over the input pairs — `composition` MUST be
-    # summed over exactly the population the token totals use (the docstring of
-    # `_composition_totals` states that invariant, so a second, looser filter
-    # here would publish a value-channel table describing sessions the headline
-    # excludes — #11385 review P2).
-    usable_pairs = [p for p, r in zip(pairs, rows, strict=True)
-                    if r["reduction"] is not None
-                    and not r.get("legacy_error") and not r.get("delta_error")]
+    # ONE keep-mask for BOTH views (`usable` rows and the `pairs` they came
+    # from). The same three-clause filter written out twice is the drift this
+    # branch keeps repairing: `composition` MUST be summed over exactly the
+    # population the token totals use (the docstring of `_composition_totals`
+    # states that invariant), and a second, looser filter here would publish a
+    # value-channel table describing sessions the headline excludes — while
+    # nothing kept the two copies agreeing (#11385 review P2/P3).
+    keep = [r["reduction"] is not None
+            and not r.get("legacy_error") and not r.get("delta_error")
+            for r in rows]
+    usable = [r for r, k in zip(rows, keep, strict=True) if k]
+    usable_pairs = [p for p, k in zip(pairs, keep, strict=True) if k]
     failed = len(rows) - len(usable)   # the EXCLUDED population, errors or not
     sum_lg = sum(r["legacy_out_tokens"] for r in usable)
     sum_dl = sum(r["delta_out_tokens"] for r in usable)
@@ -743,9 +772,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         ],
         "summary": summary,
         "caveats": [
-            "Measured per-session S4 output tokens on RECORDED real S2 geometry; "
-            "the prompt inputs are identical across arms, so the delta is the "
-            "output contract's effect.",
+            "Measured per-session S4 output tokens on RECORDED real S2 geometry "
+            "(the 4 tax-surface sections); the prompt inputs are identical "
+            "across arms, so the delta is the output contract's effect.",
+            "The replayed S2 embed list is the 4 tax sections — 266 of the 311 "
+            "items the receipts record (chain_notes 7 and link_before_create 38 "
+            "are not in the prompt; retractions 0). Both arms see the same "
+            "narrowed list, so the A/B stays single-variable, but it shrinks the "
+            "legacy arm's re-emit target and therefore UNDERSTATES the measured "
+            "reduction (#11385 review P3).",
             "One call per arm per session (no production-run composition): model "
             "compliance in the wild is not measured here — it is OBSERVABLE per "
             "row via verbatim_reemissions / added_by_s4 / corrected_by_s4 / "
@@ -758,10 +793,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             "turn echoes dropped). Relabelling the session's own list as "
             "already-in-the-graph is the maximally gap-SUPPRESSING input for a "
             "delta contract AND the maximally correction-FRIENDLY one (a "
-            "correction is emitted only where the search shows the item exists), "
-            "so the two value channels are measured at opposite extremes and the "
-            "aggregate's direction is not established — neither a ceiling nor a "
-            "floor.",
+            "correction is emitted only where the search shows the item exists) "
+            "— for the 231 of the 266 items it can offer: the block renders "
+            "entities/points/events only, so the 35 operators are never shown "
+            "(in production too) and their correction channel is structurally "
+            "zero here. So the two value channels are measured at opposite "
+            "extremes and the aggregate's direction is not established — "
+            "neither a ceiling nor a floor.",
             "model_id is the model REQUESTED; the served id is not recorded here.",
             "Accuracy / chunk@20 are the eval lane's gates and are NOT measured here.",
         ],
