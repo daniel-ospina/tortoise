@@ -66,16 +66,22 @@ Exit codes (a CLOSED set — a caller may branch on them):
     1  INVALID     the ledger cannot be trusted (fail-closed; nothing is computed)
     2  UNCOVERED   valid ledger, uncovered list non-empty (the real finding)
     3  DISABLED    the off-switch was set; NO verdict was computed
+    4  ADVISORY    the report was rendered and NOT enforced
 
 Off-switch: `TORTOISE_CAPSTONE_LEDGER=off` (kill-switch — exits 3, never 0, so
 "disabled" can never be mistaken for "clean"), or `=advisory` (prints the full
-report, exits 0 — for a caller that wants the report without the gate).
+report and exits **4** — NOT 0). Advisory used to return EXIT_CLEAN, which made
+the one mode whose whole point is "do not treat this as a verdict" identical, to
+any caller branching on the exit status, to a ledger with an empty uncovered
+list. A review measured exactly that: 11 uncovered rows, exit 0. The code is
+distinct now because the caller cannot be assumed to read stdout.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Final
@@ -106,6 +112,10 @@ EXIT_CLEAN: Final[int] = 0
 EXIT_INVALID: Final[int] = 1
 EXIT_UNCOVERED: Final[int] = 2
 EXIT_DISABLED: Final[int] = 3
+#: Advisory renders the report and enforces nothing. It must NOT reuse
+#: `EXIT_CLEAN`: a caller that branches on the exit code would then read
+#: "advisory, 11 rows uncovered" as "clean".
+EXIT_ADVISORY: Final[int] = 4
 
 _CMD_PREFIX: Final[str] = "cmd:"
 
@@ -161,22 +171,67 @@ def load_ledger(path: Path) -> dict[str, Any]:
     return data
 
 
-def _evidence_is_real(entry: str) -> tuple[bool, str]:
-    """A path must exist; a `cmd:` entry must name a command.
+def _commit_exists(sha: str) -> bool:
+    """Is `sha` an object in THIS repository? A sha nobody can resolve is a claim.
+
+    The 40-hex shape check alone lets `measured_at.sha: deadbeef…` through, and
+    `render()` then prints "measured at origin/main@deadbeef… on <date>" as fact.
+    The one claim binding 22 verdicts to a tree is therefore the cheapest thing
+    in the record to fabricate, so it is checked against the object database.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    return proc.returncode == 0
+
+
+def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, str]:
+    """A path must be a FILE inside the tree; a `cmd:` entry must name an artifact.
 
     ⛔ This is the anti-forgery rule and the reason the tool is worth having: a
     row that *describes* its evidence in prose used to count. Now the file has
-    to be in the tree, or the row does not count at all.
+    to be in the tree, or the row does not count at all — and "in the tree" is
+    enforced literally: an absolute path outside the checkout, a directory, and
+    `.` are all REFUSED, because `Path.exists()` accepted every one of them and
+    a reviewer measured each returning a clean exit on a `verified` row.
+
+    The `cmd:` arm gets the same treatment, for the same reason: accepting any
+    non-empty string meant `cmd:done` — or a sentence explaining that the work
+    was done — satisfied the strongest verdict in the vocabulary, so one word
+    defeated the whole record. A command entry must now NAME an artifact of this
+    tree (the script or test file it ran); prose names nothing and is refused.
     """
+    root = repo_root.resolve()
     if entry.startswith(_CMD_PREFIX):
         command = entry[len(_CMD_PREFIX) :].strip()
         if not command:
             return False, "`cmd:` evidence names no command"
-        return True, ""
+        tokens = command.replace("`", " ").replace("'", " ").replace('"', " ").split()
+        if len(tokens) < 2:
+            return False, f"`cmd:` evidence must be a COMMAND, not a word: {command!r}"
+        for token in tokens[1:]:
+            candidate = Path(token)
+            resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+            if resolved.is_file() and resolved.is_relative_to(root):
+                return True, ""
+        return False, (
+            f"`cmd:` evidence names no artifact of this tree: {command!r} — a command "
+            "entry must name the script or test file it ran, so prose cannot stand in "
+            "for held evidence"
+        )
     candidate = Path(entry)
-    resolved = candidate if candidate.is_absolute() else REPO_ROOT / candidate
-    if not resolved.exists():
-        return False, f"evidence path does not exist in the tree: {entry}"
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    if not resolved.is_relative_to(root):
+        return False, f"evidence path escapes the tree (`{entry}` resolves outside it)"
+    if not resolved.is_file():
+        return False, f"evidence path is not a file in the tree: {entry}"
     return True, ""
 
 
@@ -190,6 +245,9 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
     """
     problems: list[str] = []
 
+    if data.get("version") != 1:
+        problems.append(f"`version` must be 1, got {data.get('version')!r}")
+
     if data.get("issue") != 9664:
         problems.append(f"`issue` must be 9664, got {data.get('issue')!r}")
 
@@ -200,6 +258,9 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         sha = str(measured_at.get("sha") or "")
         if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
             problems.append(f"`measured_at.sha` must be a 40-hex sha, got {sha!r}")
+        elif not _commit_exists(sha):
+            # Shape is not existence: a fabricated sha renders as provenance.
+            problems.append(f"`measured_at.sha` names no commit in this repository: {sha}")
         if not str(measured_at.get("date") or "").strip():
             problems.append("`measured_at.date` must be set (YYYY-MM-DD)")
 
@@ -253,7 +314,7 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
             if not evidence:
                 problems.append(f"{where} is `verified` with no evidence cited")
             for entry in evidence:
-                ok, why = _evidence_is_real(entry)
+                ok, why = _evidence_is_real(entry, repo_root)
                 if not ok:
                     problems.append(f"{where}: {why}")
         else:
@@ -339,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
             f"verdict not enforced; {len(remaining)} uncovered row(s) reported",
             file=sys.stderr,
         )
-        return EXIT_CLEAN
+        return EXIT_ADVISORY
     return EXIT_UNCOVERED if remaining else EXIT_CLEAN
 
 

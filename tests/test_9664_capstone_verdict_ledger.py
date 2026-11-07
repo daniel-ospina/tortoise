@@ -74,6 +74,8 @@ EXPECTED_UNCOVERED = [
     "S2",
     "S3",
     "S4",
+    "S5",
+    "S6",
     "U1",
     "U2",
     "U4",
@@ -310,15 +312,95 @@ def test_off_switch_exits_disabled_never_clean(tmp_path):
     assert "no verdict was computed" in proc.stderr
 
 
-def test_advisory_reports_but_does_not_enforce(tmp_path):
+def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
+    """Advisory must not reuse EXIT_CLEAN.
+
+    It used to return 0, which meant a caller branching on the exit status read
+    "advisory, rows uncovered" as "clean" — measured on the real ledger: 13
+    uncovered rows, exit 0. A distinct code is the only version a caller cannot
+    misread, because the caller cannot be assumed to read stdout.
+    """
     proc = _run_cli(
         tmp_path,
         _ledger([_row("A"), _row("B", "blocked")]),
         env={"TORTOISE_CAPSTONE_LEDGER": "advisory"},
     )
-    assert proc.returncode == cl.EXIT_CLEAN
+    assert proc.returncode == cl.EXIT_ADVISORY, proc.stdout + proc.stderr
+    assert proc.returncode != cl.EXIT_CLEAN
+    assert proc.returncode != cl.EXIT_UNCOVERED  # it did NOT enforce either
     assert "B" in proc.stdout  # the report still names the uncovered row
     assert "ADVISORY" in proc.stderr
+
+
+# ── the anti-forgery arms a review broke, pinned ───────────────────────────
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "cmd:done",
+        "cmd:I verified this by hand, screenshots are in the issue",
+        "cmd:uv run pytest",
+        "cmd:cat /etc/hostname",
+    ],
+)
+def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
+    """`cmd:` used to accept ANY non-empty string, so `cmd:done` satisfied `verified`.
+
+    One word — or a sentence explaining that the work was done — defeated the
+    strongest verdict in the vocabulary and turned the uncovered list empty.
+    A command entry must name the script or test file it ran.
+    """
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[prose])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    # Two arms name the same defect: a one-word entry is not a command at all,
+    # a sentence-shaped one simply names no file. Both are refusals.
+    assert "`cmd:` evidence" in proc.stderr
+
+
+def test_a_cmd_entry_that_names_a_real_script_is_accepted(tmp_path):
+    """The rule must not be so tight that the committed ledger's own rows fail."""
+    proc = _run_cli(
+        tmp_path,
+        _ledger([_row("A", evidence=["cmd:uv run python tools/test_lane.py run -- x -q"])]),
+    )
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("escape", ["/etc/hostname", "..", ".", "docs"])
+def test_a_path_outside_or_not_a_file_is_invalid(tmp_path, escape):
+    """`Path.exists()` accepted an absolute path outside the checkout, a bare
+    directory and `.` — each on a `verified` row with a clean exit. The rule the
+    artifact states is "a FILE *in the tree*", so all three are refusals."""
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[escape])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "evidence path" in proc.stderr
+
+
+def test_validate_honours_its_repo_root_argument(tmp_path):
+    """`repo_root` was accepted and never forwarded, so a caller scoping
+    validation to another tree silently validated against THIS checkout and the
+    "not in the tree" assertion could never fail on the developer's box."""
+    empty = tmp_path / "elsewhere"
+    empty.mkdir()
+    data = _ledger([_row("A")])  # cites a file that exists only in the real tree
+    with pytest.raises(cl.InvalidLedger):
+        cl.validate(data, repo_root=empty)
+
+
+def test_an_unknown_version_is_invalid(tmp_path):
+    proc = _run_cli(tmp_path, _ledger([_row("A")], version=99))
+    assert proc.returncode == cl.EXIT_INVALID
+    assert "version" in proc.stderr
+
+
+def test_a_sha_that_names_no_commit_is_invalid(tmp_path):
+    """Shape is not existence: a fabricated 40-hex sha rendered as provenance."""
+    data = _ledger([_row("A")])
+    data["measured_at"]["sha"] = "deadbeef" * 5
+    proc = _run_cli(tmp_path, data)
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "names no commit" in proc.stderr
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────

@@ -190,33 +190,42 @@ criteria:
 
   - id: S5
     text: "`connection-written` + `harness-connected` close at token issue"
-    verdict: verified
+    verdict: not-covered
     evidence:
       - docs/evidence/9664-capstone/run-2026-10-26/step6e-full-trace.txt
       - docs/evidence/9664-capstone/run-2026-10-26/step7-graphs-and-step5-onboarding-state.txt
       - cmd:uv run python docs/evidence/9664-capstone/probes/step_premise_census.py
     evidence_kind: server-observation
     reason: >-
-      WAIVER (server-observation): this criterion is not observable on a screen —
-      `connection-written` is a client checkpoint in no completion gate and
-      `harness-connected` is filed server-side on the first agent write, so a
-      screenshot can never carry it. Verified as corrected: nothing closes at
-      token issue. The run's trace shows `connection-written` rendered as "Not
-      applicable to ChatGPT", and census rows 5a-5e re-measure the gates at this
-      head (26 premises, 0 unmeasured).
+      The criterion's OBSERVABLE IS REFUTED, so it cannot be graded `verified`.
+      Nothing closes at token issue: `connection-written` is a client checkpoint in
+      no completion gate (the run renders it as "Not applicable to ChatGPT"), and
+      `harness-connected` is filed server-side on the first agent write, not at
+      token issue. Census rows 5a-5e re-measure the gates at this head (26
+      premises, 0 unmeasured). A previous draft of this row said `verified` "as
+      corrected" - that reads a refuted statement as covered, which is the exact
+      false PASS this ledger exists to refuse. The row needs the criterion
+      RESTATED (what does close, and when) before a run can satisfy it; the
+      server-observation waiver explains why no screenshot can carry it, and does
+      not make a false claim true.
 
   - id: S6
-    text: "paste the pointer prompt → the agent calls `tortoise_load_skill`"
-    verdict: verified
+    text: "paste the pointer prompt — the agent calls `tortoise_load_skill`"
+    verdict: not-covered
     evidence:
       - docs/evidence/9664-capstone/run-2026-10-26/step6e-full-trace.txt
       - cmd:uv run python docs/evidence/9664-capstone/probes/step_premise_census.py
     evidence_kind: trace
     reason: >-
-      Verified as corrected: `tortoise_load_skill` does not exist. Measured at
-      this head in-process against the real registry — 72 tools, and the names
-      containing "skill" are: [] (empty). Census row 6 CONFIRMED (0 of 72 live
-      names). The run's trace shows the real call order instead.
+      The named tool DOES NOT EXIST, so the criterion as written cannot be
+      satisfied by any run: measured at this head in-process against the real
+      registry - 72 tools, and the names containing "skill" are `[]` (census row 6
+      CONFIRMED, 0 of 72). The run's trace shows the real call order instead. A
+      previous draft said `verified` "as corrected", which counts a refuted
+      observable as covered; `failed` would assert a failure that #9664's own
+      "anything that failed has an issue" row must then back - and no issue names
+      this one - so the honest state is: restate the criterion (which tool, if
+      any) and file the gap, then a run can grade it.
 
   - id: S7
     text: "\"what graphs do I have?\" — `tortoise_list_graphs` returns only entitled graphs"
@@ -319,10 +328,10 @@ criteria:
     reason: >-
       Artifacts exist and are dated (54 PNGs, every one carrying a 20261026 stamp)
       and a live link now exists, but coverage is not per-step: step 5 has ZERO
-      screenshots — by nature, since it is a server-side observation (see S5's
-      waiver). This row stays uncovered until the waiver is carried on the row it
-      applies to AND the remaining run produces step 3's card (the one surface no
-      run has ever captured).
+      screenshots — by nature, since it is a server-side observation (S5 carries
+      the `server-observation` waiver, so that half is already stated). What still
+      blocks this row is step 3's card, the one surface no run has ever captured:
+      it needs a signed-in dashboard session.
 
   - id: E2
     text: "The tool-call trace for steps 6-9 (what the model actually called, in order)."
