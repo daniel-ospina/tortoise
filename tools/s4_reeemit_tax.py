@@ -607,8 +607,11 @@ def compare(pairs: list[dict]) -> dict:
     # committed runs have zero errors, so no published number moves; the row
     # keeps `legacy_error`/`delta_error` and `sessions_attempted` keeps the
     # excluded population visible (#11385 review P2).
-    failed = sum(1 for r in rows
-                 if r.get("legacy_error") or r.get("delta_error"))
+    # ⛔ `failed` must be the EXCLUDED population, not the errored one: an arm
+    # can be unmeasured with no `error` at all (`arm_out_tokens` returns `None`
+    # for a tokenless / rejected-count / deadline-aborted / incomplete-recovery
+    # call), and that null polarity is exactly what creates that shape — so
+    # counting errors alone reported "nothing excluded" in it (#11385 P2).
     usable = [r for r in rows
               if r["reduction"] is not None
               and not r.get("legacy_error") and not r.get("delta_error")]
@@ -620,6 +623,7 @@ def compare(pairs: list[dict]) -> dict:
     usable_pairs = [p for p, r in zip(pairs, rows, strict=True)
                     if r["reduction"] is not None
                     and not r.get("legacy_error") and not r.get("delta_error")]
+    failed = len(rows) - len(usable)
     sum_lg = sum(r["legacy_out_tokens"] for r in usable)
     sum_dl = sum(r["delta_out_tokens"] for r in usable)
     reductions = sorted(r["reduction"] for r in usable)

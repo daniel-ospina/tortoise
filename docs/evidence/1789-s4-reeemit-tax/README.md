@@ -230,21 +230,26 @@ artifact.
 
   So the aggregate's direction is **not** established, and it does not reduce to
   one sign: the measured −93.8 % is the contract's effect under ONE fixed input.
-  The correction channel can only *shrink* the real saving from here — it is
+  The correction channel **cannot enlarge** the real saving from here: it is
   measured at its production maximum and already contributes nothing (0 emitted),
-  so production cannot add to it. The gap channel can go either way: if the input
-  is what suppressed gap emission, production leaves more to find, the delta arm
-  emits more, and the saving is **smaller**; if the contract itself suppresses
-  gap-finding (a defect, not a win), production behaves like this run and the
-  saving barely moves. Settling it needs a production-geometry run.
+  so production cannot add correction tokens — that channel is inert, not
+  favourable. What keeps the direction open is the *other* side: this is one fixed
+  input for BOTH arms, and both can move. If the input suppressed the delta arm's
+  gaps, production leaves more to find, the delta arm emits more, and the saving is
+  **smaller**; if the contract itself suppresses gap-finding (a defect, not a win),
+  production behaves like this run. And the opposite route is not excluded either:
+  the measured delta arm emits 6 gap items and the legacy arm re-emits 266 —
+  production could emit fewer of each, which would make the real saving **larger**.
+  Settling it needs a production-geometry run.
 
   ⚠️ **What the committed artifacts actually say.** Their `caveats[2]` ends
   "…Relabelling the session's own list as already-in-the-graph is the maximally
   gap-SUPPRESSING input for a delta contract, so the measured saving is a CEILING
   and the delta arm's `added_by_s4` / `s4_items` read as a floor." That is the
-  one-sided reading this section refutes: it names only the gap channel and
-  concludes a ceiling, when the same input makes the correction channel
-  *maximally* exercisable. The string stands as the **disclosed hand-correction**
+  **incomplete** reading, not a refuted one: it names only the gap channel, draws
+  a one-sign conclusion from it, and says nothing about the correction channel —
+  which this input also exercises at its maximum, and which the two bullets above
+  weigh on their own terms. The string stands as the **disclosed hand-correction**
   left it — word-for-word the instrument's own caveat from `10b8d52cb` until this
   change — and it is left alone now for the same reason it was corrected then:
   it is a caveat, never a measurement. Editing it again to match this section
@@ -269,7 +274,7 @@ corrected items with the cap/census accounting above, composition totals, and th
 per-arm `s4_delta_empty` / `s4_delta_reemit_suspect` flags derived with
 production's own predicates) and `ab-20261107T024226Z.json` (the re-run).
 
-Instrument tests: `tests/test_s4_reeemit_tax.py` (**32** tests, offline, fake
+Instrument tests: `tests/test_s4_reeemit_tax.py` (**33** tests, offline, fake
 model) — they pin the ways a number like this goes wrong silently: a vacuous A/B, the
 two arms receiving different inputs, a mis-attributed cost (a per-call total
 rather than the final call; `null` rather than 0 when the provider reports
@@ -291,8 +296,11 @@ output size, so it is excluded from the sums and the median while its spend and
 visible.
 
 Two of them cover this bundle. `test_every_committed_artifact_reconciles_with_its_own_rows`
-pins each artifact's **internal** consistency and hard-codes no figure, so a
-legitimate regeneration does not red it.
+pins each artifact's **internal** consistency — summary against its own rows — and
+carries no headline figure, so a legitimate regeneration does not red it on a
+number. (The only literals it carries are the invariants stated here, e.g. that no
+list reached the cap; a regeneration whose largest list exceeded 40 candidates
+would red it, by design.)
 `test_the_readme_figures_reproduce_from_the_committed_artifacts` is its
 literal-figure counterpart: it reads both
 committed JSONs and asserts every headline figure above is *recomputed* from

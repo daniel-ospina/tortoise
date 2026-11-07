@@ -656,6 +656,28 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
             for arm in ("legacy", "delta"):
                 assert row[f"{arm}_out_tokens"] == a[arm].get("out_tokens"), (
                     path.name, a["session"], arm)
+                # ⛔ EVERY field the summary copies, not just the token total:
+                # `{arm}_s4_items` and `delta_added_by_s4` are what the
+                # published "no new tax-surface item in 5 of 7 sessions" rides
+                # on, and a summary edited to disagree with its own rows is the
+                # corruption this pin exists for (#11385 review P2).
+                assert row[f"{arm}_s4_items"] == a[arm].get("s4_items"), (
+                    path.name, a["session"], arm, "s4_items")
+                assert row[f"{arm}_truncated"] == a[arm].get("truncated"), (
+                    path.name, a["session"], arm, "truncated")
+                assert row[f"{arm}_error"] == a[arm].get("error"), (
+                    path.name, a["session"], arm, "error")
+            assert row["s2_items"] == a["legacy"].get("s2_items"), (
+                path.name, a["session"], "s2_items")
+            for key, field in (
+                    ("delta_verbatim_reemissions", "verbatim_reemissions"),
+                    ("delta_added_by_s4", "added_by_s4"),
+                    ("delta_corrected_by_s4", "corrected_by_s4")):
+                assert row[key] == a["delta"].get(field), (
+                    path.name, a["session"], key)
+            assert row["delta_corrected_items"] == (
+                (a["delta"].get("corrected_items") or {}).get("count")), (
+                path.name, a["session"], "delta_corrected_items")
         # ⛔ over the MEASURED pairs, mirroring `compare`'s `usable_pairs` —
         # summing every arm here would red a legitimate artifact that contains
         # one failed arm, which is the shape this pin must tolerate (a failed
@@ -829,6 +851,26 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
     assert (f"{_thousands(ps['sum_legacy_out_tokens'])} → "
             f"{_thousands(ps['sum_delta_out_tokens'])} output tokens over 7 "
             "sessions") in flat_all
+    # the input provenance the README states, from `inputs[]`
+    refs = sorted(i["s2_reference"]["completion_tokens"] for i in pri["inputs"])
+    assert refs == sorted(i["s2_reference"]["completion_tokens"]
+                          for i in rer["inputs"])
+    assert (f"{_thousands(refs[0])}–{_thousands(refs[-1])} tokens, median "
+            f"{_thousands(round(__import__('statistics').median(refs)))}") in flat_all
+    # the multiples and the spread the document quotes
+    assert f"{ps['token_weighted_reduction'] / 0.40:.1f}× the threshold" in flat_all
+    spread = round((prs["token_weighted_reduction"]
+                    - ps["token_weighted_reduction"]) * 100, 2)
+    assert f"differ by {spread:.2f} points" in flat_all
+    # the case count in this file (a hand-written count drifted once already)
+    _count = sum(1 for k in globals() if k.startswith("test_"))
+    assert f"**{_count}** tests" in flat_all, _count
+    # the per-row gap channel the "5 of 7" sentence rides on
+    zero_gaps = sum(1 for a in pri["arms"] if a["delta"].get("added_by_s4") == 0)
+    assert (f"no new tax-surface item** in {zero_gaps} of {len(pri['arms'])} "
+            "sessions in both runs") in flat_all, zero_gaps
+    assert sum(1 for a in rer["arms"] if a["delta"].get("added_by_s4") == 0) == zero_gaps
+
     assert (f"Re-run (`ab-20261107T024226Z`): "
             f"{_thousands(prs['sum_legacy_out_tokens'])} → "
             f"{_thousands(prs['sum_delta_out_tokens'])} tokens, **−"
@@ -864,14 +906,22 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
             for label, cells in table.items():
                 if "census" in label and len(cells) >= 2:
                     rows["census"] = (_num(cells[0]), _num(cells[1]))
+                # `merged_items` is NOT here: the composition table states it in
+                # prose, not in a cell, so a `rows[...]` entry for it would be
+                # collected and never read (#11385 review P2).
                 for key in ("verbatim_reemissions", "corrected_by_s4",
-                            "added_by_s4", "s4_items", "merged_items"):
+                            "added_by_s4", "s4_items"):
                     if f"`{key}`" in label and len(cells) >= 2:
                         rows[key] = (_num(cells[0]), _num(cells[1]))
+        # `merged_items` is stated in prose ("nothing is lost by construction"),
+        # not in a table cell — pin the SENTENCE, since a dead `rows[...]` entry
+        # guarded nothing (#11385 review P2).
         assert rows["verbatim_reemissions"] == (lg["verbatim_reemissions"], 0), rows
         assert rows["corrected_by_s4"] == (lg["corrected_by_s4"], 0), rows
         assert rows["added_by_s4"] == (lg["added_by_s4"], dl["added_by_s4"]), rows
         assert rows["s4_items"] == (lg["s4_items"], dl["s4_items"]), rows
+        assert (f"`merged_items` is {dl['merged_items']} vs an S2 base of "
+                f"{lg['s2_items']}") in " ".join(readme.split()), dl["merged_items"]
         # the census row's label wraps the subtraction, so match on the word
         assert rows["census"] == (lg["corrected_by_s4"] - lg["verbatim_reemissions"],
                                   0), rows
@@ -1003,3 +1053,15 @@ def test_a_partial_run_is_flagged_not_silently_published():
     assert mixed["partial"] is True
     assert mixed["sessions_failed"] == 1
     assert mixed["sessions_measured"] == 1
+
+
+def test_the_partial_flag_counts_UNMEASURED_arms_not_only_errored_ones():
+    """`sessions_failed` is documented as the excluded population, so it must
+    count an arm that is unmeasured with NO error — the shape the null polarity
+    exists to create (a tokenless / rejected-count / deadline-aborted call).
+    Counting errors alone reported "nothing excluded" in exactly that shape."""
+    mixed = tool.compare([_pair("a", 1000, 100),
+                          _pair("b", 2000, None)])   # unmeasured, no error
+    assert mixed["sessions_failed"] == 1
+    assert mixed["sessions_measured"] == 1
+    assert mixed["partial"] is True
