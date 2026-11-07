@@ -3212,6 +3212,10 @@ def _byref_sdk_source() -> str:
         "    def mention_past_a_COMPREHENSION_shadow(self):\n"
         "        _safe(_review_pool)\n"
         "        return [x for _review_pool in (1, 2)]\n"
+        # ⛔ The OUTERMOST iterable is evaluated in the ENCLOSING scope, so a
+        # mention there is a real reach (#11389 review, P3).
+        "    def mentions_the_OUTERMOST_iterable(self):\n"
+        "        return [x for _review_pool in _review_pool]\n"
         "    def binds_it_in_a_COMPREHENSION_only(self, rows):\n"
         "        return [x for _review_pool in rows]\n"
         # The comprehension's own target, REFERENCED inside it: the `Load`
@@ -3300,7 +3304,10 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               "mention_past_a_COMPREHENSION_shadow",
               # A nested class BODY runs with the enclosing method, so a mention
               # there is a real reach (#11389 review, P3).
-              "mentions_inside_a_nested_CLASS")
+              "mentions_inside_a_nested_CLASS",
+              # The outermost iterable is the ENCLOSING scope's, so this is a
+              # real reach and must be declared (#11389 review, P3).
+              "mentions_the_OUTERMOST_iterable")
     for name in shapes:
         assert name not in methods, (
             f"{name} reaches the leg through a reference this scan cannot "

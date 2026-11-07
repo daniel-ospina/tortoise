@@ -2651,11 +2651,26 @@ def _sdk_methods_on_vector_leg(
                                              shadowed | comp_bound)
                 if reached:
                     by_reference.setdefault(fn.name, set()).add(reached)
-            here = comp_bound
             if isinstance(node, _COMPREHENSION_NODES):
+                # ⛔ The OUTERMOST `for`'s ITERABLE is evaluated in the
+                # ENCLOSING scope, not the comprehension's (#11389 review, P3):
+                # `[x for _pool in _pool]` iterates the METHOD's `_pool`, so a
+                # mention there is a real reach and suppressing it was an
+                # under-report. Only the later `for` clauses and the element
+                # live inside the comprehension's own scope.
                 here = comp_bound | _comprehension_targets(node)
+                for f in ("elt", "key", "value"):
+                    child = getattr(node, f, None)
+                    if child is not None:
+                        stack.append((child, here))
+                for i, gen in enumerate(getattr(node, "generators", ())):
+                    stack.append((gen.iter, comp_bound if i == 0 else here))
+                    stack.append((gen.target, here))
+                    for cond in getattr(gen, "ifs", ()):
+                        stack.append((cond, here))
+                continue
             for child in ast.iter_child_nodes(node):
-                stack.append((child, here))
+                stack.append((child, comp_bound))
     declaration = None
     if by_reference:
         # ⛔ Every TARGET, not just the first: a method can take two different
