@@ -3747,9 +3747,20 @@ def test_ci_arms_the_record_against_a_real_postgres():
     steps = job.get("steps") or []
     runs = "\n".join(str(step.get("run", "")) for step in steps)
 
-    assert "TEST_RECORD_DB_URI=" in POSTGRES_PROVISION.read_text(), (
-        f"{name} provisions a database but the action never exports "
-        f"{RECORD_DB_ENV}: the legs still skip (#9551)")
+    # The DEFAULT must still be `TEST_RECORD_DB_URI` (the name every existing
+    # caller and every leg in this file reads), and the write must go through the
+    # variable rather than a second literal — the action now takes the exported
+    # name as an input so a job can provision a SECOND server (#9567 D8), and a
+    # pin on the raw literal `TEST_RECORD_DB_URI=` would pass while the default
+    # silently changed. Both halves are asserted, so neither can drift alone.
+    provision = POSTGRES_PROVISION.read_text()
+    assert 'DSN_VAR="${POSTGRES_DSN_VAR:-TEST_RECORD_DB_URI}"' in provision, (
+        f"{name} provisions a database but the action's exported DSN name no "
+        f"longer defaults to {RECORD_DB_ENV}: the legs still skip (#9551)")
+    assert 'echo "${DSN_VAR}=' in provision, (
+        "the provisioning action no longer writes the DSN under the variable it "
+        "resolved — a name passed by a caller would be ignored and the second "
+        "server would overwrite the first")
     assert re.search(r"\.\[[^\]]*\bpostgres\b[^\]]*\]", runs), (
         f"{name} does not install the `postgres` extra, so `_record_db()`'s "
         "`importorskip('psycopg2')` skips the legs for the OTHER half of the "

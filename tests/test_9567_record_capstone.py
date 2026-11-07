@@ -26,10 +26,13 @@ skip.
 
 ⛔ WHAT IS DELIBERATELY NOT HERE.
 
-* **D8 (restore from its own backup)** — the production drill shells out to
-  `pg_dump`/`pg_restore`, which this lane does not carry. The command that owns
-  it is `pytest tests/test_record_backup.py`; the artifact records D8 as NOT
-  MEASURED here with that reason rather than a green it did not run.
+* **D8's HOSTED leg (the drill against the account's record)** — the drill ITSELF
+  runs here, end to end, against a second real Postgres that the CI job
+  provisions, with its falsifier fired (see `test_D8_…`). What is NOT here is the
+  same drill against the **hosted** record: that needs
+  `TORTOISE_RECORD_BACKUP_DSN` + the R2 key, which a lane cannot supply
+  (tracked on #11193). It is recorded as `hosted leg NEVER-RUN`, never as a green
+  this file did not run (#9567 comment 6690574287 §4).
 * **D6's "all four R5 edge families are present"** — a property of what a
   CAPTURE emits, not of the rebuild. This file proves the seam the projection
   owns (every relation the record carries lands in the cache, per predicate);
@@ -44,6 +47,7 @@ skip.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import uuid
@@ -64,6 +68,26 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: The record's database — the arming surface `test_9078` and the CI job use.
 RECORD_DB_ENV = "TEST_RECORD_DB_URI"
+
+#: The SECOND Postgres the D8 drill restores INTO (`postgres-provision` with
+#: `dsn_var: TEST_RECORD_SCRATCH_URI`). It cannot be the record itself: the drill
+#: refuses a scratch target that resolves to the source (`refuse_same_database`).
+SCRATCH_DB_ENV = "TEST_RECORD_SCRATCH_URI"
+
+#: The image whose client binaries carry the drill when the runner has none.
+#: Measured 2026-11-06: `pg_dump (PostgreSQL) 16.15` inside `postgres:16` — so
+#: "this box has no `pg_dump`" is not a reason to skip D8 (#9567 §1 of comment
+#: 6690574287), it is a reason to borrow the record's own image.
+CLIENT_IMAGE = "mirror.gcr.io/postgres:16"
+
+#: One drill's wall clock (dump + encrypt + upload + download + decrypt + restore
+#: + two counts). `record_backup.RECORD_SUBPROCESS_TIMEOUT_S` bounds the drill's
+#: own legs; this bounds the client-binary wrapper, which the drill cannot see.
+_CLIENT_TIMEOUT_S = 300
+
+#: 32 bytes = AES-256. A FIXED test key: the drill's job is to prove the artifact
+#: restores, and a random key would only prove a random key restores.
+_DRILL_KEY = b"0123456789abcdef0123456789abcdef"
 
 #: The tables this run counts per tenant: the ones the capture writes and the
 #: ones D9's cross-tenant pair / D10's dropped policy read.
@@ -471,6 +495,180 @@ def test_D7_the_raw_turn_text_reads_back_from_the_record_only(armed):
             f"the raw turn {turn['content']!r} did not come back from the "
             f"record; transcript={text.transcript!r}"
         )
+
+
+# ── D8 — restore from the record's own backup, against a SECOND real Postgres ─
+
+
+def _pg_client_runner(workdir: Path):
+    """The drill's `run` seam: REAL `pg_dump`/`pg_restore`, on PATH or in the image.
+
+    Returns `None` when both client binaries are on PATH — the drill's own default
+    runner then does the work and nothing here is involved.
+
+    Otherwise the SAME argv is executed by the client binaries that ship inside the
+    Postgres image. That is not a workaround: `#9567`'s comment 6690574287 §1
+    measured the binaries were never the gap (`docker run … postgres:16 pg_dump
+    --version` ⇒ 16.15), and D8's remaining half is a CREDENTIAL, not a client.
+
+    `--network host` because the provision action binds 127.0.0.1 (a container's
+    own loopback is not the host's), and the workdir is mounted because the dump
+    is written to a host path that `pg_restore` then reads back. Only `PG*`
+    variables are forwarded: the drill's env is libpq's coordinates plus
+    PATH/HOME, and forwarding the host's PATH/HOME into the container would be a
+    second, pointless difference from the default runner.
+    """
+    if shutil.which("pg_dump") and shutil.which("pg_restore"):
+        return None
+
+    def run(argv, *, env=None, capture_output=True, text=True, timeout=None, **_ignored):
+        cmd = ["docker", "run", "--rm", "--network", "host", "-v", f"{workdir}:{workdir}"]
+        for key, value in sorted((env or {}).items()):
+            if key.startswith("PG"):
+                cmd += ["-e", f"{key}={value}"]
+        cmd += [CLIENT_IMAGE, *argv]
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout or _CLIENT_TIMEOUT_S
+        )
+
+    return run
+
+
+@dataclass
+class Drilled:
+    """One completed restore drill, and the second server it landed in."""
+
+    verdict: dict[str, Any]
+    scratch: str
+    psycopg2: Any
+
+
+@pytest.fixture(scope="module")
+def drilled(armed, tmp_path_factory):
+    """Run the production drill once: dump → encrypt → upload → download →
+    decrypt → restore → per-table count, into a SECOND real Postgres.
+
+    The scratch target is armed the way the record is (the repo's own
+    `_ensure_record_schema`) and carries the tenancy rows its foreign keys
+    reference — read from the SOURCE rather than assumed, because this job's
+    record also holds whatever the sibling legs captured, and a missing tenant
+    row is a restore failure that has nothing to do with the artifact.
+    """
+    from tortoise import record_backup as rb
+    from tortoise.hosted_backup import MemoryStorage
+
+    _, psycopg2 = _driver()
+    scratch = os.environ.get(SCRATCH_DB_ENV)
+    if not scratch:
+        pytest.skip(
+            f"{SCRATCH_DB_ENV} not set — the drill restores into a target that is NOT "
+            "the record, and `refuse_same_database` correctly refuses a drill pointed "
+            "at the record itself. One database cannot arm this leg; the CI job "
+            "provisions the second (postgres-provision, dsn_var=TEST_RECORD_SCRATCH_URI)."
+        )
+    from tests.test_9078_record_written_by_production_path import (
+        _ensure_record_schema,
+        _seed_tenant,
+    )
+
+    scratch_conn = psycopg2.connect(scratch)
+    scratch_conn.autocommit = True
+    try:
+        _ensure_record_schema(scratch_conn)
+        with armed.conn.cursor() as cur:
+            cur.execute("SELECT id, org_id FROM public.graphs ORDER BY id")
+            tenancies = [(row[1], row[0]) for row in cur.fetchall()]
+        for pair in tenancies:
+            _seed_tenant(scratch_conn, pair)
+    finally:
+        scratch_conn.close()
+
+    workdir = tmp_path_factory.mktemp("record-drill-9567")
+    verdict = rb.run_restore_drill(
+        armed.dsn,
+        MemoryStorage(),
+        scratch,
+        run=_pg_client_runner(workdir),
+        key=_DRILL_KEY,
+        workdir=workdir,
+        reset_scratch=True,
+    )
+    yield Drilled(verdict=verdict, scratch=scratch, psycopg2=psycopg2)
+
+
+def test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires(
+    armed, drilled
+):
+    """D8: *restore from its own backup* — measured, and breakable on purpose.
+
+    Two halves in one run, because the second is the first's falsifier: a green
+    that cannot be broken on purpose is not evidence.
+
+      1. `verdict == "RESTORED"`, with EVERY record table carrying the source's row
+         count — per table, never a total (a total hides a table that lost rows to
+         one that gained them);
+      2. delete one table's rows in the RESTORED copy and require the module's own
+         `verify_restore` to RED, naming the table.
+
+    Falsifier for (1): drop a table from `record_tables()` (the dump no longer
+    covers it) → the per-table assertion above reds naming it. Pointing the drill
+    at the record itself is the OTHER falsifier, and it is a refusal by design
+    (`refuse_same_database`) — which is why this leg needs a second server rather
+    than a second database on one.
+    """
+    from tortoise import record_backup as rb
+
+    verdict = drilled.verdict
+    assert verdict["verdict"] == "RESTORED", verdict
+    assert verdict["scratch_reset"] is True, verdict
+    assert verdict["row_total"] > 0, (
+        "the drill reported RESTORED over an artifact with no rows — a pass that proves nothing"
+    )
+    tables = verdict["tables"]
+    assert set(tables) == set(rb.record_tables()), (
+        f"the drill measured {sorted(tables)}, which is not the record's table set "
+        f"{sorted(rb.record_tables())}"
+    )
+    for table, row in tables.items():
+        assert row["restored"] == row["source"], (
+            f"{table}: the restored record holds {row['restored']} of the source's "
+            f"{row['source']} rows ({row})"
+        )
+
+    # ── the falsifier: the same counting step, on a copy that lost a table ──
+    source_counts = rb.record_row_counts(armed.dsn)
+    # `journal_event` is APPEND-ONLY by trigger (`journal_event_is_append_only`
+    # refuses DELETE unless `app.record_journal_purge=on`), so the falsifier picks
+    # the largest table it can actually shorten. That is a property of the schema,
+    # not a carve-out: the deletion is the measurement, and it has to be allowed.
+    candidates = {
+        name: count
+        for name, count in source_counts.items()
+        if name != "journal_event" and count > 0
+    }
+    assert candidates, (
+        f"no record table outside the append-only journal carries a row ({source_counts}) "
+        "— the falsifier needs rows it can delete"
+    )
+    victim = max(candidates, key=candidates.get)
+    conn = drilled.psycopg2.connect(drilled.scratch)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM public.{victim}")
+    finally:
+        conn.close()
+    restored = rb.record_row_counts(drilled.scratch, role="scratch target")
+    with pytest.raises(rb.RecordRestoreVerifyError) as fired:
+        rb.verify_restore(source_counts, restored)
+    assert victim in str(fired.value), (
+        f"the row-count step red but did not NAME the table that lost its rows "
+        f"({victim}): {fired.value}"
+    )
+    assert str(source_counts[victim]) in str(fired.value), (
+        f"the red does not carry the source's own number for {victim} "
+        f"({source_counts[victim]}): {fired.value}"
+    )
 
 
 # ── D9/D10 — tenancy ───────────────────────────────────────────────────────

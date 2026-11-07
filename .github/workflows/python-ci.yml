@@ -4670,6 +4670,22 @@ jobs:
         # run). The action binds loopback (#7637) and exports
         # `TEST_RECORD_DB_URI`; paired with the teardown step below.
         uses: ./.github/actions/postgres-provision
+      - name: Provision the DRILL's scratch Postgres — a SECOND server (#9567 D8)
+        # D8 is "restore from the record's own backup", and `run_restore_drill`
+        # REFUSES a scratch target that is the same database as the record
+        # (`refuse_same_database`, by identity of coordinates, not by string
+        # equality). So the drill cannot be armed with one server — and until this
+        # step existed D8 was measured on NO CI leg (`rg 'test_record_backup'
+        # .github/workflows/` ⇒ 0 hits; #9567 comment 6690574287 §4 names exactly
+        # this as one of D8's two missing halves).
+        #
+        # The two NAMES are inputs because `$GITHUB_ENV` is last-one-wins: with the
+        # defaults this call would overwrite `TEST_RECORD_DB_URI` and the first
+        # container's label, and the drill would then point at itself.
+        uses: ./.github/actions/postgres-provision
+        with:
+          dsn_var: TEST_RECORD_SCRATCH_URI
+          label_var: TORTOISE_CI_POSTGRES_LABEL_SCRATCH
       - name: Run the record's Postgres legs (armed — #9551)
         run: |
           set +e
@@ -4751,6 +4767,14 @@ jobs:
       - name: Stop Postgres (#9551)
         if: always()
         uses: ./.github/actions/postgres-teardown
+      - name: Stop the drill's scratch Postgres (#9567 D8)
+        # Selected by ITS OWN label variable: two instances share a job, and the
+        # default name would make one teardown remove whichever container the
+        # other labelled last.
+        if: always()
+        uses: ./.github/actions/postgres-teardown
+        with:
+          label_var: TORTOISE_CI_POSTGRES_LABEL_SCRATCH
 
   # ── "DID THIS PR INTRODUCE A FAILURE?" (#9984) ──────────────────────────────
   # The required check used to ask "does anything fail anywhere?". Because it is ONE

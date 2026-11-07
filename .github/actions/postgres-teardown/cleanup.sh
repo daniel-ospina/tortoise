@@ -8,14 +8,26 @@ set -uo pipefail
 
 SUFFIX="${GITHUB_RUN_ID:-local}-${GITHUB_JOB:-job}-${GITHUB_RUN_ATTEMPT:-1}"
 
-# The provision step exports the EXACT per-instance label. Without it there is
-# nothing this job can safely claim: the run/job/attempt key is shared by every
-# matrix shard (GITHUB_JOB is the job_id, not the shard), so sweeping that prefix
-# would delete a PEER shard's live server. A container left behind by a provision
-# that failed before exporting is removed by provision.sh's own EXIT trap.
-LABEL="${TORTOISE_CI_POSTGRES_LABEL:-}"
+# The provision step exports the EXACT per-instance label, under the name the
+# caller chose (`label_var` — a job that provisioned a second server uses a
+# second name, so neither teardown can remove the other's container). Without
+# it there is nothing this job can safely claim: the run/job/attempt key is
+# shared by every matrix shard (GITHUB_JOB is the job_id, not the shard), so
+# sweeping that prefix would delete a PEER shard's live server. A container left
+# behind by a provision that failed before exporting is removed by provision.sh's
+# own EXIT trap.
+LABEL_VAR="${POSTGRES_LABEL_VAR:-TORTOISE_CI_POSTGRES_LABEL}"
+case "$LABEL_VAR" in
+  ''|*[!A-Za-z0-9_]*)
+    echo "#9551 teardown: refusing label variable name '$LABEL_VAR' (A-Za-z0-9_ only)" >&2
+    exit 0
+    ;;
+*)
+    LABEL="${!LABEL_VAR:-}"
+    ;;
+esac
 if [ -z "$LABEL" ]; then
-  echo "#9551 teardown: no TORTOISE_CI_POSTGRES_LABEL ($SUFFIX) — nothing to remove"
+  echo "#9551 teardown: no $LABEL_VAR ($SUFFIX) — nothing to remove"
   exit 0
 fi
 
