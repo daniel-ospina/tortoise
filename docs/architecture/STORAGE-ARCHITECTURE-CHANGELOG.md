@@ -1854,22 +1854,28 @@ and under no deny set, which #10389's fifth review round measured (`#10428`):
   `[[…, None, 'kept-228']]` — denied, and `#228`'s arbitrary prop still landed, so the entry is ONE
   key and not a blanket refusal. The departure is marked ON `#228` with an `OVERRIDES:` line
   (`#issuecomment-6540959107`).
-- Door 2 — the RECORD → CACHE restore — is still OPEN, filed as `#10394`. `source.story_arc` is
-  marked **PRIMARY** on `#7879`'s placement table, so `projected_columns("source")` keeps it and
-  `restore_from_record_view` / `rebuild_from_record` writes it back onto `:Source`; the SAME route
-  carries the `:Event` half — `public.event.story_arc` is PRIMARY on the same table (`:309`, open-set
-  passthrough), `projected_columns("event")` keeps it, and `NODE_TABLES` maps `Event → event`.
-  `tests/test_9555_narrative_cache_rebuild.py:187` measures that lane and asserts the prose IS on the
-  rebuilt node — the `:Source` half only, which is why the understatement was measured rather than
+- Door 2 — the RECORD → CACHE restore — was OPEN, filed as `#10394`. ⚠️ **CORRECTED (`#10394`, closed
+  2026-11-06): SHUT** — the record's route joins the deny set through
+  `cache_projection.CACHE_FORBIDDEN_COLUMNS`, which names `story_arc` on BOTH `public.source` and
+  `public.event`, rather than through a key set. The RETIRED mechanism, kept here because it is why the
+  deny set had to name BOTH anchors and not `:Source` alone: `source.story_arc` was
+  marked **PRIMARY** on `#7879`'s placement table, so `projected_columns("source")` kept it and
+  `restore_from_record_view` / `rebuild_from_record` wrote it back onto `:Source`; the SAME route
+  carried the `:Event` half — `public.event.story_arc` was PRIMARY on the same table (`:309`, open-set
+  passthrough), `projected_columns("event")` kept it, and `NODE_TABLES` mapped `Event → event`.
+  `tests/test_9555_narrative_cache_rebuild.py:204` measures that lane — **⚠️ CORRECTED (`#10394`): the
+  assertion is INVERTED from what this entry first recorded.** It read *the prose IS on the rebuilt
+  node, the `:Source` half only*; the test now asserts the rebuilt nodes carry **no** `story_arc` on
+  EITHER anchor, because the door is shut. The `:Source`-only half is why the understatement was measured rather than
   assumed (`#10389` review P2: the residual had described `#10394` as the `:Source` half alone, and no
   test could red on it; both anchors are now named in §9.1(b) and their premise pinned by
   `tests/test_9555_narrative_carrier.py::test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so`).
   ⚠️ That pin was RENAMED by `#10394` to `test_door_two_is_DENIED_on_BOTH_anchors_and_the_residual_says_so`
   — the name above is this entry's historical reference, and a grep for it now finds this line only.
-  **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
-  restore re-rents the RAM. ⚠️ **CORRECTED (`#11325`)**: `#10017`'s purge is the legacy TURN population and never
-  matched `:Source`/`:Event`; what the next restore re-rented was `#10000`'s write of the prose. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
-  table, plus that test's premise), which is why it is filed rather than absorbed.
+  **So `#10017`'s destructive purge was not durable while door 2 was open** — the next
+  restore re-rented the RAM. ⚠️ **CORRECTED (`#11325`)**: `#10017`'s purge is the legacy TURN population and never
+  matched `:Source`/`:Event`; what the next restore re-rented was `#10000`'s write of the prose. Closing it was a PLACEMENT decision (the column's class on `#7879`'s
+  table, plus that test's premise), which is why it was filed rather than absorbed.
 - **The `:Event` fold — door 1's counterpart one label over, denied here (`#10428`).** `_upsert_event`
   persists extras with `skip = _META_KEYS | _EVENT_HANDLED`, and `story_arc` was in neither while
   `docs/ONTOLOGY.md` declares it on `:Source` only — an UNDECLARED key on the open passthrough, the
