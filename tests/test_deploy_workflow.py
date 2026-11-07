@@ -4945,7 +4945,7 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # ADMIT it, i.e. this arm created the class its own r33-R3 fix exists to prevent:
         #   The note does not only say the tree immediately before #9548 was wrong.  -> admitted (pinned)
         # The same proposition in PREFIX order ("It is not only the note that says … was
-        # wrong", pinned at :9770) was already admitted, so the slot graded one sentence two
+        # wrong", pinned at `_asserted_refutation`) was already admitted, so the slot graded one sentence two
         # ways by word order. Measured: deleting the slot leaves `111 passed` and admits all
         # four over-fire rows, and the `never`/`not` legs below are still pinned by name.
         r"(?:\b\w+n['\u2019]t\b"
@@ -4971,8 +4971,41 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # aside is inside the clause), while a clause delimiter still ends the reporting
         # frame: `_clause_before_phrase` has already cut the text at `;` `.` `—`, so the
         # excluded set below cannot cross into another clause. Both shapes are pinned as
-        # REFUSED at `_reported_refutation` (:9768-9770).
-        r"[^.;:()\u2014\u2013]*$",
+        # REFUSED at `_reported_refutation`.
+        # ⛔ …AND A PARENTHETICAL ASIDE IS THE SAME CLASS (#11191 review r6, P2 — MEASURED
+        # fail-open vs `origin/main`, 3/3 rows). The r34-R6 fix allowed the comma but kept
+        # `(`/`)` in the excluded set, so the aside class stayed open one punctuation mark
+        # over:
+        #   "The note never says (as the row records) that the tree immediately before #9548
+        #    was wrong."                                       -> ADMITTED here, main REFUSES
+        # A parenthetical is INSIDE the clause exactly as a comma aside is, so it may not end
+        # the reporting frame; only `;` `.` `:` and a dash do (the delimiters
+        # `_clause_before_phrase` already cuts at). `\u2014`/`\u2013` stay excluded for the
+        # reason the r34 comment gives: the em-dash aside is a CLAUSE break, not an incise.
+        # ⛔ THE `$` ANCHOR — VERIFIED, THEN RE-MEASURED AS INERT (#11191 review r6, P3). The
+        # review reported it load-bearing (dropping it flipped a parenthetical sentence
+        # ADMIT->REFUSE). That was true while `(`/`)` were excluded; AFTER the parenthetical
+        # fix above, deleting `$` reddens NOTHING (measured: `111 passed`), because
+        # `_clause_before_phrase` has already cut the window at every clause delimiter, so no
+        # delimiter survives into it for an unanchored gap to stop at. The anchor stays — it
+        # is the correct form and costs nothing — but it is NOT pinned, and this comment says
+        # so rather than leaving a control that cannot red.
+        r"[^.;:\u2014\u2013]*$",
+        re.I,
+    )
+    #: ⛔ A FRAME THAT REVERSES A NEGATION IS AN ASSERTION (#11191 review r6, P1 — MEASURED
+    #: NEW FALSE RED, 3/3 rows). "It is not the case that the note never says … was wrong" is
+    #: a DOUBLE negation, so the outer frame asserts the refutation and the sentence is a
+    #: truthful correction — but the veto reads the inner `never says` and refuses it:
+    #:   It is not the case that the note never says … was wrong.   -> REFUSED here,
+    #:   It is not true that … never says …                          -> ADMITTED by origin/main
+    #:   It is not correct that … does not say …                     and by `a74e34c89`.
+    #: DELIBERATELY NARROW. The file's own `_POLARITY_FRAME` is the WRONG primitive here: its
+    #: first alternative (`nothing|no one|nobody` + a reporting verb) also matches
+    #: "Nothing indicates the tree immediately before #9548 was wrong.", which is a REPORTED
+    #: refutation and must stay refused — measured, the broad exemption reds that row.
+    _REVERSING_FRAME = re.compile(
+        r"\bit\s+is\s+(?:not\s+the\s+case|not\s+true|false|not\s+correct|untrue)\s+that\b",
         re.I,
     )
     _REFUTED_NEXT_CLAUSE = re.compile(
@@ -6023,10 +6056,20 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             # appends the true tree anywhere is admitted — which is also `origin/main`'s
             # behaviour (its first exemption is a bare `047c91f7a` substring test), so this is
             # no regression, but it is a real widening and it is not free.
-            if _REFUTED_AFTER.match(
-                norm, phrase.start()
-            ) and _TRUE_TREE not in norm and _REPORTED_NOT_ASSERTED.search(
-                _clause_before_phrase(norm, phrase.start())
+            # ⛔ …EXCEPT UNDER A FRAME THAT REVERSES THE NEGATION (#11191 review r6, P1 —
+            # MEASURED NEW FALSE RED, 3/3 rows): "It is not the case that the note never says
+            # … was wrong" asserts the refutation (a denial of the denial), so the inner
+            # `never says` is not the sentence's frame. Measured: skipping the veto for that
+            # frame admits the three truthful rows, leaves "Nothing indicates …" refused, and
+            # leaves the DEFECT-under-a-reversing-frame shape refused too (it has no
+            # refutation term after the phrase, so this arm never bought it).
+            if (
+                _REFUTED_AFTER.match(norm, phrase.start())
+                and _TRUE_TREE not in norm
+                and not _REVERSING_FRAME.search(norm)
+                and _REPORTED_NOT_ASSERTED.search(
+                    _clause_before_phrase(norm, phrase.start())
+                )
             ):
                 return False
 
@@ -9751,6 +9794,21 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "manifest item is 5 lines immediately before #9548 was wrong.",
         "The note never says, as the row records, that the tree immediately before #9548 "
         "was wrong.",
+        # ⛔ …AND A PARENTHETICAL ASIDE DOES NOT DECIDE IT EITHER (#11191 review r6, P2 —
+        # MEASURED fail-open vs `origin/main`, 3/3 rows: all three were ADMITTED before the
+        # `(`/`)` exclusion was removed from the gap, and `origin/main` REFUSES all three).
+        "The note never says (as the row records) that the tree immediately before #9548 "
+        "was wrong.",
+        "The note never says the tree (which the census names) immediately before #9548 "
+        "was wrong.",
+        # ⚠️ DISCLOSED, NOT CLOSED (#11191 review r6, P2): a parenthetical that COORDINATES a
+        # second assertion is still admitted, and this change does not close it —
+        #   "The note never says (and the row agrees) that the tree immediately before #9548
+        #    was wrong."                                        -> ADMITTED here, main REFUSES
+        # It is not the aside class the two rows above pin: `and` makes the incise a CLAUSE,
+        # which the em-dash and `;` rules already treat as a clause break. Closing it needs
+        # the paragraph-vs-clause distinction the veto deliberately does not make, and an
+        # unmeasured widening here is how the next round gets a truth-RED.
         # ⛔ THE CONTRACTION FAMILY (#11191 review r33-R3, P2 — MEASURED inert leg). The
         # first cut listed `n't` inside a `\b(?:…|n't)\b` alternation, which CANNOT match:
         # a word boundary cannot sit between `n` and `'` inside a contraction, so all three
@@ -9800,6 +9858,20 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         # whose first half is this file's own textbook correction.
         "The tree immediately before #9548 is `047c91f7a`; the note never says the tree "
         "immediately before #9548 was wrong.",
+        # ⛔ A FRAME THAT REVERSES THE NEGATION ASSERTS THE REFUTATION (#11191 review r6, P1 —
+        # MEASURED NEW FALSE RED, 3/3 rows; `origin/main` and `a74e34c89` ADMIT all three).
+        # Deliberately narrow: the file's own `_POLARITY_FRAME` would also exempt
+        # "Nothing indicates the tree immediately before #9548 was wrong." (a row of
+        # `_reported_refutation` above), which is a REPORTED refutation and must stay refused.
+        "It is not the case that the note never says the tree immediately before #9548 was wrong.",
+        "It is not true that the note never says the tree immediately before #9548 was wrong.",
+        "It is not correct that the note does not say the tree immediately before #9548 was wrong.",
+        # ⛔ …AND THE FRAME ENDS AT A CLAUSE DELIMITER (#11191 review r6, P3) — the row stays
+        # because it is TRUE and admitted (it was ADMITTED before this change too), not
+        # because it pins the `$` anchor: measured after the parenthetical fix, dropping `$`
+        # leaves `111 passed`, so this row is a correctness row, not a control for that leg.
+        "The note does not say the census is 5 lines. The tree immediately before #9548 "
+        "was wrong.",
     )
     _asserted_reds = [s for s in _asserted_refutation if _refuses_before_9548(s)]
     assert not _asserted_reds, (
