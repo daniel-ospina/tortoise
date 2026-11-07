@@ -20,7 +20,10 @@
 #     For the issue's `The run` TABLE (rows S1-S10) the criterion is the ROW, whose
 #     `Do` and `Observe` cells are joined with " — ": quoting `Do` alone would drop
 #     the observable, and quoting `Observe` alone would drop the action. That join is
-#     the ONLY transformation applied; both cells appear in full. `tests/test_9664_
+#     the ONLY transformation applied; both cells appear in full. The ONE exception is
+#     step 5 (S5), whose `Do` cell in the issue's table is the placeholder "—" because
+#     the step is a server-side observation: there is no action to join, so S5's row is
+#     the `Observe` cell alone. `tests/test_9664_
 #     capstone_verdict_ledger.py::EXPECTED_TEXT_NEEDLES` pins a distinctive fragment
 #     of each row's source cell, so a truncated or rewritten cell fails the suite
 #     (this is how the S2 row was caught dropping its `Observe` half).
@@ -179,7 +182,7 @@ criteria:
       graph creation is a FAIL (#8617, closed after that run and never re-verified
       through the UI). A run, not a fix, is what remains.
   - id: S3
-    text: "Setup-guide card → choose ChatGPT: the card's steps, as rendered"
+    text: "Setup-guide card → choose ChatGPT — the card's steps, as rendered"
     verdict: blocked
     reason: >-
       The card exists at this head (`website/apps/dashboard/src/harnesses.js` -
@@ -281,7 +284,7 @@ criteria:
       Complete, `onboarding_complete: true`), pinned by the same 42-test suite.
 
   - id: S10
-    text: "capture disclosure card: states capture is unavailable for ChatGPT, not silence"
+    text: "capture disclosure card — states capture is unavailable for ChatGPT, not silence"
     verdict: verified
     evidence:
       - docs/evidence/9664-capstone/run-2026-10-26/step10-capture-disclosure-tall-20261026-130452.png
