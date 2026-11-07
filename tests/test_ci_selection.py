@@ -19031,6 +19031,31 @@ def test_cache_evict_runs_on_a_tools_only_change():
         "module-skips without TORTOISE_DB_URI")
 
 
+def test_entry_point_guard_census_runs_on_a_tools_only_change():
+    # #11255 / #11342: `tests/test_entry_point_python_guard.py` (registered
+    # `core`) is the census that holds EVERY `tools/` entry point's #5128
+    # interpreter guard — it EXECs the guard node with `sys.version_info` faked
+    # to (3, 9, 6), so a dropped refusal reds it. `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and `tools/test_design_map_check.py` matched no
+    # SOURCE_PATTERNS row, so a diff touching ONLY that file was filtered to
+    # `changed == []` BEFORE the "not matched -> core" fallback and selected no
+    # surface at all: MEASURED before the CORE_ALSO entry, `surfaces=[]` and the
+    # census ABSENT from `test_files`.
+    #
+    # ⛔ That is the hole the guard exists to close, reopened for one file: a
+    # branch rewrite that silently dropped this file's refusal would merge with
+    # the census green-by-omission, because the one file whose guard it dropped
+    # selected nothing that runs the census. Every sibling in this PR
+    # (`tools/cache_evict.py`, `tools/gen_placement_table.py`) already had its
+    # row; this file landed in `2cb1f35c21` (PR #11276) without one.
+    # Mutation check: removing the CORE_ALSO entry fails the arms below
+    # (surfaces == [] and the census absent from test_files).
+    r = _sel(["tools/test_design_map_check.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_entry_point_python_guard.py" in r["test_files"], r
+
+
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     # #10017: `tests/test_10017_turn_parity_census.py` (registered `core`)
     # pins the refusal arms of `tools/turn_parity_census.py` — the purge gate

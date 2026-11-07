@@ -42,6 +42,13 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     # would report STALE, whose natural "repair" is regenerating under the same
     # old interpreter or hand-editing a GENERATED artifact. Print on stderr and
     # exit 2, which `main()` never returns (it returns 0 and 1 only).
+    # ⛔ 2 is NOT unused by this program: `argparse` exits 2 on a usage error, so
+    # the refusal shares a status with "you passed a wrong flag". That is the
+    # safe collision — both are "a bad invocation, no verdict about the
+    # carrier" — and it is the one that must never be taken: 1, which means
+    # STALE. (A caller that keys 2 = "re-run with the right interpreter" would
+    # loop; `tools/cache_evict.py` sets the higher bar with a `_UsageParser`
+    # because its verdicts occupy 2/3/4.)
     print(
         f"tools/gen_placement_table.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "

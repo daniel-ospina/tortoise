@@ -2920,6 +2920,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # network) and `core` is where it is registered. Pinned by
              # tests/test_ci_selection.py::test_cache_evict_runs_on_a_tools_only_change.
              "tools/cache_evict.py",
+             # #11255 / #11342: the same silent-drop class, on the census that holds
+             # every `tools/` entry point's #5128 interpreter guard.
+             # `tools/test_design_map_check.py` is a flat NON_PYTHON_PREFIXES entry
+             # matching no SOURCE_PATTERNS row, so a diff touching ONLY it filtered to
+             # `changed == []` and took the docs-only early return — MEASURED at the
+             # head that added this entry: `select(["tools/test_design_map_check.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], and
+             # `test_entry_point_python_guard.py` ABSENT from `test_files`. That is
+             # exactly the hole the guard is FOR: a branch rewrite that silently
+             # drops the refusal would merge with the whole census green-by-omission,
+             # because the file whose guard it dropped selects no surface that runs
+             # the census. CORE_ALSO (not TOOL_CARVEOUTS) for the same reason as the
+             # entries above: the census is hermetic (it EXECs one AST node per file)
+             # and `core` is where it is registered. Pinned by
+             # tests/test_ci_selection.py::
+             # test_entry_point_guard_census_runs_on_a_tools_only_change.
+             "tools/test_design_map_check.py",
              # #10920: the CI runner-label coverage gate. `tools/` is a flat
              # NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
              # `tools/ci_runner_labels.py`, so a TOOL-ONLY change filtered to
