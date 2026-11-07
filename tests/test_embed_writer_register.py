@@ -331,6 +331,40 @@ def test_the_live_guard_has_teeth_on_an_INJECTED_writer(tmp_path):
             register.classify(key)
 
 
+def test_the_exported_ROUTE_seams_are_the_ones_the_class_claims_are_used():
+    """`RECOGNISED_PRODUCER_SEAMS` is the class's definition AS DATA, and the entries agree.
+
+    `#11444`: the audit instrument credits a `recognised_producer` declaration only when the
+    writer's own body reaches one of these seams, so the tuple must be the same definition the
+    entries are written against — otherwise the export is stale and every correct declaration
+    reads as uncorroborated (a false HOLD, the opposite of the gate that made it reachable).
+
+    ⛔ Pinned from the ENTRIES' side, not by copying the docstring: every `recognised_producer`
+    reason must NAME at least one exported seam. What this CANNOT see — because a reason usually
+    cites more than one seam, so `any(...)` stays satisfied when a co-named seam is dropped — is the
+    FALSE-HOLD direction (a writer whose body reached only the dropped seam stops being credited).
+    That direction is pinned where it is observable, in `tests/test_dod_5090_probe.py::
+    test_a_seam_REMOVED_from_the_export_holds_the_declarations_that_need_it`, so this test's claim
+    is the weaker one it actually asserts.
+    """
+    seams = register.RECOGNISED_PRODUCER_SEAMS
+    assert seams, "an empty seam set would corroborate every route claim"
+    assert all(isinstance(s, str) and s for s in seams), seams
+    recognised = {
+        key: entry for key, entry in EMBED_WRITER_CLASSES.items()
+        if entry.cls == RECOGNISED_PRODUCER
+    }
+    assert recognised, "no recognised_producer entry — re-measure this guard"
+    silent = sorted(
+        key for key, entry in recognised.items()
+        if not any(seam in entry.reason for seam in seams)
+    )
+    assert not silent, (
+        "these recognised_producer entries name none of the exported seams, so either the "
+        f"entry's reason is stale or RECOGNISED_PRODUCER_SEAMS is missing one: {silent} "
+        f"(exported: {seams})")
+
+
 def test_the_register_names_the_shapes_its_discovery_cannot_see():
     """`#11274`: the guard is exactly as wide as discovery — so its blind spots are NAMED.
 
