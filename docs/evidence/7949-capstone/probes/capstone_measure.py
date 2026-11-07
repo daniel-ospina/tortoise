@@ -811,7 +811,7 @@ def door_record(observed: dict[str, str | None]) -> dict:
 #:
 #: ⛔ ``error`` IS NOT ONE OF THOSE, and listing it here was a measured defect
 #: (#11298 review, round 14). ``error`` is a POST-dispatch outcome — the lane ran
-#: and raised — and the mode is emitted from INSIDE the lane: by
+#: and REPORTED a failure (raised, or caught and appended), mode set INSIDE it: by
 #: ``sdk._extract_session_v2`` (the door itself) and by ``sdk._extract_session_llm``
 #: (the other lane), each setting ``meta["mode"]`` to ``"error"`` iff its own
 #: ``errors`` is non-empty. ``sdk.capture_session`` then maps a failed extraction
