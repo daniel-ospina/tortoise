@@ -2599,6 +2599,68 @@ def test_an_alias_leak_REDS_even_when_the_SAME_file_resolves_a_site(tmp_path):
     assert any("test_mixed.py" in v for v in violations), violations
 
 
+def test_a_MODULE_LEVEL_journal_above_the_client_is_in_its_block(tmp_path):
+    """#11217 review round-15 P2: the module-level block was truncated forward.
+
+    `_enclosing_block_span`'s `indent == 0` branch began the block at the SITE's
+    own line, while the `def` branch begins at the enclosing `def` LINE. A handle
+    journaled just above a module-level client was therefore outside its own
+    block and red as "no journal in the block", while the IDENTICAL shape inside
+    a function read CLEAN — the verdict depended on INDENTATION, not on the
+    record. That red is a false BLOCK, and the module-level hoist is exactly the
+    "routine tidy" this file's own docstring names as reachable:
+
+        NAME = f"test_modlevel_{os.urandom(4).hex()}"
+        _journal_append(NAME)
+        c = FalkorDB(host="h")
+        c.query("MATCH (n) DETACH DELETE n")
+
+    ⛔ Non-vacuity is measured, not asserted: this fixture REDS against the tree
+    before the fix (reproduced on a detached worktree at `ce7e602df`) and is
+    clean here. Do not narrow the block back to `line_start`.
+    """
+    site = tmp_path / "test_module_hoist.py"
+    site.write_text(
+        "import os\n"
+        "from falkordb import FalkorDB\n"
+        "from tests._embedded import _journal_append\n"
+        "\n"
+        'NAME = f"test_modlevel_{os.urandom(4).hex()}"\n'
+        "_journal_append(NAME)\n"
+        "\n"
+        'c = FalkorDB(host="h")\n'
+        'c.query("MATCH (n) DETACH DELETE n")\n'
+    )
+    assert not _raw_detach_violations(root=tmp_path), (
+        "a module-level handle journaled ABOVE the client must count as in its "
+        f"block: {_raw_detach_violations(root=tmp_path)}")
+
+    # Control, and the half that keeps the repair from over-reaching: the journal
+    # belongs to a PRECEDING def, not to this module-level run. Widening the block
+    # backwards to the preceding def's START (rather than its END) would sweep
+    # that def's body in and let an unrelated test's journal satisfy this site —
+    # the same fail-open, mirrored. This must stay RED.
+    site.write_text(
+        "import os\n"
+        "from falkordb import FalkorDB\n"
+        "from tests._embedded import _journal_append\n"
+        "\n"
+        "\n"
+        "def test_unrelated():\n"
+        '    name = f"test_unrelated_{os.urandom(4).hex()}"\n'
+        "    _journal_append(name)\n"
+        '    g = FalkorDB(host="h")\n'
+        '    g.query("MATCH (n) DETACH DELETE n")\n'
+        "\n"
+        "\n"
+        'c = FalkorDB(host="h")\n'
+        'c.query("MATCH (n) DETACH DELETE n")\n'
+    )
+    assert _raw_detach_violations(root=tmp_path), (
+        "a journal inside a PRECEDING def satisfied a module-level DETACH — the "
+        "widened block reached into an unrelated function (fail-open)")
+
+
 def test_a_journaled_NON_OWNED_handle_fails_the_raw_detach_census(tmp_path):
     """#11217 review P1: journaling is not ownership.
 
@@ -3746,9 +3808,35 @@ def _enclosing_block_span(src: str, pos: int) -> tuple[str, int, int]:
     line_start = masked.rfind("\n", 0, pos) + 1
     indent = len(masked[line_start:]) - len(masked[line_start:].lstrip(" "))
     if indent == 0:
+        # ⛔ The block must NOT start at the construction line (#11217 review
+        # round-15 P2). The `def` branch below spans from the enclosing `def`
+        # LINE, so a handle journaled just ABOVE the client is inside the block
+        # there; truncating the module-level block to `line_start` made the
+        # verdict depend on INDENTATION rather than on the record:
+        #     NAME = f"test_modlevel_{os.urandom(4).hex()}"
+        #     _journal_append(NAME)
+        #     c = FalkorDB(host="h")
+        #     c.query("MATCH (n) DETACH DELETE n")
+        # reds at module level as "no journal in the block" while the IDENTICAL
+        # shape inside a `def` reads CLEAN (measured) — and that module-level
+        # hoist is precisely the routine tidy this file's own docstring names.
+        # The boundary is therefore the same statement RUN the forward search
+        # already uses, walked backwards: the module-level block begins where the
+        # last top-level `def`/`class`/decorator before the site ENDS.
+        #
+        # It must be that definition's END, not its start: a bare start would
+        # sweep the whole preceding `def` body into the module-level block and let
+        # a journal inside that unrelated test satisfy this site — the same
+        # fail-open, mirrored. `_block_end` at indent 0 is exactly the first
+        # following flush-left line, so a decorated def is handled by taking the
+        # max over its decorator AND its `def` line.
+        start = 0
+        for m in re.finditer(r"(?m)^(?:async )?(?:def |class |@)", masked[:line_start]):
+            start = max(start, _block_end(masked, m.start(), 0))
+        start = min(start, line_start)
         nxt = re.search(r"\n(?=(?:async )?(?:def |class |@))", masked[pos:])
         end = pos + nxt.start() if nxt else len(src)
-        return src[line_start:end], line_start, end
+        return src[start:end], start, end
     # innermost enclosing def, verified to contain the site
     for m in reversed(list(re.finditer(r"(?m)^([ ]*)(?:async )?def ", masked[:line_start]))):
         ind = len(m.group(1))
