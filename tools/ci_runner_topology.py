@@ -170,6 +170,7 @@ scheduling it is follow-up work on #10912.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import subprocess
@@ -180,7 +181,7 @@ from pathlib import Path
 from typing import Any
 
 #: The label `agent-infra/scripts/ci_runner_gate.sh` attaches to the self-hosted
-#: pool as a GitHub-hosted fallback (`:178 FALLBACK_LABEL`). It promises an
+#: pool as a GitHub-hosted fallback (its `FALLBACK_LABEL` declaration). It promises an
 #: x86_64 hosted image, which is why a non-x64 runner carrying it is a violation
 #: and not merely an oddity.
 FALLBACK_LABEL = "ubuntu-latest"
@@ -1026,7 +1027,7 @@ def fetch_queue_probe(repo: str = REPO) -> QueueProbe:
     candidates.sort(key=lambda row: row[1])  # oldest first — the gate's own walk order
     scanned = 0
     ghosts = 0
-    for index, (run_id, created) in enumerate(candidates):
+    for run_id, created in candidates:
         if scanned >= cap:
             return QueueProbe(
                 ghosts=ghosts,
@@ -1065,9 +1066,8 @@ def fetch_queue_probe(repo: str = REPO) -> QueueProbe:
     )
 
 
-def _age_seconds(created: "datetime.datetime") -> int | None:
+def _age_seconds(created: datetime.datetime) -> int | None:
     """Seconds since `created`, or None for a timestamp in the FUTURE (a clock skew no reading can
-
     resolve — the gate leaves the age empty for the same input rather than rounding it to 0 and
     reporting a fresher queue than anyone measured).
     """
