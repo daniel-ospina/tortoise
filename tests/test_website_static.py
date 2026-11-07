@@ -4417,23 +4417,39 @@ class TestSiteIconAndSocialPreviewContract:
         png = (png_w, png_h)
         apple = (apple_w, _apple_h)
         for page in self._pages():
-            links = self._links(self._head(page.read_text()))
-            # `rel` is split CASE-INSENSITIVELY: HTML lowercases attribute NAMES, never
-            # values, so `rel="ICON"` is the same relation — comparing the raw value
-            # reded a correct page with a message that blamed it for having no icon.
-            missing = self._missing_icon_links(links)
-            assert not missing, (
-                f"{page.name} does not declare {', '.join(missing)} with the rel that "
-                "makes it an icon — a page with no icon shows a blank tab and, on a "
-                "share, no avatar; iOS draws a screenshot instead of the mark")
-            # ⛔ EVERY link is audited, and the apple-touch branch is dispatched BY NAME:
-            # `"apple-touch-icon".split()` is `["apple-touch-icon"]`, so a `"icon" in
-            # rel` filter reaches neither of its branches and the apple link's `sizes`
-            # went unchecked while this guard reported the page correct.
-            for link in links:
-                violation = self._declared_sizes_violation(
-                    page.name, link, png, ico_sizes, apple)
-                assert violation is None, violation
+            violations = self._icon_trio_violations(
+                page.name, page.read_text(), png, ico_sizes, apple)
+            assert not violations, "\n".join(violations)
+
+    def _icon_trio_violations(self, page_name: str, head: str,
+                              png: tuple[int, int], ico_sizes: set[int],
+                              apple: tuple[int, int]) -> list[str]:
+        """Every way this page's `<head>` fails the icon contract; empty means it passes.
+
+        ⛔ SPLIT OUT SO THE PAGE-LEVEL APPLICATION IS DRIVEN BY A TEST, not only by this
+        tree's own pages. The commit that added these assertions proved the off-host and
+        wrong-`sizes` paths with a hand-run probe against `website/404.html` and never with
+        a suite assertion — so replacing either one with `assert True` left 87 tests green,
+        and a real page regression would have shipped green. That is precisely the class of
+        defect this guard exists to end, one level ABOVE the helpers it calls.
+        """
+        links = self._links(self._head(head))
+        # `rel` is split CASE-INSENSITIVELY: HTML lowercases attribute NAMES, never values,
+        # so `rel="ICON"` is the same relation — comparing the raw value reded a correct
+        # page with a message that blamed it for having no icon at all.
+        violations = [
+            f"{page_name} does not declare {href} with the rel that makes it an icon — a "
+            "page with no icon shows a blank tab and, on a share, no avatar; iOS draws a "
+            "screenshot instead of the mark"
+            for href in self._missing_icon_links(links)]
+        # ⛔ EVERY link is audited, and the apple-touch branch is dispatched BY NAME:
+        # `"apple-touch-icon".split()` is `["apple-touch-icon"]`, so a `"icon" in rel`
+        # filter reaches neither of its branches and the apple link's `sizes` went
+        # unchecked while this guard reported the page correct.
+        violations += [
+            v for v in (self._declared_sizes_violation(
+                page_name, link, png, ico_sizes, apple) for link in links) if v]
+        return violations
 
     @classmethod
     def _missing_icon_links(cls, links: list[dict]) -> list[str]:
@@ -4610,6 +4626,42 @@ class TestSiteIconAndSocialPreviewContract:
             "dropping the apple-touch link was not reported as a missing icon")
         assert self._missing_icon_links([complete[0], complete[2]]) == [f"/{self.ICON_PNG}"], (
             "dropping the PNG rel=icon was not reported as a missing icon")
+        # ⛔ THE FILE KEY OF THE ICO AND APPLE BRANCHES. On this tree the PNG conjunct
+        # shadows them (every page's PNG link is graded first and the ICO/apple hrefs are
+        # the only other ones), so dropping either lets a SECOND, correctly-declared
+        # variant (`/favicon-32.png`, `/apple-touch-icon-120x120.png`) be graded against
+        # the default file and red — a false red nothing in the suite noticed.
+        assert self._declared_sizes_violation(
+            "page.html", {"rel": "icon", "href": "/favicon-32.png", "sizes": "32x32"},
+            png, ico_sizes, apple) is None, (
+            "a second, correctly-declared PNG icon was graded against the ICO")
+        assert self._declared_sizes_violation(
+            "page.html", {"rel": "apple-touch-icon",
+                          "href": "/apple-touch-icon-120x120.png", "sizes": "120x120"},
+            png, ico_sizes, apple) is None, (
+            "a correctly-declared apple-touch variant was graded against apple-touch-icon.png")
+        # ...and the PAGE-LEVEL application itself, driven by a synthetic head. Without
+        # this, either assertion in the loop could be `assert True` and the suite stayed
+        # green — measured by the round-6 reviewer against a genuinely broken 404.html.
+        broken = ("<head>"
+                  '<link rel="icon" href="/favicon.ico" sizes="32x32">'
+                  f'<link rel="icon" href="/favicon.png" sizes="{png[0]}x{png[1]}">'
+                  "</head>")  # no apple-touch link, and the wrong ICO slot
+        trio = self._icon_trio_violations("synthetic.html", broken, png, ico_sizes, apple)
+        assert any(self.ICON_APPLE in v for v in trio), (
+            f"a head with no apple-touch link produced no page-level violation: {trio}")
+        assert any(self.ICON_ICO in v and "sizes" in v for v in trio), (
+            f"a head declaring the wrong ICO slot produced no page-level violation: {trio}")
+        good = ("<head>"
+                f'<link rel="icon" href="/favicon.ico" '
+                f'sizes="{" ".join(f"{n}x{n}" for n in sorted(ico_sizes))}">'
+                f'<link rel="icon" href="/favicon.png" sizes="{png[0]}x{png[1]}">'
+                f'<link rel="apple-touch-icon" href="/{self.ICON_APPLE}" '
+                f'sizes="{apple[0]}x{apple[1]}">'
+                "</head>")
+        assert self._icon_trio_violations(
+            "synthetic.html", good, png, ico_sizes, apple) == [], (
+            "a complete, correctly-declared head was reported as violating the contract")
         # ⛔ THE REL TOKEN, NOT JUST THE HREF. `<link rel="preload" href="/favicon.ico">`
         # mentions the file and gives the tab no icon at all — an href-only reduction of
         # this predicate reports all three as declared, which is the exact earlier cut's
