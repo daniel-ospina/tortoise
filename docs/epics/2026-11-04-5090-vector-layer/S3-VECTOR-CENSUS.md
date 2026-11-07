@@ -324,9 +324,9 @@ $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
                                  # this tree: 132 collected, 131 passed, 1 skipped
 ```
 
-(115 collected before #11088's round 7; the file collects **132 in the tree this document sits in** —
-nine added by #11337, one by #11437, with `main` at 122 — and reads 131 passed, 1 skipped on the
-docker lane. The
+(115 collected before #11088's round 7; the file collects **132 in the tree this document sits in**,
+and `main` collects **131** — `#11337`'s nine over the 122 baseline that predates it — so `#11437`
+adds exactly one. It reads 131 passed, 1 skipped on the docker lane. The
 skip is the `<3.12` re-derive. ⚠️ The count is bound to THIS TREE, never to a branch head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is
 added, and `test_the_census_doc_collects_what_the_file_collects` re-derives it from the file's own
