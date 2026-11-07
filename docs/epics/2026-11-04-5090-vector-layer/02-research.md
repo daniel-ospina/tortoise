@@ -12,7 +12,7 @@ aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, e
 
 # Epic research brief — the vector layer (#5090)
 
-**Stage:** 2 of 6 (`epic-workflow` → `epic-research`). **Head `641e5f1b37`; §*Extractor-v4 alignment* measured at `28d13ccc8`** — a LATER commit than that pin, and the section says so where it matters, because at the pin two of its claims are false and at `28d13ccc8` they are true. **Review gate:** verifier.
+**Stage:** 2 of 6 (`epic-workflow` → `epic-research`). **Head `641e5f1b37`; §*Extractor-v4 alignment* measured at `28d13ccc8`** — a LATER commit than that pin, and the section says so where it matters, because at the pin three of its claims are false and at `28d13ccc8` they are true. **Review gate:** verifier.
 
 > **What this brief is, and is not.** It does **not** re-derive what the repo already holds — the 35 KB
 > `docs/research/2026-09-23-vector-index-ram-model/research-brief.md` (issue `#4333`) and the paid
