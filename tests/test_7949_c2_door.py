@@ -1145,7 +1145,7 @@ def test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run():
     # ``capture_session`` docstring advertises as THE success shape) would widen
     # the door to the exact bypass ``DOOR_ENTERED_PREFIX`` exists to refuse, and
     # every other test in this file would stay green (#10983 review).
-    for mode in ("replayed", "no-provider", "empty", "error", "llm",
+    for mode in ("replayed", "no-provider", "empty", "llm",
                  "extraction-disabled", None):
         runs = [entered[0], {"session_id": "wp02", "extraction_mode": mode,
                              "ok": True}]
@@ -1154,6 +1154,45 @@ def test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run():
             probe.require_door_entered(runs)
         assert "REFUSED" in str(exc.value) and "wp02" in str(exc.value), (
             f"a {mode!r} capture was accepted as door-entered: {exc.value}")
+
+
+def test_a_capture_that_ENTERED_the_door_and_FAILED_is_not_a_BYPASS():
+    """``error`` is a POST-dispatch outcome; a bypass it is not (#11298 r14).
+
+    ⛔ ``error`` used to sit in the refused tuple above, and that was a measured
+    defect, not a conservative default. ``sdk.capture_session`` maps a failed
+    extraction onto ``extraction_mode="error"`` (``sdk.py:15719``) and the mode
+    is emitted from INSIDE the lane — ``_extract_session_v2``, i.e. THE DOOR,
+    at ``sdk.py:17074`` — so a receipt carrying it took the door and raised.
+    Refusing it did three wrong things at once: it named a cause that was false
+    (``returned BEFORE sdk._extract_session_v2``), it did so AFTER the run's full
+    spend, and because ``require_door_entered`` raises before the log is written
+    it discarded the receipt's ``errors`` — the only thing that says what
+    actually happened. The probe's own rule (``capstone_measure.py``, the
+    ``REFUSED`` posture) is that a refusal naming a false reason is the one
+    failure mode a refusal must not have.
+    """
+    probe = _load_probe()
+    # The REAL shape: ``sdk.py:15639`` sets ok=False whenever extraction_errors
+    # is non-empty, so an ``error`` receipt can never carry ok=True. The previous
+    # version of this pin fed ``ok=True`` and was therefore asserting over an
+    # input the SDK cannot produce.
+    failed = {"session_id": "wp02", "extraction_mode": "error",
+              "ok": False, "errors": ["llm: boom"]}
+    worked = {"session_id": "wp01", "extraction_mode": "llm:deepseek-direct",
+              "ok": True}
+    witness = probe.door_witness([worked, failed])
+    assert witness == {"entered": 2, "sessions": 2, "bypassed": []}, (
+        "a capture that took the door and failed was counted as a bypass, so "
+        f"the refusal would name a cause that is false: {witness}")
+    # And it must not refuse: the failure is the failed-list's to report, and
+    # the log it lets through is what carries the errors.
+    assert probe.require_door_entered([worked, failed])["entered"] == 2
+    # The line is the MODE, not ``ok``: a receipt that never entered is still a
+    # bypass even if something marked it ok (the #3892 keyless shape does).
+    keyless = {"session_id": "wp03", "extraction_mode": "no-provider",
+               "ok": True}
+    assert probe.door_witness([worked, keyless])["bypassed"] == ["wp03"]
 
 
 def test_an_unmeasured_door_never_claims_a_read_back():

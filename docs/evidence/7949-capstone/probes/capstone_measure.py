@@ -787,14 +787,32 @@ def door_record(observed: dict[str, str | None]) -> dict:
 #:   ``tests/test_capture_session.py::test_capture_session_zero_extraction_is_warning_not_failure``.
 #:   A prefix of ``"llm"`` would therefore admit an m2 capture as door-entered,
 #:   which is the one bypass this witness exists to refuse. The bare ``"llm"``
-#:   and ``"error"`` spellings are pinned in
+#:   spelling is pinned in
 #:   `tests/test_7949_c2_door.py::test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run`
 #:   so the widening cannot be made by aligning the m2 lane to this contract.
 #:
-#: ``empty``, ``no-provider``, ``replayed``, ``error`` and ``extraction-disabled``
-#: all mean the capture returned BEFORE the lane dispatch (#3892 keyless, #1727
-#: replay).
+#: ``empty``, ``no-provider``, ``replayed`` and ``extraction-disabled`` mean the
+#: capture returned BEFORE the lane dispatch (#3892 keyless, #1727 replay) or
+#: took a lane that is not the v2 door, so none of them is this door entered.
+#:
+#: ⛔ ``error`` IS NOT ONE OF THOSE, and listing it here was a measured defect
+#: (#11298 review, round 14). ``error`` is a POST-dispatch outcome — the lane ran
+#: and raised — and the mode is emitted from INSIDE the lane
+#: (``_extract_session_v2``: ``sdk.py:17074``, the door itself;
+#: ``_extract_session_llm``: ``sdk.py:16222``), never by the pre-dispatch guards.
+#: ``sdk.capture_session`` maps a failed extraction onto it at ``sdk.py:15719``.
+#: Counting it as a bypass refused a run for a cause that was false, AFTER its
+#: full spend, and — because ``require_door_entered`` raises before the log is
+#: written — threw away the ``errors`` that would have shown what actually
+#: happened. See ``DOOR_ENTERED_THEN_FAILED``.
 DOOR_ENTERED_PREFIX = "llm:"
+
+#: The ``extraction_mode`` a capture reports when it DID enter the door and then
+#: FAILED. Treated as entered, not bypassed, for the reason above. The failure is
+#: not swallowed by that: ``run_corpus`` keeps each receipt's ``errors``,
+#: ``main`` collects the non-``ok`` sessions into ``failed``, and the log — which
+#: a bypass no longer prevents — reports them (``sessions failed: […]``).
+DOOR_ENTERED_THEN_FAILED = ("error",)
 
 
 def door_witness(runs) -> dict:
@@ -819,7 +837,15 @@ def door_witness(runs) -> dict:
     runs = list(runs or [])
     entered = [run for run in runs
                if str(run.get("extraction_mode") or "").startswith(
-                   DOOR_ENTERED_PREFIX)]
+                   DOOR_ENTERED_PREFIX)
+               # A post-dispatch FAILURE still took the door: ``measured_arm``
+               # pins this probe to the v2 lane and refuses a leak, so an
+               # ``error`` receipt here is a v2 receipt that raised, not another
+               # lane and not a return before the dispatch. The failure is
+               # reported by ``main``'s failed list, which a bypass would have
+               # prevented the log from ever reaching.
+               or str(run.get("extraction_mode") or "") in
+               DOOR_ENTERED_THEN_FAILED]
     bypassed = [str(run.get("session_id")) for run in runs
                 if run not in entered]
     return {"entered": len(entered), "sessions": len(runs),
@@ -837,12 +863,17 @@ def require_door_entered(runs) -> dict:
     if witness["bypassed"]:
         raise SystemExit(
             f"capstone-measure: REFUSED — {len(witness['bypassed'])} of "
-            f"{witness['sessions']} capture(s) returned BEFORE "
+            f"{witness['sessions']} capture(s) did not enter "
             f"sdk._extract_session_v2 ({witness['bypassed']}), so this pass did "
             f"not take the door it would declare: a keyless capture extracts "
-            f"nothing (#3892) and a re-capture of an existing session REPLAYS "
-            f"(#1727) — both report ok=True, and a table measured on a graph "
-            f"they did not write is a measurement of another run (#10983)")
+            f"nothing (#3892), a re-capture of an existing session REPLAYS "
+            f"(#1727) — both report ok=True — and a capture on the other lane "
+            f"reports a bare ``llm`` with no route. A table measured on a graph "
+            f"they did not write is a measurement of another run (#10983). "
+            f"NOTE: a capture that ENTERED the door and FAILED (mode ``error``) "
+            f"is not refused here — it is reported as ``sessions failed`` in "
+            f"the log, because that refusal would name a false cause and "
+            f"discard the errors that say what actually happened")
     return witness
 
 
