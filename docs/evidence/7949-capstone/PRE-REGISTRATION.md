@@ -936,6 +936,12 @@ stops being true is visible as a log that does not carry `UNPREREGISTERED`.
 
 ## 9. Provenance of every number in this file
 
+**Two provenances are not the same thing, and this table distinguishes them.** A row that names a
+file in this tree is **re-derivable**: run the gate and it re-checks the figure. A row that names an
+issue comment is a **RECORDED READING** — the basis a threshold was set against, deliberately not
+presented as re-derivable here (§0, §10.3). The A-row bases added by `#10982` are the second kind
+except where noted; the alternative was to omit the provenance and let a reader assume the first.
+
 | number | re-derived at `3f2f4893` from |
 |---|---|
 | 62.27% (4,901 / 7,870) | `tortoise/definite_description_backfill.py` docstring; `EXTRACTOR-V4-ARCHITECTURE.md:85` |
@@ -951,6 +957,12 @@ stops being true is visible as a log that does not carry `UNPREREGISTERED`.
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
+| **5,314 Objects** and `object→object edges []` (A1 basis) | ⚠️ **RECORDED READING** — the owner's 2026-11-04 `live-v4` reading at `#7949` comment `6645275147`; the tree-derivable half is only the vocabulary (`packs/dev/manifest.yaml:142` `decomposesInto`, `:148` `hasPart`) |
+| **9,910 / 15,534** statements (63.8%) carrying neither `IMPL` nor `NAND`; 36.2% cheap (A3 basis) | ⚠️ **RECORDED READING** — the same comment |
+| **26 Subjects** against **19,300 points** (A5 basis) | ⚠️ **RECORDED READING** — the same comment. The PINNED corpus measures a different population: `"Subject": 19` at `capstone-measured-9152448d.log:275`, which §10.10 reports beside it rather than substituting |
+| **6,533 / 2,614 / 402** on **7,870** Objects and **27,324** reference edges (A2 basis) | `tortoise/definite_description_backfill.py:15-23` — re-derivable |
+| **64** Objects / **19** Subjects / **21** `aboutSubject` (the A-row figures §10.10 discloses) | `capstone-measured-9152448d.log:271` (`"Object": 64`), `:275`, `:299-309` — re-derivable |
+| the **nine** A-row floors (§3.7) | `pins.denominator_floors` in this file, cross-checked against `preregistration.json` **both ways** by `tools/capstone_preregistration_check.py` |
 
 ---
 

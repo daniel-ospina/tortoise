@@ -2553,6 +2553,15 @@ def _a5_subjects(projection) -> dict:
         f"MATCH (n:Point)-[r:{pattern}]-() WHERE n.pointKind = 'statement' "
         "RETURN count(DISTINCT n)").result_set
     carrying = int(carrying[0][0] or 0) if carrying else 0
+    # ⛔ A5's registered denominator promises the `:Subject` count *"and the `Point` population
+    # reported beside them, never used as the actor denominator"* — so the block must carry the
+    # Point population too. It was missing, which left the pinned floors `a5_points` and
+    # `a2_candidates` consumed by NO field and no arm: a floor nothing can be checked against is a
+    # floor that cannot refuse (#11331 review round 8, P2-4b). The count is a COMPLETE enumeration,
+    # so an absent population reads as a measured 0 here — not as the `UNMEASURED` a zero
+    # denominator gets, because 0 Points is a real (and REFUSED-by-floor) measurement, not silence.
+    point_population = projection.g.query("MATCH (n:Point) RETURN count(n)").result_set
+    point_population = int(point_population[0][0] or 0) if point_population else 0
     return {"subjects": subjects,
             # ⛔ A5's BAR divides by the distinct actors the A-corpus NAMES, so the census must carry
             # that population or the bar is not producible from the block (review cycle 2, finding 8).
@@ -2561,6 +2570,7 @@ def _a5_subjects(projection) -> dict:
             "named_actors": unmeasured(
                 "the distinct actors the A-corpus names — #10983 (C2) registers the actor list; the "
                 "`:Subject` count is NOT it, or the bar would be satisfied by the run's own writes"),
+            "point_population": point_population,
             "families": {name: int(families.get(name, 0))
                          for name in SUBJECT_EDGE_FAMILIES},
             "statements_with_a_subject_edge": carrying}
@@ -2622,10 +2632,32 @@ def a_row_census(uri: str) -> dict:
         "registering it and asking it")
 
     # A2 — attach vs mint. No counter exists anywhere on the write path yet.
+    # ⛔ THE BLOCK CARRIES EVERY PART THE REGISTRATION NAMES, not just the two the decision reads.
+    # The metric's THIRD arm is `held` — "each held candidate named with its reason" — and the
+    # threshold's RED leg is "a run that holds candidates without naming them is **RED**". The bar
+    # divides by DECIDED candidates, which the denominator fixes against the all-candidate count:
+    # "the all-candidate count is reported beside it, never used as the floor". Emitting only
+    # attach/mint left a consumer unable to tell "zero held" from "the held arm was never
+    # measured", so the registered RED leg could not be evaluated from the one block §3.7
+    # designates as the place a scoring child reads — the silence `a_row_census_lines` refuses
+    # everywhere else, and the exact omission the issue's Target forbids (#11331 review round 8).
+    _a2_counter = ("an S3 RESOLVE attach/mint/held counter on the run's own receipt — no writer "
+                   "stamps one today; #10985 (C4) owns it")
     result["A2"] = {
-        "attach": unmeasured("an S3 RESOLVE attach/mint/held counter on the run's own "
-                             "receipt — no writer stamps one today; #10985 (C4) owns it"),
+        "attach": unmeasured(_a2_counter),
         "mint": unmeasured("the same counter's mint arm — #10985 (C4)"),
+        "held": unmeasured(
+            "the same counter's held arm, each held candidate NAMED with its reason — the "
+            "registration makes an unnamed held candidate RED; #10985 (C4)"),
+        "candidates": unmeasured(
+            "the all-candidate count the run decided over — reported BESIDE the floor, never "
+            "used as it; #10985 (C4)"),
+        "decided_candidates": unmeasured(
+            "the decided-candidate population A2's bar divides by — the population the pinned "
+            "floor a2_decided_candidates guards; #10985 (C4)"),
+        "attach_share": unmeasured(
+            "attach_share = attach / decided_candidates — a zero denominator is REFUSED, never "
+            "rendered as 0/0; #10985 (C4)"),
     }
 
     result["A3"] = row("A3", _a3_chain_join, {"statements": 0,
@@ -2640,7 +2672,7 @@ def a_row_census(uri: str) -> dict:
                         "null": 0, "typed": 0, "typed_by_kind": {},
                         "typed_share": unmeasured("a claim-point population")})
     result["A5"] = row("A5", _a5_subjects,
-                       {"subjects": 0, "named_actors": 0,
+                       {"subjects": 0, "named_actors": 0, "point_population": 0,
                         "families": {name: 0 for name in SUBJECT_EDGE_FAMILIES},
                         "statements_with_a_subject_edge": 0})
     tagged: dict = {"note": TAGGED_NOTE}
@@ -2686,7 +2718,13 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
     add(f"a1 rollup_queries={a1['rollup_queries']}")
 
     a2 = census_a["A2"]
-    add(f"a2 attach={a2['attach']} mint={a2['mint']}")
+    # ⛔ EVERY part the registration names, in the order the decision reads them: the two arms it
+    # compares, the held arm whose silence is RED, the floor population, the count reported beside
+    # it, and the rate. A renderer that emits a subset makes the block's contents invisible in the
+    # artefact a scorer actually reads (#11331 review round 8, P2-1).
+    add(f"a2 attach={a2['attach']} mint={a2['mint']} held={a2['held']} "
+        f"candidates={a2['candidates']} decided_candidates={a2['decided_candidates']} "
+        f"attach_share={a2['attach_share']}")
 
     a3 = census_a["A3"]
     add(f"a3 statements={a3['statements']} "
@@ -2711,7 +2749,7 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
 
     a5 = census_a["A5"]
     add(f"a5 subjects={a5['subjects']} named_actors={a5['named_actors']} "
-        f"families={a5['families']} "
+        f"point_population={a5['point_population']} families={a5['families']} "
         f"statements_with_a_subject_edge={a5['statements_with_a_subject_edge']}"
         + (f" error={a5['error']}" if a5.get("error") else ""))
 

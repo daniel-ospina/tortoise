@@ -18,6 +18,7 @@ to validate, a red row with no named cause. Each one has a stable finding code
 """
 from __future__ import annotations
 
+import ast
 import importlib.util as _ilu
 import json
 import re
@@ -45,6 +46,52 @@ PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"
 #: silenced that way is exactly the fail-open the arm exists to close (review P2,
 #: #10982). A new entry here must name the nesting path in this comment.
 _NESTED_MEASUREMENT_RUN_KEYS = ("errors", "corpus_sha256")
+
+
+def _run_block_keys(source: str) -> list[str]:
+    """The TOP-LEVEL keys of the emitter's ``"run": { ... }`` literal, read by PARSING.
+
+    ⛔ NOT BY INDENT, which is how the previous cut silently SKIPPED a key. It read the
+    literal line-by-line and dropped every line whose indent was not *exactly* 12, so an
+    unregistered measurement key written at indent 10 or 14 — which Python allows, and
+    which the very commit that adds a key is free to re-indent — left this arm GREEN
+    (``unregistered=[]``) while ``_record_carries_a_measurement`` stayed blind to it, so
+    ``_blocker_exempt`` would exempt a ``REFUSED`` table whose ``blocked_by`` has CLOSED
+    from V12: a false PASS in a verdict gate. Measured at #11331 review round 8 with a
+    14-space ``"e6_receipt": 1`` inside the run dict. That is the same fail-open the
+    arm's own docstring says a skip would restore, one column off.
+
+    The AST cannot be wrong about which keys an object literal carries, so this is the
+    ONE definition of "the keys the emitter writes".
+
+    ⛔ A ``**spread`` REFUSES. ``ast.Dict`` carries ``None`` where it cannot name a key,
+    so the keys a spread brings are invisible here — reporting "no new key" over them
+    would be the same fail-open with a different trigger. A computed key refuses for the
+    same reason. And there must be exactly ONE run-block literal: two would make the
+    scan ambiguous about which one the emitter actually writes.
+    """
+    found: list[list[str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values, strict=True):
+            if not (isinstance(key, ast.Constant) and key.value == "run"
+                    and isinstance(value, ast.Dict)):
+                continue
+            keys: list[str] = []
+            for inner in value.keys:
+                assert isinstance(inner, ast.Constant) and isinstance(inner.value, str), (
+                    "the emitter's run block carries a key this scan cannot read: a "
+                    "SPREAD (`**mapping`) or a computed key hides the measurements it "
+                    "brings, so the arm would report 'no new key' while the record's "
+                    "exemption set stayed blind. Spell the keys literally.")
+                keys.append(inner.value)
+            found.append(keys)
+    assert len(found) == 1, (
+        f"expected exactly ONE `\"run\": {{...}}` literal in the emitter, found {len(found)} "
+        "— a second run block makes this scan ambiguous about which one the emitter writes")
+    assert found[0], "the emitter's run-block literal carries no keys — re-derive this scan"
+    return found[0]
 
 
 def _load_probe():
@@ -3746,27 +3793,7 @@ def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
     REFUSES rather than being skipped — the residual fail-open a skip would restore.
     """
     measure = _load_measure_probe()
-    source = Path(measure.__file__).read_text().splitlines()
-    start = next(i for i, line in enumerate(source) if line.strip() == '"run": {')
-    emitter_keys: list[str] = []
-    for line in source[start + 1:]:
-        stripped = line.strip()
-        indent = len(line) - len(line.lstrip())
-        if stripped and indent <= 8:
-            break
-        if not stripped or stripped.startswith("#") or indent != 12:
-            continue
-        if re.match(r'^ {12}[}\])]+,?$', line):
-            continue  # a nested block's closing brace, not a key
-        match = re.match(r'^ {12}"([^"]+)"\s*:', line)
-        assert match, (
-            f"the emitter's run block carries a 12-space line this scan cannot read as a "
-            f"quoted key: {line!r}. A SPREAD (`**mapping`) or a computed key carries "
-            "measurements this arm cannot see, so it would report 'no new key' while the "
-            "record's exemption set stayed blind — the fail-open this arm exists to close. "
-            "Spell the keys literally, or teach this scan to expand the spread")
-        emitter_keys.append(match.group(1))
-    assert emitter_keys, "the emitter's run-block literal was not found — re-derive this scan"
+    emitter_keys = _run_block_keys(Path(measure.__file__).read_text())
     # A declared NON-measurement must name a key the emitter really writes: otherwise the
     # declaration list drifts into a dumping ground of names nothing produces, and the
     # forward check below silently accepts a key that no longer exists.
@@ -3794,6 +3821,54 @@ def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
     assert not phantom, (
         f"{phantom} are registered as measurement keys but the emitter never writes them — a "
         "stale entry masks the moment the emitter's real key is renamed")
+
+
+def test_the_emitter_key_scan_cannot_be_defeated_by_INDENTATION():
+    """The scan reads keys by PARSING, so re-indenting the literal cannot hide one (#11331).
+
+    The arm above is only as strong as its ability to see every key the emitter writes.
+    Its previous cut read the literal line-by-line and skipped any line whose indent was
+    not exactly 12 — so a measurement key at indent 10 or 14 escaped the scan while the
+    run block really carried it. This test drives the scan directly with a re-indented
+    literal and with the shapes it must still refuse; the emitter itself is not mutated.
+    """
+    measure = _load_measure_probe()
+    source = Path(measure.__file__).read_text()
+    baseline = _run_block_keys(source)
+    assert "a_row_census" in baseline, baseline
+
+    # (1) A key written at 14 spaces is still SEEN. This is the measured fail-open: the
+    #     indent-filtered cut returned unregistered=[] over exactly this mutation.
+    reindented = source.replace('            "a_row_census":',
+                                '              "a_row_census":', 1)
+    assert reindented != source, "the emitter's a_row_census line is no longer at 12 spaces"
+    assert "a_row_census" in _run_block_keys(reindented), (
+        "a run-block key that is merely re-indented became invisible to the scan — which is "
+        "the fail-open that lets an unregistered measurement key reach the V12 exemption")
+
+    # (2) A SPREAD inside the run block REFUSES rather than reporting "no new key".
+    spread = source.replace('        "run": {',
+                            '        "run": {**{"e6_receipt": 1},', 1)
+    assert spread != source
+    try:
+        _run_block_keys(spread)
+    except AssertionError as exc:
+        assert "SPREAD" in str(exc) or "cannot read" in str(exc), exc
+    else:  # pragma: no cover - the assertion below is the failure
+        raise AssertionError(
+            "a `**spread` inside the run block was expanded or ignored instead of refused — "
+            "the keys it carries are invisible, so this arm would certify a set it never read")
+
+    # (3) A SECOND run-block literal is ambiguous and refuses.
+    doubled = source + "\n_OTHER = {\"run\": {\"e6_receipt\": 1}}\n"
+    try:
+        _run_block_keys(doubled)
+    except AssertionError as exc:
+        assert "exactly ONE" in str(exc), exc
+    else:  # pragma: no cover
+        raise AssertionError(
+            "a second `run` dict literal did not refuse — the scan would then pick one "
+            "arbitrarily and could certify the emitter against the wrong block")
 
 
 def test_the_blocker_record_was_refreshed_with_the_log_it_covers():
