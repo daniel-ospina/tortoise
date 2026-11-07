@@ -9915,7 +9915,9 @@ durations:
   # `grep -c '^def test_'` -> 41 while pytest collects 43 — re-derive with `pytest --collect-only -q | tail -1`
   # rather than trusting this note. The ANCHORED grep is exact here: 41
   # definitions and no prose (an UNANCHORED `grep -c 'def test_'` reads 44, because
-  # three docstring lines — 266, 273, 274 — contain the token; prose INFLATES a
+  # three docstring lines quote the token — deliberately NOT numbered here: an
+  # earlier version quoted their line numbers, and every edit above them rotted
+  # them (so a reader greps a number that no longer holds the token); prose INFLATES a
   # grep, it never deflates one). The 41 -> 43 gap is the parametrised function's
   # three arms, exactly as the header above says). One count per head, in
   # FUNCTIONS, measured per commit
