@@ -1791,7 +1791,7 @@ is the record for:
   creation row with no matching retraction — is the repair or should be accepted permanently is the
   open decision on `#10325`, not a settled one. The `EntityMutated` op=delete record the replay folds
   is kept, so a shorter re-capture is durable even though the feed is one-sided.
-- **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:204`, step 7's settled answer
+- **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:215`, step 7's settled answer
   to `#10129`'s placeholder): `_emit_event` returns on an append failure BEFORE the record write, so
   that capture's turn rows **never reached the record either** — its transcript is already lost, and
   refusing the tail would cost the whole journal while recovering nothing. The R1 removal record
@@ -1861,12 +1861,17 @@ and under no deny set, which #10389's fifth review round measured (`#10428`):
   deny set had to name BOTH anchors and not `:Source` alone: `source.story_arc` was
   marked **PRIMARY** on `#7879`'s placement table, so `projected_columns("source")` kept it and
   `restore_from_record_view` / `rebuild_from_record` wrote it back onto `:Source`; the SAME route
-  carried the `:Event` half — `public.event.story_arc` was PRIMARY on the same table (`:309`, open-set
+  carried the `:Event` half — `public.event.story_arc` was PRIMARY on the same table (`:310`, open-set
   passthrough), `projected_columns("event")` kept it, and `NODE_TABLES` mapped `Event → event`.
   `tests/test_9555_narrative_cache_rebuild.py:204` measures that lane — **⚠️ CORRECTED (`#10394`): the
   assertion is INVERTED from what this entry first recorded.** It read *the prose IS on the rebuilt
-  node, the `:Source` half only*; the test now asserts the rebuilt nodes carry **no** `story_arc` on
-  EITHER anchor, because the door is shut. The `:Source`-only half is why the understatement was measured rather than
+  node, the `:Source` half only*; the test now asserts the rebuilt cache is PROSE-FREE — and the
+  `:Source` anchor is STILL the only half that leg can red on, because its seed carries the capture's
+  `SourceCreated` and no `:Event` record at all, so its `story_arc` check is vacuous one label over.
+  The BOTH-anchor real-restore pin is
+  `tests/test_9555_narrative_cache_rebuild.py::test_the_record_restore_writes_no_story_arc_on_any_node`,
+  whose view holds a `:Source` AND an `:Event` node and asserts `sum(size(n.story_arc))` = 0 over every
+  node after the restore. The `:Source`-only coverage of the rebuilt-cache leg is why the understatement was measured rather than
   assumed (`#10389` review P2: the residual had described `#10394` as the `:Source` half alone, and no
   test could red on it; both anchors are now named in §9.1(b) and their premise pinned by
   `tests/test_9555_narrative_carrier.py::test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so`).
