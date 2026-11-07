@@ -9,7 +9,8 @@ pass. These tests pin the MECHANISMS that number came from, plus the properties
 the issue's own verification checklist makes non-negotiable:
 
 * **S6 — a cached column map cannot diverge from the live schema silently.** The
-  cache is keyed on each migration file's `(mtime_ns, size, inode)`, so an edit,
+  cache is keyed on each migration file's `(name, mtime_ns, size, inode, ctime_ns)`,
+  so an edit,
   an addition and a removal are all cache MISSES. Reverting `table_columns` to a
   single unconditional module-level memo reds
   `test_an_edited_migration_is_seen_immediately` and
@@ -32,7 +33,8 @@ handle is parked.
 NO DATABASE. Every connection here is a fake DB-API object (the same shape
 `tests/test_record_writer_seam.py` uses, imported rather than re-invented), and
 the transaction-status constants are patched so this file runs on a lane with no
-`[postgres]` extra — `test_record_writer_seam.py`'s own
+`[postgres]` extra (⚠️ SEVEN of its twenty tests then SKIP — the pool pins need the
+driver — which is why it is also armed into `test-record-postgres`) — `test_record_writer_seam.py`'s own
 `test_importing_the_seam_pulls_in_no_database_driver` is what keeps the seam
 importable there, and this file must not undo it by importing the driver itself.
 """

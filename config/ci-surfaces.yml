@@ -3025,8 +3025,9 @@ surfaces:
   # `fast_pool()`, and an unweighted fast file is the #3400/#4348 trap. DB-free by
   # construction: the schema tests parse real migration files copied into
   # `tmp_path`, and the pool tests drive `_default_connect` through a fake
-  # `psycopg2.connect`, so the one arm that needs the driver uses
-  # `importorskip` and skips visibly without the `[postgres]` extra. The measured
+  # `psycopg2.connect`, so the SEVEN arms that need the driver use
+  # `importorskip` and skips visibly without the `[postgres]` extra (`13 passed,
+  # 7 skipped`, 20 collected). The measured
   # cost is in `docs/evidence/9558-record-write-cost/`.
   - test_9558_record_write_cost.py
   # #9554 (R6) — the record's TENANCY POSTURE on the CODE side: the GUC the

@@ -879,9 +879,11 @@ journal record**, and the module states the cost in place: *"~one connection + c
 plan materialization"* — `table_columns()` is **deliberately uncached**, so every record re-reads the
 migrations. No pool exists.~~ ✅ **the mechanism LANDED (#9558/R10, PR #11386).** The pool now lives
 BEHIND the private hook `_default_connect` (so the read door reuses it too), the column map is cached
-on a fingerprint of the registered migrations' content identity, and the cost was MEASURED before
-and after with one instrument against two trees: **51.72–53.09 → 243.63–260.84 records/s**, per-record
-median **18.61–19.14 → 3.72–4.07 ms**, `connect` calls per record **1.00 → 0.00**, server-logged new
+on a per-file STAT identity — `(name, mtime_ns, size, inode, ctime_ns)`, NOT a content hash (a
+content-preserving stat rewrite inside one inode-clock tick is the one shape it cannot see, and a
+digest was measured at ~25–40 % of the cache's own win and rejected), and the cost was MEASURED before
+and after with one instrument against two trees: **49.72–52.86 → 255.68–261.61 records/s**, per-record
+median **18.49–18.58 → 3.75–3.84 ms**, `connect` calls per record **1.00 → 0.00**, server-logged new
 connections over 65 records **+66 → +2** (`docs/evidence/9558-record-write-cost/`). ⚠️ Two residual
 facts a later lane should not re-derive: the column-map CALL count is unchanged at 1/record (the WORK
 dropped, not the call — a caller-held map is the deferred lifecycle change), and 0.27–0.33 ms/record of
@@ -890,9 +892,12 @@ fingerprint — the filed fix (#11388) saves ONE of those two passes (0.135–0.
 above).
 **What it blocks:** capture latency at volume. **Not a first-customer gate** — hosted capture is off
 by owner ruling (2026-10-14) and the beta volume is unmeasured. **But it must land before the per-record cost of a real
-write volume can be measured.** Cheapest fix is the pooler DSN plus caching the column map; batching is the larger
-change and needs the ordering-across-three-doors question answered.
-**Decision needed:** none to start; the batching shape needs a measurement first.
+write volume can be measured.** ~~Cheapest fix is the pooler DSN plus caching the column map; batching is the larger
+change and needs the ordering-across-three-doors question answered.~~ ✅ **Superseded by what landed:** the fix was an
+IN-PROCESS pool behind `_default_connect` plus a stat-keyed column-map cache — not the pooler DSN, which remains a
+deployment option nobody has needed (the measured cost was the connect+auth handshake itself, which the pool removes at
+the client). Batching is still the larger change and still needs the ordering-across-three-doors question.
+**Decision needed:** none — the item is landed; batching's shape (and #11388's fingerprint hoist) are the open scopes.
 
 ### R11 — Land the byte gate, then wire the meter, before any allowance is configured · **S/M** · code + ops/config · **FOLLOW**
 
