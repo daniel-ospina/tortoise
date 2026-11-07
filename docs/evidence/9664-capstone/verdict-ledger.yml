@@ -38,6 +38,12 @@
 
 version: 1
 issue: 9664
+# The pin on the DENOMINATOR, not on any verdict. Deleting the uncovered rows was
+# measured to report CLEAN (`criteria: 9 ... uncovered: 0`), which reproduces by
+# hand the 14/18/22 drift this ledger exists to end. Changing the criterion SET now
+# takes two visible edits — drop the row AND move this number — so it reads as a
+# decision. `tools/capstone_ledger.py` refuses a mismatch.
+criteria_expected: 22
 
 measured_at:
   ref: origin/main
