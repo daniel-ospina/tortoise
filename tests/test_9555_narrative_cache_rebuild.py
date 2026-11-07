@@ -600,7 +600,7 @@ def test_the_point_props_tail_is_not_a_record_home_for_the_prose():
           `public.point` and the name is not refused for `point`, so it lands in
           the tail — with NO null filter;
       (3) `_patch_statement` writes the tail as a RIGHT-HAND merge
-          (`props = props || $n::jsonb`), so `{"story_arc": null}` OVERWRITES the
+          (`props = props || %s::jsonb`), so `{"story_arc": null}` OVERWRITES the
           prose that tail held.
 
     So the operator guidance names `public.session_narrative.narrative` and

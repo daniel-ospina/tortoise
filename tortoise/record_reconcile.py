@@ -184,7 +184,7 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   because the clear's OWN record write consumes it**: ``story_arc`` is no
   ``public.point`` column, so ``record_projection._split_properties`` sends the key
   to the tail (it has no null filter) and the record patch is a RIGHT-HAND merge
-  (``props = props || $n::jsonb``) — so ``{"story_arc": null}`` OVERWRITES the prose
+  (``props = props || %s::jsonb``) — so ``{"story_arc": null}`` OVERWRITES the prose
   that tail held, and a row whose only record home is the tail loses the last copy
   the record's KEYED VIEW holds to the very clear that counting it licensed (the
   append-only ``journal_event`` payload still carries the pre-clear prose — see the

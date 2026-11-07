@@ -1220,7 +1220,7 @@ def parity_difference(cache_props: Mapping[str, Any],
       (``public.session_narrative.narrative`` — ⛔ NOT the point's own ``props``
       tail, which the clear's OWN record write consumes: ``point`` has no
       ``story_arc`` column, so the projection tails the key and the patch merges
-      RIGHT-HAND, ``props = props || $n::jsonb``, so a null OVERWRITES the prose);
+      RIGHT-HAND, ``props = props || %s::jsonb``, so a null OVERWRITES the prose);
       where the narrative row does not carry it the
       node's copy is the only one no SHIPPED route can put back on a production
       graph (the record's KEYED view does not hold it), and the clear deletes it, because the
