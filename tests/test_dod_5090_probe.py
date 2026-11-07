@@ -4600,20 +4600,23 @@ def _residual_sentences(s3: str) -> list[str]:
       the wrong direction here, so it is declared rather than closed;
     * an inverse whose REVERSER is outside `_AFFIRMED`'s vocabulary — the list is
       a class pattern for negated reversers and negated privatives now, not four
-      literals, but it is still a list;
+      literals, but it is still a list. A ROW in `declared_open` below
+      (#11437 review, P3);
     * a HEDGE whose cue is outside `_AFFIRMED`'s pseudo-negation termset. The
       NegEx-style list closes `not always` / `not necessarily` / `not sure` /
       `not certain` / `not clear` …, but an adverb it does not name still reads
       as an exclusion — measured GREEN with that list in place:
       `"the walk does not substantially visit …"`, `"…does not routinely
       report …"`, `"…does not generally reach …"`. Closing this needs SCOPE
-      rather than a longer list, so it is declared instead.
+      rather than a longer list, so it is declared instead — and all three are
+      ROWS in `declared_open` below, not prose (#11437 review, P3).
 
     FALSE-BLOCK (it reds the claim, stated honestly):
 
     * an exclusion stated with none of `not`/`never`/`outside`, or one that says
       `skipped`, or one phrased `"…are never inside the walk"` — `inside the
-      walk` is an affirm marker and `never` does not outrank it;
+      walk` is an affirm marker and `never` does not outrank it. All three are
+      ROWS in `declared_blocks` below (#11437 review, P3);
     * an HONEST sentence that uses a marker as an ASIDE — both measured RED
       (#11437 review, round 2, P3): a concessive `"…except that a default is
       evaluated when the outer method runs"`, which trips the `except that`
@@ -4625,12 +4628,18 @@ def _residual_sentences(s3: str) -> list[str]:
     * a statement whose coverage verb is outside the `walk/visit/reach/report`
       list — measured, `"…are never TOUCHED by the walk"` reds, because the
       negation must reach one of those four verbs to be read as governing it
-      (#11437 review, round 3, P1);
-    * a PARTIAL exclusion stated as a HEDGE — `"…are not always visited"` reds,
-      because the pseudo-negation termset exists to refuse exactly that modal.
-      The price is stated rather than hidden: a doc that honestly NARROWS the
-      exclusion has to say so as a clause (`"…except when the outer method
-      runs"`, which stays green) rather than as a hedge.
+      (#11437 review, round 3, P1).
+
+    ⛔ NOT a false block, and listed here only to correct an earlier claim
+    (#11437 review, P3): a PARTIAL exclusion stated as a HEDGE — `"…are not
+    always visited"` — reds, and that is CORRECT, not a price paid. The pin
+    protects a TOTAL claim (the walk does not visit them); a hedge asserts a
+    weakened one, which is not the claim, so satisfying the pin with it would be
+    the 3/3 hedge false-GREEN this change closes. A doc that honestly narrows the
+    exclusion must say so as a clause (`"…except when the outer method runs"`,
+    which stays green) — if the total claim has actually stopped being true, the
+    pin SHOULD red and both the doc and the predicate need updating. This shape
+    is pinned in `must_red`, not here.
 
     ⛔ The false-GREEN direction is the one that matters: a missed inverse is a
     false PASS in the file whose purpose is to be false-PASS-free, while a false
@@ -4915,14 +4924,38 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
             "a nested `def`'s decorators and parameter defaults are not omitted "
             "from the walk; the walk reports them",
         # ⛔ The NEGATED PRIVATIVE — a double negative that asserts coverage.
-        # #11443 measured all three of these GREEN (#11437 review, P1); the
-        # `un…` alternation in `_AFFIRMED` closes them.
+        # #11443 measured all three of these GREEN (#11437 review, P1).
+        # ⚠️ MEASURED, and the correction matters (#11437 review, P3): the two
+        # rows BELOW do not red through `_AFFIRMED` at all. `_NEGATION_GOVERNS`
+        # returns None on both (`never unvisited` / `not unreported`), because the
+        # privative is not a coverage word — the negation governs nothing, so the
+        # sentence never reaches the affirm test. The earlier wording, "the `un…`
+        # alternation in `_AFFIRMED` closes them", was therefore a causal claim
+        # the artifact did not verify. The rows that DO exercise that alternation
+        # are the three that follow it.
         "inverse: never unvisited":
             "a nested `def`'s decorators and parameter defaults are never "
             "unvisited: the closure walk visited them",
         "inverse: not unreported":
             "a nested `def`'s decorators and parameter defaults are not "
             "unreported: the walk reported them",
+        # ⛔ ONE ROW PER `_AFFIRMED` ALTERNATIVE THAT HAD NO EXECUTOR (#11437
+        # review, P3). `\btherefore reported\b`, `\bskipped\b` and the `un…`
+        # privative alternation were each load-bearing and each unexercised: with
+        # any one of them replaced by a never-matching pattern, every row and the
+        # real-doc assertion stayed GREEN, so that alternation's closure of its
+        # shape was a claim rather than a result — the exact defect this test
+        # exists to refuse. Measured: each row below is GREEN with its arm
+        # removed from `_AFFIRMED` and RED with the arm in place.
+        "inverse: `therefore reported` after a non-visit":
+            "a nested `def`'s decorators and parameter defaults are not visited "
+            "by the body walk, and are therefore reported by the closure walk",
+        "inverse: `skipped` by another walk":
+            "the body walk does not report a nested `def`'s decorators and "
+            "parameter defaults; they are skipped by the closure walk",
+        "inverse: privative after a governing negation":
+            "the body walk does not report a nested `def`'s decorators and "
+            "parameter defaults, which are not unreported by it",
         # ⛔ And the STRAY-NEGATION class (#11437 review, round 3, P1): the
         # negation only has to OCCUR under the old `_NEGATION.search`, so an
         # inverse passed on the strength of a `not` that governed nothing. All
@@ -5030,6 +5063,27 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
         "decoy: the instrument's OUTPUT, not the walk's visit":
             "this section has not reported on `def` decorators or parameter "
             "defaults",
+        # ⛔ The out-of-termset HEDGE, declared and now EXECUTED (#11437 review,
+        # P3). The docstring names these three as measured GREEN; naming them as
+        # prose is not the same as pinning them, so each is a row. They stay open
+        # because closing them needs SCOPE, not a longer list: the cue negates the
+        # MODALITY and an adverb outside the termset still reads as an exclusion.
+        "open hedge: `not substantially` (outside the termset)":
+            "the walk does not substantially visit a nested `def`'s decorators "
+            "and parameter defaults",
+        "open hedge: `not routinely` (outside the termset)":
+            "the walk does not routinely report a nested `def`'s decorators "
+            "and parameter defaults",
+        "open hedge: `not generally` (outside the termset)":
+            "the walk does not generally reach a nested `def`'s decorators "
+            "and parameter defaults",
+        # ⛔ And an inverse whose REVERSER is outside `_AFFIRMED`'s vocabulary
+        # (#11437 review, P3). The list is a class pattern now rather than four
+        # literals, but it is still a list, so a reverser it does not name is
+        # GREEN — measured. Pinned so the limit is a result, not a sentence.
+        "open inverse: reverser outside `_AFFIRMED`'s vocabulary":
+            "a nested `def`'s decorators and parameter defaults are not visited "
+            "by the body walk; the closure walk handles them",
     }
     for label, sentence in declared_open.items():
         assert sentence != original, f"decoy row {label!r} merely restates the claim"
@@ -5060,6 +5114,16 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
         "false block: `inside the walk's` matches the possessive":
             "the walk does not visit nested `def` decorators and defaults "
             "reached from inside the walk's enclosing frame",
+        # ⛔ The two shapes the docstring's FALSE-BLOCK list declares as prose
+        # without a row (#11437 review, P3): an exclusion stated with NONE of
+        # `not`/`never`/`outside`, and one that says `skipped`. Both measured RED,
+        # and a residual nobody can see is indistinguishable from a fix.
+        "false block: exclusion with no negation cue at all":
+            "nested def decorators and parameter defaults are excluded from the "
+            "walk",
+        "false block: exclusion stated as `skipped`":
+            "nested def decorators and parameter defaults are skipped by this "
+            "walk",
     }
     for label, sentence in declared_blocks.items():
         assert sentence != original, (
