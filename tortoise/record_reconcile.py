@@ -655,8 +655,8 @@ def reconcile_record_and_cache(
     DESTRUCTIVE CLEAR — an explicit ``REMOVE n.story_arc`` on the anchor, or a full
     ``record-restore`` (whose wipe is whole-graph, so it clears the copy too;
     measured by `test_the_record_restore_writes_no_story_arc_on_any_node` arm
-    (3)) — never a non-destructive one, which is the only sense in which this
-    class differs from the declined pair. ⛔ NOT `#10017`: that tool purges the
+    (3)) — never a non-destructive one, which is ONE of the ways this class differs
+    from the declined pair (the other is WHY the name must be absent). ⛔ NOT `#10017`: that tool purges the
     pre-#10000 turn ``:Point`` nodes (``tools/purge_legacy_turns.py``) and touches
     neither ``:Source`` nor ``:Event``. Two bounds on the clear itself: where no
     record home carries the text (the module docstring's population (ii)) the
