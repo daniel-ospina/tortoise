@@ -530,11 +530,16 @@ def _capture_payload(
         # exists to catch (#11332 review). A seam that cannot be declared is a
         # fail-open, so the ordering is the fix and the assertion below states it.
         env.setdefault("FLY_MITIGATION_LEDGER", str(ledger_path()))
-        assert env["PATH"] == stub_dir and env["HOME"] == stub_dir, (
-            "the step/job env overrode the harness's own PATH/HOME — the stub "
-            "`fly`/`flyctl` would not be found and the payload would be "
-            "classified against a shell that cannot run it"
-        )
+        # ⛔ ValueError, NOT `assert`: an AssertionError is caught by NO call site,
+        # so it escapes as exit 1 — the class `deploy-hosted.yml` turns into the
+        # `skip-fly-secret-provenance` bypass. The whole point of the fail-closed
+        # exits above is that an uncheckable state is exit 2.
+        if env["PATH"] != stub_dir or env["HOME"] != stub_dir:
+            raise ValueError(
+                "the step/job env overrode the harness's own PATH/HOME — the stub "
+                "`fly`/`flyctl` would not be found and the payload would be "
+                "classified against a shell that cannot run it"
+            )
         # fd 3 is opened by the wrapper and inherited across `exec`, so the stub
         # has somewhere private to write. `bash -e -u` mirrors GitHub's default
         # shell for a `run:` block, plus NOUNSET: a payload that reads a variable
@@ -909,13 +914,19 @@ def fly_toml_env_assignments(text: str) -> dict[str, str]:
     values: dict[str, str] = {}
     in_env = False
     for line in text.splitlines():
-        stripped = line.strip()
+        # ⛔ STRIP THE COMMENT BEFORE THE HEADER TEST, not only before the value:
+        # `[env] # versioned config` is a valid TOML header, and requiring the
+        # stripped line to END with `]` left `in_env` False for the WHOLE file, so
+        # `fly_toml_env_assignments` returned `{}` and the ledger's `[env]` check
+        # accepted an entry for a name `[env]` assigns a real value to — a false
+        # record on the green path (#11332 review round 5, P2).
+        code = line.split("#", 1)[0]
+        stripped = code.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
             in_env = stripped == "[env]"
             continue
         if not in_env:
             continue
-        code = line.split("#", 1)[0]
         match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", code)
         if match:
             raw = match.group(2).strip()
@@ -1225,14 +1236,19 @@ def main() -> int:
                     # "the mitigation working" would be a green over exactly the state
                     # this ledger exists to prevent, so it is a FALSE RECORD instead:
                     # the recorded absence is not in effect (#11332 review round 4, P1).
-                    if name in set(fly_names):
+                    if name in set(fly_names) or env_assignments.get(name):
                         violations.append(
                             f"MITIGATION NOT IN EFFECT — the ledger empties {name!r} "
-                            "from the payload, but `flyctl secrets set` is ADDITIVE, so "
-                            "the value already on Fly SURVIVES the omission and the "
-                            f"absence is not in effect. Unset it on Fly "
-                            f"(`flyctl secrets unset {name} --app {app}`) so the "
-                            "fail-closed value is what the next boot reads"
+                            "from the payload, but the omission is not what the app "
+                            "reads. Either `flyctl secrets set` is ADDITIVE and the "
+                            "value already on Fly SURVIVES it "
+                            f"(fly secret: {name in set(fly_names)}), or `fly.toml` "
+                            "`[env]` supplies it a NON-EMPTY value whatever the secret "
+                            f"list says (env value: {env_assignments.get(name)!r}). Fix "
+                            "the delivery path — `flyctl secrets unset "
+                            f"{name} --app {app}` for the secret, or remove the [env] "
+                            "value — so the fail-closed value is what the next boot "
+                            "reads"
                         )
                         continue
                     mitigated_derived.append(name)
