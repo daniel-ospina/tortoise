@@ -16762,12 +16762,15 @@ def test_surface_audit_maps_tortoise_api_source_as_api_pin(tmp_path):
 
 
 def test_window_arm_receipt_edit_selects_eval():
-    """#10538 (fresh-context review, cycle 1, P1): the receipts a ruling rests on
-    must be under the gate.
+    """#10538 (fresh-context review, cycle 1, P1): the receipts an open verdict
+    is argued from must be under the gate.
 
     `docs/scoping/receipts/2026-11-03-10538-window-arm-retention.json` is a
-    COMMITTED build artifact: the owner ruling on #10538 (`window-exit` vs
-    `ab-head-ab`) and the #9097 exit measurement are argued from its numbers. A
+    COMMITTED build artifact: the still-open PLACEMENT verdict (tail vs head) and
+    the #9097 exit measurement are argued from its numbers. (The NON-EVICTION
+    question is NOT open — the owner ruled `window-exit` on 2026-11-07 and the
+    guard ships on — which is why this receipt is pinned to the PRE-RULING
+    splice; see `tools/longmem_eval/window_arm_baseline.py`.) A
     docs-only diff selects NO surface (tier 1), so before the exact-path
     SOURCE_PATTERNS entry a hand-edited receipt — or an instrument change that
     re-emits different numbers — ran nothing that gates. The instrument

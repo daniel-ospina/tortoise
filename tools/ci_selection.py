@@ -1366,8 +1366,9 @@ SOURCE_PATTERNS = {
              # above. The suite is registered on `eval` below.
              "tools/operator_receipt_check.py",
              # #10538 (fresh-context review P1): the window arm's RETENTION
-             # receipt is a COMMITTED build artifact whose numbers a ruling and
-             # the #9097 exit measurement are argued from, and a docs-only diff
+             # receipt is a COMMITTED build artifact whose numbers the PLACEMENT
+             # verdict (tail vs head — still open) and the #9097 exit measurement
+            # are argued from, and a docs-only diff
              # selects NO surface — so a hand-edited receipt, or an instrument
              # change that re-emits different numbers, ran nothing that gates.
              # Registering the TEST file alone does not fix this half (the
