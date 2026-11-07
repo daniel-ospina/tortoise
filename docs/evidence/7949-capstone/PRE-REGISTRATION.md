@@ -242,8 +242,16 @@ passes its own `max_tokens=_stage_cap(…)` per call, which beats the adapter de
 truncation budgets `TORTOISE_EXTRACTOR_MAX_TOKENS` (`_stage_cap`, read at call time: unset ⇒ the
 shipped 1500/16000 stage defaults) and `TORTOISE_EXTRACTOR_ESCALATION_TOKENS` (the
 length-truncation retry budget), `TORTOISE_REFERENTIALITY` (the S2.2 mention arm, reached
-through `referentiality.ENV_FLAG`), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
-`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last three are the cycle-7, cycle-8 and cycle-9 review findings: each sits on the acceptance path and was in no pin, no ledger row and no closure. The set
+through `referentiality.ENV_FLAG`), `TORTOISE_CHANGE_FEED` (an ambient `=1` adds a `:GraphEvent`
+to the graph the run writes), and the two confidence gates `TORTOISE_SUBJECT_TAU_HI` /
+`TORTOISE_SUBJECT_TAU_LO` (read through a parameter by `subject_binding`, and they decide whether
+the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last five are the cycle-7 to
+cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
+then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
+path and was in no pin, no ledger row and no closure. The authoritative list is
+`capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
+against the tree — this sentence is the reader's map, not the control. The set
 is CLOSED over the **measurement modules the path renders with** — and which modules those
 are is DERIVED rather than enumerated here, because a hand-kept list in this paragraph is the one
 that rots: the derivation sentence below is the record — and `tests/test_7949_c2_door.py` derives
@@ -258,7 +266,7 @@ count, because a count in this paragraph went stale three rounds running (six, t
 the derivation grew, which is itself the defect this section is about. Cycle 10 also made the derivation
 read the `TORTOISE_*` **literals** in those modules, not only the two read shapes its resolver understands:
 `subject_binding.py` holds both of its spellings and passes one to a helper as an argument, so it resolved
-to the EMPTY SET while sitting on the write path (`sdk.py:16716` `bind_point_subjects`, inside
+to the EMPTY SET while sitting on the write path (`bind_point_subjects`, inside
 `_extract_session_v2`) and gating whether the `:aboutSubject`/`:aboutObject` edge is written at all
 (measured: `decide_binding(0.90)` is `bound` at the defaults and `suspected` with
 `TORTOISE_SUBJECT_TAU_HI=0.99`) — so the arm seams, the mention arm, the per-turn embed
@@ -286,7 +294,7 @@ never made.
 | row | corpus that carries it | the claim it supports | it is NOT a proof of |
 |---|---|---|---|
 | **E1** | `tests/eval/write_path` (fixture, this hash) | `^the <X>` share falls ≥50% **on this corpus**, both arms, same commit | that the fleet's graph volume falls |
-| **E1b** | `tests/eval/write_path` **on the `m2` lane** (`baselines/m2.json`, posture `m2`) | the anti-gaming control: planted units survive the deterministic lane (90/90 at this hash) | anything about the v2 door: the `m2` lane is a *different extractor*, so unit survival there says nothing about what the v2 lane writes |
+| **E1b** | `tests/eval/write_path` **on the `m2` lane** (`baselines/m2.json`, posture `m2`: `salient_unit_survival_strict` 1.0 = 90/90 at this `fixtures_hash`). ⚠️ The figure the probe **publishes** is read from `docs/evidence/9889/e1-e2-scores.json` → `e1b.real_facts` ← `on-arm.log`, which is a no-loss **CONTROL on the scored (v2) arm** and says so itself ("no committed artifact carries `grading.strict_survival_counts` over the m2 lane"), and the `m2` baseline's own history records its metrics as **carried forward** from `943a99ec6`, not re-measured at this hash | the anti-gaming control: planted units survive the deterministic lane (90/90) | anything about the v2 door: the `m2` lane is a *different extractor*, so unit survival there says nothing about what the v2 lane writes — **and the published 90/90 was not measured on it either** |
 | **E2a / E2b** | `tests/eval/write_path` (fixture) | value-bearing units survive; claims are not fused | the fleet's correctness, which needs a capture through the door |
 | **E3** | the run's **own door-written graph** (shape, not content) | every derived node carries a version anchor | a content claim: it is a structural property of the writer; nor a fleet-population claim, since the graph it counts is whichever graph the run wrote |
 | **E4** | `tests/eval/write_path`, graded **through the v2 door** (the receipt the probe selects by `corpus_hash`) | 5 of 15 planted operator edges are wired and persisted against the registered bar (15) | the fleet's graph: this is the fixture corpus. ⚠️ It is **not** an `m2` row — the selected receipt (`w2b-operator-2026-10-24-8503-b.json`) records `extract_session_v2` |

@@ -1054,17 +1054,35 @@ def test_the_probe_pins_the_lane_and_reads_it_back():
             f"log claims it was pinned (#10983 review round 2)")
 
 
+class _Unpoppable(dict):
+    """Accepts a pin, refuses to apply it — a popped value leaks back out."""
+
+    def pop(self, key, default=None):
+        return self.get(key, default)
+
+
+def _scrubbed_env(pin) -> "_Unpoppable":
+    """A copy of the real environment with every PINNED key removed first.
+
+    ⛔ The two leak tests build their fake environ from ``os.environ``, so on a box
+    that exports ANY pinned lever the leak they assert about is not the one under
+    test: ``_Unpoppable.pop`` never deletes, so every ambient pin leaks too and
+    ``measured_arm``'s refusal loop fires on the FIRST key in tuple order. MEASURED
+    (round 11): `TORTOISE_EXTRACT_MODEL=deepseek/deepseek-chat` red
+    ``test_the_probe_refuses_a_LEAKED_PINNED_OFF_switch`` with a refusal naming
+    ``TORTOISE_EXTRACT_MODEL`` while the test was exercising
+    ``TORTOISE_EXTRACTOR_MAX_TOKENS``. This is the same hazard the PINNED_ON test
+    below already documents for exported levers; it is fixed once, here.
+    """
+    env = _Unpoppable((k, v) for k, v in os.environ.items() if k not in pin)
+    return env
+
+
 def test_the_probe_refuses_a_leaked_lane(monkeypatch):
     """Fail closed: a lane that does not read back as unset REFUSES the run."""
     probe = _load_probe()
 
-    class _Unpoppable(dict):
-        """Accepts the pin, refuses to apply it — the lane leaks back out."""
-
-        def pop(self, key, default=None):
-            return self.get(key, default)
-
-    env = _Unpoppable(os.environ)
+    env = _scrubbed_env(tuple(probe.DOOR_KEYS))
     env[probe.DOOR_LANE_ENV] = "m2"
     monkeypatch.setattr(probe, "os", type(
         "os", (), {"environ": env})())
@@ -1087,18 +1105,12 @@ def test_the_probe_refuses_a_LEAKED_PINNED_OFF_switch(monkeypatch):
     """
     probe = _load_probe()
 
-    class _Unpoppable(dict):
-        """Accepts the pin, refuses to apply it — the value leaks back out."""
-
-        def pop(self, key, default=None):
-            return self.get(key, default)
-
     others = [k for k in probe.DOOR_PINNED_OFF if k != probe.DOOR_LANE_ENV]
     assert others, (
         "DOOR_PINNED_OFF pins only the lane — the other switches are back to "
         "being declarations (see the #10983 review)")
     for key in others:
-        env = _Unpoppable(os.environ)
+        env = _scrubbed_env(tuple(probe.DOOR_KEYS))
         env[key] = "leaked"
         monkeypatch.setattr(probe, "os", type(
             "os", (), {"environ": env})())
@@ -1107,6 +1119,32 @@ def test_the_probe_refuses_a_LEAKED_PINNED_OFF_switch(monkeypatch):
         assert "REFUSED" in str(exc.value) and key in str(exc.value), (
             f"a leaked {key} was accepted: the run would declare a pinned-off "
             f"seam it did not actually run (got {exc.value})")
+
+
+def test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run():
+    """The door is a PATH, not only an environment fact (#10983 review r11).
+
+    ⛔ ``measured_arm`` pins and reads back the LANE, and a leaked lane refuses —
+    but neither a keyless capture (#3892) nor an ``#1727`` REPLAY is another
+    lane: it is *no* lane, it reports ``ok=True``, and a re-run against an
+    existing graph (``--graph``) reaches the replay for every session at zero
+    cost. Until this pin, that run still wrote a table whose ``door:`` line
+    asserted the v2 lane and whose record said ``measured: true``.
+    """
+    probe = _load_probe()
+    entered = [{"session_id": "wp01",
+                "extraction_mode": "llm:deepseek-direct", "ok": True}]
+    assert probe.door_witness(entered) == {"entered": 1, "sessions": 1,
+                                           "bypassed": []}
+    assert probe.require_door_entered(entered)["entered"] == 1
+    for mode in ("replayed", "no-provider", "empty", None):
+        runs = [entered[0], {"session_id": "wp02", "extraction_mode": mode,
+                             "ok": True}]
+        assert probe.door_witness(runs)["bypassed"] == ["wp02"]
+        with pytest.raises(SystemExit) as exc:
+            probe.require_door_entered(runs)
+        assert "REFUSED" in str(exc.value) and "wp02" in str(exc.value), (
+            f"a {mode!r} capture was accepted as door-entered: {exc.value}")
 
 
 def test_an_unmeasured_door_never_claims_a_read_back():
@@ -1497,6 +1535,39 @@ def test_the_registration_records_the_door_and_the_corpus_attribution():
     assert rows["E1b"]["lane"] == "m2", (
         f"E1b's lane is {rows['E1b'].get('lane')!r}; it is the m2 anti-gaming "
         f"control (#10983)")
+    # …and BIND E1b to its artifacts, the way E4 is bound above. The assertion
+    # before this one compares two literals, so neither artifact the row talks
+    # about was read. TWO are involved and both are read here: the lane the row
+    # is DEFINED on (the fixture's m2 baseline, at the frozen hash) and the
+    # artifact the probe actually PUBLISHES the number from — round 11 measured
+    # that the published 90/90 comes from the 9889 record's `e1b` line, a no-loss
+    # control on the SCORED (v2) arm whose own note disclaims the m2 lane, while
+    # the row named the m2 baseline as its carrier and nothing compared them.
+    m2_base = json.loads((REPO / "tests/eval/write_path/baselines/m2.json")
+                         .read_text(encoding="utf-8"))
+    assert (m2_base.get("config") or {}).get("extractor_posture") == "m2", (
+        f"baselines/m2.json is no longer the m2 lane's baseline: "
+        f"{m2_base.get('config')}")
+    assert m2_base.get("fixtures_hash") == record["corpus"]["fixtures_hash"], (
+        f"baselines/m2.json is pinned at {m2_base.get('fixtures_hash')!r}, not "
+        f"the frozen {record['corpus']['fixtures_hash']!r} — E1b would cite a "
+        f"carrier measured on another corpus revision (#10983)")
+    assert ((m2_base.get("metrics") or {}).get("salient_unit_survival_strict")
+            == 1.0), (
+        "baselines/m2.json no longer carries the 90/90 strict survival E1b's row "
+        f"cites: {m2_base.get('metrics')}")
+    published = json.loads((REPO / probe.E1_E2_SCORES).read_text(encoding="utf-8"))
+    published_e1b = published.get("e1b") or {}
+    assert published_e1b.get("artifact") in rows["E1b"].get(
+        "published_figure", ""), (
+        f"the probe publishes E1b from {published_e1b.get('artifact')!r} (the "
+        f"9889 record's e1b line), and the row does not name it — a reader takes "
+        f"E1b as an m2 measurement when the published figure is the SCORED "
+        f"arm's control: {rows['E1b'].get('published_figure')!r}")
+    assert rows["E1b"].get("carried_forward"), (
+        "E1b's m2 carrier records its metrics as CARRIED FORWARD from the "
+        "previous fixtures_hash, not re-measured at this one, and the row must "
+        "say so (#10983 review round 11)")
     for crit, entry in rows.items():
         assert entry["corpus"] in {
             "tests/eval/write_path",         # the registered fixture corpus
