@@ -4703,13 +4703,16 @@ jobs:
           # what makes it run rather than pass by absence. It sits BEFORE the
           # capstone because the capstone is last on purpose (D10, above).
           # #9558 (R10): `test_9558_record_write_cost.py` is armed HERE because
-          # its pool half needs the DRIVER, and the sharded `test` job installs
-          # no `[postgres]` extra — so in that job its 6 driver-dependent pins
-          # would SKIP (the canonical-env run reports `9 passed, 6 skipped`),
-          # leaving the connection-reuse mechanism this change is FOR covered by
-          # no CI leg at all. Here the extra is installed, nothing in the file
-          # skips, and this job's any-skip leg gate stays green. Its schema-cache
-          # half is DB-free and already runs in `core`.
+          # its pool half needs the DRIVER (the `[postgres]` extra), and the
+          # sharded `test` job installs none — so there its `importorskip` pins
+          # would SKIP, leaving the connection-reuse mechanism this change is FOR
+          # covered by no CI leg at all. Here the extra is installed, so not one
+          # item skips and this job's any-skip leg gate (#9551) stays green; its
+          # schema-cache half is DB-free and already runs in `core`. ⚠️ Nothing
+          # in the file may CONDITIONALLY skip: a filesystem-dependent skip here
+          # is a nondeterministic RED on a required context, which is why the
+          # ctime arm burns an inode-clock tick instead of skipping when a tick
+          # boundary happens not to fall between two calls (#9558 cycle 2, P1).
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
             tests/test_9555_narrative_carrier.py \

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -273,6 +274,25 @@ def test_an_edited_migration_is_seen_immediately(tmp_path):
     # the pre-edit map indefinitely (#9558 review cycle 1, P2, reproduced: five
     # migrations rewritten content->contenu, stat unchanged, stale map served).
     before = target.stat()
+    # ⛔ BURN ONE INODE-CLOCK TICK FIRST, so the ctime arm ALWAYS runs.
+    # Inode timestamps are coarse on ordinary Linux filesystems (measured: ext4,
+    # delta 0 ns for a write + `utime` microseconds apart), so a step that simply
+    # hopes a tick boundary falls between two calls runs only ~60% of the time —
+    # and this file is armed into `test-record-postgres`, whose leg gate FAILS on
+    # any skip (#9551). A nondeterministic pin there is a false RED that blames
+    # the database (#9558 review cycle 2, P1). So: nudge the target's ctime until
+    # it moves past the pre-edit value, bounded, then do the write. `os.utime`
+    # with the ORIGINAL mtime keeps the property this step is about.
+    deadline = time.monotonic() + 3.0
+    while (target.stat().st_ctime_ns == before.st_ctime_ns
+           and time.monotonic() < deadline):
+        os.utime(target, ns=(before.st_mtime_ns, before.st_mtime_ns))
+        time.sleep(0.005)
+    ticked = target.stat()
+    assert ticked.st_ctime_ns != before.st_ctime_ns, (
+        "the inode clock did not advance within 3 s — this box cannot exercise "
+        "the ctime arm at all, which is an environment failure rather than a "
+        "property this test can assert")
     target.write_text(rewritten.replace("ffff_probe_column",
                                         "gggg_probe_column"), encoding="utf-8")
     os.utime(target, ns=(before.st_mtime_ns, before.st_mtime_ns))
@@ -280,17 +300,8 @@ def test_an_edited_migration_is_seen_immediately(tmp_path):
     assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns,
                                                   before.st_size), (
         "the step must preserve size AND mtime, or it does not test ctime")
-    if after.st_ctime_ns == before.st_ctime_ns:
-        # ctime is the arm this step exists to test, and some filesystems tick it
-        # so coarsely that a write + `utime` inside one tick leaves it identical
-        # (measured on this box's /tmp: an ext3-style mount, delta 0 ns). The
-        # step cannot be exercised HERE, and pretending otherwise would flake —
-        # so it says so. The residual it cannot cover is declared at
-        # `_migrations_fingerprint`; skipping is not a claim that it is closed.
-        pytest.skip(
-            f"this filesystem's ctime did not move on a write+utime within one "
-            f"tick ({before.st_ctime_ns}) — the ctime arm of the fingerprint "
-            f"cannot be exercised here")
+    assert after.st_ctime_ns != before.st_ctime_ns, (
+        "the ctime moved back to the pre-edit value — the key would see nothing")
     columns = rp.table_columns(tree)["point"]
     assert "gggg_probe_column" in columns, (
         "a same-size rewrite with the mtime RESTORED was not seen — the "
@@ -619,6 +630,10 @@ def test_a_returned_handle_refuses_further_use():
 
     FALSIFIER: forward `cursor`/`commit`/`rollback` straight to `self._raw` (drop
     `_live`) and this reds on all three — the calls succeed instead of raising.
+    A FOURTH arm covers `__setattr__`, which is how a session setting like
+    `autocommit` reaches the server: without its own fence a caller could
+    re-poison the handle AFTER `_park_connection` normalised it, so the two fixes
+    would cancel out (#9558 review cycle 2, P2, reproduced).
     """
     driver = pytest.importorskip("psycopg2", reason="the fence raises the "
                                                  "driver's own InterfaceError")
@@ -630,6 +645,13 @@ def test_a_returned_handle_refuses_further_use():
                  lambda: handle.cursor()):
         with pytest.raises(driver.InterfaceError):
             call()
+    with pytest.raises(driver.InterfaceError):
+        handle.autocommit = True
+    assert getattr(raw, "autocommit", False) is False, (
+        "a post-close ATTRIBUTE WRITE reached the parked handle — it can "
+        "re-poison the same connection's session state after "
+        "`_park_connection` already normalised it, which is the exact state the "
+        "normalisation exists to prevent")
     assert raw.commits == 0 and raw.rollbacks == 0, (
         f"a post-close call reached the raw handle (commits={raw.commits}, "
         f"rollbacks={raw.rollbacks})")

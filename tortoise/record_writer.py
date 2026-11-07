@@ -1171,10 +1171,20 @@ class _PooledConnection:
     def __setattr__(self, name: str, value: Any) -> None:
         # `autocommit` and friends must reach the server, not vanish onto the
         # wrapper. Only this class's own state is underscore-prefixed.
+        #
+        # ⛔ FENCED ON RELEASE, exactly like the three DB-API verbs above. Without
+        # this the fence is 3/5 complete: `handle.close()` parks and normalises
+        # the handle, and a later `handle.autocommit = True` would still reach the
+        # raw — re-poisoning the SAME handle for the next borrower *after*
+        # `_park_connection` had cleaned it, which is precisely the state the
+        # normalisation exists to prevent (#9558 review cycle 2, P2, reproduced).
+        # Attribute READS stay available (see `__getattr__`): reading state cannot
+        # corrupt another borrower, and a debugger or `repr` must still work.
         if name.startswith("_"):
             object.__setattr__(self, name, value)
-        else:
-            setattr(object.__getattribute__(self, "_raw"), name, value)
+            return
+        self._live()
+        setattr(object.__getattribute__(self, "_raw"), name, value)
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid only
         state = "returned" if self._returned else "borrowed"

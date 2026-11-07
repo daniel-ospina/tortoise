@@ -119,15 +119,19 @@ default. The reviewer reproduced it: five migrations rewritten `content`→
 now, and the pin performs a same-size rewrite with `os.utime` restoring the
 mtime — dropping `ctime_ns` reds it (measured).
 
-⚠️ **Re-measured, and the residual is narrower than the claim, not zero.** On
-this box's `/tmp` (an ext3-style mount) a write plus `utime` inside one tick
-leaves `ctime_ns` **identical** (delta 0 ns), so on a coarse-ctime filesystem a
-`cp -p` landing inside a single tick is still invisible. A content digest would
-close it and was measured and rejected: blake2b over the fifteen files (129 KB)
-costs **0.554 ms** per pass against the stat pass's **0.135 ms**, i.e. it would
-consume most of the ~0.5 ms the cache saves over a re-parse. The pin skips — with
-that reason printed — where the box's ctime cannot move, rather than flaking or
-claiming coverage it does not have.
+⚠️ **Re-measured, and the residual is narrower than the claim, not zero — and it
+applies on the DEFAULT filesystem.** On this box (**ext4**, `/dev/root`, in both
+`/tmp` and the repo worktree) a write plus `utime` microseconds apart leaves
+`ctime_ns` **identical** (delta 0 ns), because inode-timestamp granularity is
+coarse on ordinary Linux filesystems. So a `cp -p` landing inside a single tick is
+still invisible. A content digest would close it and was measured and rejected:
+blake2b over the fifteen files (129 KB) costs **0.554 ms** per pass against the
+stat pass's **0.135 ms**, i.e. it would consume most of the ~0.5 ms the cache
+saves over a re-parse. The pin therefore **burns an inode-clock tick explicitly**
+before its same-size write, so the ctime arm always executes — the earlier version
+of this test skipped when a tick boundary happened not to fall between two calls,
+which measured as 4 skips in 10 runs and would have intermittently reddened a
+required CI job whose leg gate fails on ANY skip.
 
 **The pool needed a cross-DSN bound.** `RECORD_POOL_MAX_CONNECTIONS` is per
 bucket, and `record_dsn()` re-reads the environment on every call, so a rotating

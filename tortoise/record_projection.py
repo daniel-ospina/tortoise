@@ -1591,22 +1591,26 @@ def _migrations_fingerprint(base: Path) -> tuple:
     so the key now covers the whole reachable surface rather than the
     append-mostly one.
 
-    ⚠️ **The residual, measured rather than dismissed.** A stat-preserving rewrite
-    is still invisible where the FILESYSTEM gives `ctime` coarse granularity: on
-    this box's `/tmp` (an ext3-style mount) a write plus `utime` inside one tick
-    leaves `ctime_ns` identical (delta 0 ns, measured), so a `cp -p` delivered
-    within that tick can be served from the pre-edit map until any other stat
-    field of any registered file moves. Closing it completely needs a content
-    digest, and that was MEASURED and rejected: blake2b over the fifteen files
-    (129 KB) costs 0.554 ms per pass against the stat pass's 0.135 ms — an order
-    of magnitude more than the ~0.5 ms the cache saves relative to a re-parse,
-    so the "fix" would cost most of the win. The trade is therefore explicit: on
-    a fine-grained-ctime filesystem the surface is fully covered; on a coarse one
-    it is covered for every writer except an archive extraction landing inside a
-    single tick. `tests/test_9558_record_write_cost.py` reds it if the
+    ⚠️ **The residual, measured rather than dismissed — and it applies HERE, on
+    the default filesystem.** A stat-preserving rewrite is still invisible inside
+    one inode-clock tick, because `ctime` granularity is COARSE on ordinary Linux
+    filesystems: measured on this box on **ext4** (`/dev/root`, both `/tmp` and
+    the repo worktree), a write plus `utime` microseconds apart leaves
+    `st_ctime_ns` IDENTICAL (delta 0 ns). So a `cp -p` landing inside a single
+    tick can be served from the pre-edit map until any other stat field of any
+    registered file moves. ⛔ Do not read this as "an exotic mount" — it is the
+    common case, which is why the test below advances the inode clock explicitly
+    instead of hoping a tick boundary falls between two calls.
+
+    Closing it completely needs a content digest, and that was MEASURED and
+    rejected: blake2b over the fifteen files (129 KB) costs 0.554 ms per pass
+    against the stat pass's 0.135 ms — several times more than the ~0.5 ms the
+    cache saves relative to a re-parse, so the "fix" would cost most of the win.
+    The trade is therefore explicit: covered for every writer except an archive
+    extraction landing inside one inode-clock tick. The test reds it if the
     fingerprint stops changing on an edit, an edit-of-an-edit, a same-size
-    rewrite, a same-size rewrite with the mtime RESTORED (skipped — with the
-    reason — where the box's ctime cannot move), or a removal.
+    rewrite, a same-size rewrite with the mtime RESTORED (it BURNS a tick first,
+    so the arm always runs), or a removal.
     """
     entries: list[tuple] = []
     for name in RECORD_MIGRATIONS:
