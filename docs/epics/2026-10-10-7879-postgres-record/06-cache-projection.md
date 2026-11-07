@@ -456,7 +456,12 @@ RECORD → CACHE restore re-materialised the prose on every rebuild and undid `#
 non-durably. ⚠️ `#10017`'s purge is NOT the lane that was undone (`#11325`): its single destructive
 statement deletes legacy episodic turn `:Point`s, never `:Source`/`:Event`, and names no `story_arc` — so
 this class's targeted repair is a graph-side `REMOVE n.story_arc` that no instrument ships, or the full
-restore's whole-graph wipe (⚠️ refused PRE-WIPE on a production SERVER graph name by `#2944`'s L2 guard). **The seam is the fix, and a post-restore sweep is not an alternative**: a purge pass would
+restore's whole-graph wipe on either ANCHOR (⚠️ refused PRE-WIPE on a production SERVER graph name by
+`#2944`'s L2 guard) — ⚠️ **except on a `:Point`, which has a non-destructive one**:
+`update_point(<id>, story_arc=None)` clears the property and keeps the node (measured; the `None` passes
+`_refuse_unpaired_narrative` and `SET n += $props` removes a `None`-valued key, journalled so a rebuild
+clears it rather than restoring it; on a `:Source` the same call is refused as server-managed and on an
+`:Event` it leaves the value in place). **The seam is the fix, and a post-restore sweep is not an alternative**: a purge pass would
 rent the RAM for the duration of the write and would have to run on every restore forever.
 
 Three consumers align on the same constant rather than each re-deciding it, and all three are pinned:
