@@ -376,8 +376,26 @@ def check_registration(repo: Path, doc: Path, text: str | None = None) -> list[s
     # exactly that. `docs/00_index.md` is a file of long summary rows and the
     # sibling maps are the kind that could carry these words first, so the regex
     # is applied to the ONE line that names this file.
-    row_line = next((line for line in body.splitlines() if doc.name in line), "")
-    declared = _INDEX_COUNTS.search(row_line)
+    # The ENTRY, not a mention: an index row ends with the document it registers
+    # (``… | `docs/architecture/X.md` |``), so the path must sit in the LAST cell.
+    # Two earlier versions failed here and both were caught by review, not by the
+    # suite: searching the whole file let ANY row's counts answer (#1), and taking
+    # the FIRST line naming the file let a "supersedes `X.md`" cross-reference
+    # answer (#2). `docs/00_index.md` rows already cross-reference other docs by
+    # bare filename, so a mention is one "see also" away from a false PASS.
+    entry = [
+        line for line in body.splitlines()
+        if line.rstrip().endswith(f"`{doc.name}` |")
+        or line.rstrip().endswith(f"`{DOC_REL}` |")
+    ]
+    if len(entry) != 1:
+        errors.append(
+            f"{INDEX_REL} has {len(entry)} row(s) ENDING with `{DOC_REL}` — the "
+            f"registration must be exactly one row whose last cell is the path "
+            f"(a mention elsewhere is not a registration, and two rows are ambiguous)"
+        )
+        return errors
+    declared = _INDEX_COUNTS.search(entry[0])
     if declared is None:
         errors.append(
             f"{INDEX_REL}'s entry for {doc.name} states no `**N fixed · N open · "

@@ -3,7 +3,7 @@
 The memory-substrate problem map (`docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`)
 answers *"is this still broken?"* for 26 named defects. The issue it re-cuts went
 stale for eight weeks — its body read as 26 problems waiting while the tree had
-fixed 21 — so the map is only worth having if something can tell when its answers
+fixed 20 — so the map is only worth having if something can tell when its answers
 age out. This file pins the guard that makes its machine-checkable half
 falsifiable.
 
@@ -239,7 +239,7 @@ def test_an_index_entry_whose_counts_disagree_is_drift(tmp_path):
     (repo / "docs").mkdir(parents=True)
     index = repo / pmc.INDEX_REL
     index.write_text(
-        "# index\n| x | `" + DOC.name + "` — **22 fixed · 4 open · 0 unknown** |\n",
+        "# index\n| the map | **22 fixed · 4 open · 0 unknown** | `" + DOC.name + "` |\n",
         encoding="utf-8",
     )
     errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
@@ -260,12 +260,56 @@ def test_a_decoy_index_ROW_cannot_satisfy_the_count_check(tmp_path):
     index = repo / pmc.INDEX_REL
     index.write_text(
         "# index\n"
-        "| decoy map | `some-other-map.md` — **21 fixed · 5 open · 0 unknown** |\n"
-        "| ours | `" + DOC.name + "` — **22 fixed · 4 open · 0 unknown** |\n",
+        "| decoy map | **20 fixed · 6 open · 0 unknown** | `some-other-map.md` |\n"
+        "| ours | **22 fixed · 4 open · 0 unknown** | `" + DOC.name + "` |\n",
         encoding="utf-8",
     )
     errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
     assert errors and "the two disagree" in errors[0], errors
+
+
+def test_an_earlier_MENTION_of_the_path_cannot_satisfy_the_count_check(tmp_path):
+    """Fails if a cross-reference to this document supplies the counts.
+
+    Reachable, and found by the THIRD review round on the version that had
+    already been fixed once for the same class: selecting the first line that
+    merely NAMES the file let a ``| supersedes `MEMORY-SUBSTRATE-PROBLEM-MAP.md`
+    — **20 fixed · 6 open · 0 unknown** |`` cross-reference answer for a row that
+    was stale. `docs/00_index.md` rows already cross-reference other docs by bare
+    filename, so this is one "see also" from a false PASS. The registration is the
+    row whose LAST cell is the path.
+    """
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    index = repo / pmc.INDEX_REL
+    index.write_text(
+        "# index\n"
+        "| another map | supersedes `" + DOC.name + "` — **20 fixed · 6 open · 0 unknown** |\n"
+        "| the map | **22 fixed · 4 open · 0 unknown** | `" + DOC.name + "` |\n",
+        encoding="utf-8",
+    )
+    errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
+    assert errors and "the two disagree" in errors[0], errors
+
+
+def test_two_rows_ending_with_the_path_are_reported_as_ambiguous(tmp_path):
+    """Fails when two index rows both END with the document's path.
+
+    Reachable: the index is `merge=union` and appended to from many lanes; a
+    duplicated registration row is the shape that produces this, and picking one
+    of the two would silently decide which counts are authoritative.
+    """
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    index = repo / pmc.INDEX_REL
+    index.write_text(
+        "# index\n"
+        "| a | **20 fixed · 6 open · 0 unknown** | `" + DOC.name + "` |\n"
+        "| b | **20 fixed · 6 open · 0 unknown** | `" + DOC.name + "` |\n",
+        encoding="utf-8",
+    )
+    errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
+    assert errors and "must be exactly one row" in errors[0], errors
 
 
 def test_an_index_entry_with_no_headline_counts_is_drift(tmp_path):
@@ -278,7 +322,7 @@ def test_an_index_entry_with_no_headline_counts_is_drift(tmp_path):
     repo = tmp_path / "repo"
     (repo / "docs").mkdir(parents=True)
     (repo / pmc.INDEX_REL).write_text(
-        "# index\n| x | `" + DOC.name + "` |\n", encoding="utf-8"
+        "# index\n| x | no counts here | `" + DOC.name + "` |\n", encoding="utf-8"
     )
     errors = pmc.check_registration(repo, DOC, DOC.read_text(encoding="utf-8"))
     assert errors and "states no" in errors[0], errors

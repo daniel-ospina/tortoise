@@ -3,12 +3,12 @@ title: "The memory-substrate problem map — re-cut, 26 entries, 4 patterns, 20 
 type: engineering
 domain: platform
 doc_status: live
-created: 2026-11-05
+created: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise, memory-substrate, issue 2820, issue 4917
 measured_at_commit: 23d227c53
-measured_at: 2026-11-05
+measured_at: 2026-11-06
 ---
 
 # The memory-substrate problem map — re-cut
@@ -51,7 +51,7 @@ both:
    itself. A test module is preferred, because a symbol can survive a fix being
    reverted out from under it.
 
-**Issue closure is not evidence, and this map has three rows that prove it:**
+**Issue closure is not evidence, and this map has four rows that prove it:**
 
 | What the tracker said | What the tree said | Row |
 |---|---|---|
@@ -87,7 +87,7 @@ a fixed defect, or an open one an unfixed one.
 | UNKNOWN | 0 |
 | **Total tracked** | **26** |
 
-| #2820 as filed (2026-09-10) | Now (2026-11-05) |
+| #2820 as filed (2026-09-10) | Now (2026-11-06) |
 |---|---|
 | WS-A write-path integrity — "a decision + three mechanical bugs" | **5 of 5 rows fixed**; the write contract design itself is in `docs/plans/2026-09-10-write-contract-five-doors.md` |
 | WS-B ontology substrate — "~2 design decisions + mostly mechanical bugs" | **7 of 8 rows fixed** (#2787 OPEN: the kind-bucket rule is not implemented); the property-declaration design is in `docs/plans/2026-09-10-ws-b-pack-property-declaration.md` |
@@ -189,7 +189,7 @@ was never decided, so both are half-built.*
 | #2782 | money has no representation — `amount`+`currency` on entities, and same-named money items must not merge across portfolio companies | OPEN | `b408d8588` | `tests/test_money_value_2782.py` |
 | #2817 | no numeric/locale normalization anywhere — PT-BR/EN amounts cannot be canonicalized (8 failure modes) | VERIFIED-FIXED | `79c13050c`, `29cc564e1` | `tests/test_value_normalizer_2817.py` |
 | #2730 | entity attachment & disambiguation — binding facts to the right Subject/Object (name collisions, aliases, placeholders, recurring people) | OPEN | `6a73ea7ea` | `tests/test_entity_attachment_brief_claims.py` |
-| #2684 | verbatim value-spans on value-bearing points — a claim carries its exact value **and** the source span, and assembly surfaces it | OPEN | `` | `tests/eval/write_path/test_value_span_census_2684.py` |
+| #2684 | verbatim value-spans on value-bearing points — a claim carries its exact value **and** the source span, and assembly surfaces it | OPEN | `2312845b6`, `fda19cf93` | `tests/eval/write_path/test_value_span_census_2684.py` |
 
 **#2782 — OPEN, and the row states which half.** The *representation* landed: a
 flat, currency-safe money value on entities (#8641) and on the Point lane
@@ -328,13 +328,15 @@ rounding:**
 
 - The map's content is **#2820**'s (2026-09-10); its four patterns, six
   workstreams and 26 entries are unchanged here.
-- The statuses, anchors and pins were re-measured against `23d227c53` (2026-11-05)
+- The statuses, anchors and pins were re-measured against `23d227c53` (2026-11-06)
   by reading the tree, the history, and the tracker — never the issue's own body.
 - The three WS design documents this re-cut assumes are already committed:
   `docs/plans/2026-09-10-write-contract-five-doors.md`,
   `docs/plans/2026-09-10-ws-b-pack-property-declaration.md`,
   `docs/plans/2026-09-10-ws-c-numeric-normalization.md`.
-- Tracker reads: `gh issue view <n>` for each of the 26 on 2026-11-05. Two were
-  closed NOT_PLANNED (**#2787**, **#2748**) and one has **never been closed at
-  all** (**#2782**, open since 2026-09-10 with half its work shipped) — the three
-  cases §1 exists to keep honest.
+- Tracker reads: `gh issue view <n>` for each of the 26 on 2026-11-06. Four are
+  not what their state suggests: two closed NOT_PLANNED (**#2787** with one
+  indicator landed, **#2748** fixed in effect), one **never closed at all**
+  (**#2782**, open since 2026-09-10 with half its work shipped), and one closed
+  COMPLETED with the mechanism unbuilt (**#2730**) — the four cases §1 exists to
+  keep honest.
