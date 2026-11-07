@@ -1,3 +1,14 @@
+---
+title: "Cache egress evidence — #10976: the measured fall of a bounded, record-gated sweep"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-11-05
+subjects.team: epistemic-team
+aboutSubjects: Tortoise memory graph cache
+aboutObjects: "#10976, epic #7879, tortoise/cache_evictor.py, tortoise/cache_eviction.py, tools/cache_evict.py"
+---
+
 # #10976 — cache EGRESS: the measurement
 
 The issue's mandate is *"code that bounds the cache + a red-first test + the measurement
