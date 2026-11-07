@@ -938,7 +938,10 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         assert (f"In the primary run {ops_legacy} of {lg['added_by_s4']} legacy gaps "
                 f"and {ops_delta} of {dl['added_by_s4']} delta gaps are operators"
                 ) in flat_doc, (ops_legacy, ops_delta)
-        assert gaps is not None
+        # both arms' operator gaps, counted independently of the flattening
+        # above — a real pin; `assert gaps is not None` could never fail, a list
+        # comprehension is never None (#11385 review P3).
+        assert gaps and len(gaps) == ops_legacy + ops_delta
         # the delta arm's honest limitation, not a hidden one
         assert sum(a["delta"].get("s4_delta_empty") is False
                    for a in art["arms"]) == 7
@@ -1003,3 +1006,12 @@ def test_a_partial_run_is_flagged_not_silently_published():
     assert mixed["partial"] is True
     assert mixed["sessions_failed"] == 1
     assert mixed["sessions_measured"] == 1
+    # ⛔ THE case the old `0 < len(usable) < len(rows)` got wrong: a run that
+    # measured NOTHING published `partial: False`, i.e. the one field that exists
+    # to make incompleteness visible read "complete" exactly when it was empty.
+    # Both populations above read identically under that expression, so without
+    # this case a revert stays green (#11385 review P3).
+    none = tool.compare([_pair("a", 1000, None, delta={"error": "Boom"})])
+    assert none["partial"] is True
+    assert none["sessions_measured"] == 0
+    assert none["sessions_failed"] == 1

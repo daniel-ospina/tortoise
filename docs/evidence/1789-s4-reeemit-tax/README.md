@@ -230,9 +230,10 @@ artifact.
 
   So the aggregate's direction is **not** established, and it does not reduce to
   one sign: the measured −93.8 % is the contract's effect under ONE fixed input.
-  The correction channel can only *shrink* the real saving from here — it is
-  measured at its production maximum and already contributes nothing (0 emitted),
-  so production cannot add to it. The gap channel can go either way: if the input
+  The correction channel cannot *shrink* the real saving from here — it is
+  measured at its production maximum (all 266 items offered as existing) and
+  already contributes nothing (0 emitted), so production has no room to add to
+  it. The gap channel can go either way: if the input
   is what suppressed gap emission, production leaves more to find, the delta arm
   emits more, and the saving is **smaller**; if the contract itself suppresses
   gap-finding (a defect, not a win), production behaves like this run and the
