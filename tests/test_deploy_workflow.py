@@ -5381,11 +5381,23 @@ _FORKABLE_IN_LEDGER_BLOCK = (
 
 
 def _ledger_block(run: str) -> str:
-    """The run region between the ledger's own marker and the flyctl call."""
-    start = run.index("# ⛔ #11122 — THE MITIGATION LEDGER")
-    end = run.index('flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq')
-    assert start < end, "marker drift: the ledger block moved after the flyctl call"
-    return run[start:end]
+    """The ledger machinery, both regions, in the order the deploy runs them.
+
+    Two regions by design: an ENVIRONMENT block before the payload is composed (it
+    blanks each ledgered name so derived values observe the absence) and a PAYLOAD
+    block after it (the belt that removes the name from ARGS when a default branch
+    re-adds it). Joining them is the whole mechanism; either alone is half of it.
+    """
+    env_start = run.index("# ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE ENVIRONMENT")
+    env_end = run.index("# ⛔ #11122 — END OF THE ENVIRONMENT BLOCK")
+    tail_start = run.index("# ⛔ #11122 — THE MITIGATION LEDGER, APPLIED TO THE PAYLOAD")
+    tail_end = run.index('flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq')
+    assert env_start < env_end < tail_start < tail_end, (
+        "marker drift: the ledger regions moved, or the environment block now runs "
+        "after the payload composition (which would restore the derived-value "
+        "inconsistency the ordering exists to prevent)"
+    )
+    return run[env_start:env_end] + run[tail_start:tail_end]
 
 
 def test_the_sync_step_honours_the_mitigation_ledger():

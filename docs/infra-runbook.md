@@ -2766,14 +2766,29 @@ undone.
 - **Declared inventory:** `.github/scripts/fly-secret-mitigations.txt`
   (`<NAME> owner=<owner> expires=<YYYY-MM-DD> reason=<why>`) — its header is the
   authoritative grammar; this is orientation.
-- **Enforced at SYNC time, in the workflow.** The `Set all app secrets on Fly.io`
-  step filters ledger names out of the `flyctl secrets set` argv. **This is the
-  load-bearing half**, and it is deliberately *not* the gate: an exception that
-  only quiets a gate is a **false exception** — the measured Argo CD trap, where
-  `spec.ignoreDifferences` suppresses the difference during comparison while the
-  sync still applies the desired value, so `RespectIgnoreDifferences=true` is
-  required for the exception to exist at all. Here the write is `flyctl secrets
+- **Enforced at SYNC time, in the workflow — in the ENVIRONMENT, before the
+  payload is composed.** The `Set all app secrets on Fly.io` step reads the ledger
+  at the TOP of its `run:` body, blanks every ledgered name in the environment, and
+  then removes any survivor from the `flyctl secrets set` argv at the tail.
+  **This is the load-bearing half**, and it is deliberately *not* the gate: an
+  exception that only quiets a gate is a **false exception** — the measured Argo CD
+  trap, where `spec.ignoreDifferences` suppresses the difference during comparison
+  while the sync still applies the desired value, so `RespectIgnoreDifferences=true`
+  is required for the exception to exist at all. Here the write is `flyctl secrets
   set`, so that is where the filter lives.
+- **The ordering is part of the contract, not style.** A tail-only filter is not
+  enough: the payload COMPOSES values from the environment — `BACKUP_SWEEP_ENABLED`
+  only when a conjunction of nine secrets is present, and the versioned LLM-model
+  default chosen from whether `OPENROUTER_API_KEY` is set — so filtering the finished
+  argv left those computed from the unfiltered values. A ledger entry for
+  `TORTOISE_BACKUP_KEY` then shipped `BACKUP_SWEEP_ENABLED=true` in the same argv
+  that omitted the key, and the app booted into a `ConfigError` asserting an
+  invariant that payload had just broken (the sweep and the staleness watcher start
+  disabled, with only a warning). Blanking the name in the environment first makes
+  every downstream `[ -n ]`, conjunction and default observe the deliberate absence.
+  The tail pass stays as the belt — a ledgered `TORTOISE_SESSION_LLM_MODEL` is
+  blanked up top and then RE-APPEARS from the unconditional default branch, so only
+  the tail removes it.
 - **The gate's half is the reverse check**, so the two cannot rot apart: a ledger
   entry the payload still carries is `LEDGER NOT HONOURED` (dropping the filter
   would otherwise re-arm every mitigation while the ledger kept reading as a
@@ -2831,7 +2846,9 @@ undone.
   — so do it deliberately, in a window. Nothing in this repo reads or clears pending
   staged state.
 - **`reason` is a review note, never the value.** The ledger is tracked and public,
-  and the gate prints every entry's `reason` on each deploy.
+  and the gate prints every entry's `reason` on a CLEAN deploy (an exit-1 or exit-2
+  run reports the violations instead, and quotes the entry's `reason` only in
+  `MITIGATION LAPSED`).
 - **A lapsed entry KEEPS suppressing on purpose.** Silently re-arming on a date
   is the same unannounced overwrite with extra steps; the deploy goes RED and the
   remedy is one line either way — re-affirm with a new `expires`, or delete the
