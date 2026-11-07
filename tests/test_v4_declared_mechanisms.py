@@ -4981,6 +4981,39 @@ def test_the_cross_module_reach_arms_are_each_load_bearing(tmp_path) -> None:
     for stray in ("pkg5/__init__.py", "pkg5/user.py", "pkg5"):
         target = tmp_path / stray
         target.rmdir() if target.is_dir() else target.unlink()
+    # The STAR twin of that shape, PACKAGE-ABSOLUTE on BOTH hops: the star re-export
+    # names its source absolutely (`from pkg6.sub.carrier import *`, which only the
+    # suffix retry resolves) and the consumer renames through the ROOT package
+    # (`from pkg6 import POINT_UNQ as Q`, which only the registered root id resolves).
+    # Both hops have to work for the alias to reach the use, and each one is
+    # load-bearing: measured RED when the star branch is removed, when the suffix
+    # retry is removed, and when the root package has no id.
+    (tmp_path / "pkg6" / "sub").mkdir(parents=True)
+    (tmp_path / "pkg6" / "__init__.py").write_text(
+        "from pkg6.sub.carrier import *\n", encoding="utf-8"
+    )
+    (tmp_path / "pkg6" / "sub" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg6" / "sub" / "carrier.py").write_text(
+        'POINT_UNQ = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg6" / "user.py").write_text(
+        'from pkg6 import POINT_UNQ as Q\ng.query(Q + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path / "pkg6")
+    assert assembled, (
+        "a PACKAGE-ABSOLUTE star re-export renamed through the ROOT package was not "
+        f"refused — both hops must resolve: {assembled}"
+    )
+    for stray in (
+        "pkg6/user.py",
+        "pkg6/sub/carrier.py",
+        "pkg6/sub/__init__.py",
+        "pkg6/sub",
+        "pkg6/__init__.py",
+        "pkg6",
+    ):
+        target = tmp_path / stray
+        target.rmdir() if target.is_dir() else target.unlink()
     # A RENAME CHAIN ORDERED AGAINST THE FILENAME SORT: propagation runs files in
     # sorted order, so a chain that runs backwards needs more than one pass.
     (tmp_path / "zz_a.py").write_text(
