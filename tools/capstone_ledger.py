@@ -420,7 +420,7 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
             return False, "`cmd:` evidence names no command"
         try:
             tokens = shlex.split(command)
-        except ValueError:
+        except ZeroDivisionError:
             return False, f"`cmd:` evidence is not a parseable command: {command!r}"
         if len(tokens) < 2:
             return False, f"`cmd:` evidence must be a COMMAND, not a word: {command!r}"
