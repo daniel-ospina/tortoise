@@ -393,12 +393,14 @@ substrate preamble on first use, seeds a tenant, and asserts every write is
 
 The mechanism half is pinned in `tests/test_9558_record_write_cost.py` (28
 tests: 7 for the schema cache, 16 for the pool, and 5 for the wrapper/park/
-read-door contracts the review cycles added). 24 of the 28 carry an
-explicit `FALSIFIER:` block naming the mutation that reds them; the four that do
-not (`test_the_refused_props_map_also_reacts_to_an_edit`,
+read-door contracts the review cycles added). 24 of the 28 carry a recorded
+mutation: **23** under a literal `FALSIFIER:` block and one
+(`test_a_parked_transaction_is_reset_at_reuse_not_at_release`) stated as
+`FALSIFIER, both halves:`. The four with no block at all
+(`test_the_refused_props_map_also_reacts_to_an_edit`,
 `test_a_removed_migration_is_seen_and_restores_the_error`,
 `test_two_different_trees_never_share_a_parse`,
-`test_the_returned_map_is_the_callers_own`) simply have no block written for
+`test_the_returned_map_is_the_callers_own`) simply have none written for
 them. ⛔ They are not mutation-proof by nature — dropping `str(base)` from
 `_schema_entry`'s key reds the two-trees pin, and sharing the refused-props parse
 across fingerprints reds the refused-props pin — so the honest statement is "no
@@ -458,16 +460,22 @@ difference is visible rather than implied.
 
 ```console
 $ python -m pytest tests/test_9558_record_write_cost.py -q
-20 passed
+28 passed          # [postgres] extra installed
 
-$ python -m pytest tests/test_9078_record_written_by_production_path.py \
-    tests/test_9548_record_arming_health.py tests/test_9558_record_write_cost.py \
-    tests/test_record_writer_seam.py tests/test_record_projection.py -q
-332 passed
+$ python -m pytest tests/test_9558_record_write_cost.py -q
+15 passed, 13 skipped   # the same file WITHOUT the extra
 ```
+
+Both readings are of ONE tree — the commit below that added the wrapper's cursor
+fence — differing only in whether the `[postgres]` extra is installed; every skip
+is a `_fake_driver` `importorskip` arm, which is why `test-record-postgres`
+installs the extra and fails on any skip. The wider record-suite reading is
+`docs/evidence/9558-record-write-cost/runs/`, NOT this console block — those
+numbers move with which DB legs a given box can arm, and pinning one of them
+here is what made this transcript stale in the first place.
 
 `TEST_RECORD_DB_URI` armed (the throwaway container above) **and `psycopg2`
 installed (the `[postgres]` extra)**, so the record's Postgres legs ran rather
-than skipping. ⛔ Without the extra the SAME tree collects 332 and reports
-**318 passed / 14 skipped**: the driver-gated legs skip, which is exactly why the
-`test-record-postgres` job installs the extra and fails on any skip.
+than skipping. ⛔ Without the extra the SAME tree reports driver-gated skips —
+the ones above plus the ones in the sibling record suites — which is exactly why
+the `test-record-postgres` job installs the extra and fails on any skip.

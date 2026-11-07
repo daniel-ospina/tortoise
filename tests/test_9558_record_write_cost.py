@@ -35,7 +35,7 @@ fetched and therefore before the answer is returned (#9558 review cycle 3, P1).
 NO DATABASE. Every connection here is a fake DB-API object (the same shape
 `tests/test_record_writer_seam.py` uses, imported rather than re-invented), and
 the transaction-status constants are patched so this file runs on a lane with no
-`[postgres]` extra (⚠️ SEVEN of its twenty-one tests then SKIP — the pool pins need the
+`[postgres]` extra (⚠️ THIRTEEN of its twenty-eight tests then SKIP — the pool pins need the
 driver — which is why it is also armed into `test-record-postgres`) — `test_record_writer_seam.py`'s own
 `test_importing_the_seam_pulls_in_no_database_driver` is what keeps the seam
 importable there, and this file must not undo it by importing the driver itself.
@@ -105,6 +105,39 @@ class FakeStatusConnection(FakeConnection):
         self.info = _Info(status)
 
 
+class ScriptedCursor(FakeCursor):
+    """A cursor that honours the DRIVER's post-`close()` contract.
+
+    psycopg2: *"The cursor will be unusable from this point forward; an
+    InterfaceError will be raised if any operation is attempted with the
+    cursor"* (<https://www.psycopg.org/docs/cursor.html>). Before #9558 it was
+    `connection.close()` that did this to every cursor the connection had
+    issued; parking a handle no longer closes it, so the wrapper has to close
+    them itself or a pre-release cursor stays live on a reused connection.
+
+    `close()` is idempotent, exactly as the driver's is, so the ordinary
+    `with conn.cursor() as cur:` shape costs nothing extra on release.
+    """
+
+    def __init__(self, conn: FakeConnection) -> None:
+        super().__init__(conn)
+        self.closed = False
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.closed = True
+        self.close_calls += 1
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        if self.closed:
+            try:
+                from psycopg2 import InterfaceError  # type: ignore[import-not-found]
+            except Exception:  # pragma: no cover - driver absent
+                raise RuntimeError("cursor already closed") from None
+            raise InterfaceError("cursor already closed")
+        super().execute(sql, params)
+
+
 class ScriptedConnection(FakeStatusConnection):
     """A fake whose cursor also accepts DB-API arguments and can be closed.
 
@@ -118,11 +151,12 @@ class ScriptedConnection(FakeStatusConnection):
     def __init__(self, status: int = IDLE) -> None:
         super().__init__(status)
         self.cursor_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self.cursors: list[ScriptedCursor] = []
 
     def cursor(self, *args: Any, **kwargs: Any) -> Any:
         self.cursor_calls.append((args, kwargs))
-        cur = FakeCursor(self)
-        cur.close = lambda: None       # type: ignore[method-assign]
+        cur = ScriptedCursor(self)
+        self.cursors.append(cur)
         return cur
 
     def set_session(self, **kwargs: Any) -> None:
@@ -900,12 +934,23 @@ def test_a_returned_handle_refuses_further_use():
     (`set_session(autocommit=True)`) — a method goes through `__getattr__`, so
     fencing `__setattr__` alone left that door open (#9558 review at
     `d51c7897d6`, P2, reproduced).
+    A SIXTH arm covers the FENCE'S THIRD DOOR: a cursor obtained BEFORE the
+    release. It holds no reference to `_returned`, so fencing `cursor()` alone
+    leaves it fully usable on a handle the pool may have lent to another thread
+    (#9558 review at `b8371c2350`, P2).
     """
     driver = pytest.importorskip("psycopg2", reason="the fence raises the "
                                                  "driver's own InterfaceError")
     raw = ScriptedConnection()
     handle = rw._pooled_connection(raw, _DSN)
+    early = handle.cursor()          # obtained BEFORE the release (SIXTH arm)
     handle.close()
+    assert early.closed is True, (
+        "a cursor issued before `close()` survived the release OPEN — it can "
+        "still issue statements on a handle the pool may have lent to another "
+        "thread, which is the silent cross-talk this fence exists to prevent")
+    with pytest.raises(driver.InterfaceError):
+        early.execute("SELECT 1")
     for call in (lambda: handle.commit(),
                  lambda: handle.rollback(),
                  lambda: handle.cursor()):

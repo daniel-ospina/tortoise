@@ -1217,6 +1217,18 @@ class _PooledConnection:
     ``psycopg2.extensions.connection`` is the one thing it does NOT satisfy, and
     nothing in this tree does that.
 
+    ⛔ THE FENCE HAS A THIRD DOOR, and it is the one no flag on THIS object can
+    close: a cursor obtained BEFORE the release. ``cursor()`` returns the
+    driver's own cursor, which holds no reference to ``_returned``, so fencing
+    ``cursor``/``commit``/``rollback`` and both attribute doors left it fully
+    usable on a handle the pool may already have lent to another thread. Before
+    this wrapper existed it was ``connection.close()`` that invalidated such a
+    cursor — psycopg2 raises ``InterfaceError`` from any cursor operation once
+    its connection is closed (<https://www.psycopg.org/docs/cursor.html>) — and
+    parking a handle no longer closes it. So :meth:`close` closes every cursor
+    it issued before parking, which restores exactly the pre-change loud error
+    (#9558 review at `b8371c2350`, P2, reproduced).
+
     ⚠️ The transaction is the caller's, exactly as before: ``commit()`` forwards.
     What the pool adds is a reset of a handle that is not IDLE, charged to the
     next BORROW rather than to release — so an aborted projection still cannot be
@@ -1230,6 +1242,9 @@ class _PooledConnection:
         object.__setattr__(self, "_raw", raw)
         object.__setattr__(self, "_key", key)
         object.__setattr__(self, "_returned", False)
+        # Cursors this borrow ISSUED and has not been told are closed. Bounded
+        # by one borrow's worth: the wrapper is built per borrow, never reused.
+        object.__setattr__(self, "_issued_cursors", [])
 
     # — the DB-API surface the record path uses —
     def _live(self) -> Any:
@@ -1254,7 +1269,9 @@ class _PooledConnection:
         return self._raw
 
     def cursor(self, *args: Any, **kwargs: Any) -> Any:
-        return self._live().cursor(*args, **kwargs)
+        cur = self._live().cursor(*args, **kwargs)
+        object.__getattribute__(self, "_issued_cursors").append(cur)
+        return cur
 
     def commit(self) -> None:
         self._live().commit()
@@ -1263,11 +1280,37 @@ class _PooledConnection:
         self._live().rollback()
 
     def close(self) -> None:
-        """Return the handle to the pool. Idempotent, and never raises."""
+        """Return the handle to the pool. Idempotent, and never raises.
+
+        It first invalidates every cursor this borrow issued — see the class
+        docstring's "THIRD DOOR" note. A cursor already closed by its caller is
+        closed again here, which psycopg2 makes a no-op (``cursor.close()`` does
+        not raise for an already-closed cursor), so the common
+        ``with conn.cursor() as cur:`` shape costs nothing.
+        """
         if self._returned:
             return
         object.__setattr__(self, "_returned", True)
+        self._close_issued_cursors()
         _park_connection(self._key, self._raw)
+
+    def _close_issued_cursors(self) -> None:
+        """Invalidate the cursors this borrow handed out. **Never raises.**
+
+        The wrapper's whole contract with its callers is "close() returns the
+        handle and is safe on every path", so a driver failure while closing a
+        cursor (a dead server, a half-closed socket) must not escape and mask the
+        write failure the caller is already reporting. A cursor with no
+        ``close`` at all — the shape some fakes have — is simply forgotten.
+        """
+        cursors = object.__getattribute__(self, "_issued_cursors")
+        while cursors:
+            cur = cursors.pop()
+            close = getattr(cur, "close", None)
+            if close is None:
+                continue
+            with contextlib.suppress(Exception):
+                close()
 
     @property
     def closed(self) -> Any:
