@@ -5934,49 +5934,29 @@ def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
 
 
 def test_the_INDENT_pops_DECLARED_strict_false_PASS_is_PINNED():
-    """Round-59 review, P2 — a DECLARED residual that had NO pin, so it could move silently.
+    """Round-59 review, P2 — a DECLARED residual that had no pin, so it could move silently.
 
-    The indent-pop note in `strip_code` (the `⛔ THE RECORD IS STILL GATED ON `prev_prose` AT BOTH
-    POPS` block) declares this family as STILL a false PASS at this head — but no test built the
-    body, so the declaration was prose only, and the file's own convention (`⚠️ DECLARED RESIDUAL`,
-    and the `test_the_TYPE_7_neighbour…` above) is that a known gap is PINNED so it cannot move
-    silently:
+    The indent-pop note in `strip_code` (the `⛔ THE RECORD IS STILL GATED ON prev_prose AT BOTH
+    POPS` block) declares this family as STILL a false PASS at this head. No test built the body, so
+    the declaration was prose only; the file's own convention (`⚠️ DECLARED RESIDUAL`, and the
+    `test_the_TYPE_7_neighbour…` above) is that a known gap is PINNED so it cannot move silently.
 
         `- 2.` + `    - x` + `x` + `2.     Closes #100`
             renderer `<pre><code>` -> CODE, so GitHub does NOT fire the keyword
-            `origin/main` `fc3f0e687`: `[]` lenient / `[100]` in BOTH `strict` arms
-            THIS HEAD: IDENTICAL (`[False, False, True, True]`) — `claims()` `[100]`
+            `origin/main` `fc3f0e687` AND this head: `[]` lenient / `[100]` in BOTH `strict` arms
+            `issue_process_lint.claims()` -> `closing: [100]` — the arm-1 false PASS
 
     ⛔ THIS IS A SHARED DECLARED TRADE WITH `main`, NOT A REGRESSION FROM IT, and pinning both sides'
     SHA is the point. `strict` is the arm `issue_process_lint` reads a carrier body through, so
-    `[100]` there is a CLASS-A false PASS in that gate — the SAME answer `main` gives.
-    `tools/closes_landing.py` ONCE DECLARED a mechanism and a cost for this family, and BOTH are
-    retracted: the note now marks the mechanism FALSIFIED (see the next paragraph) and the
-    `+116 / +112` two-term grid it cited is no longer in the tree. The `~110 lost closes` that DOES
-    survive in that function belongs to a DIFFERENT question — the price of un-gating the dedent
-    pop — and must not be read as this body's fix cost. **#11358** owns this body and is OPEN. This
-    pin does not decide that fix.
+    `[100]` there is a CLASS-A false PASS — the same answer `main` gives. **#11358** owns and
+    explains it (`own_code = own_gap > 4 and not ordered_continuation and not _html_here`, with
+    `ordered_continuation` True here). The round-55 lazy gate (**#11369**) does NOT cover it.
 
-    ⛔ BUT THE MECHANISM THAT SENTENCE PROPOSES IS FALSIFIED FOR THIS BODY, and recording that is the
-    most useful thing this pin can do. "The record would have to survive the one-line clearing at the
-    top of the loop" does not move this body: disabling that clearing leaves it at `[F, F, T, T]`
-    (mutation M3 below), and **#11358** independently reports that dropping the
-    `dropped_paragraph_item = _popped_by_indent` assignment changes NONE of the three arms on it.
-    #11358 gives the measured root instead — `own_code = own_gap > 4 and not ordered_continuation
-    and not _html_here`, where `ordered_continuation` is True here, so the wide-gap rule never
-    applies. The round-55 lazy gate (**#11369**) is a DIFFERENT issue and does not cover this body.
-
-    ⚠️ MEASURED WHILE WRITING THIS PIN, RECORDED BECAUSE IT IS WHAT THE #11358 FIXER NEEDS: this body
-    is NOT on the path that the declarations' own candidate terms govern. Six mutations were run
-    against the module and EVERY ONE left this answer at `[F, F, T, T]` — un-gating the indent pop's
-    `prev_prose` (declared INERT), narrowing the round-55 gate to `if lazy_marker:`, disabling the
-    top-of-loop clearing, `prev_para_depth` → `prev_quote_depth`, dropping the indent pop's record
-    assignment, and removing the `not _html_opened_here` exemption. So this is a REGRESSION LOCK on a
-    measured answer, NOT a detector for those fixes: a green here is not evidence that a candidate
-    term works. The answer IS body-sensitive (dropping the `x` line blanks all four arms; dropping
-    `    - x` credits all four), and that is what keeps the assertion about the computed answer
-    rather than about a constant. `keyword_types` keeps the fixture honest — if the body drifts out
-    of the rendered CODE shape, this reddens here instead of pinning a mutation.
+    The expectations below are the MEASURED ANSWER, and most are the wrong one: this is a
+    DECLARATION pinning a known gap, not a correctness assertion. It is a REGRESSION LOCK — a green
+    here does NOT mean a candidate fix works. The mutation measurements, including the one lever
+    that DOES move this body and the lost-close price it carries, are recorded on #11358 rather
+    than restated here, so a fixer reads them once, at the issue that owns the fix.
     """
     cl = _load_module()
     md = MarkdownIt("commonmark")

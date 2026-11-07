@@ -1976,14 +1976,17 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 # ⚠️ GATED ON `prev_prose`, AND THE GATE IS LOAD-BEARING HERE (measured: un-gating it
                 # changes 93 of 60,000 fuzz bodies, +98 lenient / +39 strict lost closes). The record
                 # only says anything while a paragraph is open above this line, which is what the
-                # gate states. ⛔ THE RESIDUAL THIS POP LEAVES (`- 2.` + `    - x` + `x` + wide-gap
-                # marker) IS NOT FIXED BY UN-GATING IT — nor by letting the record survive the
-                # one-line clearing at the top of the loop, which was claimed here earlier and is
-                # FALSIFIED for that body: both directions leave it at `[F, F, T, T]` (measured),
-                # and #11358 — which owns the residual and whose repro is that exact body — reports
-                # the same for dropping this assignment. Its measured root is `own_code`'s
-                # `not ordered_continuation` term, not the record. It is declared open rather than
-                # paid for with ~110 lost closes.
+                # gate states.
+                # ⛔ THIS GATE IS ALSO THE ONE LEVER THAT FIXES THE `- 2.` RESIDUAL, AND THE COST ABOVE
+                # IS ITS COST. Un-gating this pop MEASURED takes that body from `[F, F, T, T]` to
+                # `[F, F, F, F]`, and `issue_process_lint.claims()` from `[100]` to `[]` — the arm-1
+                # false PASS is closed at the price of the +98 lenient / +39 strict lost closes
+                # quoted above. So the residual is DECLARED OPEN AS A TRADE, not blocked for want of
+                # a mechanism: #11358 owns it, and its fixer must evaluate that trade rather than
+                # assume the record is inert. (What IS inert is the INDENT pop's gate — 0 of
+                # 60,000. And dropping THIS pop's `dropped_paragraph_item` assignment moves the body
+                # the WRONG way — to `[T, T, T, T]`, a false PASS in all four arms. Removing the
+                # INDENT pop's assignment changes none of the arms, per #11358.)
                 if prev_prose and prev_container is _popped and _popped.real:
                     dropped_paragraph_item = _popped
             # An item that was empty on its marker line gains CONTENT from the first line that stays
@@ -2590,12 +2593,17 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 #         PROPOSE — "the record would have to survive the one-line clearing at the
                 #         top of the loop" — is FALSIFIED for this body: disabling that clearing
                 #         leaves it at `[F, F, T, T]` (measured), and #11358 reports the same for
-                #         dropping the record assignment. Do not re-derive from that sentence.
+                #         dropping THIS pop's record assignment. Do not re-derive from that
+                #         sentence. ⛔ BUT ONE LEVER DOES WORK, AND IT IS NOT IN THIS POP: un-gating
+                #         the DEDENT pop's `prev_prose` gate takes this body to `[F, F, F, F]`
+                #         (`claims()` `[]`) — measured — at the +98 lenient / +39 strict lost-close
+                #         price its own note quotes. So #11358 is a TRADE to be evaluated, not a
+                #         mechanism still to be discovered.
                 #         PINNED at `tests/test_closes_landing.py::test_the_INDENT_pops_DECLARED_
-                #         strict_false_PASS_is_PINNED`, so it cannot move silently. That pin also
-                #         records the measurement that NONE of the candidate terms above moves this
-                #         body (six mutations, all left `[F, F, T, T]`) — the fixer of #11358 should
-                #         re-derive rather than assume a green there.
+                #         strict_false_PASS_is_PINNED`, so it cannot move silently. The mutation
+                #         table measured against this body is recorded on **#11358** — read it
+                #         there, once, at the issue that owns the fix — and do NOT read a green on
+                #         that pin as evidence that a candidate term works.
                 # ⚠️ BOTH TERMS ARE GATED ON `prev_prose`, MEASURED: un-gating this one changes 0 of
                 # 60,000 fuzz bodies (it is unobservable — the record only matters when a paragraph
                 # was open above, which is what the gate says), and un-gating the DEDENT pop at the
