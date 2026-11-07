@@ -210,6 +210,18 @@ _MEASUREMENT_RUN_KEYS = (
 #: the construction #10601 review round 2 closed. A hand-listed pin cannot see a key
 #: nobody hand-listed; this list is the other half of that pin.
 #:
+#: ⛔ ``door`` IS ``arm``'s SIBLING, not a measurement (#11298 merge, #11331). ``arm``
+#: was already parked here because it is the arm's ATTESTATION — the seam values
+#: ``measured_arm()`` forced and then read back — and ``door`` is that same block for
+#: the lane pins: ``door_record()`` carries ``measured``/``lane``/``lane_env``/
+#: ``pinned_off``/``source``, i.e. WHICH door the run took, not a produced number. Its
+#: one counted cell, ``door.captures`` (``door_witness()``'s ``entered``/``bypassed``),
+#: is a ROUTING witness — the same shape ``steps_observed`` carries above — and it
+#: gates a run through ``require_door_entered()`` rather than scoring a criterion.
+#: It is therefore declared here, the fail-CLOSED direction for V12: nothing in
+#: ``door`` rescues an otherwise-emptied record from the CLOSED-blocker refusal.
+#: Parking a REAL measurement key here is still the residual this list states below.
+#:
 #: ⛔ RESIDUAL, stated so no reader treats this pin as complete: membership in one list or
 #: the other is the ONLY question the drift arm asks, so a REAL measurement key PARKED in
 #: this list silences it — measured, `"e6_receipt"` added to the emitter AND declared here
@@ -226,6 +238,9 @@ _NON_MEASUREMENT_RUN_KEYS = (
     "probe",
     "graph",
     "arm",
+    # #11298 (merged at #11331): the door block is the arm block's sibling — the
+    # lane pins' read-back, not a scored number. See this list's header.
+    "door",
     "steps_required",
     "steps_conditional",
     "steps_unobserved",
