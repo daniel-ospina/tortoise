@@ -74,11 +74,29 @@ assert that a refused/errored pass issued none.
 """
 from __future__ import annotations
 
+import sys
+
+# The #5128 interpreter guard MUST precede every other import: a module-level
+# 3.12-only import raises ImportError on an older interpreter BEFORE a later
+# guard could run, and the refusal then looks like a broken tool rather than a
+# floor. Print-then-`SystemExit(int)` is the shape the #5128 census's detector
+# accepts (`tests/test_entry_point_python_guard.py`), and exit 1 is this tool's
+# usage code. It must NOT be 2/3/4: those are this verb's PLAN / REFUSED /
+# UNBOUNDED codes, and a scheduler acting on them would read an interpreter
+# refusal as "a sweep may have deleted nodes". Mirrors `tools/substrate_map_check.py`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/cache_evict.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/cache_evict.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
 import argparse
 import contextlib
 import importlib
 import json
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
