@@ -20,7 +20,7 @@ leaves ``tests/test_evidence_assembly.py`` (30 passed) and
 the eval lane silently measures OFF-vs-OFF: ``evidence_assembly_stats`` is still
 computed (``applied: True``, ``collapsed_duplicates: N``) on the outcome the seam
 RETURNS — the runner's per-outcome whitelist (the ``outcome = {`` dict in the
-run loop) and its Layer-1 projection (the ``"outcomes"`` key list in
+run loop) and its Layer-1 projection (the ``"outcomes"`` block inside
 ``run.py``'s ``outcomes_to_report``) carry four sibling arm-stat keys and not
 this one (the ``tr_session`` ``_stats`` halves are dropped too — see the census
 comment below), so nothing the run persists shows the arm state (``#11467``) —
@@ -302,7 +302,7 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     # that once stood here had drifted out from under them. The numbers below
     # are a READING at `29d67f9cc`, not a citation — re-derive them from the
     # symbol when you need them current. At that commit the four keys sit at
-    # `run.py:5396/5431/5440/5451` and its knobs at `:6048-6069` (the two
+    # `run.py:5396/5431/5440/5451` and its knobs at `:6048-6071` (the two
     # `tr_session_*` CONFIG-FLAG entries at `:1956-1959` in `run.py`, whose
     # block runs on to `:1975` with the four completion budgets). A key name
     # survives a rebase; a line number does not.
