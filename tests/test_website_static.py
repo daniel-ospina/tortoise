@@ -4977,9 +4977,12 @@ class TestSiteIconAndSocialPreviewContract:
         # "href": "//evil.example/favicon.png"})` returned None.
         path_part = cls._icon_ref(link.get("href", ""))
         if not path_part:
-            return (f"{page_name} links an icon this site does not serve "
+            # `_icon_ref` also returns "" for an href that names NO host at all — an
+            # inline `data:` icon is legitimate HTML, so "another host" would be a
+            # false statement about it. The branch says what is true of every case.
+            return (f"{page_name} links an icon that is not a file this site serves "
                     f"(rel={link.get('rel')!r} href={link.get('href')!r}) — the tab "
-                    "draws an image from a host this site does not control")
+                    "draws nothing this site controls")
         assert "/logo.png" not in path_part, (
             f"{page_name} uses the wordmark as an icon: rel={link.get('rel')!r} "
             f"href={link.get('href')!r}")
@@ -5050,6 +5053,23 @@ class TestSiteIconAndSocialPreviewContract:
         assert "non-square" in wordmark, (
             "a 160x98 wordmark was accepted as a tab icon — the filename blacklist is the "
             f"only rule again. Got: {wordmark!r}")
+
+        # ⛔ THE ORIGIN EDGE, AND IT MUST BE PINNED HERE OR THE FIX IS UNWATCHED. This
+        # helper is graded on hrefs; every other fixture in this test is ON-SITE, so a
+        # revert to `urlsplit(urljoin(...)).path` (which discards the netloc) leaves
+        # every other assertion in this test behaving identically and the suite GREEN.
+        # MEASURED with that revert restored: both off-host forms below return None.
+        # `data:` is included because `_icon_ref` rejects it too, for a different
+        # reason (it names no host at all), so the branch must not claim "another host".
+        for off_host in ("//evil.example/favicon.png",
+                         "https://evil.example/favicon.png",
+                         "data:image/png;base64,AAAA"):
+            refused = self._icon_target_violation(
+                "page.html", {"rel": "icon", "href": off_host}) or ""
+            assert "not a file this site serves" in refused, (
+                f"{off_host!r} was accepted as a tab icon — the origin is being "
+                f"discarded again (`urlsplit(...).path` drops the netloc). "
+                f"Got: {refused!r}")
 
         try:
             self._icon_target_violation("page.html", {"rel": "icon", "href": "/logo.png"})
@@ -5429,10 +5449,17 @@ class TestSiteIconAndSocialPreviewContract:
             "taking the last EOI in the file instead of the one that ends the image")
 
         # ⛔ AND THE MEASURE IS FORMAT-AWARE. A PNG's image ends at its IEND chunk; `FF D9`
-        # inside IDAT is ordinary compressed data, so the JPEG walk both FALSE-PASSES a
-        # padded PNG card and FALSE-FAILS a real one. `website/logo.png` is the real
-        # witness: 35,670 B, its IDAT happens to contain `FF D9`, and a JPEG-only scan
-        # reads it 6,280 B short.
+        # inside IDAT is ordinary compressed data, so a measure that hunts `FF D9` both
+        # FALSE-PASSES a padded PNG card and FALSE-FAILS a real one. `website/logo.png`
+        # is the real witness: 35,670 B, and its IDAT happens to contain `FF D9`.
+        # ⛔ MEASURED AT THIS HEAD, because the number is not folklore: the 6,280-short
+        # (29,390 B) reading belongs to the SUPERSEDED `rfind`-for-the-last-`FF D9`
+        # measure. The current segment/scan walk reads `logo.png` at its full 35,670 B
+        # even when handed the JPEG branch, so it does NOT stop at an interior `FF D9`.
+        # What the pin below therefore witnesses is narrower than the bug story: that
+        # `_encoded_length` took the PNG branch and that branch ended at IEND. The
+        # padded-PNG fixture above is what catches a dispatch regression; this assertion
+        # catches a PNG walk that over-reads the image.
         padded_png = self._flat_png(64)
         padded_png += b"\x00" * (self.CARD_MIN_BYTES + 1_000 - len(padded_png))
         assert self._card_floor_violation("page.html", Path("card.png"), padded_png), (
@@ -5445,8 +5472,8 @@ class TestSiteIconAndSocialPreviewContract:
             "state that this witness is gone)")
         assert self._encoded_length(in_tree_png) == len(in_tree_png), (
             f"website/logo.png ({len(in_tree_png)} B) measures "
-            f"{self._encoded_length(in_tree_png)} B — a JPEG scan is being applied to a "
-            "PNG, which reads an interior FF D9 as the end of the image")
+            f"{self._encoded_length(in_tree_png)} B — the PNG walk did not end at its "
+            "IEND chunk, so it over-read past the image (or it is not the PNG branch)")
         assert self._encoded_length(shipped) == len(shipped), (
             f"the shipped JPEG ({len(shipped)} B) measures "
             f"{self._encoded_length(shipped)} B — its stream must end at its own EOF")

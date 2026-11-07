@@ -434,8 +434,11 @@ SOURCE_PATTERNS = {
                    # `test_the_wordmark_is_never_used_as_an_icon` forbids), so the
                    # page-derived population above cannot see it. The card/icon guard
                    # nonetheless OPENS its bytes: it is the real PNG whose IDAT carries
-                   # `FF D9`, the witness that isolates "the JPEG walk is applied to a
-                   # PNG" — a JPEG-only scan reads it 6,280 B short — and
+                   # `FF D9`, the witness that isolates "a measure that hunts the last
+                   # `FF D9` is applied to a PNG" — the SUPERSEDED `rfind` measure read
+                   # it 6,280 B short (29,390 B); the current segment/scan walk reads it
+                   # in full, so the witness pins the PNG branch's IEND end, not that
+                   # older bug — and
                    # `test_the_content_guards_reject_a_blank_image_and_keep_their_
                    # measured_floors` asserts on its full length. Measured before this
                    # entry: `select(["website/logo.png"])` -> `surfaces: []`, so
