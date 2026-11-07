@@ -98,12 +98,20 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    graph_name = f"evict_{os.urandom(6).hex()}"
+    graph_name = f"test_evict_{os.urandom(6).hex()}"
     # #5128-class hygiene (cycle-6 P1-3 / cycle-8 P2-2): the raw client bypasses
     # `_assert_test_graph` AND the per-test wipe scope, so a per-test-unique name
     # alone still leaks one empty graph per run. Journaling the name is the
     # ownership contract the session-end sweep reads — without it the graph is
     # UNOWNED and the sweep can never drop it.
+    #
+    # The `test_` prefix is LOAD-BEARING, not decoration: the sweep's name gate
+    # (`tests/_embedded.py::owns_by_ownership_record`) admits only
+    # `_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")`,
+    # so a journal entry named `evict_…` is PRESERVED rather than dropped —
+    # journaling it would look like the fix while leaking the graph anyway, and
+    # it would additionally be reported as a "preserved" name, the signal that
+    # means "a test drove PRODUCT code at a shared path".
     from tests._embedded import _journal_append
     _journal_append(graph_name)
     graph = db.select_graph(graph_name)
