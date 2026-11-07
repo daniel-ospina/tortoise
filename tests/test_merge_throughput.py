@@ -4070,20 +4070,17 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         # listed INSIDE the exact list rather than exempted — the exactness of
         # this assertion is the whole point.
         "python3 tools/substrate_map_check.py --check\n"
-        # #11084: the #5090 surface map's own guard joins the same step for the
-        # `#4454` reason (a docs-only edit of the map selects no surface) and one
-        # of its own — the map is the #5090 capstone's checklist, and a checklist
-        # that silently loses a row is the failure it exists to prevent. NOTE it
-        # takes NO `--check`: the tool verifies by default, which is exactly why
-        # a pin whose text said "the four `--check` commands" could not absorb it
-        # (#11412 root 2). Keep this list in step with `ci.yml`'s docs step.
-        "python3 tools/test_design_map_check.py"
+        # #11084: the surface map's own guard, BOTH arms. `--self-test` proves the
+        # checker still catches the mutations its "not trusted" claim rests on;
+        # an arm nothing runs would let a quietly weakened rule pass green.
+        "python3 tools/test_design_map_check.py\n"
+        "python3 tools/test_design_map_check.py --self-test"
     )
     assert code.strip() == expected, (
         "the drift step must invoke EXACTLY the installer, the four "
-        "`--check` commands and the no-flag design-map check — no shell "
-        "operator, no wrapper, no trailing "
-        f"anything, or a real failure reports green (#2656); got {code!r}"
+        "`--check` commands and the map guard's two arms — no shell operator, "
+        "no wrapper, no trailing anything, or a real failure reports green "
+        f"(#2656); got {code!r}"
     )
     # The step may carry only the keys that cannot silence it. Enumerating the
     # silencing keys one at a time is what left the next one open, so the rule is
