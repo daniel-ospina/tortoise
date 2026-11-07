@@ -3171,8 +3171,8 @@ def test_a_bypass_on_a_GATED_writer_also_holds_row_one_at_PARTIAL(
         tmp_path, monkeypatch):
     """A `bypass` parked on a GATED writer is still a DEFECT — and BOTH holds catch it.
 
-    ⛔ `#11444` review: measured by mutation, then corrected by a fresh-context reviewer
-    that caught this docstring claiming more than the run showed.
+    ⛔ `#11473` round-1 review: measured by mutation, then corrected by a fresh-context
+    reviewer that caught this docstring claiming more than the run showed.
 
     The sibling test above parks its `bypass` on an *unresolved* (outside-gate) writer,
     and its two holds are `violations` + `bypass_declarations` (its own docstring says
@@ -3220,11 +3220,11 @@ def test_a_bypass_on_a_GATED_writer_also_holds_row_one_at_PARTIAL(
         "a bypass on a GATED writer must hold the row: "
         f"{row.verdict!r} {row.observed}")
     assert "tortoise.a::_gated" in next(
-        n for n in row.notes if n.startswith("REAL BYPASSES")), (
+        (n for n in row.notes if n.startswith("REAL BYPASSES")), ""), (
         "`bypass_declarations` must be built over EVERY declaration, not over the "
         f"outside-gate population: {row.observed}")
     assert "tortoise.a::_gated" in next(
-        n for n in row.notes if n.startswith("stale declarations")), (
+        (n for n in row.notes if n.startswith("stale declarations")), ""), (
         "a gated writer's declaration is STALE (it now routes through the gate), so "
         f"`stale` must not be narrowed to the outside-gate population: {row.observed}")
 
