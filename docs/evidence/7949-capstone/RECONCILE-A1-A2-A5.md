@@ -255,9 +255,11 @@ four-suite run below is 254).
 ⛔ **But the HOLD that landed is not the gate A2 needs, and an earlier revision of this record read it as
 if it were.** The HOLD has exactly **one** kind (`identity_hold.py:125` `HOLD_ENDPOINT =
 "operator_endpoint"`, and `KINDS = (HOLD_ENDPOINT,)`) and exactly **one** call site —
-(`extractor_v2.py:9617` at `80c912244`; **`:10172` at `d69faaf38`**, the sole `_hold_endpoint(...)` call,
-def `:10052`), inside `_mint_endpoint`, which fabricates a `statement` **Point** from an
-operator ref. A2's population is the **Object** mint: every emitted entity is appended unfiltered at the
+(`extractor_v2.py:9617` at `80c912244`; **`:10172` at `d69faaf38`**, the sole `_hold_endpoint(...)` call —
+inside `def _mint_endpoint`, `:10052` at `d69faaf38` / `:9497` at `80c912244`, while `_hold_endpoint`'s OWN
+def is `:3104` at `d69faaf38`; `git grep -n '_hold_endpoint(' -- tortoise/extractor_v2.py` prints that
+def and the one call), which fabricates a `statement` **Point** from an operator ref. A2's population is
+the **Object** mint: every emitted entity is appended unfiltered at the
 `payload_entities.append({` site (`extractor_v2.py:8880` at `80c912244`; **`:9433` at `d69faaf38`**)
 (`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16414-16428`. Nothing
 filters it, and the tree's own registry says so in `#10997`'s own words —
