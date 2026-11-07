@@ -292,7 +292,7 @@ def test_a_carried_record_is_constructed_not_copied():
     """The `seeded` carry copied a channel entry VERBATIM, so an entry that guessed
     the cue's own `rule_id` (the S4 prompt renders the whole embed list, so the shape
     is visible) shipped a `span_source` naming a text that does not index it, and
-    skipped the `_MAX_QUOTE` clamp on the way (review cycle 5, P2)."""
+    skipped the `_MENTION_CAPS["quote"]` clamp on the way (review cycle 5, P2)."""
     el = _embed_list("config/ci-surfaces.yml")
     el["mentions"] = [{
         "surface": "the problem", "quote": "the quick brown fox",
@@ -2272,48 +2272,60 @@ def _declared_both(surface, quote, *, span, narrative=""):
     return _span_fields(rec), _span_fields(_clamped_mention(m, narrative=narrative))
 
 
-@pytest.mark.parametrize("surface,quote,span,narrative", [
+@pytest.mark.parametrize("surface,quote,span,narrative,expect_source", [
     # a declaration that VERIFIES — both must honour it
     ("the problem", "the problem is elsewhere",
-     {"span_start": 0, "span_end": 11, "span_source": "quote"}, ""),
+     {"span_start": 0, "span_end": 11, "span_source": "quote"}, "", "quote"),
     # a declaration that does NOT verify — both must demote to "model"
     ("the problem", "the problem is elsewhere",
-     {"span_start": 3, "span_end": 9, "span_source": "quote"}, ""),
+     {"span_start": 3, "span_end": 9, "span_source": "quote"}, "", "model"),
     # an absent QUOTE is a definite MISMATCH, never an amnesty
     ("the problem", "",
-     {"span_start": 0, "span_end": 11, "span_source": "quote"}, ""),
+     {"span_start": 0, "span_end": 11, "span_source": "quote"}, "", "model"),
     # an absent NARRATIVE is an UNKNOWABLE haystack — the declaration STANDS
     ("the problem", "the problem is elsewhere",
-     {"span_start": 0, "span_end": 11, "span_source": "narrative"}, ""),
+     {"span_start": 0, "span_end": 11, "span_source": "narrative"}, "",
+     "narrative"),
     # …and a supplied narrative that does not verify demotes
     ("the problem", "the problem is elsewhere",
      {"span_start": 0, "span_end": 11, "span_source": "narrative"},
-     "nothing about it here"),
+     "nothing about it here", "model"),
     # a padded declaration is the SAME declaration
     ("the problem", "the problem is elsewhere",
-     {"span_start": 0, "span_end": 11, "span_source": " quote "}, ""),
+     {"span_start": 0, "span_end": 11, "span_source": " quote "}, "", "quote"),
     # a haystack longer than the cap, with the address inside it
     ("the problem", "the problem " + ("x" * 300),
-     {"span_start": 0, "span_end": 11, "span_source": "quote"}, ""),
+     {"span_start": 0, "span_end": 11, "span_source": "quote"}, "", "quote"),
     # the amnesty must not leak: no narrative AND wrong offsets is still unknown
     ("the problem", "the problem is elsewhere",
-     {"span_start": 2, "span_end": 13, "span_source": "narrative"}, ""),
-    # an AMBIGUOUS surface is not an address: the locator refuses it, so a
-    # declaration naming it demotes on BOTH builders. This is the row a re-split
-    # cannot satisfy — a `find`/substring copy returns the FIRST occurrence and
-    # keeps "quote", so it diverges here while every single-occurrence row above
-    # still passes (#11368 R1).
+     {"span_start": 2, "span_end": 13, "span_source": "narrative"}, "",
+     "narrative"),
+    # an AMBIGUOUS surface is not an address: the locator refuses it, so the
+    # declaration demotes. ⛔ This is the row that pins the VERDICT rather than
+    # parity: a copy that located the span with `find`/substring arithmetic — in
+    # ONE builder or in BOTH — returns the first occurrence, keeps "quote", and
+    # reds here, while every single-occurrence row above would still pass. Parity
+    # alone cannot see that: two identical `find` copies agree with each other
+    # (#11368 R1).
     ("it", "it was there and it was here",
-     {"span_start": 0, "span_end": 2, "span_source": "quote"}, ""),
+     {"span_start": 0, "span_end": 2, "span_source": "quote"}, "", "model"),
 ])
 def test_the_two_mention_builders_give_the_SAME_verdict_on_a_declared_span(
-        surface, quote, span, narrative):
+        surface, quote, span, narrative, expect_source):
     rec, cl = _declared_both(surface, quote, span=span, narrative=narrative)
     assert rec == cl, (
         f"the two mention builders disagree on ONE declared span — record={rec} "
         f"vs clamp={cl} for surface={surface!r} quote={quote[:40]!r} span={span} "
         f"narrative={narrative[:40]!r}. A `span_source` may only assert a "
         "verification BOTH builders would perform (#11368).")
+    # ⛔ AND the agreed verdict must be the RIGHT one. Parity is satisfied by two
+    # identical copies of a wrong rule, so each row names the verdict it wants:
+    # this is the half that reds a symmetric re-split.
+    assert rec[3] == expect_source, (
+        f"both builders agreed on span_source={rec[3]!r} where the rule gives "
+        f"{expect_source!r} for surface={surface!r} quote={quote[:40]!r} "
+        f"span={span} narrative={narrative[:40]!r} — agreement between two copies "
+        "of one locator is not evidence that the locator is right (#11368 R1).")
 
 
 def test_both_builders_read_every_cap_from_ONE_source(monkeypatch):
