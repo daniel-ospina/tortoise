@@ -6172,10 +6172,12 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             # complement IS the defect. So the exemption is deleted outright and every such
             # shape is REFUSED. A truthful quoted dissent names the TRUE tree as the phrase's
             # referent ("That the tree before #9548 is `047c91f7a` does not mean …") and is
-            # accepted by the referent rule before this point is reached. Its regex is GONE
-            # itself is kept only for the pattern-pair control, which still proves the
-            # subject-binding the r13 round added.
-            # ⚠️ NEW FALSE RED, DISCLOSED (table B, row 4): a factive frame that puts the true
+            # accepted by the referent rule before this point is reached. The regex that
+            # carried it is DELETED with it — a pattern nothing consults is not a rule, and
+            # a control asserting the pattern still matches would prove nothing about
+            # behaviour (#11191 review r32, comment drift).
+            # ⚠️ NEW FALSE RED, DISCLOSED in the PR body's table B (the factive-next-clause
+            # row): a factive frame that puts the true
             # tree in the NEXT clause ("That `ff6379eb2` is 12 commits behind the tree before
             # #9548 does not mean the note is wrong — the tree is `047c91f7a`.") is now
             # REFUSED where `origin/main` and `3aed2b1547` accept it. It is a truthful
@@ -9059,11 +9061,14 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     _inference_passed = [
         s for s in _unbound_inference_denial if not _refuses_before_9548(s)
     ]
+    # NOTE: the inference-denial exemption itself is WITHDRAWN at this head, so this block
+    # now guards the RESULT rather than an arm: both shapes must stay REFUSED, and they do
+    # because no exemption admits them any more (#11191 review r31 F1). The message below is
+    # kept as the history of why the arm was wrong to exist.
     assert not _inference_passed, (
-        "the INFERENCE-DENIAL arm is a blank cheque: a `does not mean` anywhere in the "
-        "clause exempts the false equivalence, because the denial of what the claim is "
-        "USED FOR is read as a denial of the claim. Every other correction arm here is "
-        "subject-bound for this reason (#11191 review, F3, P1):\n  "
+        "a sentence that denies only the INFERENCE drawn from the false equivalence is "
+        "ACCEPTED — the denial of what the claim is USED FOR has been read as a denial of "
+        "the claim itself (#11191 review, F3, P1):\n  "
         + "\n  ".join(_inference_passed)
     )
     # …and the QUOTED-claim shape is NOT green any more (#11191 review r31 F1, P1 — this
