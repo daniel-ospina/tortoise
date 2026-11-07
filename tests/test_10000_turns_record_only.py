@@ -1549,6 +1549,65 @@ def test_the_prior_read_carries_the_enriched_text_the_vector_describes():
     assert erased["sess_t0"].embedding_text is None, erased
 
 
+def test_the_prior_read_PROJECTS_the_enriched_text_its_fixture_answers():
+    """#8488 scope 1: the SELECT — not only the dataclass — carries the enriched text.
+
+    ⛔ THE HALF NO OTHER PIN IN THIS FILE CAN SEE. Every assertion around this one
+    runs against `_RlsConn`'s CANNED `prior_rows`, and a canned row is a six-tuple
+    WHATEVER the statement asked for: the fixture's branch matches on the leading
+    column names alone (``_RlsCursor.execute`` → ``"SELECT node_key, content,
+    embedding, created_at, status" in flat``), so replacing or dropping the sixth
+    projected expression changes nothing it answers. Measured at `e726b55ad` with
+    ``props->>'embeddingText'`` replaced by ``NULL::text`` inside
+    `record_read.turn_prior_vectors`: **94 passed** across this file plus
+    ``test_10017_turn_carrier_replay.py`` and ``test_write_session_and_turns_3551.py``.
+    On that tree the record lane reads NO prior enriched text, `PriorTurn` carries
+    ``None`` for every row, `_record_first`'s preserve arm
+    (``_held.content == _row["c"] and (_held.embedding_text or "") == (_row["et"] or "")``)
+    degrades to the content-only comparison #10528 removed, and an ON→ON re-capture
+    whose rewrite CHANGED under unchanged content keeps a vector computed from text
+    the record no longer holds — the #4194 lie, with CI green.
+
+    The projection is exactly as load-bearing as the field it feeds, and the only
+    thing that can observe it is the statement the reader ISSUES. This file already
+    states that rule for the other side of the same seam:
+    `test_the_population_guard_reddens_when_the_writer_changes_shape` asserts against
+    the REAL ``_TURN_WRITE_CYPHER`` because otherwise "every assertion below would
+    then be about a synthetic string, not about the writer".
+
+    Fails when: the sixth projected expression is not ``props->>'embeddingText'``
+    (replaced, reordered, or dropped — `turn_prior_vectors` then reads ``None``
+    silently, because it guards the width with ``len(row) > 5`` rather than
+    requiring it), or the prior read stops being one statement this pin can observe.
+    """
+    enriched = "[user] the auth flow broke"
+    conn = _RlsConn(org_id="org-1",
+                    prior_rows=(("sess_t0", "[user] hi", [0.5, 0.5], "T",
+                                 "established", enriched),))
+    got = record_read.turn_prior_vectors(
+        conn, org_id="org-1", graph_id="g-1", session_id="sess",
+        turn_ids=["sess_t0"])
+    # Non-vacuity FIRST: a statement that answered nothing would satisfy a
+    # projection assertion with the read never having returned a row.
+    assert got["sess_t0"].embedding_text == enriched, got
+
+    prior_sql = [s for s in conn.statements
+                 if s.startswith("SELECT node_key, content, embedding")]
+    assert len(prior_sql) == 1, (
+        "the prior read is no longer ONE observable statement, so its projection "
+        f"cannot be pinned here: {conn.statements}")
+    projection = prior_sql[0].split(" FROM ", 1)[0]
+    cols = [c.strip() for c in projection[len("SELECT "):].split(",")]
+    assert len(cols) == 6, (
+        f"the prior read projects {len(cols)} columns and `PriorTurn.embedding_text` "
+        "is read from the SIXTH (index 5), so a different width lands `None` "
+        f"silently and downgrades the preserve rule to content-only: {projection!r}")
+    assert cols[5] == "props->>'embeddingText'", (
+        f"the sixth column of the prior read is {cols[5]!r}, not the enriched text "
+        "`props->>'embeddingText'` — the record lane then reads no prior enriched "
+        "text, and #10528's preserve half is silently back (#4194)")
+
+
 def test_a_record_recapture_with_a_different_rewrite_clears_the_vector(
         sdk, monkeypatch):
     """#4194 on the RECORD lane: a vector for a text the row no longer holds is
