@@ -79,6 +79,7 @@ measurement-only; the instrument is read-only and its pin must be too.
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import os
 import re
@@ -5115,10 +5116,20 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
         assert out != real, f"the substitution did not change the document: {new!r}"
         return out
 
+    # ⛔ THE MUTATION IS BUILT OUTSIDE THE `raises` BLOCK (#11437 review, P2).
+    # `_mutate` proves itself with `assert hits == 1` / `assert out != real`, and
+    # both raise `AssertionError` — the very type `pytest.raises` is catching.
+    # Python evaluates call arguments INSIDE the `with` body, so `_mutate(...)`
+    # nested there is swallowed as the expected exception: a mutation that does
+    # NOT land passes the arm, and the file stays green while asserting that an
+    # unmutated document still passes. That is the exact false PASS `_mutate`
+    # was added to remove, so the call is evaluated first and only the PREDICATE
+    # runs under `raises` (the shape pytest's own docs prescribe: assertions
+    # inside the block are interceptable, so a guard must not live there).
     for sentence in selected:
+        mutated = _mutate(sentence, "mutated away entirely")
         with pytest.raises(AssertionError):
-            _assert_census_states_the_residual(
-                _mutate(sentence, "mutated away entirely"))
+            _assert_census_states_the_residual(mutated)
 
     # …and the clause REVERSED, the case #11389 exists for: the sentence KEPT
     # but asserting the inverse must red. ⛔ The replacement KEEPS a negation
@@ -5129,11 +5140,47 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
     # affirm markers, and the re-measurement below is why it is kept.
     for sentence in selected:
         flipped = re.sub(r"\b(not|never|outside)\b", "", sentence).strip()
+        reversed_doc = _mutate(
+            sentence,
+            "inside the walk, and therefore NOT reported: " + flipped)
         with pytest.raises(AssertionError):
-            _assert_census_states_the_residual(
-                _mutate(sentence,
-                        "inside the walk, and therefore NOT reported: "
-                        + flipped))
+            _assert_census_states_the_residual(reversed_doc)
+
+    # ⛔ …and the ARMS are pinned against RE-NESTING (#11437 review, P2). Hoisting
+    # `_mutate` out of the `with` block is the fix; this assertion is what keeps a
+    # later edit from putting it back. The regression is SILENT — the arm keeps
+    # passing, asserting that an unmutated document does, and no other test in the
+    # file can see it — so "the fix is unpinned and a one-line refactor reinstates
+    # the defect" is exactly the class this file exists to refuse (see
+    # `test_the_doc_section_refuses_a_renamed_or_ambiguous_boundary`, whose own
+    # docstring records the same shape being reverted with the file staying green).
+    source = Path(__file__).read_text(encoding="utf-8")
+    owner = next(
+        (node for node in ast.parse(source).body
+         if isinstance(node, ast.FunctionDef)
+         and node.name == "test_the_residual_pin_separates_the_claim_from_its_inverse"),
+        None)
+    assert owner is not None, (
+        "the mutation arms' own test is not findable by name, so the guard below "
+        "would silently check nothing")
+    nested = [
+        node.lineno for node in ast.walk(owner)
+        if isinstance(node, ast.With)
+        and any(isinstance(item.context_expr, ast.Call)
+                and isinstance(item.context_expr.func, ast.Attribute)
+                and item.context_expr.func.attr == "raises"
+                for item in node.items)
+        and any(isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Name)
+                and inner.func.id == "_mutate"
+                for stmt in node.body for inner in ast.walk(stmt))
+    ]
+    assert not nested, (
+        f"`_mutate` is called INSIDE a `pytest.raises(AssertionError)` block at "
+        f"line(s) {nested}: `_mutate` itself raises `AssertionError` when the "
+        f"substitution does not land, so the block catches its own guard and the "
+        f"arm passes while proving nothing. Evaluate `_mutate` first and pass the "
+        f"result into the block")
 
 
 def test_the_census_doc_collects_what_the_file_collects():
