@@ -5212,14 +5212,17 @@ class Test4051ChargeCoversTheLoopShape:
         endpoint spends exactly `commit_ingest_charge_bytes(payload)` and not
         some fraction of it.
 
-        ⛔ **What this leg does NOT pin: the payload term's SPEND.** For this
-        shape the charge IS the node floor (834 measured body bytes against a
-        4,096 B floor), so a spend site that passed
+        ⛔ **What this leg does NOT pin: the payload term's SPEND, on THIS lane.**
+        For this shape the charge IS the node floor (834 measured body bytes
+        against a 4,096 B floor), so a spend site that passed
         `declared_commit_write_count(payload) * COMMIT_INGEST_BYTES_PER_NODE`
-        would satisfy every assertion here. The payload term is exercised at
-        the spend site by NO test (its unit test has no HTTP); that gap is a
-        follow-up, and closing it needs a body wider than the floor, which this
-        class deliberately does not measure.
+        would satisfy every assertion here. The payload term IS exercised at a
+        spend site on the CAPTURE lane
+        (`TestCaptureOrgIngestBound::test_an_unserializable_body_is_never_charged_the_floor`,
+        through the same shared `payload_envelope_bytes` helper); what no test
+        does is exercise it at the COMMIT lane's spend site. Closing that needs a
+        body wider than the floor, which this class deliberately does not
+        measure.
 
         Mutations this REDs (each measured): charge the endpoint `0` (reds at
         the `used` observation, `0 != 4096`); charge it `charge - 1` (the SAME
@@ -5270,10 +5273,15 @@ class Test4051ChargeCoversTheLoopShape:
         `declared_commit_write_count` charges `_COMMIT_FLAT_NODE_LANES` one node
         per entry — a rate the FORMULA pins
         (`TestDeclaredCommitWriteCount::test_each_collection_entry_is_charged_once`)
-        that **no invariant leg measured against the graph before this one**:
-        `TestCommitOrgIngestBound`'s legs measure `points[]` and `operators[]`
-        only, and `supersessions[]` is pinned by nothing at all (see this
-        class's docstring). An entry
+        and that **no invariant leg measured against the graph before this one**.
+        ⚠️ Not because the flat lanes are absent from those legs —
+        `test_the_charge_is_never_cheaper_than_the_write`'s measured payload
+        carries an `entities[]` entry — but because that leg asserts
+        `declared >= minted` behind a multi-node cushion, so a one-node flat-rate
+        deficit vanishes into the cushion instead of reddening it (measured: with
+        `_COMMIT_FLAT_NODE_LANES = ()` that leg stays GREEN). This leg asserts
+        the flat rate exactly. `supersessions[]` is pinned by nothing at all (see
+        this class's docstring). An entry
         that minted a node AND a durability `:GraphEvent` would make that rate a
         2× fail-open — the same defect review cycles 2 and 3 found on the points
         and operator lanes, one lane over. Measured: declared 7 / minted 7 for
