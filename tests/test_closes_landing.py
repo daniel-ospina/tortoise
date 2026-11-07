@@ -5780,15 +5780,18 @@ def test_an_ITEM_whose_own_content_is_a_NESTED_LIST_leaves_NO_paragraph():
     (5,376 + 3,520 bodies), all four arms: 0 new fail-opens and 0 new lost closes against
     `origin/main` (`d69faaf38e1`).
 
-    ⛔ WHAT THIS GATE DOES **NOT** FIX, MEASURED (round-55 final re-review, P1): it overrides the
-    caller's `lazy_marker` answer, so an item-held lazy marker whose content merely LOOKS like a leaf
-    is read by the ladder — contradicting the module's own "the answer is the CALLER's" rule:
+    ⛔ WHAT THIS GATE OVERRODE, MEASURED (round-55 final re-review, P1 — REPAIRED in round 56, see
+    the next test): it answered with a gate that OVERRODE the caller's `lazy_marker`, so an item-held
+    lazy marker whose content merely LOOKED like a leaf was read by the ladder — contradicting the
+    module's own "the answer is the CALLER's" rule:
 
         `- item` + `  2. # H` + `  2.     Closes #100`     renderer ONE `<p>` -> PROSE
-            `origin/main` `[100]` in all four arms, `claims()` `[100]`; THIS HEAD `[]` in all four
-            arms, `claims()` `[]` — a LOST close (332 such bodies on a 43,548-body sweep, 25 reaching
-            `claims()`). The right fix is the COLUMN inside `_is_lazy_marker`, not this gate; filed
-            rather than attempted here.
+            `origin/main` `[100]` in all four arms, `claims()` `[100]`; the round-55 head `[]` in all
+            four arms, `claims()` `[]` — a LOST close (332 such bodies on a 43,548-body sweep, 25
+            reaching `claims()`).
+
+    Round 56 moved the discriminator to the COLUMN (`_ListItem.holder_col`) and made `lazy_marker`
+    final again; the assertions below were re-measured at that head and still hold.
 
     So "no regression" is a claim about the grids that were composed, and those grids do not compose a
     leaf-shaped lazy marker's content. No assertion below relies on the overstated reading. The top-level CONTROL is the neighbouring test's body and must stay `[100]`;
@@ -5827,6 +5830,79 @@ def test_an_ITEM_whose_own_content_is_a_NESTED_LIST_leaves_NO_paragraph():
         assert cl.parse_closing_refs(control, None, strict=True) == [100], control
         assert "#100" in cl.strip_code(control, indented_code=True), control
         assert ipl.claims(control)["closing"] == [100], control
+
+
+def test_a_LAZY_marker_whose_content_LOOKS_like_a_leaf_leaves_the_paragraph_OPEN():
+    """Round-56 — the #11369 family: the leaf ladder must not overrule the caller's `lazy_marker`.
+
+    Round 55's gate (`if lazy_marker and (container is None or not body.strip())`) answered "does
+    this line carry content of its own" and OVERRODE the caller to do it, so an item-held lazy marker
+    whose content merely LOOKED like a leaf was read by the ladder below — `# H` as a heading, `***`
+    as a thematic break — which closed a paragraph the renderer keeps open and blanked the real close
+    underneath it:
+
+        `- item` + `  2. # H` + `  2.     Closes #100`     renderer ONE `<p>` -> PROSE
+            `origin/main` `[100]` in all four arms, `claims()` `[100]`; the round-55 head `[]` in all
+            four arms — 332 such bodies on a 43,548-body sweep, 25 of them reaching `claims()`.
+
+    The fact the round-51 P0 needed is a COLUMN fact, so it now lives where the column lives: the
+    item records `holder_col`, the content column of the item that actually HOLDS its open paragraph
+    (a same-line nested list keeps its paragraph a level DEEPER than the item's own `rest_col`), and
+    `_is_lazy_marker` measures against it. `lazy_marker` is then final again.
+
+    The `strict`-arm fail-open below is the OTHER half: it was inherited at the round-55 head (a
+    PASS in the arm `issue_process_lint` refuses `lands` on), and it is fixed by the type-7 term on
+    `_blanked_still_open` — a lone complete tag cannot end a paragraph, so the line that removes the
+    record's item from the stack cannot be one.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    sys.path.insert(0, str(ROOT))
+    from tools import issue_process_lint as ipl
+
+    # ── Finding A — the LOST close (P1). A lazy marker's `# H` is TEXT, not a heading.
+    body = "- item\n  2. # H\n  2.     Closes #100\n"
+    assert keyword_types(body) == {"inline"}, body
+    assert cl.parse_closing_refs(body) == [100], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [100], body
+    assert "#100" in cl.strip_code(body, indented_code=True), body
+    assert "#100" in cl.strip_code(body, indented_code=True, strict=True), body
+    assert ipl.claims(body)["closing"] == [100], body
+
+    # ── Finding B — the `strict`-arm FAIL-OPEN (P1). The renderer puts the close in `<pre><code>`.
+    body = "* - x\n   2. ***\n    - > q\n<br />\n1.     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+    assert "#100" not in cl.strip_code(body, indented_code=True), body
+    assert "#100" not in cl.strip_code(body, indented_code=True, strict=True), body
+    assert ipl.claims(body)["closing"] == [], body
+
+    # ── Finding C — the lenient over-credit (P2), the same overrule in the warn direction.
+    body = "> 1. x\n>     2. ***\n       3.\n   2.     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # ── And the SHAPE the overrule was introduced for stays blanked: the round-51 P0 must not come
+    # back through the new column term. `* - x` + its own nested list keeps the paragraph at column
+    # 4, so a marker at column 3 dedents out of it and opens its own `<ol>`.
+    body = "* - x\n   2. -\n  2.     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [], body
+
+    # ── CONTROLS — the two bodies the round-55 gate was measured against must be untouched.
+    for control in ("- item\n  1.\n  2.     Closes #100\n",
+                    "Notes\n2. -\n2.     Closes #100\n",
+                    "- item\n   2.     Closes #100\n"):
+        assert keyword_types(control) == {"inline"}, control
+        assert cl.parse_closing_refs(control) == [100], control
+        assert cl.parse_closing_refs(control, None, strict=True) == [100], control
 
 
 def test_the_leaf_veto_reads_the_PARAGRAPHS_depth_not_the_last_lines():

@@ -825,6 +825,20 @@ class _ListItem:
     #: Measured against `MarkdownIt("commonmark")`: at 0-3 columns the marker DOES open a `<ul>`; at
     #: 4+ it is the paragraph's continuation text.
     real: bool = True
+    #: ⛔ THE CONTENT COLUMN OF THE ITEM THAT ACTUALLY HOLDS THIS ITEM'S OPEN PARAGRAPH, which is NOT
+    #: always `rest_col` (round-56 review of the round-55 residual, #11369). `* - x` pushes ONE item
+    #: here — its content column is 2 — but the renderer nests a SECOND list inside it, and the
+    #: paragraph the tool sees as "open" lives in that nested item, at column 4:
+    #:     `* - x` + `   2. -` + `  2.     Closes #100`
+    #:         renderer: the `- x` list is nested in the `*` item, so the `   2. -` line at column 3
+    #:         DEDENTS out of it, ends that paragraph and opens its own `<ol>`; the marker below is
+    #:         `<pre><code>` -> CODE. Measured against `rest_col` (2) the line looked like a lazy
+    #:         continuation (3 >= 2) and the arm-1 false PASS of round 51 came back.
+    #: `-1` means "same as `rest_col`" — computed at the push from the item's own content, so no
+    #: second reader has to re-derive it (round 39's rule). ⚠️ DECLARED AFTER `real` ON PURPOSE: the
+    #: push passes five POSITIONAL arguments and inserting this field any earlier silently moved
+    #: `real` into it (measured: every item `real=4`, and the round-51 P0 came back on the first run).
+    holder_col: int = -1
 
 
 def _item_dedented(line: str, item: _ListItem) -> bool:
@@ -903,6 +917,38 @@ def _content_column(rest: str) -> int | None:
     # is exactly that spelling (`-`, `*`, `+`, `1.`), so it takes the collapse-to-one branch rather
     # than a marker-width-only column — which would put the content INSIDE the marker.
     return m_indent + marker_w + (gap if 0 < gap <= 4 else 1)
+
+
+def _paragraph_holder_col(rest: str, rest_col: int) -> int:
+    """The content column of the item that actually HOLDS this line's open paragraph.
+
+    ⛔ ONE MARKER LINE CAN PUSH TWO ITEMS, AND THE TOOL PUSHES ONE (round-56 review of #11369).
+    `* - x` opens a `*` item at content column 2 and, inside it, a `-` list whose item's content is
+    at column 4 — the paragraph the state machine sees as open lives at 4. Measuring the next line
+    against 2 read a line at column 3 as that paragraph's LAZY continuation when the renderer had
+    already dedented out of the nested list, ending the paragraph and opening a new `<ol>`:
+
+        `* - x` + `   2. -` + `  2.     Closes #100`     renderer `<pre><code>` -> CODE
+            measured at 2: lazy -> paragraph open -> `[100]` (the round-51 arm-1 false PASS)
+            measured at 4: NOT lazy -> the line opens its own empty item -> `[]`, as the renderer says
+
+    The unwrap is the same one `_leaves_no_paragraph` already does on a marker line's content, in
+    the same `_content_column` space, and it stops at a nested item with NO content of its own (such
+    an item holds no paragraph, so nothing deeper can). `rest` is already post-prefix; the caller's
+    `rest_col` is the first item's content column in that space. Bounded at four levels because a
+    deeper same-line nest is already past every column this file measures.
+    """
+    holder = rest_col
+    body = rest[rest_col:]
+    for _ in range(4):
+        col = _content_column(body)
+        if col is None:
+            break
+        body = body[col:]
+        if not body.strip():
+            break                # the nested item is EMPTY — no paragraph lives there
+        holder += col
+    return holder
 
 
 def _ordered_marker_at_least_two(rest: str) -> bool:
@@ -1200,6 +1246,12 @@ def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
         # prev_container` and keeping `prev_container` across a lazy line each close ~610 fail-opens
         # and hand back 870-2,170 real closes, because they move EVERY reader of `prev_container`,
         # not just this one question.
+        # ⛔ …AND "WITHIN THE ITEM" IS MEASURED AGAINST THE ITEM THAT HOLDS THE PARAGRAPH (round-56
+        # review of #11369). `* - x` pushes one item (content column 2) while its paragraph lives in
+        # the `- x` list nested inside it; measuring the next line against 2 read a line at column 3
+        # as a continuation of a paragraph it had already dedented out of. See `holder_col`.
+        holder = container.holder_col if container is not None and container.holder_col >= 0 \
+            else (container.rest_col if container is not None else 0)
         if container is None and dropped_paragraph_item is not None:
             # ⛔ …AND A LINE AT AN INDENTED-CODE POSITION IS STILL THAT PARAGRAPH'S TEXT (round 50
             # review, P1 — a LOST CLOSE in all three arms, the silent case #10597 was filed for).
@@ -1215,7 +1267,7 @@ def _is_lazy_marker(rest: str, prefix: str, prev_prose: bool,
             # `2.     Closes #100` opens a sibling item whose wide-gap content is `<pre><code>`).
             return (line_col >= dropped_paragraph_item.rest_col
                     or line_col > _MAX_FENCE_INDENT)
-        return container is None or line_col >= container.rest_col
+        return container is None or line_col >= holder
     # depth < prev_quote_depth: the line dropped a `>` — see the docstring's third bullet.
     return _dropped_quote_is_lazy(prefix, prev_quote_depth, container, prev_container,
                                  rest_indent, raw_indent)
@@ -1350,36 +1402,15 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     #         nested content column; the marker line below is a `code_block` -> CODE
     #         `origin/main` `[]` both arms; the round-52 head credited `[100]` in both, and
     #         `issue_process_lint.claims()` returned `closing: [100]` — the arm-1 false PASS
-    # ⛔ THE DISCRIMINATOR IS THE LINE'S OWN CONTENT, NOT THE CONTAINER (round-55 review, P1 — the
-    # `container is None` form I measured first was FALSIFIED: it disables the lazy answer for EVERY
-    # item-held paragraph, so a BLANK item — which §5.2 says cannot interrupt a paragraph — stopped
-    # being a continuation and a real close was dropped in ALL FOUR arms, where `origin/main`
-    # credits it and the renderer says PROSE):
-    #     `- item` + `  1.` + `  2.     Closes #100`      renderer ONE `<p>`; `origin/main` `[100]`
-    # 33 such bodies on a 3,520-body grid, 10 of them in all four arms. Gating on "this line has
-    # content of its own" keeps those lazy (the empty-content rule is what answers them, as round 40
-    # recorded) while an item whose content IS a marker falls through to the ladder, which is the
-    # fact the round-51 P0 needed.
-    # ⛔ WHAT THIS GATE DOES **NOT** FIX, MEASURED (round-55 re-review, P1 — do not read the counts
-    # below as "no regression"): the gate answers ONE question — does this line carry content of its
-    # own — and it OVERRIDES the caller's `lazy_marker` answer to do it. So an item-held lazy marker
-    # whose content merely LOOKS like a leaf is now read by the ladder, contradicting this function's
-    # own rule 50 lines below ("A MARKER LINE THAT OPENS NO ITEM HAS NO CONTENT COLUMN TO INSPECT …
-    # The answer is the CALLER's (`lazy_marker`)"):
-    #     `- item` + `  2. # H` + `  2.     Closes #100`
-    #         renderer ONE `<p>` (an ordered marker >= 2 cannot interrupt a paragraph, so `# H` is
-    #         TEXT) -> PROSE; `origin/main` `[100]` in all four arms, `claims()` `[100]`; THIS HEAD
-    #         `[]` in all four arms, `claims()` `[]` — a LOST close
-    # 332 such bodies on a 43,548-body sweep (25 of them reaching `issue_process_lint.claims()`), none
-    # of them newly blanked by the re-review commit but all of them new against `origin/main`. The
-    # right fix is the COLUMN, not this gate: `_is_lazy_marker`'s `line_col >= container.rest_col` arm
-    # should be measured against the item that actually HOLDS the open paragraph (the nested content
-    # column), and then `lazy_marker` can decide un-overridden — filed rather than attempted here,
-    # because every guard in `_is_lazy_marker` is measured and pinned.
-    # On the two composed grids this gate is clean (0 new fail-opens, 0 new lost closes vs
-    # `origin/main`, all four arms) — those grids do not compose a leaf-shaped lazy marker's content,
-    # which is why the claim must name its grid and not be stated bare.
-    if lazy_marker and (container is None or not body.strip()):
+    # ⛔ AND THE LAZY ANSWER IS FINAL, NOT A HINT TO THE LADDER BELOW (round-56 review of #11369 —
+    # this was the round-55 gate, `if lazy_marker and (container is None or not body.strip())`, and
+    # it OVERRODE the caller to answer a question the caller had already answered). The round-51 P0
+    # that gate was written for needed a COLUMN fact, not a second owner of the paragraph question —
+    # and taking the second owner cost 332 lost closes of 43,548 (`- item` + `  2. # H` + marker: the
+    # renderer keeps ONE `<p>`, so `# H` is TEXT, while the ladder read it as a heading, closed the
+    # paragraph and blanked the real close below) plus an inherited `strict` fail-open. The column
+    # fact now lives where the column lives, in `_is_lazy_marker`'s `holder_col` term.
+    if lazy_marker:
         return False
     # ⛔ §4.4 COMES BEFORE THE LEAF TESTS, NOT AFTER THEM (round 50 — the ordering half of the
     # finding that kept the WIP arm from blanking a paragraph's own text). "An indented code block
@@ -2014,7 +2045,8 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                     _ListItem(_quote_depth(prefix), rest_col,
                               len(prefix) + rest_col,
                               bool(rest[rest_col:].strip()),
-                              not _continuation))
+                              not _continuation,
+                              _paragraph_holder_col(rest, rest_col)))
         # ── §4.6 html-block state: the state FOR THIS LINE, advanced once per line ────────────────
         # Computed here, before every `continue` below, so the fence branch and the code branches all
         # read the same answer (a state advanced inside a branch is a bug waiting for the next shape).
@@ -2121,7 +2153,26 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 # (`- item` + `- ` + `    - x` + `</div>` + `- ` + a wide-gap marker is an
                 # `html_block` in the renderer, so the marker is its TEXT — 8 closes measured).
                 _blanked_still_open = (_blanked_opens_paragraph is not None
-                                       and _blanked_opens_paragraph in list_items)
+                                       and (_blanked_opens_paragraph in list_items
+                                            # ⛔ AND THE LINE THAT POPPED IT CANNOT BE A
+                                            # LONE COMPLETE TAG (round-56 review of #11369, P1 —
+                                            # a `strict`-arm FAIL-OPEN, the `issue_process_lint`
+                                            # PASS arm, on 1 body of 5,920). The flag's item left
+                                            # `list_items` on the CURRENT line, and the only thing
+                                            # that can remove it there is this line's pop — but a
+                                            # type-7 line is INLINE in an open paragraph (§4.6), so
+                                            # it dedents out of nothing and the renderer keeps both
+                                            # the paragraph and the `<li>`:
+                                            #     `* - x` + `   2. ***` + `    - > q` + `<br />` +
+                                            #     `1.     Closes #100`
+                                            #         renderer `<li><blockquote><p>q <br /></p>`,
+                                            #         then `<ol><li><pre><code>` -> CODE; `strict`
+                                            #         credited `[100]`. `strict` over-blanks the
+                                            #         indented `    - > q` (its declared over-blank),
+                                            #         which clears `prev_prose`; this flag is the
+                                            #         record that a paragraph is still open anyway,
+                                            #         and the pop was discarding it.
+                                            or bool(_HTML_TYPE7_RE.match(rest))))
                 # ⛔ A LINE THAT ADDS A `>` STARTS A NEW CONTAINER, SO IT INTERRUPTS THE PARAGRAPH
                 # (round-54 review, P0 — a FAIL-OPEN in the lenient arm, introduced by moving the
                 # content ladder below the ordering guards). §5.1 lets a blockquote opener interrupt
