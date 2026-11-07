@@ -1130,6 +1130,24 @@ place a machine reads it.
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
+### 10.10 — the §11 cite block re-pointed after `#11368`'s mention-builder consolidation (2026-11-07, `#11368`)
+
+- **Original value (as §10.9 left it):** `_collect_classify_items` at `:11098`, its extent
+  `:11098-11120`, the two `if items:` gates at `:12908`/`:13057`, and the two fail-open `except`
+  arms at `:12921`/`:13068`.
+- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12982`/`:13131` and
+  `:12995`/`:13142`.
+- **Why:** `#11368` gave the declared-span verdict ONE home (`_verified_span_source`) and routed
+  both mention builders through it, a net **+74** lines (`126` inserted / `52` deleted) confined to
+  the mention-builder region (`:12128`–`:12607`). Every cite **below** that region therefore moves
+  by exactly `+74` — `:12908`→`:12982`, `:13057`→`:13131`, `:12921`→`:12995`, `:13068`→`:13142` —
+  while `_collect_classify_items` (`:11098`), which sits **above** it, does not move at all. The
+  `+0` on the collector and the `+74` on the four cites below it are one measurement, and quoting
+  only one of them is how the next re-derivation anchors on the wrong number.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
