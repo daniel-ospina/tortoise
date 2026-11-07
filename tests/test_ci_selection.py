@@ -18,7 +18,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 import pytest
 import yaml
@@ -215,6 +217,14 @@ def test_docs_scanning_gates_stay_in_tier1():
         "registration as the sibling capstone rows above)"
     )
 
+
+    assert "test_problem_map_2820.py" in tier1, (
+        "#2820: the problem map's drift guard must be in tier1 — the map IS a "
+        "document (`docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`), and "
+        "`docs/` is in NON_PYTHON_PREFIXES and the map matches no "
+        "SOURCE_PATTERNS entry, so the docs-only edit that can falsify 26 "
+        "status rows selects no surface and runs tier1 ONLY"
+    )
 
     assert "test_substrate_map.py" in tier1, (
         "#5086 review (P1-2): the substrate map's drift guard must be in tier1 — "
@@ -449,6 +459,56 @@ def test_substrate_map_guard_runs_on_the_diffs_it_guards():
     symbol_move = _sel(["tortoise/projection/edges.py"])
     assert "core" in symbol_move["surfaces"], symbol_move["surfaces"]
     assert "test_substrate_map.py" in symbol_move["test_files"]
+
+
+def test_problem_map_guard_runs_on_the_diffs_it_guards():
+    """#2820 review (P3): pin the SELECTION of the problem-map guard on all arms.
+
+    `tests/test_problem_map_2820.py` re-measures
+    `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md` against the tree, and four
+    distinct diffs can make it wrong. This mirrors
+    `test_substrate_map_guard_runs_on_the_diffs_it_guards` — the #5086 lane's own
+    recorded lesson, which this guard's registration inherited but did not pin:
+    with no ``assert "test_problem_map_2820.py" in tier1`` a later re-cut could
+    drop the row and every registered check would stay green while the map's own
+    controls stopped running on the one change class that can falsify it.
+
+    Measured at this head: a docs-only edit of the map gives ``surfaces == []``
+    with the pin present (the ``tier1`` row is the whole fix for that arm, and it
+    is the arm that matters — the map IS a document); a tool-only edit resolves
+    through ``CORE_ALSO`` (the entry beside its `substrate_map_check.py` sibling,
+    added in review round 11 — before it, that arm reached the pin only through
+    ``tier1``, which is thinner than the sentence above implies); and an
+    index-only edit is ``core`` for the same reason.
+    """
+    docs = _sel(["docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md"])
+    assert docs["full"] is False
+    assert docs["surfaces"] == [], docs["surfaces"]
+    assert "test_problem_map_2820.py" in docs["test_files"], (
+        "a docs-only edit of the problem map must run the guard that re-measures "
+        "it — this is the change class that can make 26 status claims wrong with "
+        "every matrix gate green"
+    )
+
+    tool = _sel(["tools/problem_map_check.py"])
+    assert tool["full"] is False
+    # ⛔ THE ARM ITSELF, not just the pin. Without this line the `CORE_ALSO`
+    # entry added in review round 11 was pinned by NOTHING: the pin arrives
+    # through `tier1` whether the entry is there or not, `--integrity` does not
+    # read `CORE_ALSO` (`tools/ci_selection.py:1479`), so deleting the entry
+    # dropped this arm from `surfaces: ['core']` (779 tests) to `[]` (80) with
+    # every gate green — the silent-drop class the entry exists to close, found by
+    # round 12 reading the test against its own comment (#1349/#3332/#3616).
+    assert tool["surfaces"] == ["core"], tool["surfaces"]
+    assert "test_problem_map_2820.py" in tool["test_files"], (
+        "a tool-only edit must run the tool's own negative controls — `tools/` is "
+        "swallowed by NON_PYTHON_PREFIXES, so CORE_ALSO is the only thing that "
+        "keeps this out of the docs-only early return"
+    )
+
+    index = _sel(["docs/00_index.md"])
+    assert index["surfaces"] == ["core"], index["surfaces"]
+    assert "test_problem_map_2820.py" in index["test_files"]
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
@@ -947,6 +1007,382 @@ def test_the_archive_writer_selects_the_surface_that_guards_it():
     )
 
 
+def _site_assets_the_icon_guard_reads() -> set[str]:
+    """The files the site icon/card guard reads, DERIVED from the pages themselves.
+
+    `_pages()` in `tests/test_website_static.py` globs `website/*.html`, and the guard
+    resolves every page's `og:image` and every `rel=…icon` href to a file whose bytes
+    it asserts. So the population is a function of the tree, not a list someone
+    maintains: a seventh card or a new page is in it the day it lands, and this
+    derivation is what makes the SELECTION rule notice.
+    """
+
+    class Collector(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.targets: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs) -> None:
+            a = {k: (v or "") for k, v in attrs}
+            if tag == "meta" and a.get("property", "").startswith("og:image"):
+                if a.get("content"):
+                    self.targets.append(a["content"])
+            elif (tag == "link"
+                  and any("icon" in t for t in a.get("rel", "").lower().split())
+                  and a.get("href")):
+                self.targets.append(a["href"])
+
+    found: set[str] = set()
+    for page in sorted((REPO / "website").glob("*.html")):
+        collector = Collector()
+        collector.feed(page.read_text())
+        collector.close()
+        for target in collector.targets:
+            path = urlsplit(urljoin("https://site.invalid/", target)).path
+            if path and (REPO / "website" / path.lstrip("/")).is_file():
+                found.add(f"website{path}")
+    return found
+
+
+def _class_body_assignments(body: list[ast.stmt]):
+    """Every assignment in a CLASS BODY, whatever compound statement encloses it.
+
+    ⛔ GENERIC WALK, NOT A LIST OF STATEMENT FIELDS. Enumerating `body`/`orelse`/
+    `finalbody`/`handlers` covered `if`/`try`/`with`/`for`/`while` but silently missed
+    `ast.Match` — whose arms live in `cases`, not in any of those fields — so a
+    `match`-guarded fixture constant became an UNOWNED witness, which is the #1349
+    silent-drop class this helper exists to close. A field list can always be one
+    compound statement behind the language; walking every child node cannot.
+
+    Pruning is what makes it a CLASS-BODY walk: a nested function, async function or
+    class is a different scope, so its bindings are not this class's constant (and
+    `ast.walk` visits a nested class on its own). Everything else — `if`, `try`,
+    `except` (`ast.ExceptHandler`), `with`, `for`, `while`, `match` arms — is the same
+    scope and is descended into.
+    """
+    stack: list[ast.AST] = list(body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
+def _class_constant_strings(src: str) -> dict[str, set[str]]:
+    """Class-level `NAME = "literal"` bindings in the guard, PARSED, not regexed.
+
+    ⛔ ALL VALUES PER NAME, never last-wins. The previous `dict(re.findall(...))` was
+    file-global and last-wins: a second `ICON_PNG = "logo.png"` anywhere later in the
+    file silently REMAPPED every earlier read of `ICON_PNG`, so the derivation dropped
+    `website/favicon.png` while the suite stayed green (the page-derived half masks it).
+    A set can only ADD candidates, so a duplicate can never make a witness vanish. It
+    can at worst ask for one more registration, which is the closed side of this gate.
+
+    `ast` rather than a regex because the regex also could not see three shapes an
+    author actually writes: `ICON_X = 'x.png'` (single quotes),
+    `ICON_X = "x.png"  # note` (trailing comment) and `ICON_X: str = "x.png"`
+    (annotated). All three were silently SKIPPED, not reported — the fail-open shape
+    this whole ratchet exists to close.
+    """
+    consts: dict[str, set[str]] = {}
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for stmt in _class_body_assignments(node.body):
+            if isinstance(stmt, ast.AnnAssign):
+                targets, value = [stmt.target], stmt.value
+            elif isinstance(stmt, ast.Assign):
+                targets, value = stmt.targets, stmt.value
+            else:
+                continue
+            if not (isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)):
+                continue
+            for target in targets:
+                if (isinstance(target, ast.Name)
+                        and re.fullmatch(r"[A-Z][A-Z0-9_]*", target.id)):
+                    consts.setdefault(target.id, set()).add(value.value)
+    return consts
+
+
+def _opened_site_witnesses(src: str) -> set[str]:
+    """The `website/` files a guard's SOURCE opens, derived from its text.
+
+    Takes the guard's source TEXT (the only filesystem touch is the `is_file()` filter
+    that drops candidates which are not real files), so the shape coverage below is
+    PINNED — `test_the_opened_witness_derivation_resolves_every_documented_shape` feeds
+    it a synthetic guard, which reds if the constant pass is deleted or narrowed again.
+
+    ⛔ THREE SHAPES ARE RESOLVED, and the boundary is stated rather than implied:
+    a literal path chain (`self.WEB / "assets" / "og-tortoise.jpg"`), whether it is
+    read inline or bound to a name first (`shared = self.WEB / "assets" / "x.png"`);
+    and a class constant holding a literal (`self.ICON_PNG = "favicon.png"`, read as
+    `(self.WEB / self.ICON_PNG)`), with NO call-suffix requirement — the same rule the
+    chain pass follows. The constant pass previously demanded a chained
+    `.read_bytes()`, so `(self.WEB / self.TEXT_FIXTURE).read_text()` — the shape an
+    author adds when a constant-held fixture is text or HTML — was resolved by nothing
+    and reported by nothing, while this docstring promised the shape was covered.
+    NOT TODAY'S GUARD, stated so the motivation is not overstated: its only
+    `self.WEB`-rooted `.read_text()` is `(self.WEB / name)` over the page-name tuple,
+    which is the runtime-bound shape below and is still unresolved. So this width
+    closes a hole an author would fall into, not a live one.
+
+    NOT resolved: a name bound at runtime — today the `(self.WEB / n).read_bytes()`
+    comprehension over `(self.ICON_PNG, self.ICON_APPLE)`. That is deliberate and not
+    a coverage hole: a runtime-bound reader takes its names from the same constants the
+    constant pass already resolves, and the pages link the files it reads, so the
+    linked half owns it. A NEW witness stored in a shape this pass cannot see would be
+    unowned, which is what the `website/logo.png` floor below exists to keep visible.
+    """
+    consts = _class_constant_strings(src)
+    found: set[str] = set()
+    # ⛔ The literal CHAIN only — NOT `(` … `).read_bytes()` as a unit. A fixture bound
+    # first (`shared = self.WEB / "assets" / "x.png"` then `shared.read_bytes()`, the
+    # shape `test_website_static.py` already uses for the shared card) never has the
+    # chained call on the same line, so requiring it made the derivation blind to
+    # exactly the shape a future author is most likely to copy — and silent about it,
+    # which is the #1349 class this test exists to close. Measured on this tree, this
+    # chain pass yields `website/assets/og-tortoise.jpg` and `website/logo.png`; the
+    # constant pass below adds the three icon files, all five already registered in
+    # SOURCE_PATTERNS, so no ratchet burden is added — it only stops the derivation
+    # being blind to a shape the guard itself already uses.
+    for match in re.finditer(
+            r'\.WEB\s*/\s*((?:"[^"\n]+"\s*/\s*)*"[^"\n]+")',
+            src):
+        rel = "/".join(re.findall(r'"([^"\n]+)"', match.group(1)))
+        if rel and (REPO / "website" / rel).is_file():
+            found.add(f"website/{rel}")
+    for name in re.findall(
+            r'\.WEB\s*/\s*(?:self|cls)\.([A-Z][A-Z0-9_]*)\b', src):
+        for rel in sorted(consts.get(name, ())):
+            if rel and (REPO / "website" / rel).is_file():
+                found.add(f"website/{rel}")
+    return found
+
+
+def _in_tree_files_the_site_guard_opens() -> set[str]:
+    """The `website/` files the site guard OPENS, DERIVED from the guard's own source.
+
+    `_site_assets_the_icon_guard_reads` covers one half of the guard's population: the
+    files a PAGE points at. This covers the other half — the fixtures it reads straight
+    off disk. A file the guard OPENS is a subject exactly as a linked one is: if editing
+    its bytes cannot select the guard, the assertion that reads it is unowned (the
+    #1349/#3332/#3616 class).
+
+    `website/logo.png` is why this exists. It is the PNG whose IDAT carries `FF D9`,
+    the witness that isolates "the JPEG walk was applied to a PNG", and NO page links
+    it as an icon — `test_the_wordmark_is_never_used_as_an_icon` requires that no page
+    does — so the page-derived half structurally cannot include it.
+    """
+    return _opened_site_witnesses(
+        (REPO / "tests" / "test_website_static.py").read_text())
+
+
+def test_the_opened_witness_derivation_resolves_every_documented_shape():
+    """PINS the derivation above — deleting or narrowing a pass must be visible.
+
+    MEASURED before this test, each on a `/tmp` copy of the guard: dropping the whole
+    constant pass left the ENTIRE suite green (`opened` fell to
+    `{assets/og-tortoise.jpg, logo.png}`, and the ratchet's only floor is `logo.png`),
+    and narrowing the pass to a required `.read_bytes()` made
+    `(self.WEB / self.TEXT_FIXTURE).read_text()` invisible. Both are the #1349
+    silent-drop class and neither had a signal, because the three icons the pass
+    contributes are also page-LINKED, so the union loop covered for the loss.
+
+    The source is SYNTHETIC on purpose: it states the contract once, and it reds on a
+    regression in the DERIVATION rather than on a legitimate edit to the real guard.
+    """
+    synthetic = '''
+class T(BaseTestCase):
+    ICON_PNG = "favicon.png"
+    TEXT_FIXTURE = 'logo.png'  # single quotes AND a trailing comment
+    ANNOTATED: str = "apple-touch-icon.png"
+    if sys.platform == "darwin":  # a GUARDED fixture constant
+        GUARDED = "favicon.ico"
+    match sys.platform:  # a MATCH-guarded fixture constant (arms are `cases`)
+        case "linux":
+            MATCHED = "assets/investors-og.jpg"
+    def icons(self):
+        return self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+    def text(self):
+        return self._head((self.WEB / self.TEXT_FIXTURE).read_text())
+    def annotated(self):
+        return self._head((self.WEB / self.ANNOTATED).read_text())
+    def guarded(self):
+        return self._ico_entries((self.WEB / self.GUARDED).read_bytes())
+    def matched(self):
+        return self._jpeg_size((self.WEB / self.MATCHED).read_bytes())
+    def bound(self):
+        shared = self.WEB / "assets" / "og-tortoise.jpg"
+        return shared.read_bytes()
+'''
+    assert _opened_site_witnesses(synthetic) == {
+        "website/favicon.ico",
+        "website/favicon.png",
+        "website/logo.png",
+        "website/apple-touch-icon.png",
+        "website/assets/og-tortoise.jpg",
+        "website/assets/investors-og.jpg",
+    }, (
+        "the opened-witness derivation lost a documented shape — a witness read "
+        "through it is unowned (the #1349 silent-drop class)"
+    )
+
+    # ⛔ A DUPLICATE NAME MUST NOT REMAP. The constants were file-global and
+    # last-wins, so a second `ICON_PNG` in a later class dropped `favicon.png` from
+    # the derivation while the suite stayed green (the page half masks it). A set of
+    # VALUES per name can only add candidates, never drop one.
+    shadowed = '''
+class A(BaseTestCase):
+    ICON_PNG = "favicon.png"
+    def a(self):
+        return (self.WEB / self.ICON_PNG).read_bytes()
+class B(BaseTestCase):
+    ICON_PNG = "apple-touch-icon.png"
+    def b(self):
+        return (self.WEB / self.ICON_PNG).read_bytes()
+'''
+    assert _opened_site_witnesses(shadowed) == {
+        "website/favicon.png", "website/apple-touch-icon.png"}, (
+        "a duplicate constant name remapped the derivation"
+    )
+
+    # ...and the REAL guard, so this cannot pass on synthetic input alone: if the
+    # guard's own expression shape drifts, the synthetic contract would still hold
+    # while the derivation saw nothing. `logo.png` is here because no page links it.
+    real = _in_tree_files_the_site_guard_opens()
+    assert {"website/favicon.ico", "website/favicon.png",
+            "website/apple-touch-icon.png", "website/logo.png"} <= real, (
+        f"the real guard's opened-witness derivation lost a file: {sorted(real)}"
+    )
+
+
+def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
+    """#11318: the ICON SET and the shared CARD are binaries, and they must select.
+
+    `website/` is in NON_PYTHON_PREFIXES, so `_keep_changed` dropped every one of them
+    assets *before* the SOURCE_PATTERNS pass and a binary-only diff took the
+    docs-only tier-1 early return. MEASURED before the entries, with the CI's own
+    selector: `select(["website/favicon.png"], "pull_request", load_manifest())` →
+    `surfaces: []`, `full: False`, and `test_website_static.py` — the file whose
+    whole job is to read these bytes — was NOT selected. So a PR that re-exported the
+    favicon at 512px, replaced the card with a flat rectangle, or hand-edited the ICO
+    directory would have run none of the assertions written to catch it. That is the
+    #1349/#3332/#3616 silent-drop class, and it is the class this file exists for.
+
+    Asserted per-asset, on the surface AND on the guard file: `tests/` falls through
+    to `core` on its own, so a bare "non-empty" check can pass with the wiring absent.
+
+    ⛔ ALL the cards the guard reads, not just the shared one: the same
+    `test_the_declared_preview_size_matches_the_file` resolves the `og:image` of
+    EVERY page, so `investors-og.jpg` and `design-partners-intro-og.jpg` are held to
+    the same 40 KB floor. Measured before they were listed:
+    `select(["website/assets/investors-og.jpg"])` → `surfaces: []` — a 2 KB flat
+    rectangle in place of either card ran none of the assertions that reject it.
+    """
+    assets = (
+        "website/favicon.ico",
+        "website/favicon.png",
+        "website/apple-touch-icon.png",
+        "website/assets/og-tortoise.jpg",
+        "website/assets/investors-og.jpg",
+        "website/assets/design-partners-intro-og.jpg",
+    )
+    # ⛔ DERIVED, NOT ENUMERATED — the fix's own next generation. The six paths above
+    # were the whole population when #11318 was repaired, and a hand-written list
+    # cannot notice a seventh: MEASURED at that head, `select(["website/assets/
+    # press-og.jpg"])` → `surfaces: []`, so a new card (or a new page) would still
+    # merge green. The population is what the guard READS, so it is derived from the
+    # pages; the six stay as a FLOOR, so a page edit that drops an icon link cannot
+    # silently shrink the guarded set to nothing.
+    KNOWN = set(assets)
+    derived = _site_assets_the_icon_guard_reads()
+    assert derived >= KNOWN, (
+        f"the derived population lost {sorted(KNOWN - derived)} — the guard reads a "
+        "file no page links any more, so this test's floor and the tree disagree")
+    # ⛔ AND THE WITNESSES — a file the guard OPENS is a subject even when no page links
+    # it. MEASURED before the entry this covers: `select(["website/logo.png"])` ->
+    # `surfaces: []`, so a wordmark re-encode merged green with the guard absent and
+    # REDed the next diff that selected it. The FLOOR below is the derivation's own
+    # tripwire: if the guard stops opening `logo.png` by literal path, this reds and the
+    # next author re-derives instead of silently losing the coverage.
+    opened = _in_tree_files_the_site_guard_opens()
+    assert "website/logo.png" in opened, (
+        f"the guard's opened-file derivation lost `website/logo.png` (derived: "
+        f"{sorted(opened)}) — either the guard no longer opens that witness by a "
+        "shape this derivation resolves (a literal `(self.WEB / \"…\")` path or a "
+        "`self.CONSTANT = \"…\"` read; re-derive the entries in this test and in "
+        "SOURCE_PATTERNS['onboarding'] and keep the coverage), or the derivation's "
+        "regex stopped matching the guard's expression shape")
+    # NOT asserted: `opened - derived`. The two halves MAY overlap legitimately — a page
+    # that adopts the wordmark as its own `og:image` puts it in the linked half too, and
+    # `test_the_wordmark_is_never_used_as_an_icon` forbids it only as an ICON. Overlap
+    # costs nothing (the loop below covers the union); an assertion here would red that
+    # honest page edit and tell its author to "re-derive" an assertion that is simply
+    # redundant the moment they do, which pushes them to delete the witness half.
+    assert opened, "the opened-file derivation found nothing — the ratchet's other half is vacuous"
+    # ⛔ AND THE SECOND WITNESS, WHICH NO DERIVATION ABOVE CAN REACH. The guard's shape
+    # rule is driven with `/assets/premiselabs-logo.png` by
+    # `test_the_icon_target_guard_reads_existence_and_shape`, so that test DEPENDS on
+    # the file's 160x98 bytes — but no page links it as an icon and the guard names it
+    # only inside a dict literal, so neither `derived` nor `opened` contains it.
+    # MEASURED before the entry: `select(["website/assets/premiselabs-logo.png"])` →
+    # `surfaces: []`, so re-exporting the wordmark SQUARE merged green with the guard
+    # absent and REDed the NEXT onboarding diff, billing its author for a file they
+    # never touched — the same pair of failures the `logo.png` entry above documents.
+    _witness = "website/assets/premiselabs-logo.png"
+    assert (REPO / _witness).is_file(), f"the asset this test guards is gone: {_witness}"
+    r = _sel([_witness])
+    assert r["surfaces"] == ["onboarding"], (
+        f"{_witness} selects {r['surfaces']} — the guard reads its bytes, so a change "
+        "to it must select the guard (#1349 silent-drop class)")
+    assert "test_website_static.py" in r["test_files"], (
+        f"{_witness} does not select test_website_static.py")
+    assert r["slow_run"] is False, f"{_witness} must not pull a slow leg"
+    for changed in sorted(derived | opened):
+        assert (REPO / changed).is_file(), f"the asset this test guards is gone: {changed}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{changed} selects {r['surfaces']} — a binary under website/ matches no "
+            "SOURCE_PATTERNS row and falls to the docs-only early return, so the byte "
+            "assertions never run on the one diff that can break them (#1349 class)"
+        )
+        assert "test_website_static.py" in r["test_files"], (
+            f"{changed} does not select test_website_static.py"
+        )
+        assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
+
+    # ...and every PAGE IN THE TREE, because the guard globs them rather than naming
+    # them. MEASURED before this loop: `select(["website/zz-new.html"])` → `surfaces:
+    # []`, 79 tier-1 files, guard absent — a page that ships with no icon trio and no
+    # og:image merged green and only a full run reded.
+    #
+    # ⛔ WHAT THIS LOOP CANNOT DO (review P3): it is a TRIPWIRE OVER THE EXISTING TREE,
+    # not a gate on the page's own PR. `website/` selects `onboarding`, this file is
+    # `core`-registered, and a named-surface match REPLACES the core fallback — so a
+    # diff that adds `website/newpage.html` together with its
+    # `config/pages-upload-classification.txt` row (which `deploy-pages.yml` forces)
+    # selects `onboarding` and NOT this file, and the `website/newpage.html selects []`
+    # red lands on the NEXT unrelated `core` diff instead. The page's head is still
+    # guarded on its own PR — the classification row is what selects `onboarding` — so
+    # the exposure is a delayed red, not an unguarded page. Closing it means moving
+    # these two ratchets into `tests/test_website_static.py` (onboarding) or
+    # registering this file on `onboarding` in `config/ci-surfaces.yml`.
+    pages = sorted(p.name for p in (REPO / "website").glob("*.html"))
+    assert pages, "no pages found — this ratchet would pass vacuously"
+    for page in pages:
+        changed = f"website/{page}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{changed} selects {r['surfaces']} — a page the icon/card guard reads must "
+            "select the guard, or its head can break with nothing running")
+        assert "test_website_static.py" in r["test_files"], (
+            f"{changed} does not select test_website_static.py")
+        assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
+
+
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """#3332: a public *site surface* change selects `onboarding`.
 
@@ -1203,6 +1639,60 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
             f"{changed} selects {guard} again — a non-gating lane file is back "
             "on a pre-merge leg, which is the regression #10194 exists to "
             f"prevent (selected: {sorted(selected)[:8]} ...)"
+        )
+
+
+def test_7949_c2_door_runs_on_both_surfaces_that_can_move_it():
+    """#10983 review round 11: the DOOR pin must run on EVERY diff that moves it.
+
+    `tests/test_7949_c2_door.py` pins the fleet's capture lane:
+    `hosted_api._capture_lane()` -> `sdk._extract_session_v2` ->
+    `extractor_v2.extract_session_v2`. Two modules can move that lane and they
+    fall on DIFFERENT surfaces:
+
+      * `tortoise/hosted_api.py` is an EXACT `SOURCE_PATTERNS["api"]` entry that
+        REPLACES the `core` fallback in `select()` (measured: surfaces
+        `['api','onboarding']`), so the file's `core` registration alone runs on
+        NO leg — a diff flipping `else "v2"` to another lane would ship green
+        with the assertion that names the door never executed;
+      * `tortoise/extractor_v2.py` matches no SOURCE_PATTERN and falls through to
+        `core` (measured: surfaces `['core']`).
+
+    MEASURED before the fix, on the head this pin was added at:
+    `--changed-files tortoise/hosted_api.py` -> the file is NOT in
+    `slow_selected` and NOT in `test_files`, i.e. the #1349/#2938 silent-drop
+    class in its harmful direction, and nothing else in `tests/` reds on that
+    mutation.
+
+    The second assertion is not cosmetic: the file is named by TWO surfaces, so
+    it must stay in the FAST pool. A `slow_files` entry named by a second
+    surface is dropped from the fast set AND never re-added to `slow_selected`
+    (first-match ownership — #6234, `test_every_slow_file_a_second_surface_
+    names_runs_for_that_surface`), so "register the `api` row" taken alone
+    would have moved the hole from the `hosted_api.py` diff to the
+    `extractor_v2.py` one. Asserting BOTH surfaces here is what makes a
+    partial fix red.
+    """
+    door = "test_7949_c2_door.py"
+    assert door not in set(load_manifest()["slow_files"]), (
+        f"{door} is back in `slow_files` while named by two surfaces — it will "
+        "run on NEITHER leg for one of them (#6234)"
+    )
+    for changed, surface in (
+            ("tortoise/hosted_api.py", "api"),
+            ("tortoise/extractor_v2.py", "core")):
+        assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+        r = _sel([changed])
+        assert surface in r["surfaces"], (
+            f"{changed} selects {r['surfaces']}, not {surface} — the premise "
+            "of this pin changed; re-derive it"
+        )
+        selected = set(r["test_files"]) if r["test_files"] != "ALL" else set()
+        selected |= set(r["slow_selected"])
+        assert door in selected, (
+            f"{changed} does not run the door pin {door} — the pin that names "
+            "the capture lane sleeps on a diff that can move it "
+            f"(surfaces={r['surfaces']}, selected slow={r['slow_selected']})"
         )
 
 
@@ -2522,6 +3012,38 @@ def test_unclassified_paths_still_fail_closed_after_the_doc_reprieve():
         r = _sel([name])
         assert r["full"] is True, f"{name} must fail closed to full, got {r}"
         assert r["test_files"] == "ALL", name
+
+
+def test_the_github_prober_paths_fail_closed_to_the_full_matrix():
+    """#11340 review (P3, finding 2): the mechanism `config/ci-surfaces.yml` cites.
+
+    That comment used to say the prober half of the availability watchdog
+    (`.github/workflows/availability-watchdog.yml`, `.github/scripts/
+    availability-watchdog.sh`) "matches no SOURCE_PATTERNS row and falls through
+    to `core`". It matches no `SOURCE_PATTERNS` row, but it does NOT fall
+    through: `.github/` is in neither `SOURCE_PATTERNS` nor `CORE_ALSO`, so an
+    unknown path takes the fail-closed branch and the WHOLE matrix runs (the
+    comment's own sibling at `ci-surfaces.yml:2313`
+    (`test_oauth_stray_code_refusal.py`) records this exact false premise being
+    registered on once before).
+
+    This is a MECHANISM pin, not a pin on the fix: the selector is unchanged by
+    the correction, so it passes before and after. What it buys is that the
+    sentence a later lane reasons from cannot silently become false — if the
+    selector ever stops failing closed on `.github/`, this reds and whoever
+    changes it re-reads the comment.
+    """
+    for name in (".github/scripts/availability-watchdog.sh",
+                 ".github/workflows/availability-watchdog.yml"):
+        r = _sel([name])
+        assert r["full"] is True, (
+            f"{name} selected {r['surfaces']} rather than the fail-closed FULL "
+            "matrix — the ci-surfaces.yml comment that calls this "
+            "\"fail closed to the FULL matrix\" is now wrong")
+        assert r["test_files"] == "ALL", name
+        # The distinguishing half: `core` IS included, but by the full matrix.
+        # A `core`-only selection would be the `falls through to core` claim.
+        assert r["surfaces"] != ["core"], name
 
 
 def test_doc_reprieve_is_per_path_not_per_diff():
@@ -19050,6 +19572,32 @@ def test_cache_evict_runs_on_a_tools_only_change():
     assert "test_cache_eviction_evictor.py" in (load_manifest()["uri_requiring"] or []), (
         "test_cache_eviction_evictor.py must be declared under `uri_requiring:` — it "
         "module-skips without TORTOISE_DB_URI")
+
+
+def test_entry_point_guard_census_runs_on_a_tools_only_change():
+    # #11320: `tests/test_entry_point_python_guard.py` (registered
+    # `core`) is the census that holds every GUARDED `tools/` entry point's #5128
+    # interpreter guard — it EXECs the guard node with `sys.version_info` faked
+    # to (3, 9, 6), so a dropped refusal reds it. `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and `tools/test_design_map_check.py` matched no
+    # SOURCE_PATTERNS row, so a diff touching ONLY that file was filtered to
+    # `changed == []` BEFORE the "not matched -> core" fallback and selected no
+    # surface at all: MEASURED before the CORE_ALSO entry, `surfaces=[]` and the
+    # census ABSENT from `test_files`.
+    #
+    # ⛔ That is the hole the guard exists to close, reopened for one file: a
+    # branch rewrite that silently dropped this file's refusal would merge with
+    # the census green-by-omission, because the one file whose guard it dropped
+    # selected nothing that runs the census. Every sibling editor of `tools/` that
+    # already has its row — `tools/cache_evict.py`, `tools/gen_placement_table.py`
+    # — was registered the same way; this file landed in `2cb1f35c21` (PR #11276)
+    # without one.
+    # Mutation check: removing the CORE_ALSO entry fails the arms below
+    # (surfaces == [] and the census absent from test_files).
+    r = _sel(["tools/test_design_map_check.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_entry_point_python_guard.py" in r["test_files"], r
 
 
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():

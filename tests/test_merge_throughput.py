@@ -4070,17 +4070,26 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         # listed INSIDE the exact list rather than exempted — the exactness of
         # this assertion is the whole point.
         "python3 tools/substrate_map_check.py --check\n"
+        # #11084 / #2820: two more doc↔tree guards join the same step for the
+        # same `#4454` reason — a docs-only edit of either map selects no
+        # surface, and `docs` is the required, `paths:`-free context. `#2820`'s
+        # needs HISTORY for its anchor-ancestry claim for the same reason its
+        # #5086 sibling above does.
+        "python3 tools/problem_map_check.py --check\n"
         # #11084: the surface map's own guard, BOTH arms. `--self-test` proves the
         # checker still catches the mutations its "not trusted" claim rests on;
         # an arm nothing runs would let a quietly weakened rule pass green.
+        # `test_design_map_check.py` takes no `--check` flag (it is verify-only
+        # with no other mode), so its invocation is listed without one — the
+        # exactness rule allows that, it just has to be the WHOLE run block.
         "python3 tools/test_design_map_check.py\n"
         "python3 tools/test_design_map_check.py --self-test"
     )
     assert code.strip() == expected, (
-        "the drift step must invoke EXACTLY the installer, the four "
-        "`--check` commands and the map guard's two arms — no shell operator, "
-        "no wrapper, no trailing anything, or a real failure reports green "
-        f"(#2656); got {code!r}"
+        "the drift step must invoke EXACTLY the installer, the five `--check` "
+        "commands and the map guard's two arms — no shell operator, no "
+        "wrapper, no trailing "
+        f"anything, or a real failure reports green (#2656); got {code!r}"
     )
     # The step may carry only the keys that cannot silence it. Enumerating the
     # silencing keys one at a time is what left the next one open, so the rule is
