@@ -733,10 +733,8 @@ def session_key_of(hit: dict) -> str:
       and the guard COSTS ``evidence_recall@5 0.527 → 0.4706``. Quoting the
       gain alone — as an earlier draft of this docstring did — inverts the
       attribution this fix exists to keep straight and re-arms the arm
-      #8713 refuted. Pre-change there was no seed ON THE PRODUCT GRAIN and
-      therefore no fetch there, so no injected group existed to place on a
-      product pool; on the eval grain the arm DID fire (354 seeds above),
-      and the pre-fix symptom there is placement, not seeding. A
+      #8713 refuted. Pre-change the PRODUCT grain had no seed, so no group
+      existed to place there (the eval grain DID fire: 354 seeds above); a
       group whose key the merge does not expect is DROPPED, not tailed
       (see ``session_reinjection.source_session_chunk_pass``). The identity
       the READER already renders (``hit_session_id``) was dropped one layer
