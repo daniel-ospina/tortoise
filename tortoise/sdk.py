@@ -38299,10 +38299,16 @@ class TortoiseSDK:
         # #2518 indicator 2 (dense-leg parity): the same harvest also feeds a
         # SECOND dense pass (``_entity_key_dense_pass``) when the operator arms
         # ``TORTOISE_ENTITY_KEY_DENSE``. The harvest is taken ONCE and shared, so
-        # the dense half costs no extra graph query; and the harvest itself runs
-        # whenever EITHER half can use it — so a read whose sparse leg came back
-        # empty still expands its dense leg (and vice versa), instead of the two
-        # halves being chained on one another's success. With the dense switch
+        # the dense half costs no extra graph query WHEN THE SPARSE HALF ALREADY
+        # NEEDED ONE; and the harvest itself runs whenever EITHER half can use it
+        # — so a read whose sparse leg came back empty still expands its dense
+        # leg (and vice versa), instead of the two halves being chained on one
+        # another's success. ⛔ That second case is the one where arming the dense
+        # half DOES add work: with an empty sparse leg the disarmed code stopped
+        # at the old ``if not fts_hits`` guard, so the armed read pays the anchor
+        # FTS plus the ``aboutObject`` join (whose server-side ``collect()`` has
+        # no LIMIT — the per-anchor cap is applied client-side) on a read that
+        # previously paid neither. Stated rather than left to be discovered. With the dense switch
         # OFF (the default, and the measured arm) the gate below reduces to the
         # sparse half's original ``raw_results.get("fts")`` condition, and the
         # code path is byte-identical to the shipped one.

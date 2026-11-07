@@ -545,6 +545,11 @@ def test_dense_switch_off_keeps_the_shipped_path_byte_identical(
     so it must not drift when the dense half ships.
     """
     enc = _dense_encoder()
+    # Clear the switch first: the shipped path must be provably unchanged on a
+    # box where an operator has exported the lever (which .env.example tells
+    # them to do) — otherwise this guard reds on a correctly-armed machine and
+    # blames a drift that does not exist (review round 2, PR #11459).
+    monkeypatch.delenv("TORTOISE_ENTITY_KEY_DENSE", raising=False)
     unset_ids = _dense_read(dense_seeded_sdk)
     assert len(enc.calls) == 1, (
         "OFF must embed ONLY the read's own query — no composed embed at all")
@@ -675,6 +680,10 @@ def test_dense_pass_is_fail_open_on_encode_failure(
     query must leave the read byte-identical to the disarmed arm — same ids,
     same order, no exception, and no degraded declaration for a leg the read
     still has."""
+    # The OFF baseline must be measured with the switch cleared — an operator
+    # who exported the lever would otherwise make this test compare the ARMED
+    # read against itself (review round 2, PR #11459).
+    monkeypatch.delenv("TORTOISE_ENTITY_KEY_DENSE", raising=False)
     off_ids = _dense_read(dense_seeded_sdk)
 
     _dense_encoder(fail_on="wheel")  # only the COMPOSED text carries it
@@ -770,10 +779,22 @@ def test_eval_fingerprint_records_the_dense_half_only_when_armed(
 
     fp_on = runner._build_fingerprint(**base, entity_key_dense=True)
     assert fp_on["entity_key_dense"] is True
+    # The REPORT's methodology block must carry the same value, or a published
+    # number from a dense-armed run is indistinguishable from the measured
+    # sparse-only arm's (review round 2, PR #11459). `r1_knobs` is built inline
+    # inside `run_evaluation` and has no seam, so the guard is a source pin: it
+    # reds if the line is dropped or a second value is invented.
+    import inspect
+
+    src = inspect.getsource(runner.run_evaluation)
+    assert '"entity_key_dense": _resolved_dense_arm(' in src, (
+        "the methodology must record the dense arm through the ONE resolver — "
+        "otherwise a report cannot name the arm it measured")
     cp = tmp_path / "cp-dense.json"
     runner._save_checkpoint(str(cp), [], [], fp_on)
     with pytest.raises(runner.CheckpointStaleError):
         runner._load_checkpoint(str(cp), fp_off)
+
 
 def test_dense_expansion_cannot_launder_a_hollow_scope_into_hybrid(
         dense_seeded_sdk, _dense_encoder, monkeypatch):
