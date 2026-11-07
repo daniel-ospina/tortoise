@@ -5774,22 +5774,52 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                     # Widening it buys nothing for the alibi class: every pinned alibi row is
                     # refused by ANOTHER mechanism (measured — the suite stays green).
                     _before = tail[: _hit.start()]
-                    if not _before.strip() or re.search(
-                        r"(?:[;:.!?(\[]"
-                        r"|,?\s*\b(?:and|but|so|because|since|while|whereas|yet|although"
-                        r"|though|then|or|also|plus)\b"
-                        r"|[\u2014\u2013])\s*$",
-                        _before,
-                        re.I,
-                    ):
-                        # …and the same single-mention bound as (c): a tail that names the
-                        # false tree again asserts the equivalence a second time.
-                        # ⚠️ NOT INDEPENDENTLY PINNED (#11191 review r24, P3 — MEASURED:
-                        # deleting it changes no verdict, because a second bare mention is
-                        # caught by the co-reference arm itself). Kept as defence in depth
-                        # and labelled as such rather than counted as coverage.
-                        if _FALSE_TREE in tail[_hit.end() :].lower():
-                            return True
+                    # ⛔ A `.` IS A CLAUSE OPENER ONLY WHEN A SENTENCE ACTUALLY STARTS
+                    # (#11191 review r25, P1 — MEASURED fail-open, NEW in `d1b4d7bf75`).
+                    # As a bare `.` in the opener class it also matched the period of an
+                    # ABBREVIATION, so an APPOSITIVE could open a clause and the
+                    # equivalence was asserted THROUGH it — the exact r23 blocker the
+                    # opener rule exists to close, reopened by the widening that fixed the
+                    # r24 false RED:
+                    #   "…is false; the tree, i.e. the commit for #9601, is
+                    #    `ff6379eb2`."        ACCEPTED here, REFUSED by `1895c94a7`
+                    #                            AND by `origin/main`.
+                    # Requiring the co-reference to START A SENTENCE distinguishes a full
+                    # stop from `i.e.`/`e.g.`/`cf.` without maintaining a closed list of
+                    # abbreviations (a list would be the same spelling-keyed bet this
+                    # predicate keeps losing).
+                    _opens_clause = bool(
+                        not _before.strip()
+                        or re.search(
+                            r"(?:[;:!?(\[]"
+                            r"|,?\s*\b(?:and|but|so|because|since|while|whereas|yet"
+                            r"|although|though|then|or|also|plus)\b"
+                            r"|[\u2014\u2013])\s*$",
+                            _before,
+                            re.I,
+                        )
+                        or (
+                            re.search(r"\.\s*$", _before)
+                            and tail[_hit.start() : _hit.start() + 1].isupper()
+                        )
+                    )
+                    if _opens_clause:
+                        # ⛔ …AND NOTHING BOUNDS (a) TO A SINGLE MENTION (#11191 review
+                        # r25, P1 — MEASURED FALSE RED, TWICE). The bound r24 added here
+                        # sliced `tail[_hit.end():]` to the END of the tail, so a second,
+                        # TRUTHFUL mention of the #9601 merge in a LATER clause read as the
+                        # equivalence restated. Both rows are ACCEPTED by `origin/main` and
+                        # by `1895c94a7`, and were REFUSED here:
+                        #   "…is false; the tree is `047c91f7a`, and the commit for #9601
+                        #    is `ff6379eb2`; the census at `ff6379eb2` returned 5 lines."
+                        #   "…is false; the true tree is `047c91f7a`, while the commit for
+                        #    #9601 is `ff6379eb2`, which returned 5 lines at `ff6379eb2`."
+                        # r24 itself measured that deleting it changed no verdict — it was
+                        # never independently pinned — so it bought no coverage and cost
+                        # two false REDs, which is the file's own named way a pin gets
+                        # deleted. A tail that DOES assert the equivalence again is caught
+                        # by this loop's NEXT `_COREF_ASSERTS_FALSE` match, which is why the
+                        # bound was redundant; both directions are controlled below.
                         continue  # (a) a different, named tree
                 # ⛔ …AND THE RELATION GUARD IS GENITIVE-ONLY (#11191 review r22, P2 —
                 # MEASURED fail-open in the first cut). Admitting a bare relation NOUN
@@ -7286,6 +7316,16 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         # and unpinned: deleting that alternative keeps the file green)
         "The claim that the tree before #9548 is `ff6379eb2` is false; that #9601 merge "
         "is `ff6379eb2`.",
+        # ⛔ …AND (a) IS NOT BOUNDED TO ONE MENTION (#11191 review r25, P1 — MEASURED FALSE
+        # RED, TWICE). r24's single-mention bound in (a) refused a truthful sentence whose
+        # LATER clause happened to name the #9601 merge again; `origin/main` and `1895c94a7`
+        # both accept these. One row per road: a following `;` clause and a relative clause.
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is "
+        "`047c91f7a`, and the commit for #9601 is `ff6379eb2`; the census at `ff6379eb2` "
+        "returned 5 lines.",
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the true tree is "
+        "`047c91f7a`, while the commit for #9601 is `ff6379eb2`, which returned 5 lines "
+        "at `ff6379eb2`.",
     )
     _refutation_truthful_reds = [
         s for s in _refutation_truthful_tail if _refuses_before_9548(s)
@@ -7377,6 +7417,13 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "#09548 is `ff6379eb2`.",
         "The claim that the tree before #9548 is `ff6379eb2` is false; the tree for "
         "#9548 is `ff6379eb2`.",
+        # ⛔ …AND AN ABBREVIATION'S PERIOD IS NOT A SENTENCE BOUNDARY (#11191 review r25,
+        # P1 — MEASURED fail-open, NEW in `d1b4d7bf75`). With a bare `.` in arm (a)'s
+        # opener class the period of `i.e.` opened a clause, so the appositive LABEL — the
+        # r23 blocker — asserted the equivalence again with the opener's permission:
+        # ACCEPTED here, REFUSED by `1895c94a7` and by `origin/main`.
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree, i.e. "
+        "the commit for #9601, is `ff6379eb2`.",
     )
     _refutation_tail_alibi_passed = [
         s for s in _refutation_tail_alibi if not _refuses_before_9548(s)
@@ -7427,6 +7474,30 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "residual has been CLOSED and this characterisation should be inverted "
         "(#11191 review r23, P1):\n  "
         + "\n  ".join(_comma_appositive_now_refused)
+    )
+    # ⚠️ …AND THE `e.g. the #<n> merge` SPELLING IS A THIRD OPEN SHAPE, for a DIFFERENT
+    # reason than the two above (#11191 review r25, P2 — MEASURED, and the diagnosis is
+    # why it is recorded rather than silently left): ACCEPTED here AND at `1895c94a7`,
+    # `origin/main` REFUSES it. It is not the opener rule — `_COREF_ASSERTS_FALSE` cannot
+    # form the co-reference at all, because its subject set is
+    # `the (tree|parent|commit|sha|branch|merge)` and `the #9601 merge` is none of those,
+    # while its middle span excludes `.` so `e.g.` breaks it too. With no co-reference
+    # seen, `_tail_reasserts_equivalence` reports nothing and step 1's refutation arm
+    # passes the sentence. The `i.e. the commit for #9601` spelling next door IS refused
+    # (pinned in `_refutation_tail_alibi`) because there the SUBJECT is `the commit`, which
+    # the set does see — so this row marks the residue, not a boundary.
+    _abbreviation_appositive_known_open = (
+        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
+        f"e.g. the #9601 merge, is `{_FALSE_TREE}`.",
+    )
+    _abbreviation_appositive_now_refused = [
+        s for s in _abbreviation_appositive_known_open if _refuses_before_9548(s)
+    ]
+    assert not _abbreviation_appositive_now_refused, (
+        "the `e.g.`-appositive alibi is now REFUSED — if that refusal is correct this "
+        "residual has been CLOSED and this characterisation should be inverted "
+        "(#11191 review r25, P2):\n  "
+        + "\n  ".join(_abbreviation_appositive_now_refused)
     )
     # ⛔ …AND THE ARM READS THE OCCURRENCE, NOT THE SENTENCE (#11191 review r21 P3 / r22 P3
     # — MEASURED). r21 measured that reverting `_REFUTED_INVERTED.search(own)` to
