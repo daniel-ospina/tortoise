@@ -2828,6 +2828,44 @@ def _gated_writer(name: str) -> dict:
                    "kind": "gated", "label": "Point"}}
 
 
+#: ── `#11444`: the product register, as a row-1 input ────────────────
+def _no_register(monkeypatch) -> None:
+    """Neutralise the product register so a row-1 test measures ONE clause.
+
+    ⛔ `#11444` made row 1 READ `tortoise/embed_writer_register.py`. A test that
+    injects a tiny writer map and no register would otherwise see all twenty of
+    this tree's real declarations as STALE (the injected population is not the
+    tree's), and pass or fail for a reason it never names. Tests that ARE about
+    the register inject it explicitly — so the closure is explicit in both
+    directions rather than inherited from whichever fixture ran first.
+    """
+    monkeypatch.setattr(probe, "declared_writers", lambda: {})
+
+
+def _declared(name: str, cls: str = probe.CENSUS_EXEMPT, *,
+              reason: str | None = None, owner: str = "#11085") -> dict:
+    """One register entry, in the shape `declared_writers()` reads.
+
+    The `reason` cites the writer ITSELF by default, because the probe credits a
+    declaration only when that citation re-derives (`declaration_violations`).
+    """
+    return {"cls": cls, "owner_issue": owner,
+            "reason": reason if reason is not None else f"`{name}` for this test"}
+
+
+def _unresolved_writer(name: str, *callees: str) -> dict:
+    """A writer discovery finds OUTSIDE the gate, with its own callee names.
+
+    ``callees`` is what a `recognised_producer` declaration is CORROBORATED
+    against — a route claim the body does not make is not credited.
+    """
+    return {name: {"callee": "unrecognised",
+                   "at": f"{name.replace('::', '.py:')}",
+                   "kind": "unresolved_write",
+                   "label": "UNKNOWN(unresolved producer)",
+                   "callees": frozenset(callees)}}
+
+
 def test_row_one_is_PARTIAL_when_the_gate_is_off_although_every_writer_is_gated(
         tmp_path, monkeypatch):
     """The flag is the operator's; a fully-gated population with the gate OFF is
@@ -2835,6 +2873,7 @@ def test_row_one_is_PARTIAL_when_the_gate_is_off_although_every_writer_is_gated(
     enforcement the shipped config does not set."""
     _fake_rule_tree(tmp_path)
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
     monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
     monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(False))
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
@@ -2848,6 +2887,7 @@ def test_row_one_reaches_MET_only_when_every_clause_holds(tmp_path, monkeypatch)
     machinery, not measurement — the same objection, mirrored."""
     _fake_rule_tree(tmp_path)
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
     monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
     monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
@@ -2860,6 +2900,7 @@ def test_row_one_is_NOT_MET_when_no_writer_reaches_the_gated_seam(
     """A stated rule with no gated writer is a comment, not enforcement."""
     _fake_rule_tree(tmp_path)
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
     monkeypatch.setattr(probe, "embedding_writers", lambda: {})
     monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
@@ -2880,9 +2921,17 @@ def test_row_one_is_PARTIAL_because_ONE_writer_embeds_outside_the_gate(
     is ON and a population that is fully gated must still not publish `MET`
     while one writer embeds outside it: that writer is a path the rule never
     sees, and turning the flag on does not fix it.
+
+    ⛔ `#11444` narrowed the clause to the form reading (b) can keep: an
+    outside-gate writer holds the row **while the product does not name it**.
+    The injected writer here is UNDECLARED on purpose (the register is empty),
+    so this falsifier keeps its teeth; the DECLARED direction — the same writer,
+    named — is `test_a_named_ungated_writer_is_the_accepted_exception_reading_b`
+    below. Dropping `undeclared` from the verdict reds this test.
     """
     _fake_rule_tree(tmp_path)
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
     monkeypatch.setattr(probe, "embedding_writers", lambda: {
         "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
         "tortoise.session_indexer::main": _writer(
@@ -2901,9 +2950,16 @@ def test_row_one_is_PARTIAL_because_ONE_writer_has_no_resolved_producer(
     """The same argument for the other clause the epic names: an unresolved
     writer's label cannot be resolved, so the row cannot claim a complete
     measurement. Dropping `unresolved_writes or` measured GREEN (70 passed)
-    before this test existed."""
+    before this test existed.
+
+    ⛔ `#11444`: the clause is `undeclared` now — an unresolved writer the
+    PRODUCT names is the accepted exception reading (b) describes, and it holds
+    this row only while nothing names it. The injected name is undeclared on
+    purpose (the register is empty).
+    """
     _fake_rule_tree(tmp_path)
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
     monkeypatch.setattr(probe, "embedding_writers", lambda: {
         "tortoise.a::_gated": _writer("tortoise.a::_gated", "gated"),
         "tortoise.z::_store": _writer("tortoise.z::_store", "unresolved_write"),
@@ -2919,6 +2975,7 @@ def test_row_one_is_NOT_MET_when_the_rule_is_not_STATED(tmp_path, monkeypatch):
     """`not stated` is the `NOT MET` pole's first clause. Re-review measured that
     dropping it leaves 72 passed / 1 skipped GREEN — row 1 then publishes `MET`
     ("the rule is stated and wired") for a tree where no predicate exists."""
+    _no_register(monkeypatch)
     (tmp_path / "tortoise").mkdir()
     # The predicate is ABSENT from the gate module.
     (tmp_path / "tortoise" / "embed_gate.py").write_text(
@@ -2942,6 +2999,7 @@ def test_row_one_is_NOT_MET_when_the_rule_set_is_a_COPY(tmp_path, monkeypatch):
 
     _fake_rule_tree(tmp_path)
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
     monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
     monkeypatch.setattr(probe, "flag_in_shipped_configs", lambda flag: _fake_shipped(True))
     monkeypatch.setattr(embed_gate, "RULE_SET", (*tuple(embed_gate.RULE_SET), "x"))
@@ -2957,6 +3015,7 @@ def test_row_one_is_PARTIAL_when_an_unparseable_module_holds_the_row(
     not a zero". Dropping this clause measured GREEN (72 passed)."""
     _fake_rule_tree(tmp_path)
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
     monkeypatch.setattr(probe, "embedding_writers", lambda: {
         **_gated_writer("tortoise.a::_w"),
         "tortoise.broken": _writer("tortoise.broken::", "unparsed"),
@@ -2974,6 +3033,7 @@ def test_row_one_is_PARTIAL_when_a_duplicate_identity_collided(
     Dropping this clause measured GREEN (72 passed)."""
     _fake_rule_tree(tmp_path)
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    _no_register(monkeypatch)
     monkeypatch.setattr(probe, "embedding_writers", lambda: {
         **_gated_writer("tortoise.a::_w"),
         "tortoise.__init__::": _writer("tortoise.__init__::", "duplicate"),
@@ -2982,6 +3042,303 @@ def test_row_one_is_PARTIAL_when_a_duplicate_identity_collided(
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
     row = probe.score_rule_bullet()
     assert row.verdict == "PARTIAL", f"a duplicate identity must hold: {row.verdict!r}"
+
+
+# ── #11444: row 1 reads the PRODUCT's declared writer register ───────────────
+
+
+def _registered_population(monkeypatch, declarations, writers) -> None:
+    """Inject BOTH halves row 1 now reads: the discovered population and the register."""
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    monkeypatch.setattr(probe, "declared_writers", lambda: declarations)
+    monkeypatch.setattr(probe, "flag_in_shipped_configs",
+                        lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+
+
+def _row_one_fixture(tmp_path, monkeypatch):
+    """A tree where the rule holds and the gate is shipped ON, so only the WRITER
+    clauses of row 1 can decide the verdict."""
+    _fake_rule_tree(tmp_path)
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+
+
+def test_row_one_reads_MET_when_every_writer_routes_or_is_named(
+        tmp_path, monkeypatch):
+    """`#11444` target: reading (b) makes `MET` REACHABLE without weakening anything.
+
+    Reading (b), recorded on `#11085`: *"Every embedding writer must route through
+    the gate or be a named, accepted exception in the product."* Here one writer
+    reaches the gated seam and the other is NAMED — with its route corroborated at
+    its own seam — so every writer is classified and the row is `MET`.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {
+        **_gated_writer("tortoise.a::_gated"),
+        **_unresolved_writer("tortoise.b::_routes", "set_embedding_clause"),
+    }
+    declarations = {
+        "tortoise.b::_routes": _declared(
+            "tortoise.b::_routes", probe.CENSUS_RECOGNISED,
+            reason="`tortoise.b::_routes` reaches `set_embedding_clause`"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
+    assert "1 of 1 outside-gate writers" in row.observed, row.observed
+
+
+def test_row_one_goes_back_to_PARTIAL_when_ONE_declaration_is_removed(
+        tmp_path, monkeypatch):
+    """The MUTATION the issue names, executed: remove ONE name, nothing else.
+
+    ⛔ This is the falsifier `#11444`'s body asks for — *"row 1 reads `PARTIAL` again
+    the moment one writer is removed from the register"* — and it is written as a
+    mutation rather than as two fixtures so the ONLY difference between the `MET`
+    read and the `PARTIAL` read is the removed declaration. Deleting the
+    `undeclared` clause from the verdict, or crediting a writer discovery does not
+    find outside the gate, reds HERE.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {
+        **_gated_writer("tortoise.a::_gated"),
+        **_unresolved_writer("tortoise.b::_routes", "set_embedding_clause"),
+        **_unresolved_writer("tortoise.c::_named"),
+    }
+    declarations = {
+        "tortoise.b::_routes": _declared(
+            "tortoise.b::_routes", probe.CENSUS_RECOGNISED,
+            reason="`tortoise.b::_routes` reaches `set_embedding_clause`"),
+        "tortoise.c::_named": _declared("tortoise.c::_named"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    assert probe.score_rule_bullet().verdict == "MET", (
+        "the un-mutated population must be MET, or the mutation below measures "
+        "something other than the declaration it removes")
+
+    # ── the mutation: exactly one declaration removed, product unchanged ──
+    trimmed = {k: v for k, v in declarations.items() if k != "tortoise.c::_named"}
+    monkeypatch.setattr(probe, "declared_writers", lambda: trimmed)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        f"removing one declaration must hold the row: {row.verdict!r} {row.observed}")
+    undeclared = next(n for n in row.notes if n.startswith("undeclared writers"))
+    assert "tortoise.c::_named" in undeclared, undeclared
+
+
+def test_a_bypass_declaration_holds_row_one_at_PARTIAL(tmp_path, monkeypatch):
+    """A `bypass` is a DEFECT, never an exemption — and the instrument NAMES it.
+
+    `#11085`'s `load()` refuses to BUILD a register containing one (``bypass`` is not
+    in ``CLASSES``), so this can only arrive from a tampered or injected register.
+    The row must not assume the register is well-formed: it holds, and it says what
+    it found. Same rule the census already applies to its own third class.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.b::_bypass")}
+    declarations = {
+        "tortoise.b::_bypass": _declared(
+            "tortoise.b::_bypass", probe.CENSUS_BYPASS),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"a bypass must hold: {row.verdict!r}"
+    assert "REAL BYPASSES" in row.observed, row.observed
+    assert "tortoise.b::_bypass" in next(
+        n for n in row.notes if n.startswith("REAL BYPASSES")), row.observed
+
+
+def test_the_over_inclusive_enumeration_is_still_printed_when_everything_is_named(
+        tmp_path, monkeypatch):
+    """Requirement 5: the register CLASSIFIES the population, it never REPLACES it.
+
+    With every writer credited — the `MET` state — the AST enumeration and the
+    discovery location of each writer are still in the evidence. A change that swaps
+    the enumeration for the register would green this row while making the measured
+    population invisible, which is the failure mode the register exists to fix rather
+    than to commit.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {
+        **_gated_writer("tortoise.a::_gated"),
+        **_unresolved_writer("tortoise.b::_routes", "set_embedding_clause"),
+        **_unresolved_writer("tortoise.c::_named"),
+    }
+    declarations = {
+        "tortoise.b::_routes": _declared(
+            "tortoise.b::_routes", probe.CENSUS_RECOGNISED,
+            reason="`tortoise.b::_routes` reaches `set_embedding_clause`"),
+        "tortoise.c::_named": _declared("tortoise.c::_named"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
+    enumeration = next(
+        n for n in row.notes
+        if n.startswith("functions writing an embedding with no recognised producer call:"))
+    assert "deliberately OVER-INCLUSIVE" in enumeration, enumeration
+    assert "tortoise.b::_routes @ tortoise.b.py:_routes" in enumeration, enumeration
+    assert "tortoise.c::_named @ tortoise.c.py:_named" in enumeration, enumeration
+
+
+def test_a_STALE_declaration_holds_row_one_at_PARTIAL(tmp_path, monkeypatch):
+    """The guard that makes "add a name" INSUFFICIENT — the falsifier answer.
+
+    The register's entries are hand-written names, so "is this writer named?" alone
+    would let a register edit buy a green row. It cannot: a name with **no live writer
+    behind it** is STALE and HOLDS the row. With the product unchanged this is what an
+    added name always is — the population is already fully declared — so a naming-only
+    edit moves the row toward `PARTIAL`, never toward `MET`. Same contract ESLint's
+    suppressions file enforces: *"There are suppressions left that do not occur
+    anymore … re-run with `--prune-suppressions`"*, a non-zero exit.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.b::_named")}
+    declarations = {
+        "tortoise.b::_named": _declared("tortoise.b::_named"),
+        # ── the added name: a writer the product does NOT have ──
+        "tortoise.ghost::_nobody": _declared("tortoise.ghost::_nobody"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", (
+        f"a declaration with no live writer must hold the row, not green it: "
+        f"{row.verdict!r} {row.observed}")
+    stale = next(n for n in row.notes if n.startswith("stale declarations"))
+    assert "tortoise.ghost::_nobody" in stale, stale
+
+
+def test_a_ROUTE_claim_its_body_does_not_make_is_not_credited(tmp_path, monkeypatch):
+    """Corroboration: `recognised_producer` is a claim about a ROUTE.
+
+    The class's own definition (the register's `RECOGNISED_PRODUCER` docstring) is
+    *"a writer whose vector reaches a recognised producer — the canonical clause
+    builder or the `#5008` session producer"*. A declaration that says so while the
+    function's own body makes no such call is contradicted by the seam that is
+    supposed to support it, so it is NOT credited and the writer stays unrecognised.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               # deliberately NO recognised-producer callee
+               **_unresolved_writer("tortoise.b::_claims")}
+    declarations = {
+        "tortoise.b::_claims": _declared(
+            "tortoise.b::_claims", probe.CENSUS_RECOGNISED,
+            reason="`tortoise.b::_claims` reaches `set_embedding_clause`"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    assert "uncorroborated declarations" in row.observed, row.observed
+    assert "claims a route to a recognised producer" in row.observed, row.observed
+
+
+def test_a_declaration_parked_on_ANOTHER_writers_seam_is_not_credited(
+        tmp_path, monkeypatch):
+    """A citation must be the writer's OWN seam, not a resolvable one anywhere.
+
+    The register's own citation test requires *a* `module::symbol` that resolves at
+    HEAD; it cannot tell whose seam it is. The instrument can: the citation must name
+    the writer the declaration is about, or the declaration is parked on someone
+    else's evidence and is not credited.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.b::_named")}
+    declarations = {
+        "tortoise.b::_named": _declared(
+            "tortoise.b::_named",
+            reason="`tortoise.a::_gated` is exempt for this test"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    assert "does not cite its own" in row.observed, row.observed
+
+
+def test_a_named_UNGATED_writer_is_the_accepted_exception_reading_b(
+        tmp_path, monkeypatch):
+    """Reading (b), in the direction that used to be impossible to express.
+
+    `tortoise.session_indexer::main` is a REAL write path outside the gate and it is
+    NAMED in the register (owner `#5008`). Under reading (b) that is a named,
+    accepted exception, so it is credited — while the row STILL REPORTS it outside
+    the gate, because "the rule never sees it" remains a fact the reader must see.
+    Before `#11444` this writer held row 1 unconditionally, which is exactly why the
+    rung was unreachable.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {
+        **_gated_writer("tortoise.a::_gated"),
+        "tortoise.session_indexer::main": {
+            "callee": "compute_session_embedding",
+            "at": "tortoise/session_indexer.py:1",
+            "kind": "ungated", "label": "Event",
+            "callees": frozenset({"compute_session_embedding"}),
+        },
+    }
+    declarations = {
+        "tortoise.session_indexer::main": _declared(
+            "tortoise.session_indexer::main", probe.CENSUS_RECOGNISED,
+            owner="#5008",
+            reason="`tortoise.session_indexer::main` uses "
+                   "`compute_session_embedding`"),
+    }
+    _registered_population(monkeypatch, declarations, writers)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "MET", f"{row.verdict}: {row.observed}"
+    assert "embed OUTSIDE the gate: 1" in row.observed, row.observed
+
+
+def test_an_UNREADABLE_register_holds_row_one_as_UNMEASURED(tmp_path, monkeypatch):
+    """A register that cannot be read is a HOLE, never "nothing is declared".
+
+    Reading it as an empty mapping would render every outside-gate writer `undeclared`
+    and blame the PRODUCT for the instrument's own failure — the misattribution shape
+    this file refuses on the census side, applied to the new input.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    writers = {**_gated_writer("tortoise.a::_gated"),
+               **_unresolved_writer("tortoise.b::_named")}
+
+    def _unreadable():
+        raise ImportError("no register module")
+
+    monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    monkeypatch.setattr(probe, "declared_writers", _unreadable)
+    monkeypatch.setattr(probe, "flag_in_shipped_configs",
+                        lambda flag: _fake_shipped(True))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    assert "UNREADABLE" in row.observed, row.observed
+    assert "undeclared writers" not in row.observed, (
+        "an unreadable register must not be reported as the product declaring "
+        f"nothing: {row.observed}")
+
+
+def test_the_LIVE_register_credits_every_writer_outside_the_gate(monkeypatch):
+    """On THIS tree: every writer discovery finds outside the gate is CREDITED.
+
+    The real register and the real discovery, through the ROW rather than through the
+    register's own arithmetic. With the gate flag read as ON — the other half of row 1,
+    owned by `#11086` — the row reaches `MET`, which is the reachability `#11444` is
+    about. A writer added to `tortoise/` without a declaration reds HERE, from the
+    instrument's side, not only from the register's.
+    """
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    monkeypatch.setattr(probe, "flag_in_shipped_configs",
+                        lambda flag: _fake_shipped(True))
+    row = probe.score_rule_bullet()
+    for hold in ("undeclared writers", "stale declarations", "REAL BYPASSES",
+                 "uncorroborated declarations", "writer register UNREADABLE"):
+        assert hold not in row.observed, f"{hold}: {row.observed}"
+    assert "20 of 20 outside-gate writers" in row.observed, row.observed
+    assert row.verdict == "MET", (
+        f"row 1 must be REACHABLE once the gate flag is on and every writer is "
+        f"classified — that is the defect #11444 fixes: {row.verdict} {row.observed}")
 
 
 # ── #11088: the census names the `entity_type` values, not just the labels ──
