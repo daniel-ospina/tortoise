@@ -2388,7 +2388,9 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
         # the renderer puts in `<pre><code>`:
         #     `-` + `    code` + `<br />` + `     -     Closes #100`
         #         renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
-        #         `main` before #11186 `[]`; after #11186 `[100]` in `strict` — a FALSE PASS
+        #         `[]` at the branch point `origin/main` `80c912244`; `[100]` in `strict` AND
+        #         `indented_code` at `1177c6708` (still at the tip `3861f0a10`) — a fail-open `main`
+        #         carried until it fixed `strict` there in #11330 (`a022f03ce`)
         # `strict` blanked `    code` (its own declared over-blank), which left no paragraph open, so
         # `<br />` opened a PHANTOM type-7 block and `_html_here` then exempted the line below it.
         # ⛔ THIS TERM IS NARROWER THAN "STRICT IS UNCONDITIONAL", AND THE DIFFERENCE IS A DECLARED
