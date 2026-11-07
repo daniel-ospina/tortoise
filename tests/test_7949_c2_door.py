@@ -1165,9 +1165,12 @@ def test_a_capture_that_ENTERED_the_door_and_FAILED_is_not_a_BYPASS():
     effective_mode = "error"`` branch) and the mode is emitted from INSIDE the
     lane — ``sdk._extract_session_v2``, i.e. THE DOOR, sets
     ``meta["mode"] = "error"`` iff its own ``errors`` is non-empty — so a
-    receipt carrying it took the door and raised. (Cited by FUNCTION, never by
-    ``sdk.py:<line>``: a line number in prose re-stales on the next insertion,
-    which is the defect class this whole file exists to retire.)
+    receipt carrying it took the door and raised. (Its mode emission, and the two
+    in the other lane, are cited by FUNCTION rather than by ``sdk.py:<line>``: a
+    line number there re-stales on the next insertion, which is the defect class
+    this whole file exists to retire. The file's remaining ``sdk.py:<line>`` cites
+    are for symbols the suite itself resolves, so this is scoped to the door's
+    emissions and is not a claim about every cite in the file.)
     Refusing it did three wrong things at once: it named a cause that was false
     (``returned BEFORE sdk._extract_session_v2``), it did so AFTER the run's full
     spend, and because ``require_door_entered`` raises before the log is written
