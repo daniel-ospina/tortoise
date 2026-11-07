@@ -4977,7 +4977,8 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # `(`/`)` in the excluded set, so the aside class stayed open one punctuation mark
         # over:
         #   "The note never says (as the row records) that the tree immediately before #9548
-        #    was wrong."                                       -> ADMITTED here, main REFUSES
+        #    was wrong."                -> ADMITTED at the pre-r6 head, REFUSED by main, and
+        #                                   now REFUSED and PINNED here
         # A parenthetical is INSIDE the clause exactly as a comma aside is, so it may not end
         # the reporting frame; only `;` `.` and a dash do (the delimiters `_clause_before_phrase`
         # already cuts at). ⛔ `:` IS **NOT** ONE OF THEM (#11191 review r8, P2 — the two
@@ -5810,8 +5811,16 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
                     to the phrase's own CLAUSE, and the r8 attempt at exactly that
                     (pushing `_clause_before_phrase` here) was REVERTED because
                     `_CLAUSE_DELIM` cuts at every coordinator with no grammatical role test,
-                    so `"It is not true that the note and the row never say … was wrong."` —
-                    which `origin/main` ADMITS — became a FALSE RED. The closing rule is
+                    so a truthful complement was a FALSE RED. The row, quoted VERBATIM because
+                    the deciding word is the one an ellipsis would drop — `origin/main`'s
+                    window is only ~60 characters, so it ADMITS the short spelling and REFUSES
+                    the long one (51 vs 63 characters past its `not`):
+                      "It is not true that the note and the row never say the tree before #9548
+                       was wrong."            -> ADMITTED by `origin/main`, REFUSED at r8
+                      "…never say the tree IMMEDIATELY before #9548 was wrong."
+                                             -> REFUSED by `origin/main` too, so quote the
+                                                short spelling when reproducing this claim
+                    The closing rule is
                     grammatical, not punctuation: a coordinator that STARTS a new clause ends
                     the frame's window; one INSIDE its complement does not. Until a window
                     can tell those apart, the file keeps the stated fail-open.
@@ -10098,7 +10107,8 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # coordination", which is true for the coordinated/`;`/dash members and FALSE for `:`,
         # because `_CLAUSE_DELIM` has no `:` member): a coordinator or `;`/dash inside the
         # aside is cut by `_CLAUSE_DELIM`, while a `:` inside the aside is stopped by THIS
-        # pattern's own excluded `:` in the gap tail (`:4993`) — proved by dropping `:` from
+        # pattern's own excluded `:` in the gap tail BELOW (the inline pattern is quoted
+        # there, which is the citation that cannot rot) — proved by dropping `:` from
         # that tail, which flips the `:` spellings and nothing else. Each row below is ADMITTED
         # here and REFUSED by `origin/main`, and each was ADMITTED at the pre-r6 head
         # `b37a6c24abb` too, and the `:` spellings are that class too
