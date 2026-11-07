@@ -1390,6 +1390,25 @@ def _head_literal(value: str) -> str:
     return value[:cut]
 
 
+def _binds_locally(scope, key: str) -> bool:
+    """True when `scope` binds `key` in its OWN scope — a parameter, an
+    assignment/target/import, or a nested def/class of that spelling.
+
+    This is what makes PEP 227's nearest-binding rule decidable for the nested
+    walk: a `nonlocal key` in a scope INSIDE `scope` rewrites `scope`'s binding
+    only when no scope in between binds the name itself. Without it the walk
+    reports a compliant site — `def helper(): name = …` / `def inner(): nonlocal
+    name` — as a mutation of the OUTER handle it never touches (a false BLOCK,
+    measured for the assignment, the parameter and the 3-level variants)."""
+    if _bindings_in(scope, key):
+        return True
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.name == key
+        for node, _depth in _own_statements(scope)
+    )
+
+
 def _mutated_from_a_nested_scope(scope, key: str) -> bool:
     """True when a scope INSIDE `scope` can change `key` — so `scope`'s own
     bindings do not describe the value a call sees (#11217 review round 6).
@@ -1409,7 +1428,12 @@ def _mutated_from_a_nested_scope(scope, key: str) -> bool:
       themselves. Stopping after one level was a measured false PASS (#11217
       review round 13): the grandchild shape certified the stale OWNED prefix,
       the journal received `evict_…`, `_sweep_drop` classified it `preserved` and
-      consumed the journal — a leaked graph under a GREEN census;
+      consumed the journal — a leaked graph under a GREEN census. The SAME rule
+      is why an intermediate scope that binds the name itself ABSORBS the deeper
+      declaration: reported as a mutation it would be a false BLOCK on a
+      compliant site whose owned handle is never touched (see
+      `_binds_locally`, and the nearest-binding mirrors in
+      `test_a_NONLOCAL_at_ANY_depth_rewrites_the_outer_binding`);
     * a `NamedExpr` inside a comprehension, which PEP 572 binds in the scope
       ENCLOSING the comprehension (so `[x for … if (name := …)]` rewrites
       `name` without appearing in that scope's own statements at all). This one
@@ -1423,23 +1447,43 @@ def _mutated_from_a_nested_scope(scope, key: str) -> bool:
 
     Whether such a mutation RUNS is not decidable here, so the answer is "could",
     and the caller fails closed."""
-    top = [(node, 1) for node, _depth in _own_statements(scope)
+    top = [(node, 1, False) for node, _depth in _own_statements(scope)
            if isinstance(node, _NESTED_SCOPES)]
     # The declarations themselves: every nested scope at ANY depth (PEP 227's
-    # chain), plus the depth-1-only comprehension walrus.
+    # chain), plus the depth-1-only comprehension walrus. `shadowed` is whether a
+    # scope BETWEEN `scope` and this one binds the name ITSELF — PEP 227's
+    # nearest-binding rule, applied to the walk instead of only to the docstring.
     pending = list(top)
     while pending:
-        node, depth = pending.pop()
+        node, depth, shadowed = pending.pop()
+        nonlocal_decl = False
         for inner, _inner_depth in _own_statements(node):
-            if isinstance(inner, (ast.Nonlocal, ast.Global)) and key in inner.names:
+            # `global` reaches the module global from ANY depth and shadows
+            # nothing on the way (PEP 227 is about `nonlocal`), so it is counted
+            # as the one-level arm always counted it.
+            if isinstance(inner, ast.Global) and key in inner.names:
                 return True
+            if isinstance(inner, ast.Nonlocal) and key in inner.names:
+                nonlocal_decl = True
             if depth == 1 and isinstance(node, _COMPREHENSIONS) \
                     and isinstance(inner, ast.NamedExpr) \
                     and key in _target_keys(inner.target):
                 return True
-        pending.extend((child, depth + 1) for child, _d in _own_statements(node)
+        if nonlocal_decl and not shadowed:
+            return True
+        # A COMPREHENSION binds its walrus in the scope ENCLOSING it, so it never
+        # shadows for anything inside it; a CLASS body's namespace is skipped by
+        # PEP 227's `nonlocal` resolution, so it never shadows either (which is
+        # why `class Helper: def go(self): nonlocal name` still reaches the
+        # function enclosing the class).
+        deeper_shadowed = shadowed or (
+            not nonlocal_decl
+            and not isinstance(node, (_COMPREHENSIONS, ast.ClassDef))
+            and _binds_locally(node, key))
+        pending.extend((child, depth + 1, deeper_shadowed)
+                       for child, _d in _own_statements(node)
                        if isinstance(child, _NESTED_SCOPES))
-    for node, _depth in top:
+    for node, _depth, _shadowed in top:
         # A nested scope's DEFAULTS, decorators, bases and keywords are evaluated
         # in the ENCLOSING scope, so a walrus there rebinds the outer name. It is
         # not in `_own_statements(node)`, which begins at the nested BODY
@@ -2721,7 +2765,15 @@ def test_a_NONLOCAL_at_ANY_depth_rewrites_the_outer_binding(tmp_path):
     mutating shape sits beside its own compliant MIRROR (same nesting, plain
     nested binding instead of the declaration), so neither direction can go
     vacuous: the mirror reds a guard that fails closed on any nested scope, and
-    the mutating case reds the one-level stop."""
+    the mutating case reds the one-level stop.
+
+    A second mirror family pins PEP 227's OTHER half, which a depth-agnostic walk
+    gets wrong: a scope BETWEEN this one and the declaration that binds the name
+    ITSELF absorbs it (`nonlocal` selects the NEAREST binding), so the outer
+    handle is never touched. The first version of this walk reported those three
+    compliant shapes as UNDECIDABLE — a violation line asserting a falsehood
+    about a correct site, the same false-BLOCK class round 3's mirror exists for.
+    """
     site = tmp_path / "test_round13_nested_nonlocal.py"
 
     def _prefixes(*lines: str) -> list[str]:
@@ -2818,6 +2870,59 @@ def test_a_NONLOCAL_at_ANY_depth_rewrites_the_outer_binding(tmp_path):
         assert not _raw_detach_violations(root=tmp_path), (
             f"{label}: a plain nested binding was treated as a mutation of the "
             f"outer name: {_raw_detach_violations(root=tmp_path)}")
+
+    # ── PEP 227's NEAREST-binding rule: a scope in between that BINDS the name
+    #    itself absorbs the deeper `nonlocal`, so the OUTER handle is untouched
+    #    and its owned prefix stands. Measured RED ("UNDECIDABLE" over a correct
+    #    site) with the depth-agnostic walk that preceded `_binds_locally`.
+    for label, compliant in (
+        # the intermediate scope ASSIGNS the name
+        ("assignment in the intermediate scope",
+         (owned,
+          "    def helper():",
+          '        name = f"test_ok_{os.urandom(4).hex()}"',
+          "        def inner():",
+          "            nonlocal name",
+          '            name = f"evict_{os.urandom(4).hex()}"',
+          "        inner()",
+          "        return name",
+          "    helper()",
+          "    _journal_append(name)")),
+        # …via a PARAMETER, a binding at the scope's own definition
+        ("parameter of the intermediate scope",
+         (owned,
+          "    def helper(name=None):",
+          "        def inner():",
+          "            nonlocal name",
+          '            name = f"evict_{os.urandom(4).hex()}"',
+          "        inner()",
+          "        return name",
+          "    helper()",
+          "    _journal_append(name)")),
+        # …and one hop deeper, where the middle scope is the one that binds it
+        ("3 levels, the middle scope binds it",
+         (owned,
+          "    def helper():",
+          "        def mid():",
+          '            name = f"test_ok_{os.urandom(4).hex()}"',
+          "            def inner():",
+          "                nonlocal name",
+          '                name = f"evict_{os.urandom(4).hex()}"',
+          "            inner()",
+          "            return name",
+          "        return mid()",
+          "    helper()",
+          "    _journal_append(name)")),
+    ):
+        assert _prefixes(*compliant) == ["test_ok_"], (
+            f"{label}: a nested scope that binds the name itself absorbed the "
+            "deeper `nonlocal`, so the outer owned prefix is untouched and "
+            "provable — the arm failed CLOSED over a correct site: "
+            f"{_prefixes(*compliant)}")
+        site.write_text(_raw_client_site(*compliant), encoding="utf-8")
+        assert not _raw_detach_violations(root=tmp_path), (
+            f"{label}: a compliant, owned journal record was reported: "
+            f"{_raw_detach_violations(root=tmp_path)}")
 
     # ── a MODULE-level binding, rewritten through a grandchild `global` ─────
     # `_bound_prefix` resolves a name up the whole scope chain, so the MODULE is
