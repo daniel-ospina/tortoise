@@ -49,6 +49,31 @@ RED:
   ``test_the_write_back_refuses_to_promote_a_claim_class`` RED.
 * **Drop the attribution loop** — remove the ``seen`` dedupe →
   ``test_the_same_verified_finding_writes_back_once`` RED.
+* **Drop the ACROSS-CALL attribution loop** — ignore ``already_written`` (re-mint
+  what the cheap tier holds) → ``test_a_second_escalation_of_the_same_question_writes_nothing``,
+  ``test_a_repeat_escalation_writes_nothing_and_the_loop_closed``,
+  ``test_one_stored_unit_does_not_suppress_a_DIFFERENT_finding``,
+  ``test_a_repeat_occurrence_is_reported_once`` and four more RED (eight in total).
+* **Report a MINTED unit as already stored** — drop the ``key in persisted`` half
+  of the branch → ``test_a_minted_unit_is_never_also_reported_as_persisted`` RED.
+* **Leave the stored class out of the class guard** — compare only against
+  ``seen`` → ``test_a_stored_class_cannot_be_overwritten_by_a_re_escalation`` and
+  ``test_a_stored_class_conflict_beats_the_within_batch_dedupe`` RED.
+* **Grade the store lazily** — record a store contradiction and raise only when
+  the batch hits that key → ``test_a_contradictory_store_is_refused_even_when_the_batch_never_touches_it``
+  RED and the sibling contradiction test stays GREEN (this is the one edit that
+  distinguishes the two).
+* **Drop the store-contradiction refusal** — plain ``setdefault`` → both
+  store-contradiction tests RED.
+* **Claim a closed loop when nothing was accounted for** — ``settled = not units``
+  → ``test_an_empty_plan_is_neither_ok_nor_settled``,
+  ``test_a_refused_plan_is_never_settled_even_when_the_tier_holds_a_unit`` and
+  ``test_a_stored_class_cannot_be_overwritten_by_a_re_escalation`` RED.
+* **Accept a bare ``unit_key`` in ``already_written``** — drop the ``SummaryUnit``
+  type check → ``test_a_bare_key_cannot_silently_disable_the_dedupe`` RED (and
+  the stored-class guard is silently disabled).
+* **Mutate the caller's store list** — ``already_written.sort(…)`` in place →
+  ``test_planning_a_write_back_mutates_nothing_it_was_given`` RED.
 * **Let a unit carry the raw payload** — add a ``raw``/``supersedes`` field to
   ``SummaryUnit`` → ``test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it``
   RED.
@@ -1256,11 +1281,12 @@ def test_a_store_that_contradicts_itself_is_refused_not_decided_by_row_order() -
 
     ``setdefault`` would keep whichever row arrived first, so the verdict would
     depend on the caller's row ORDER — and one order reported ``ok``/``settled``
-    for a key the store contradicts (measured on the pre-fix module with THIS
-    test's ``semantic`` batch: ``[semantic, episodic]`` settled,
-    ``[episodic, semantic]`` refused — it is whichever row arrives FIRST that
-    wins, so an ``episodic`` batch reverses that). The store is the record; the
-    caller repairs it and re-plans. Both orders must fail, identically.
+    for a key the store contradicts (measured with the guard REMOVED — plain
+    ``setdefault``, this ``ValueError`` disabled — on THIS test's ``semantic``
+    batch: ``[semantic, episodic]`` settled, ``[episodic, semantic]`` refused; the
+    winner is whichever row arrives FIRST, so an ``episodic`` batch reverses
+    that). The store is the record; the caller repairs it and re-plans. Both
+    orders must fail, identically.
     """
     episodic = plan_writeback([_finding(claim="acme corp signed",
                                        claim_class="episodic")]).units[0]
