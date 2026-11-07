@@ -970,6 +970,13 @@ _PURE_STR_METHODS = frozenset({
     "rjust", "rstrip", "strip", "swapcase", "title", "upper", "zfill",
 })
 
+# A folded `str` method must not ALLOCATE an attacker-sized string: `.ljust(10**10)`,
+# `.zfill(900000000)` and `.center(…)` really build it, so an unbounded fold raised
+# `MemoryError` out of the census — or was OOM-killed, printing no count line —
+# instead of failing CLOSED on the site (third-session review, follow-up round).
+# A graph handle is short, so a width past this cap is simply not decidable here.
+_FOLD_WIDTH_CAP = 4096
+
 
 def _pos(node) -> tuple[int, int]:
     """Source order for a node, as (line, column): what "BEFORE the call" and
@@ -980,13 +987,21 @@ def _pos(node) -> tuple[int, int]:
 def _dotted(node) -> str | None:
     """The key a binding target, or a use, names: `name`, `t.name`,
     `self.graph`. An `Attribute` target journals exactly like a plain name
-    (#11243: `t.name = f"evict_…"` then `_journal_append(t.name)`)."""
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        head = _dotted(node.value)
-        return f"{head}.{node.attr}" if head else None
-    return None
+    (#11243: `t.name = f"evict_…"` then `_journal_append(t.name)`).
+
+    Walked with a LOOP, not by recursion: `a.b.b.…` is as deep as it is long, and
+    ~1000 hops raised `RecursionError` out of the census — a traceback naming no
+    file and reporting nothing about the site, the exact symptom this module
+    closes everywhere else (third-session review, follow-up round: measured
+    `RecursionError` at 1500 hops on source CPython compiles fine)."""
+    parts: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    return ".".join([current.id] + list(reversed(parts)))
 
 
 def _target_keys(node) -> list[str]:
@@ -1254,10 +1269,18 @@ def _const_str(node, _depth: int = 0) -> str | None:
                         else _const_int(arg) for arg in node.args]
                 if any(arg is None for arg in args):
                     return None
+                # ⛔ A fold that ALLOCATES is bounded: `.ljust(10**10)` and
+                # `.zfill(900000000)` really allocate the width, so the census
+                # raised `MemoryError` (or was OOM-killed, printing no count
+                # line) instead of failing CLOSED on the site (third-session
+                # review, follow-up round). A handle is short; past the cap the
+                # value is simply not decidable here.
+                if any(isinstance(arg, int) and arg > _FOLD_WIDTH_CAP for arg in args):
+                    return None
                 try:
                     folded = getattr(receiver, func.attr)(*args)
                 except (TypeError, ValueError, KeyError, IndexError,
-                        AttributeError, OverflowError):
+                        AttributeError, OverflowError, MemoryError):
                     # A template whose fields the arguments do not satisfy
                     # (`"{missing}".format("x")` -> KeyError, `"{0.nope}"` ->
                     # AttributeError, `"{0[9]}"` -> IndexError): NOT decidable —
@@ -2100,6 +2123,34 @@ def test_a_PARTIAL_concat_fold_is_not_a_decidable_VALUE(tmp_path):
     assert "UNDECIDABLE" in bad[0], (
         f"the slice bound is resolvable but its BASE is not, so the violation "
         f"must say UNDECIDABLE rather than claim a resolved prefix: {bad}")
+
+
+def test_no_shape_can_abort_the_census_instead_of_reding_it(tmp_path):
+    """A shape the arm cannot read must produce a VIOLATION, never a traceback.
+
+    Third-session review, follow-up round. The module's contract — stated at
+    `_journal_prefixes` and closed twice for other walks — is that an undecidable
+    shape degrades to `UNDECIDABLE` and the census fails CLOSED. Two raises on the
+    new AST path survived that: `_dotted` recursed once per attribute (`a.b.b.…`
+    at ~1000 hops raised `RecursionError` out of `_raw_detach_violations`), and the
+    constant fold really ALLOCATED the width, so `"a".zfill(900000000)` raised
+    `MemoryError` (or was OOM-killed, printing no count line). Both abort the whole
+    file's census — a traceback naming no site — instead of reding on it.
+
+    Pinned as BEHAVIOUR: neither shape may raise, and both must be REPORTED.
+    """
+    site = tmp_path / "test_census_aborts.py"
+    deep = "a" + ".b" * 1500
+    for line in (f"    _journal_append({deep})",
+                 '    _journal_append("a".zfill(900000000) + os.urandom(2).hex())'):
+        site.write_text(
+            _raw_client_site(line), encoding="utf-8")
+        # The assertion IS the call: a RecursionError / MemoryError here fails the
+        # test with the census never reaching a verdict.
+        bad = _raw_detach_violations(root=tmp_path)
+        assert bad, (
+            f"`{line.strip()[:60]}…` must RED — the census cannot read it, and "
+            f"aborting instead of reding names no site")
 
 
 def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_path):
