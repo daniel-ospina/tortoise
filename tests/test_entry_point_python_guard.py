@@ -1061,6 +1061,29 @@ REFUSAL_WHY: dict[str, str] = {
     ),
 }
 
+
+def test_every_refusal_code_carries_its_reason():
+    """★ the two tables must describe the SAME files, or the red loses its diagnostic.
+
+    `test_the_refusal_exit_code_is_the_one_the_tool_can_spare` quotes
+    ``REFUSAL_WHY[rel]`` **inside its failure message**, so an entry added to
+    ``REFUSAL_CODES`` without a matching reason turns that test's red into a bare
+    ``KeyError`` — the row still fails, and the sentence naming the contract that
+    was broken is exactly what is lost. The mirror case is a ``REFUSAL_WHY`` row
+    no code pins: a reason that reads as enforcement while nothing enforces it.
+
+    Pinned as its own row rather than an `assert` between the tables so the
+    failure is a counted FAILED test naming both directions, not a collection
+    error that takes the other 500-odd rows with it.
+    """
+    missing_reasons = sorted(set(REFUSAL_CODES) - set(REFUSAL_WHY))
+    reasons_without_a_code = sorted(set(REFUSAL_WHY) - set(REFUSAL_CODES))
+    assert not missing_reasons and not reasons_without_a_code, (
+        f"REFUSAL_CODES entries with no REFUSAL_WHY reason: {missing_reasons}; "
+        f"REFUSAL_WHY reasons for a file no code pins: {reasons_without_a_code}"
+    )
+
+
 #: Run a tool as a script under a faked pre-3.12 interpreter. `version_info` is
 #: replaced before `runpy` executes the file, so the file's OWN guard node runs
 #: and nothing below it does — no old interpreter and no real work needed.
