@@ -1014,8 +1014,15 @@ def _in_tree_files_the_site_guard_opens() -> set[str]:
     src = (REPO / "tests" / "test_website_static.py").read_text()
     consts = dict(re.findall(r'^\s+([A-Z][A-Z0-9_]*)\s*=\s*"([^"\n]+)"\s*$', src, re.M))
     found: set[str] = set()
+    # ⛔ The literal CHAIN only — NOT `(` … `).read_bytes()` as a unit. A fixture bound
+    # first (`shared = self.WEB / "assets" / "x.png"` then `shared.read_bytes()`, the
+    # shape `test_website_static.py` already uses for the shared card) never has the
+    # chained call on the same line, so requiring it made the derivation blind to
+    # exactly the shape a future author is most likely to copy — and silent about it,
+    # which is the #1349 class this test exists to close. Measured on this tree: the
+    # widened pattern yields the same two files, both already in SOURCE_PATTERNS.
     for match in re.finditer(
-            r'\.WEB\s*/\s*((?:"[^"\n]+"\s*/\s*)*"[^"\n]+")\s*\)\s*\.read_bytes\(\)',
+            r'\.WEB\s*/\s*((?:"[^"\n]+"\s*/\s*)*"[^"\n]+")',
             src):
         rel = "/".join(re.findall(r'"([^"\n]+)"', match.group(1)))
         if rel and (REPO / "website" / rel).is_file():
