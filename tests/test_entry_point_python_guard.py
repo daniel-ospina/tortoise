@@ -988,7 +988,7 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # because `bool` is an `int`, not because `False` is a status. CPython turns
     # `.code` into a status with `0 if code is None else (code if isinstance(code, int)
     # else 1)` and the OS then keeps the low 8 bits — so `SystemExit(256)`, `(512)`,
-    # `(-256)` and `(768)` leave the process at **0** while the derived value is not
+    # `(-256)` and `(768)` leave the process at **0** while the PRE-MASK value is not
     # (measured). Both steps are applied here.
     #
     # Declared bound, because the derivation cannot be total: for an int outside C
@@ -997,8 +997,17 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # measured). No guard writes such a code, and the property this assertion checks
     # survives it: a status of 0 is reachable only from `None`, `False`, 0 or an int
     # ≡ 0 (mod 256), and every one of those derives 0.
+    # `int.__and__` rather than `&` on purpose: an `int` SUBCLASS may override
+    # `__and__`, and a guard could then leave the process at status 0 while this
+    # derivation returned non-zero — the false PASS this assertion exists to close
+    # (measured with `class Evil(int): __and__ -> 1`). The unbound call is the int
+    # arithmetic the OS will apply, whatever the subclass declares.
     _code = refusal.value.code
-    _status = 0 if _code is None else ((_code & 0xFF) if isinstance(_code, int) else 1)
+    _status = (
+        0
+        if _code is None
+        else (int.__and__(_code, 0xFF) if isinstance(_code, int) else 1)
+    )
     assert _status != 0, (
         f"{rel}: the guard refused but the PROCESS exits {_status} — a refusal "
         f"that reports success is indistinguishable from the tool having run: "
