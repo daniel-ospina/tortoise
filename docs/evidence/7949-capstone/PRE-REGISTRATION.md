@@ -422,7 +422,7 @@ reporting one is the defect, not the small number.
 | **A1** | `object→object` edges written by the run, by **declared relation type** and by **endpoint kind**, plus the number of **rollup queries** the run asks that answer (return at least one row) | every `:Object` node written by the run, same arm, same commit (floor of at least 30 Objects); and the rollup queries asked (floor of at least 1 query) | `>= 1` edge for **each** relation family pinned in `a1_relation_families` (`hasPart` — the ONE relationship label the pack's two declared hierarchy predicates `decomposesInto`/`hasPart` are both **written** as; a pin on the declared spelling names a label no writer stamps, which makes the bar unsatisfiable), and **every** rollup query answers (`>= 1` row); zero object→object edges on a population that clears the floor is **RED**, never REFUSED |
 | **A2** | S3 RESOLVE candidates **attached** to an existing `:Object` versus **minted**, plus candidates **held** and each held candidate named with its reason | the **decided** S3 RESOLVE candidates in the scored run (floor of at least 30 decided candidates — `a2_decided_candidates`; the all-candidate count is reported beside it, never used as the floor) | `attach_share >= 0.50` of **decided** candidates, and every `held` candidate named with its reason — a run that holds candidates without naming them is **RED** |
 | **A3** | statements that **join a chain** under the definition registered here — carrying at least one incident `IMPL`/`NAND` edge **and** at least one such edge crossing a batch boundary (a different `Event` root, with an `eventId` on **both** ends) — with the CHEAP rate (any incident `IMPL`/`NAND`, no cross-batch requirement) reported beside it and explicitly NOT the bar | the statements written by the run that carry an `eventId` — `Point` nodes whose `pointKind` is `statement` **and** whose `eventId` is present (floor of at least 30 statements AND an event-root coverage of at least 0.50); the unstamped statements and the `NULL` `pointKind` population are reported separately, never folded in | `cross_batch_rate >= 0.50` over the stamped statements; the cheap rate and the coverage are reported and never compared to this bar |
-| **A4** | typed claims — **claim** Points (neither a truthy `is_episodic` nor a truthy `is_operator`) whose `pointKind` is present, not blank and not `statement` — reported by kind, with the `statement` and `NULL`/blank populations reported beside them | all **claim** `Point` nodes written by the run (floor of at least 30 typed statements); the excluded turn-row and operator-Point populations are counted and reported beside it, never folded in | UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED above the floor of `>= 30` typed statements and compared to no bar) |
+| **A4** | typed claims — **claim** Points (neither a truthy `is_episodic` nor a truthy `is_operator`) whose `pointKind` is present, not blank and not `statement` — reported by kind, with the `statement` and `NULL`/blank populations reported beside them | all **claim** `Point` nodes written by the run (floor of at least 30 typed statements); the excluded turn-row and operator-Point populations are counted and reported beside it, never folded in | UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED and compared to no bar, above the floor of `>= 30` typed statements) |
 | **A5** | `:Subject` nodes written by the run, and the **four subject-edge families** (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) counted per family (`count(DISTINCT r)`), plus the statements carrying at least one of them | the distinct actors the A-corpus names — `a5_actors`, floor of at least 30 named actors — with the `:Subject` count and the `Point` population reported beside them, never used as the actor denominator | `>= 1` `:Subject` per distinct actor named in the A-corpus and `>= 1` statement carrying a subject edge; a family that is zero is named with its reason rather than averaged away |
 
 ⚠️ The **step set** these rows are measured over is not all-unconditional: §11 records which of §4.1's
@@ -786,6 +786,12 @@ Exit 0 only when **all** of these hold:
      (§3.7), so a row that has no bar must not pass the "has a bar" check on the floor's number.
      `tools/capstone_preregistration_check.py` enforces both halves: it strips the comparator THE
      FLOOR OWNS and refuses any comparator left outside it, and it requires a `#NNNN` reference.
+     ⛔ **The exemption is the row's PINNED value AND its own floor unit, and the clause must END
+     the cell at that unit** (§10.12): `floor of ` >= 30 `` typed statements ` is `A4`'s floor,
+     while a rate spelled after the same unit (`typed statements per claim`, `…, share`, `… ratio`)
+     re-scopes the number and is a BAR, refused exactly as `>= 30 % typed` is. Only closing
+     punctuation may follow the unit, to the end of the cell — an allowlist rather than a denylist
+     of rate spellings, because a denylist is bypassed by the spelling it does not list.
      ⛔ **The exemption is a CLOSED register, and registering a new bar-less row is a TOOL change.**
      The gate tests membership in `REGISTERED_NON_BAR_ROWS` (a pinned `frozenset({"A4"})`, asserted
      disjoint from the required `E`-rows), not the mere presence of `UNMEASURED(`. So adding a
@@ -1612,6 +1618,42 @@ if it were a measurement of the fleet graph it was written to reverse.
 ⛔ **No value moves.** No metric, denominator, threshold, relation family, floor or `UNMEASURED(...)`
 register changes; `required_criteria_rows` stays `[E1, E2, E3, E4, E5]`; no committed verdict is
 re-scored. `document_sha256` is re-cut from the resolved document (§8), never picked from a side.
+
+### 10.12 — the `A4` floor clause is exempted as a WHOLE unit phrase that ENDS the cell (`#11331`, 2026-11-07)
+
+**Old value (verbatim).** §3.1's `A4` threshold cell (and its `criteria[A4].threshold` restatement in
+`preregistration.json`, which agrees character for character) ended:
+
+> until that is ruled the row is REPORTED above the floor of `` `>= 30` `` typed statements and compared to no bar)
+
+**New value.** The same sentence, with the floor clause **moved to the end of the cell** so nothing
+follows its unit but the closing parenthesis:
+
+> until that is ruled the row is REPORTED and compared to no bar, above the floor of `` `>= 30` `` typed statements)
+
+**Why (the reason this is not a cosmetic edit).** The gate exempts a floor clause from §7 item 1's
+"a registered non-bar cannot also be a bar" arm, and round 10 bound that exemption to the row's
+**pinned value AND its floor unit** — but on a **prefix** of the unit. So a RATE spelled *after* the
+unit walked through the other side of the same hole that `>= 30 % typed` walked through before it:
+measured at `#11331` review round 11, `floor of ` >= 30 `` typed statements per claim, and compared to
+no bar ` — and the same cell with `share` or `ratio` in place of `per claim` — left the gate at
+**`exit=0` / `OK`** with `criteria[A4].floor` untouched, while the identical cell with `%` after the
+number was refused. `typed statements per claim` is the ordinary way to write a rate whose denominator
+is a claim, and it is exactly the `A4`-vs-`D3` bar `#10988`/`#1022` have **not** ruled on, so the
+exemption was settling an owner-gated decision by prose.
+
+The tool now requires the clause to **END** the cell at the row's own floor unit: after that unit only
+closing punctuation is accepted. That is an **allowlist**, not a denylist of rate spellings, because a
+denylist is bypassed by the spelling it does not list — the same reason OWASP's input validation
+control names allowlisting as the required minimum — and because a delimiter is not a licence either:
+`typed statements, per claim` is refused exactly as `typed statements per claim` is. It is also the
+fail-**closed** direction: over-blocking costs a re-worded cell (what this entry records), while
+failing open settles an owner-gated decision. The `A4` cell is re-worded accordingly — floor clause
+last — so the pinned artifact stays green under the stricter rule.
+
+⛔ **No value moves.** No metric, denominator, threshold NUMBER, relation family, floor or
+`UNMEASURED(...)` register changes: the cell is re-ordered and nothing else, `document_sha256` is
+re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 

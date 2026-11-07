@@ -3,7 +3,7 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:3e61b8fff1030a80520c523479fef7798653588e22cc039b76b211ec45344f11",
+  "document_sha256": "sha256:7705d849f7f184e43810c329ff7d2d8ffcbbfe0691077edaba06c826e0f1775a",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -135,7 +135,7 @@
       "id": "A4",
       "metric": "typed claims — **claim** Points (neither a truthy `is_episodic` nor a truthy `is_operator`) whose `pointKind` is present, not blank and not `statement` — reported by kind, with the `statement` and `NULL`/blank populations reported beside them",
       "denominator": "all **claim** `Point` nodes written by the run (floor of at least 30 typed statements); the excluded turn-row and operator-Point populations are counted and reported beside it, never folded in",
-      "threshold": "UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED above the floor of `>= 30` typed statements and compared to no bar)",
+      "threshold": "UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED and compared to no bar, above the floor of `>= 30` typed statements)",
       "threshold_basis": "NO BAR EXISTS and this registration may not invent one: the owner's assertion ('0.6% typed is the ceiling the capstone must beat') points OPPOSITE to D3's 'statement only', #10988 (C7) is BLOCKED on that reopen, and #1022 carries the decision. The row is REPORTED above its floor and compared to nothing until the fork is ruled.",
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "no A-row was visible at the registration commit `a6085af84` (2026-10-21), which is the anchor this field uses (PRE-REGISTRATION.md section 10.3; E3 stays false on the same ground even though the amending author had seen its FAIL). ⛔ The ground is the ANCHOR, not 'no committed artifact': the owner's 0.6%-typed hand reading of the hosted graph is a measurement of this row's metric and predates the row (it is the contrast the row's threshold records), and docs/evidence/7949-capstone/capstone-measured-9152448d.log (committed 31f996f91, 2026-11-04) carries `point_composition` on the pinned corpus. What no artifact carries is the `pointKind` HISTOGRAM over claim Points that this row registers, which is why the bar is `UNMEASURED` pending #10988 (C7) and #1022. That discount is disclosed in PRE-REGISTRATION.md section 0 and section 10.10, and #10988 owns the measurement once the D3 fork is ruled.",
