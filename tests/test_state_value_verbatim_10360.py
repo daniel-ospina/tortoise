@@ -34,6 +34,8 @@ import inspect
 import json
 import pathlib
 import re
+import sys
+import traceback
 
 import pytest
 
@@ -2376,9 +2378,25 @@ def _assert_the_row_names_its_closure(row: str) -> None:
     flat = " ".join(block.split()).lower()
     sentences = re.split(r"(?<=[.!?;])\s+", flat)
     adjacency_at = [i for i, s in enumerate(sentences) if "adjacency" in s]
-    assert adjacency_at, (
-        "the row no longer makes any ADJACENCY claim in residual (d) — this "
-        "table closed that gap; if it was reopened, say so AND delete this pin")
+    # ⛔ `assert adjacency_at` WAS DELETED HERE AND IT IS NOT TIDINESS (#11258
+    # round 27 `P2`, MEASURED): it was DEAD, and it was the one structural rule
+    # with no killing mutant — the exact class the record in `test_every_structural
+    # _rule_in_the_pin_has_a_falsifier` claims is empty. `after` is
+    # `residual[1][:1200]` and `block` is `residual[1]` up to `(e) the` (10,019
+    # chars), so `after ⊆ block`; the assert 3 lines above
+    # (`"ADJACENCY" in after.upper()`) therefore implies "adjacency" ∈ `flat`,
+    # which implies this list is non-empty. MEASURED by deletion: patching this
+    # assert to `pass` changed NO verdict — control PASS, all 10 falsifiers red at
+    # the same rules — so it could never fire.
+    # The loop below is therefore GUARDED BY AN IMPLICATION, not by an assert, and
+    # that is sound only while `after ⊆ block` holds: if a future edit reads `block`
+    # from a NARROWER window than `after`, the implication breaks and the loop
+    # silently goes vacuous. `test_every_structural_rule_in_the_pin_has_a_falsifier`
+    # re-measures the premise (`after in block` on the real row) and reds if it
+    # stops holding, so the vacuity route is recorded rather than left to be
+    # discovered — and the `adjacency-claim-exists` entry that used to stand in
+    # here is gone with the assert, because its mutant reddened the WINDOW rule
+    # above instead of this one (a label that no longer named its rule).
     # ⛔ THE CLAIM ITSELF must still say CLOSED, per SENTENCE (review cycle 7 P1,
     # MEASURED: collapsing this to a block-wide `"closed" in flat` let a row that
     # says "the ADJACENCY half is not currently judged; the closed set grows"
@@ -2450,7 +2468,14 @@ def _assert_the_row_names_its_closure(row: str) -> None:
     # positive control: the RATE class IS still open, and it must stay NAMED, or
     # the assertions above could be satisfied by a row that says nothing at all.
     assert "not judged" in flat, block
-    assert "per day" in flat or "per\n      day" in block, block
+    # ⛔ AND THE BLOCK-WIDE `per day` ASSERT THAT STOOD HERE WAS DELETED (#11258
+    # round 27 `P3`, MEASURED): unreachable, not merely late. `flat` is `block`
+    # whitespace-flattened and `block ⊇ after`, so the opening-window assert above
+    # (`"per\n      day" in after or "per day" in after`) already implies this one;
+    # MEASURED by deletion: patching it to `pass` left the matrix BYTE-IDENTICAL
+    # (control PASS, every falsifier red at the same line). Same class as the two
+    # tail asserts deleted above, and the `rate-per-day` falsifier still reds on the
+    # window assert, so the rule is not left unpinned.
 
 
 def test_the_registry_row_names_the_residual_that_still_stands():
@@ -3802,10 +3827,23 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
 #: — UNIQUENESS for padding, MEMBERSHIP for substitution, a `>=` floor for shrinkage —
 #: and it is the shape this one did not have.
 #:
-#: Each entry is `(key, label, mutate, attribution)`:
+#: Each entry is `(key, label, mutate, attribution, rule)`:
 #:   * `key` — the stable, short name the test body pins membership of;
 #:   * `label` — the rule, named the way its own assertion names it;
 #:   * `mutate` — the registry text → a copy that breaks THAT rule;
+#:   * `rule` — the SOURCE LINE of the assert that must actually, fire, as a
+#:     fragment of its own text. ⛔ ADDED BECAUSE THE KEY WAS NOT THE RULE (#11258
+#:     round 27 `P2`, MEASURED): `attribution` above checks WHICH KIND of failure
+#:     arrived, never WHICH RULE refused it, so an entry whose mutant reddens a
+#:     NEIGHBOURING structural rule passed every arm — the `adjacency-claim-exists`
+#:     entry (`assert adjacency_at`) was reddened by the WINDOW assert two lines
+#:     above it, and its own rule was dead: patching it to `pass` changed no
+#:     verdict. Declaring the line turns "some structural assert refused it" into
+#:     "THIS rule refused it", which is the only thing the label ever claimed.
+#:     Declared for every entry, not just the ambiguous one: the gap was the whole
+#:     registry's, and a field filled in on one row would let the next row in
+#:     unfalsified. A probe for it (a synthetic entry that reddens a neighbour)
+#:     lives in `test_a_falsifier_that_reddens_a_neighbouring_rule_is_refused`.
 #:   * `attribution` — how the red is allowed to arrive. Named arms, not a fallback
 #:     (#11258 review round 23 `P2`): an arm that accepts ANY non-reopening reason
 #:     is the wrong-reason red this test's own docstring forbids.
@@ -3819,6 +3857,31 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
 #:       `"region-guard"`    additionally asserts `_residual_region(mutant)` raises,
 #:                          because the rule under test IS that guard, and a mutant
 #:                          can break a structural rule AND a region guard at once.
+#:                          `rule` pins the guard's OWN assert line for these.
+
+
+def _red_line(call, mutant: str, src_lines) -> tuple[str, int, str]:
+    """The SOURCE LINE of the assert that actually refused `mutant` (#11258 round 27).
+
+    Returns `(function_name, lineno, line_text)` for the innermost `AssertionError`
+    frame, so a falsifier can be attributed to the assert it CLAIMS rather than to any
+    structural rule that happens to be nearby. `src_lines` is this file's own source
+    (read once by the caller); the lineno is 1-based, as `traceback` gives it.
+
+    ⛔ WHY THIS EXISTS: `attribution` says which KIND of failure arrived, never which
+    RULE refused it, so one entry could red a neighbour's assert and read as full
+    coverage of its own dead one — MEASURED on `adjacency-claim-exists`, whose
+    mutant reddened the 1,200-char WINDOW assert while its own `assert adjacency_at`
+    could not fire at all.
+    """
+    try:
+        call(mutant)
+    except AssertionError:
+        frame = traceback.extract_tb(sys.exc_info()[2])[-1]
+        return frame.name, frame.lineno, src_lines[frame.lineno - 1].strip()
+    raise AssertionError(
+        "the mutant did not raise at all, so it cannot attribute a rule — the "
+        "entry proves nothing about the assert it is labelled with")
 
 
 def _mutate_row_end_unfindable(text: str) -> str:
@@ -3840,14 +3903,16 @@ def _mutate_row_end_unfindable(text: str) -> str:
 def _mutate_adjacency_past_the_window(text: str) -> str:
     """Push the ADJACENCY sentence PAST residual (d)'s 1,200-char opening window.
 
-    ⛔ THE `adjacency-claim-exists` ENTRY BELOW USED TO CLAIM this rule was
-    un-falsifiable while `adjacency_at` held — "no mutant can break the window
-    assert without also emptying `adjacency_at`" — and that record was FALSE
-    (#11258 review round 24 `P1`, MEASURED). The sentence sits ~700 chars into the
-    window; filler inserted BEFORE it moves the sentence past 1,200 while leaving
-    it inside residual (d), so `adjacency_at` still finds it and the window assert
-    is the only thing that can fire. This helper is that mutant, and with it the
-    rule is pinned like every other.
+    ⛔ THE `adjacency-claim-exists` ENTRY THIS USED TO BE PAIRED WITH IS GONE, and
+    so is its `assert adjacency_at` (#11258 round 27 `P2`, MEASURED). That entry
+    claimed this rule was un-falsifiable while `adjacency_at` held — "no mutant can
+    break the window assert without also emptying `adjacency_at`" — and that record
+    was FALSE (#11258 review round 24 `P1`): the sentence sits ~700 chars into the
+    window, so filler inserted BEFORE it moves the sentence past 1,200 while leaving
+    it inside residual (d), and `adjacency_at` still finds it. This helper is that
+    mutant; with it, the WINDOW rule is pinned like every other — and the dead
+    `adjacency_at` assert it was wrongly paired with is deleted rather than left
+    carrying a label this mutant does not red.
     """
     anchor = "is the carve-out's own fifth example."
     assert text.count(anchor) == 1, (
@@ -3861,18 +3926,20 @@ _STRUCTURAL_FALSIFIERS = (
         "d-header",
         "residual (d) is still stated as the RATE-unit gap",
         lambda t: t.replace("(d) a RATE unit", "(d) the RATE-unit gap", 1),
+        r"assert len(residual) == 2",
         "claims-not-run",
     ),
     (
         "rate-per-day",
-        # ⛔ ONE FALSIFIER FOR ONE RULE EXPRESSED TWICE. `per day` is asserted at TWO
-        # scopes in the pin (the `after` window and the block-wide `flat`), so no
-        # single deletion of either assert is caught; deleting BOTH reds here.
-        # MEASURED and recorded rather than chased: the two asserts are the same
-        # claim at two depths, so the redundancy is a doubled message, not a
-        # doubled guarantee — and a mutant that split them would prove the fixture.
+        # ⛔ ONE RULE, ONE ASSERT (#11258 round 27 `P3`). This entry used to say the
+        # rule was "expressed TWICE" and that no single deletion was caught; the
+        # SECOND assert (block-wide) was UNREACHABLE, not merely redundant — the
+        # window assert implies it (`after ⊆ block`) — and it is deleted, see the
+        # positive control in `_assert_the_row_names_its_closure`. So a single
+        # deletion DOES red here now, and this mutant reds the one assert left.
         "the RATE class's own `per day` example is still in residual (d)'s opening",
         lambda t: t.replace("requests per\n      day", "requests per\n      week", 1),
+        r'assert "per\n      day" in after or "per day" in after',
         "claims-empty",
     ),
     (
@@ -3880,21 +3947,26 @@ _STRUCTURAL_FALSIFIERS = (
         "the positive control: the RATE class is still named as NOT JUDGED",
         lambda t: t.replace("is not judged: no unit is ADJACENT",
                             "is judged: no unit is ADJACENT", 1),
+        'assert "not judged" in flat',
         "claims-empty",
     ),
     (
-        "adjacency-claim-exists",
-        "the row still makes an ADJACENCY claim at all",
-        lambda t: t.replace("The ADJACENCY half", "The unit half", 1),
-        "claims-empty",
-    ),
-    (
-        "adjacency-claim-in-window",
+        # ⛔ THE `adjacency-claim-exists` ENTRY THAT STOOD HERE IS DELETED (#11258
+        # round 27 `P2`, MEASURED), WITH its `assert adjacency_at`. Its label named
+        # the row still making an ADJACENCY claim at all; its mutant walked the
+        # ADJACENCY word out of the first 1,200 chars, so the red landed on the
+        # WINDOW assert below — a rule that already has its own entry — while its
+        # own assert could not fire for ANY mutant (`after ⊆ block`). Restoring the
+        # note without a falsifier for it is the defect; the rule is now covered by
+        # the window assert (a superset) and by the `after in block` premise check.
+        #
         # ⛔ THE WINDOW ASSERT IS A SEPARATE RULE FROM `adjacency_at`, MEASURED
         # (#11258 review round 24 `P1`): this entry replaces a record that claimed
         # the opposite. See `_mutate_adjacency_past_the_window`.
+        "adjacency-claim-in-window",
         "the ADJACENCY claim is still inside residual (d)'s opening window",
         _mutate_adjacency_past_the_window,
+        'assert "ADJACENCY" in after.upper()',
         "claims-empty",
     ),
     (
@@ -3902,6 +3974,7 @@ _STRUCTURAL_FALSIFIERS = (
         "the ADJACENCY gap is asserted CLOSED, per SENTENCE",
         lambda t: t.replace("stand here is CLOSED:",
                             "stand here was judged, and the tables now cover it:", 1),
+        "assert any(re.search(p, sentences[i])",
         "claims-empty",
     ),
     (
@@ -3912,27 +3985,137 @@ _STRUCTURAL_FALSIFIERS = (
         # so it mutates nothing the guard reads and would prove the guard missing
         # when it is present. A second OCCURRENCE is what the guard counts.
         lambda t: t + "\n      " + _RESIDUAL_MARKER + " — a second, unguarded list\n",
+        "assert text.count(_RESIDUAL_MARKER) == 1",
         "region-guard",
     ),
     (
         "one-row",
         "the registry carries exactly ONE `state_value_carve_out` row",
         lambda t: t + "  - id: state_value_carve_out\n    name: \"a second, unguarded copy\"\n",
+        "assert row_copies == 1",
         "region-guard",
     ),
     (
         "row-end-findable",
         "the row's END (the next `  - id: ` entry) is findable",
         _mutate_row_end_unfindable,
+        "assert nxt is not None",
         "region-guard",
     ),
     (
         "region-spans-d-to-e",
         "the region runs from residual (d) through residual (e)",
         lambda t: t.replace("(e) the", "(e) that", 1),
+        r'assert (_RESIDUAL_MARKER in region and "(d) a RATE unit" in region',
         "region-guard",
     ),
 )
+
+
+def _verify_structural_falsifier(entry, text: str, src_lines) -> None:
+    """One `_STRUCTURAL_FALSIFIERS` entry, measured end to end (#11258 round 27).
+
+    Extracted so the checks are exercised by a PROBE entry as well as by the real
+    list: `test_a_falsifier_that_reddens_a_neighbouring_rule_is_refused` feeds it a
+    deliberately mis-attributed entry, so the attribution check has a falsifier of
+    its own instead of being trusted because it is written down.
+
+    `entry` is `(key, label, mutate, rule, attribution)`; `src_lines` is this file's
+    source, used to name the assert that actually fired.
+    """
+    key, label, mutate, rule, attribution = entry
+    assert attribution in ("claims-empty", "claims-not-run", "region-guard"), (
+        f"{key!r} declares an unknown attribution {attribution!r} — an unnamed "
+        "arm is a fallback, and a fallback accepts any non-reopening reason")
+    mutant = mutate(text)
+    assert mutant != text, (
+        f"the fixture for {key!r} ({label!r}) no longer CHANGES the registry — "
+        "the row wording it targets has moved, so this falsifier proves nothing "
+        "at all. Re-anchor it on the row's new text; do not delete the entry")
+    try:
+        _assert_the_row_names_its_closure(mutant)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            f"the structural rule {label!r} has NO falsifier: a registry that "
+            "breaks it still passes the pin, so the rule is prose the suite "
+            "never re-measures — the class this artifact exists to refuse")
+    # ⛔ ATTRIBUTION, asserted per named arm rather than as one permissive
+    # fallback (#11258 review round 23 `P2`). `claims-empty` is the STRONG arm:
+    # the claim rule ran and found nothing, so nothing but the structural rule
+    # can have refused the mutant. `claims-not-run` records the weaker fact —
+    # the mutant never reached the claim rule — instead of pretending to the
+    # stronger one.
+    if attribution == "claims-empty":
+        assert _residual_reopening_claims(mutant) == [], (
+            f"the falsifier for {key!r} reds through the REOPENING scan, so it "
+            "proves nothing about the structural rule it is labelled with — "
+            "re-derive the mutant, or declare `claims-not-run` if the scan "
+            "cannot run on it at all")
+    else:
+        with pytest.raises(AssertionError):
+            _residual_reopening_claims(mutant)
+    if attribution == "region-guard":
+        # asserted on the GUARD ITSELF, not inferred from the pin's failure above: a
+        # mutant can break a structural rule AND the region guard, and then the pin's
+        # red says nothing about which one refused it.
+        frame, lineno, line = _red_line(_residual_region, mutant, src_lines)
+    else:
+        frame, lineno, line = _red_line(
+            _assert_the_row_names_its_closure, mutant, src_lines)
+    # ⛔ THE RED MUST ARRIVE AT THIS ENTRY'S OWN RULE (#11258 round 27 `P2`). The
+    # kind arms above cannot see WHICH assert fired, so an entry whose mutant reddens
+    # a NEIGHBOURING rule read as full coverage of a rule with no killing mutant at
+    # all — measured on the deleted `adjacency-claim-exists`, whose
+    # `assert adjacency_at` could not fire for any mutant. `rule` is a fragment of the
+    # raising line's own text, so a re-anchored entry that drifts onto a neighbour's
+    # assert reds HERE instead of passing quietly.
+    assert rule in line, (
+        f"the falsifier for {key!r} ({label!r}) reds {frame}:{lineno} — "
+        f"`{line}` — which is NOT the rule it declares (`{rule}`). An entry "
+        "that reds a neighbouring rule proves nothing about its own: "
+        "re-derive the mutant, or delete the rule and the entry together")
+
+
+def test_a_falsifier_that_reddens_a_neighbouring_rule_is_refused():
+    """The attribution check has a falsifier of its own (#11258 round 27 `P2`).
+
+    ⛔ MEASURED, and this is the finding: at `06cdf2a692e7` the falsifier table
+    carried `adjacency-claim-exists` labelled "the row still makes an ADJACENCY claim
+    at all", whose mutant walked the ADJACENCY word out of residual (d)'s 1,200-char
+    window. Every arm the table had — the `mutant != text` guard, "the pin reds", the
+    kind attribution — PASSED, because the red landed on the WINDOW assert three lines
+    above, a rule that already had its own entry. The entry's own rule
+    (`assert adjacency_at`) could not fire for ANY mutant (MEASURED by deletion:
+    patching it to `pass` left the control PASS and all 10 falsifiers red at the same
+    rules), so the table asserted coverage of a rule it never touched.
+
+    This probe feeds `_verify_structural_falsifier` exactly that shape — a real
+    mutant, a real red, `claims-empty` genuinely satisfied — with only the `rule`
+    fragment pointing at a DIFFERENT assert. Before the `rule` check existed this
+    entry passed; now it must be refused, and named as mis-attributed. A probe that
+    hardcodes the expected message would pass on a stub, so what is asserted is the
+    refusal AND that it names the declared rule.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    src_lines = pathlib.Path(__file__).read_text(encoding="utf-8").splitlines()
+    probe = (
+        "probe-reddens-a-neighbour",
+        "a rule whose mutant reds the NEXT rule's assert instead",
+        lambda t: t.replace("requests per\n      day", "requests per\n      week", 1),
+        'assert "ADJACENCY" in after.upper()',
+        "claims-empty",
+    )
+    with pytest.raises(AssertionError) as refused:
+        _verify_structural_falsifier(probe, text, src_lines)
+    message = str(refused.value)
+    assert "probe-reddens-a-neighbour" in message, (
+        f"the probe was refused for some other reason: {message}")
+    assert "is NOT the rule it declares" in message, (
+        "the probe was refused without naming the mis-attribution — the check that "
+        f"refused it is not the `rule` check this test exists to pin: {message}")
 
 
 def test_every_structural_rule_in_the_pin_has_a_falsifier():
@@ -3968,22 +4151,50 @@ def test_every_structural_rule_in_the_pin_has_a_falsifier():
     structural rule. Same shape as the over-block ledger: what is measured is
     recorded as measured, and what a rule CANNOT do is stated rather than implied.
 
+    ⛔ AND A MUTANT MUST NOT RED FOR THE WRONG RULE EITHER (#11258 round 27 `P2`,
+    MEASURED). Attribution by KIND was not enough: `adjacency-claim-exists`
+    (`assert adjacency_at`) was reddened by the WINDOW assert three lines above it,
+    so an entry whose own rule was DEAD read as full coverage — the exact shape
+    cargo-mutants refuses when it reports the test that CAUGHT a mutant rather than
+    "some test failed". Each entry now declares the source line of the assert that
+    must fire (`rule`), and this loop re-reads the raised frame's own line.
+
     ⛔ AND THE LIST OF FALSIFIERS IS ITSELF PINNED — see its own note. A falsifier
     list that can be SHORTENED is this same `P0` one layer up, and it was measured:
     deleting the per-sentence entry plus the loop it covers left the file at `108
     passed` over a row that says the ADJACENCY half "was judged".
 
-    ⛔ NOT FALSIFIED HERE, stated rather than implied: nothing. The two SPELLING-tail
-    rules that used to be listed here were DELETED (#11258 review round 24 `P1`,
-    MEASURED): both are implied by this test's own `sum(…) > 1` records over the
-    same `tail`, so neither could ever fire — deleting either alone, or both,
-    left `108 passed`.
+    ⛔ NOT FALSIFIED HERE, stated rather than implied: nothing — and the two rules
+    that WERE here under a claimed falsifier are gone rather than excused. The two
+    SPELLING-tail rules were DELETED (#11258 review round 24 `P1`, MEASURED): both
+    are implied by this test's own `sum(…) > 1` records over the same `tail`, so
+    neither could ever fire. `assert adjacency_at` and the block-wide `per day`
+    assert were DELETED with their claims (#11258 round 27 `P2`/`P3`, MEASURED):
+    each was UNREACHABLE given the assert above it, and patching either to `pass`
+    changed no verdict. A DEAD assert is worse than an absent one — the absence is
+    visible here, the dead assert reads as coverage — which is why the eliminations
+    leave their premise re-measured below (`after in block`) instead of a note.
     """
     text = (pathlib.Path(__file__).resolve().parent.parent
             / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    src_lines = pathlib.Path(__file__).read_text(encoding="utf-8").splitlines()
     # control: the real row must PASS, or a mutant could red for a reason that has
     # nothing to do with the rule it is labelled with.
     _assert_the_row_names_its_closure(text)
+    # ⛔ THE PREMISE under which the two dead asserts above were deleted (#11258
+    # round 27). `assert adjacency_at` was dead and the block-wide `per day` assert
+    # was dead ONLY while `after ⊆ block`; if a later edit reads `block` from a
+    # narrower window than `after`, both deleted rules become reachable again and the
+    # per-sentence CLOSED loop silently goes vacuous (a suppressed red, not a loud
+    # one). So the premise is re-measured rather than assumed.
+    _residual_after_block = text.split("(d) a RATE unit", 1)[1]
+    assert _residual_after_block[:1200] in \
+        _residual_after_block.split("(e) the", 1)[0], (
+            "`after` (the 1,200-char opening window) is no longer a PREFIX of the "
+            "(d) block, so `assert adjacency_at` and the block-wide `per day` assert "
+            "that were deleted as unreachable are reachable again — re-derive a "
+            "falsifier for the rule they covered (and for the now-vacuous "
+            "per-sentence CLOSED loop) instead of reading the deletion as coverage")
     # ⛔ THE LIST IS PINNED (#11258 review round 23 `P0`): see its own note. Without
     # this, deleting a rule and the single entry covering it is TWO edits that are
     # each individually green — measured at `108 passed` over a row that says the
@@ -3996,7 +4207,9 @@ def test_every_structural_rule_in_the_pin_has_a_falsifier():
         "d-header",
         "rate-per-day",
         "positive-control",
-        "adjacency-claim-exists",
+        # ⛔ NOT `adjacency-claim-exists`: its assert was dead and its mutant reddened
+        # the window rule, so the entry is DELETED with it (#11258 round 27 `P2`).
+        # Re-adding the key without a rule that its own mutant reds is the defect.
         "adjacency-claim-in-window",
         "adjacency-closed-per-sentence",
         "one-marker",
@@ -4007,45 +4220,8 @@ def test_every_structural_rule_in_the_pin_has_a_falsifier():
         "the structural falsifier list no longer carries a declared rule — deleting "
         "a rule AND the falsifier that covers it is the `P0` this key set exists to "
         f"refuse (have: {sorted(set(keys))})")
-    for key, label, mutate, attribution in _STRUCTURAL_FALSIFIERS:
-        assert attribution in ("claims-empty", "claims-not-run", "region-guard"), (
-            f"{key!r} declares an unknown attribution {attribution!r} — an unnamed "
-            "arm is a fallback, and a fallback accepts any non-reopening reason")
-        mutant = mutate(text)
-        assert mutant != text, (
-            f"the fixture for {key!r} ({label!r}) no longer CHANGES the registry — "
-            "the row wording it targets has moved, so this falsifier proves nothing "
-            "at all. Re-anchor it on the row's new text; do not delete the entry")
-        try:
-            _assert_the_row_names_its_closure(mutant)
-        except AssertionError:
-            pass
-        else:
-            raise AssertionError(
-                f"the structural rule {label!r} has NO falsifier: a registry that "
-                "breaks it still passes the pin, so the rule is prose the suite "
-                "never re-measures — the class this artifact exists to refuse")
-        # ⛔ ATTRIBUTION, asserted per named arm rather than as one permissive
-        # fallback (#11258 review round 23 `P2`). `claims-empty` is the STRONG arm:
-        # the claim rule ran and found nothing, so nothing but the structural rule
-        # can have refused the mutant. `claims-not-run` records the weaker fact —
-        # the mutant never reached the claim rule — instead of pretending to the
-        # stronger one.
-        if attribution == "claims-empty":
-            assert _residual_reopening_claims(mutant) == [], (
-                f"the falsifier for {key!r} reds through the REOPENING scan, so it "
-                "proves nothing about the structural rule it is labelled with — "
-                "re-derive the mutant, or declare `claims-not-run` if the scan "
-                "cannot run on it at all")
-        else:
-            with pytest.raises(AssertionError):
-                _residual_reopening_claims(mutant)
-        if attribution == "region-guard":
-            # asserted on the GUARD ITSELF, not inferred from the pin's failure
-            # above: a mutant can break a structural rule AND the region guard, and
-            # then the pin's red says nothing about which one refused it.
-            with pytest.raises(AssertionError):
-                _residual_region(mutant)
+    for entry in _STRUCTURAL_FALSIFIERS:
+        _verify_structural_falsifier(entry, text, src_lines)
     # ⛔ THE RECORD behind "not falsified here": the tail rules cannot be isolated
     # while more than one tail sentence carries their evidence. If that ever drops
     # to ONE, they CAN be falsified a sentence at a time and the entries belong in
