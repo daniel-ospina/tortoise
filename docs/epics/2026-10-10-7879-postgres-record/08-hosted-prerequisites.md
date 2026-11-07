@@ -884,9 +884,9 @@ and after with one instrument against two trees: **51.72–53.09 → 243.63–26
 median **18.61–19.14 → 3.72–4.07 ms**, `connect` calls per record **1.00 → 0.00**, server-logged new
 connections over 65 records **+66 → +2** (`docs/evidence/9558-record-write-cost/`). ⚠️ Two residual
 facts a later lane should not re-derive: the column-map CALL count is unchanged at 1/record (the WORK
-dropped, not the call — a caller-held map is the deferred lifecycle change), and ~0.9–1.0 ms/record of
+dropped, not the call — a caller-held map is the deferred lifecycle change), and 0.27–0.33 ms/record of
 pure stat overhead remains because `replay_plan` drives both cached readers and each recomputes the
-fingerprint (#11388). Batching the per-record insert was explicitly deferred, not forgotten (see
+fingerprint — the filed fix (#11388) saves ONE of those two passes (0.135–0.166 ms). Batching the per-record insert was explicitly deferred, not forgotten (see
 above).
 **What it blocks:** capture latency at volume. **Not a first-customer gate** — hosted capture is off
 by owner ruling (2026-10-14) and the beta volume is unmeasured. **But it must land before the per-record cost of a real

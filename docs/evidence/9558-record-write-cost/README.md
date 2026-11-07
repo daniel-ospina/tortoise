@@ -73,16 +73,20 @@ same spread. AFTER 2–4 are all the shipped design.)
 
 ## Reading the numbers honestly
 
-**(a) The connection half is the whole of the win, and it is now a REUSE, not a
-claim.** `_default_connect` returns an idle handle when it has one, so the live
+**(a) The connection half is MOST of the win (~80-85 % of the ~15 ms saved),
+and it is now a REUSE, not a claim.** `_default_connect` returns an idle handle when it has one, so the live
 door's per-record "open, commit, close" became "borrow, commit, return". The
 remaining 3.8–4.1 ms/record is one transaction boundary (prologue + plan + COMMIT)
 plus plan materialisation — **plus, and this was under-stated in the first
-revision, ≈0.9–1.0 ms of pure stat overhead**: `replay_plan` drives BOTH cached
-readers, and each recomputes the fifteen-file fingerprint, so the cache is
-consulted twice per record. That is a quantified residual with a known fix
-(compute the fingerprint once per plan build) and it is filed, not hidden in
-"the work the record is for".
+revision, 0.27–0.33 ms of stat overhead**: `replay_plan` drives BOTH cached
+readers, and each recomputes the fifteen-file fingerprint (0.135–0.166 ms per
+pass), so the cache is consulted twice per record. The known fix — compute the
+fingerprint once per plan build — therefore saves ONE pass, **0.135–0.166 ms**,
+and is filed as #11388 rather than hidden in "the work the record is for".
+⛔ An earlier revision of this bullet said "≈0.9–1.0 ms of pure stat", which is
+2 x the WHOLE cached call (stat + the per-call dict copy), not 2 x the stat pass;
+the fix was consequently overstated 2-6x. Corrected here and in the three places
+that had copied it.
 
 **(b) The column-map half is real but smaller than the issue's "~4 ms" note
 suggests.** At this head `table_columns()` costs ~1.7 ms uncached and ~0.47 ms
@@ -107,7 +111,7 @@ several things a capture does), and it is not a concurrency claim — the pool's
 idle set is bounded at `RECORD_POOL_MAX_CONNECTIONS = 2`, and a burst opens new
 connections rather than queueing.
 
-## Review cycle 2 — four corrections that changed the artifact
+## Review cycle 2 — five corrections that changed the artifact
 
 **The key needed `ctime_ns`.** A first key on `(mtime_ns, size, inode)` cannot see
 a *same-length* rewrite whose mtime was restored — and restoring it is what
@@ -125,9 +129,15 @@ applies on the DEFAULT filesystem.** On this box (**ext4**, `/dev/root`, in both
 `ctime_ns` **identical** (delta 0 ns), because inode-timestamp granularity is
 coarse on ordinary Linux filesystems. So a `cp -p` landing inside a single tick is
 still invisible. A content digest would close it and was measured and rejected:
-blake2b over the fifteen files (129 KB) costs **0.554 ms** per pass against the
-stat pass's **0.135 ms**, i.e. it would consume most of the ~0.5 ms the cache
-saves over a re-parse. The pin therefore **burns an inode-clock tick explicitly**
+blake2b over the fifteen files (129 KB) costs **0.42–0.55 ms** per pass against
+the stat pass's **0.135–0.166 ms**, so it ADDS 0.25–0.42 ms (net of the pass it
+replaces) to a win of **~1.2 ms** (1.65–1.78 → 0.35–0.48) — i.e. **~20–35 % of the
+win**. ⛔ An earlier revision said "most of the ~0.5 ms the cache saves", which
+compared the digest against one stat pass instead of against the win and got the
+verdict's character wrong; the remaining figures here are the same measurement,
+re-derived. The decision (no digest) is unchanged: 20–35 % for a residual that
+needs an archive extraction inside one inode-clock tick is not a trade worth
+taking, but it is a smaller cost than that revision claimed. The pin therefore **burns an inode-clock tick explicitly**
 before its same-size write, so the ctime arm always executes — the earlier version
 of this test skipped when a tick boundary happened not to fall between two calls,
 which measured as 4 skips in 10 runs and would have intermittently reddened a
@@ -188,7 +198,13 @@ substrate preamble on first use, seeds a tenant, and asserts every write is
 
 The mechanism half is pinned in `tests/test_9558_record_write_cost.py` (20
 tests: 7 for the schema cache, 8 for the pool, and 5 for the wrapper/park/
-read-door contracts the first two review cycles added), each naming its own falsifier. **Eight were OBSERVED RED** by breaking the
+read-door contracts the first two review cycles added). 16 of the 20 carry an
+explicit `FALSIFIER:` block naming the mutation that reds them; the four that do
+not (`test_the_refused_props_map_also_reacts_to_an_edit`,
+`test_a_removed_migration_is_seen_and_restores_the_error`,
+`test_two_different_trees_never_share_a_parse`,
+`test_the_returned_map_is_the_callers_own`) are contract assertions whose
+violation is the assertion itself. **Eight were OBSERVED RED** by breaking the
 source, running only the named test, and restoring the file byte-identically
 (`/tmp/prove_falsifiers.py`, one pass):
 
@@ -203,9 +219,10 @@ source, running only the named test, and restoring the file byte-identically
 | drop the double-close guard | `test_a_double_close_returns_one_handle_once` | **RED** |
 | commit inside the hook on the reuse branch | `test_a_borrowed_handle_reports_the_same_outcome_to_its_caller` | **RED** |
 
-⚠️ Two mutations were tried first and reported **STILL-GREEN**, and both were
-defects in the MUTANT rather than in the pin — recorded because a green mutant is
-the one result that can quietly pass as coverage:
+⚠️ Two mutations were tried first and reported **STILL-GREEN**. ONE was a
+defect in the mutant; the other was reporting a REAL gap in the pin (per bullet) —
+recorded because a green mutant is the one result that can quietly pass as
+coverage, in EITHER direction:
 
 * zeroing only `mtime_ns` left `size` in the fingerprint, and the edit changes the
   file's size, so the cache correctly invalidated. ⛔ Re-mutated to inode-only, it

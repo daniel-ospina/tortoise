@@ -1608,8 +1608,8 @@ def _migrations_fingerprint(base: Path) -> tuple:
     instead of against the win: one fingerprint pass is 0.135–0.164 ms, blake2b
     over the same fifteen files (129 KB) is 0.42–0.55 ms, and the cached read it
     would guard saves ~1.2 ms (uncached `table_columns()` 1.65–1.78 ms → cached
-    0.46–0.48 ms). So a digest would spend **~25–30 % of the win** — real but not
-    decisive, and not worth it for a residual that needs an archive extraction
+    0.35–0.48 ms), so a digest ADDS 0.25–0.42 ms net of the pass it replaces —
+    **~20–35 % of the win** — real but not decisive, and not worth it for a residual that needs an archive extraction
     landing inside a single inode-clock tick. The trade is therefore explicit:
     covered for every writer except that one. The test reds it if the fingerprint
     stops changing on an edit, an edit-of-an-edit, a same-size rewrite with a
@@ -2080,9 +2080,9 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     (:func:`_migrations_fingerprint`), so an edit, an addition or a removal is a
     cache MISS — the S6 surface's requirement that a cached column map cannot
     diverge from the live schema silently. Refreshing costs one stat pass
-    (0.135–0.164 ms of pure `stat` for the fifteen files; the whole cached call,
-    which also copies the map, measures 0.46–0.48 ms) versus the read+parse+regex
-    ~1.65–1.78 ms it replaces.
+    (0.135–0.166 ms of pure `stat` for the fifteen files; the whole cached call,
+    which also copies the map, measures 0.35–0.48 ms) versus the read+parse+regex
+    1.65–1.78 ms it replaces.
 
     ⚠️ The returned dict is a fresh copy on every call, exactly as before: a
     caller that edits the map it was handed mutates its own copy, never the
