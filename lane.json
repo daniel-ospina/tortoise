@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/Daniels-MacBook-Air-new.kfixer-11217-1794071697-p11316-ad797e86",
+  "_sha": "455de45cb5ab65c43be88ca0a499507b76e3644f",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/Users/danielospina/orchestrator/logs/fix-11217.log"
+    },
+    {
+      "kind": "branch",
+      "value": "main"
+    },
+    {
+      "kind": "sha",
+      "value": "e1ba0974ef8452d57ad17ecaff18579d4772cd2b"
+    },
+    {
+      "kind": "worktree",
+      "value": "/Users/danielospina/Documents/GitHub/tortoise"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "duration_s": 5935,
+  "ended_at": 1794077632,
+  "exit_code": 0,
+  "heartbeat_at": 1794077632,
+  "host": "Daniels-MacBook-Air-new",
+  "issue": 11217,
+  "kind": "fixer",
+  "lane_id": "Daniels-MacBook-Air-new.kfixer-11217-1794071697-p11316-ad797e86",
+  "lease_until": 1794085432,
+  "pid": 11316,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1794071697,
+  "state": "DONE",
+  "tag": "11217",
+  "worktree": "/Users/danielospina/Documents/GitHub/tortoise"
+}
