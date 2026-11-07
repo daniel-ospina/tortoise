@@ -282,8 +282,10 @@ named by the sha it is true at, so every delta has a reproducible operand: `:113
 at **`80c912244`** (**+380** / **+1**) → `:12302-12303` / `:1154` at **`d69faaf38`** (**+571** / **+0**).
 So a bare "re-anchor on merge" is not
 one arithmetic, and an arithmetic that is right for one base is already wrong for the next: **cite the
-symbol and let the line number be a convenience printed beside it** (`git grep -n 'vet_enabled = '`,
-`git grep -n 'payload_entities.append'`). That is the class of defect §0 exists to catch: a number true at
+symbol and let the line number be a convenience printed beside it** (`git grep -n 'vet_enabled = '
+-- tortoise/extractor_v2.py`, `git grep -n 'payload_entities.append' -- tortoise/extractor_v2.py` —
+the path matters: unscoped, both patterns also match THIS record and its quoted lines, which is the
+count-of-mentions trap §0 documents). That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
 
