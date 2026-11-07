@@ -1417,8 +1417,11 @@ def score_rule_bullet() -> Row:
         f"({', '.join(sorted(gated)) or 'none'})",
         f"write paths that embed OUTSIDE the gate: {len(ungated)} "
         f"({ungated_at or 'none'})"
-        + (" — each is a named exception in the product register, or holds this "
-           "row" if ungated else ""),
+        # ⛔ Not a verdict and not a claim about the register: this note reports the
+        # PATH. Whether the writer holds the row is decided below, from the register,
+        # and says so in its own note (`undeclared` / `credited`).
+        + (" — path(s) the gate never sees; each holds this row unless the "
+           "product register names it" if ungated else ""),
         f"gate enabled by default: {on_by_default} (ambient "
         f"{embed_gate.ENV_FLAG}={os.environ.get(embed_gate.ENV_FLAG, '')!r}; "
         f"shipped config surface walked: {len(shipped['surfaces'])} "

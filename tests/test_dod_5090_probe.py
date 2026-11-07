@@ -3335,7 +3335,21 @@ def test_the_LIVE_register_credits_every_writer_outside_the_gate(monkeypatch):
     for hold in ("undeclared writers", "stale declarations", "REAL BYPASSES",
                  "uncorroborated declarations", "writer register UNREADABLE"):
         assert hold not in row.observed, f"{hold}: {row.observed}"
-    assert "20 of 20 outside-gate writers" in row.observed, row.observed
+    # ⛔ NOT a hard-coded 20: the counts are RE-DERIVED from the row's own note and
+    # from the discovery the row scored, so a writer added tomorrow reds on "not
+    # everything was credited" rather than on a figure someone had to remember to
+    # re-cut — the rot class this file deletes elsewhere.
+    credited, total = re.search(
+        r"credited from the product register .*?: (\d+) of (\d+) "
+        r"outside-gate writers", row.observed).groups()
+    outside = {w for w, d in probe.embedding_writers().items()
+               if d["kind"] in ("unresolved_write", "ungated")}
+    assert int(total) == len(outside), (
+        f"the row scored {total} outside-gate writers and discovery finds "
+        f"{len(outside)}: {row.observed}")
+    assert credited == total, (
+        f"every writer discovery finds outside the gate must be CREDITED — "
+        f"{int(total) - int(credited)} is not, so row 1 would hold: {row.observed}")
     assert row.verdict == "MET", (
         f"row 1 must be REACHABLE once the gate flag is on and every writer is "
         f"classified — that is the defect #11444 fixes: {row.verdict} {row.observed}")
