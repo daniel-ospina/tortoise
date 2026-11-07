@@ -533,8 +533,12 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: (`tortoise.session_indexer::main`). A ``gated`` writer needs no declaration — the gate decides the
 #: write it GATES. ⛔ That is not the same sentence as "the gate decides every vector this writer
 #: stores": the module docstring's caveat refutes the wider one for `create_point`/`update_point`,
-#: whose caller-supplied vector is stored verbatim (`tortoise/sdk.py` skips the derive when
-#: `"embedding" in props`, so `encode_for_row` — the gate — is not even called).
+#: whose caller-supplied vector is stored verbatim — `create_point` calls `encode_for_row`
+#: UNCONDITIONALLY (`tortoise/sdk.py:13821-13824`) and then discards the result (`if "embedding" in
+#: props:` replaces it at `:14023-14026`, and `_create_map["embedding"] = _embedding_expr` at
+#: `:14057` assigns the caller branch last), while `update_point` genuinely skips the derive
+#: (`:18652`) — so on one path the gate RUNS and its verdict is OVERWRITTEN, on the other it is not
+#: called at all. Neither outcome is "the gate decides this vector".
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
 #: docstring: the census's discovery is a source-text regex PLUS the AST pass that decides the
 #: LITERAL container key (`rec["embedding"] = …`), and writers neither can spell (a map-merge, a
@@ -580,9 +584,10 @@ def undeclared(writers: Iterable[str]) -> tuple[str, ...]:
 
     ⛔ Precondition: ``writers`` must ALREADY be restricted to writers outside the gate. This
     register's population is the instrument's ``unresolved_write`` ∪ ``ungated`` KINDS, and that
-    restriction is the CALLER's to apply (this module imports nothing and ships no filter, so it
-    cannot apply it for you; `tests/test_embed_writer_register.py::NEEDS_A_DECLARATION` is the same
-    two-element tuple spelled for the suite — `tests/` is not a packaged module, so a runtime
+    restriction is the CALLER's to apply (this module imports nothing from ``tortoise`` and ships
+    no filter, so it cannot apply it for you;
+    `tests/test_embed_writer_register.py::NEEDS_A_DECLARATION` is the same tuple of discovery kinds
+    spelled for the suite — `tests/` is not a packaged module, so a runtime
     consumer in ``tortoise/`` cannot import it from there). Handing it the instrument's whole map
     answers with the ``gated``/``producer`` writers that need no declaration, and :func:`classify`
     then raises for each of them — a false refusal on a correct write. ⛔ ``gated`` and ``producer``
