@@ -391,6 +391,16 @@ jobs:
           # trade a duplicate page for the false green of #10892. The two arms own
           # separate issues (their titles differ by label), so the operator sees
           # "one machine restarting" rather than a merged, unattributable alert.
+          # ⚠️ The same applies to a DEPLOY, and that is not the restart leg's
+          # doing (#10892 review round 3): a rollout that replaces the machine
+          # leaves nothing serving for ~85 s (runbook §6, cold boot), which is
+          # longer than this arm's 35 s tolerance while the primary probe's 95 s
+          # budget absorbs it. So a deploy window can page here where the primary
+          # probe stays quiet. Accepted for the same reason: the bound IS the
+          # instrument, and #10892 is a machine that stayed wrongly green for two
+          # hours — a page during a known rollout is the cheap side of that trade.
+          # If it becomes noisy the fix is to teach this step the rollout window,
+          # NEVER to widen the bound.
           PROBE_ATTEMPTS: '3'
           PROBE_RETRY_SLEEP_S: '10'
         run: bash .github/scripts/availability-watchdog.sh
