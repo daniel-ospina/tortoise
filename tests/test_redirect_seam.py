@@ -477,18 +477,22 @@ def _closure_stamp(fn):
     ``def plain_wrapper(self, *a, **k): return stamp(self, *a, **k)`` calls our
     stamp but carries no ``__wrapped__`` (only ``functools.wraps`` copies
     that), so a ``__wrapped__``-only walk reported it as "never installed" —
-    the FALSE-RED half of #11430's review. A closure cell is the only static
-    evidence that a plain wrapper delegates, and it is evidence only of the
-    SHAPE: nothing static can prove a wrapper CALLS what it closes over, which
-    is why the ``@wraps``-that-never-calls shape stays tolerated (see
-    ``_is_stamp``). Deliberately NOT a globals-dict scan: any function defined
+    the FALSE-RED half of #11430's review. A closure cell is what makes the
+    SHAPE visible here, but it is not the only static evidence: bytecode shows
+    whether a wrapper CALLS what it closes over (a caller carries
+    ``CALL_FUNCTION_EX`` on the cell, a bare reference does not). What no static
+    check proves is that the call site is REACHED — so this helper stays a
+    SHAPE test, and the ``@wraps``-that-never-calls shape stays tolerated rather
+    than guessed at (see ``_is_stamp``). Deliberately NOT a globals-dict scan: any function defined
     in a module that merely HOLDS the stamp would then read as delegating,
     which is a false GREEN on the "the stamp still runs" property. The residue
     is stated rather than papered over: a MODULE-SCOPE plain wrapper that
     reaches the stamp through globals still reads as "never installed". The
     reason is not that a static check cannot see the call — bytecode can — but
-    that no static check can prove the call site is REACHED (a dead branch that
-    calls the stamp looks identical), so a recovered "link" would be a guess.
+    that no static check can prove the call site is REACHED (a branch dead at
+    RUNTIME compiles to the same opcodes as a live one — though a literal
+    ``if False:`` elides its call entirely), so a recovered "link" would be a
+    guess.
     """
     for cell in getattr(fn, "__closure__", None) or ():
         try:
@@ -572,7 +576,10 @@ def _stamp_problems(start) -> list[str]:
        re-install; it cannot prevent that rewrite. Neither shape is visible to a
        chain-LENGTH check (the count stays 1), and one-hop fails when the
        delegate is a WRAPPER whose inner frame is the previous stamp — which is
-       why fact 2 is checked by REACHABILITY.
+       why fact 2 is checked by REACHABILITY. Only the PLAIN-RELOAD shape is
+       invisible to fact 1 (the count stays 1); a re-install after a reload
+       leaves two stamps and trips it — measured: count 2, path
+       ``[stamp2, old_stamp, old_stamp]``.
     """
     links = _stamp_links(start)
     problems = []
@@ -938,11 +945,16 @@ def test_the_double_wrap_verdict_reads_the_CHAIN_not_the_identity():
         ONE pytest process.
     (2) FALSE GREEN — a genuine double wrap. After a module reload the reloaded
         module captures ``_ORIG_THREAD_START = Thread.start`` (the PREVIOUS
-        stamp): re-installing then stacks a stamp ON a stamp, and
-        ``Thread.start`` is that new function, so identity is TRUE and the check
-        the message promised cannot see it. A PLAIN reload with no re-install is
-        worse still — the assignment rewrites the installed stamp's delegate to
-        ITSELF, so the stamp count stays 1 and ``Thread.start()`` recurses.
+        stamp). The reload alone cannot stack anything: it also resets
+        ``_TEST_SESSION_ACTIVE`` and the class marker survives, so the installer
+        is a no-op for two reasons. Clearing the marker AND re-arming the flag
+        (what a test must do to reach it) then installs the reloaded module's
+        stamp ON the old one — ``Thread.start`` is that new function, so
+        identity is TRUE and the check the message promised cannot see it; a
+        chain-length check does. A PLAIN reload with no re-install is worse
+        still — it rewrites the installed stamp's delegate to ITSELF, so the
+        count stays 1, only reachability sees it, and ``Thread.start()``
+        recurses.
     """
     links = _stamp_links(threading.Thread.start)
     assert len(links) == 1, links
