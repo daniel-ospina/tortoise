@@ -7568,7 +7568,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # the other direction (fail-open has nowhere worse to go). The shapes stay named here,
     # verbatim, so the surface cannot be silently widened by omission; the *enforced*
     # boundary is the positive-control blocks: those that assert the FALSE near-boundary
-    # shapes are REFUSED (`_refutation_tail_alibi`, and the ten false rows at
+    # shapes are REFUSED (`_refutation_tail_alibi`, and the false rows at
     # `_asserted_false_with_true_appended`), TOGETHER WITH those that assert a TRUTHFUL
     # sentence is ACCEPTED (`_restored_corrections` — a correction spelling must never be
     # the shape the pin rejects — and the truthful-attribution control beside each residue).
@@ -7586,8 +7586,10 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #      #9601 says, is `ff6379eb2`."                            ACCEPTED · main REFUSES
     # ⚠️ …AND THE `, the #9601 merge,` APPOSITIVE IS THE SAME OPEN FAMILY (#11191 review
     # r23, P1 — MEASURED: ACCEPTED here AND at `77ea7bc7f`, `origin/main` REFUSES it, and
-    # deleting exemption (a) does not change it — a different arm decides it). Pinned as
-    # open for the same reason as the row above: the near-boundary shape
+    # deleting exemption (a) does not change it — a different arm decides it). RECORDED as
+    # open for the same reason as the row above — a DISCLOSURE with no assertion, since a
+    # pin would red the fix rather than the hole (#11191 review r28 F1 / r29 F4): the
+    # near-boundary shape
     # (`the tree, the commit for #9601, is …`) IS refused here and is pinned in
     # `_refutation_tail_alibi`, so this row marks the residue that remains.
     # Open family 2 — the `, the #9601 merge,` appositive (#11191 review r23, P1; ACCEPTED
