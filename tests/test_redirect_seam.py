@@ -726,6 +726,17 @@ def test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper(
       (a) marker PRESENT → the third-party wrapper survives the re-invocation;
       (b) marker ABSENT  → the SAME call DOES install (non-vacuity, and it is
           exactly the harm (a) prevents).
+
+    ⛔ What each mutation ACTUALLY reds — measured, so the next mutation-tester is
+    not sent down a wrong path: deleting the marker clause reds (a); deleting
+    `and _TEST_SESSION_ACTIVE` reds (d); deleting the `TORTOISE_TEST_MODE` clause
+    reds (e). Deleting the marker-RECORDING line, or making the installer inert,
+    does NOT reach these arms at all — it reds the precondition above (conftest's
+    own install never sets the marker), and on CPython 3.12 `if False: return` in
+    the source is dead-code-eliminated, so `if False` is not even inert. Two of
+    those three clauses were unpinned before (d)/(e) existed: dropping either
+    left `tests/test_redirect_seam.py` green except for the known pre-existing
+    connection arm.
     """
     from tortoise import projection as proj_mod
 
@@ -758,7 +769,8 @@ def test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper(
 
     # (b) non-vacuity: with the marker gone the same call must install — which is
     # precisely the replacement arm (a) requires the guard to prevent. An
-    # installer made inert (e.g. `if False`) satisfies (a) trivially; this reds.
+    # installer that stopped assigning (or assigned a decoy) satisfies (a)
+    # trivially; this reds.
     monkeypatch.delattr(threading.Thread, "_tortoise_stamp_installed",
                         raising=False)
     proj_mod.install_thread_stamp()
@@ -773,4 +785,36 @@ def test_the_marker_guard_stops_the_installer_replacing_a_third_party_wrapper(
         "the installer installed the stamp but did not record "
         "`_tortoise_stamp_installed`, so the guard arm (a) relies on can never "
         "fire on a second re-invocation"
+    )
+
+    # (d) the SESSION-FLAG clause, which is what keeps the stamp out of a prod
+    # process — and the clause the idempotence arm's call site disables. Marker
+    # absent (so that clause would let the install through) and the flag off: the
+    # installer must decline, and must not record the marker either.
+    wrapped_2 = functools.wraps(inner)(_third_party_start)
+    monkeypatch.setattr(threading.Thread, "start", wrapped_2)
+    monkeypatch.delattr(threading.Thread, "_tortoise_stamp_installed",
+                        raising=False)
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", False)
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapped_2, (
+        "the installer patched `Thread.start` with `_TEST_SESSION_ACTIVE` off — "
+        "that flag is what stops a leaked `TORTOISE_TEST_MODE=1` from stamping "
+        "stdlib in a PROD process, which the installer's own docstring names as "
+        "the reason it is a call and not a module-body side effect"
+    )
+    assert not getattr(threading.Thread, "_tortoise_stamp_installed", False), (
+        "the installer recorded `_tortoise_stamp_installed` while declining to "
+        "install — a later in-session call would then skip the real install"
+    )
+
+    # (e) the TEST-MODE clause: session live and marker absent, but the test-mode
+    # env signal gone → still declines (the same prod-process property, keyed on
+    # the other signal).
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", True)
+    monkeypatch.delenv("TORTOISE_TEST_MODE", raising=False)
+    proj_mod.install_thread_stamp()
+    assert threading.Thread.start is wrapped_2, (
+        "the installer patched `Thread.start` with `TORTOISE_TEST_MODE` unset — "
+        "the env clause is one of the two signals that must both be live"
     )
