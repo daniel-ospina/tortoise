@@ -299,7 +299,10 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     assert DUP_ID not in on_ids, (
         "the cross-session restatement must not consume a second window slot")
     assert set(on_ids) == {POINT_ID, CHUNK_ID, OTHER_ID}, on_ids
-    assert on_ids.index(POINT_ID) < on_ids.index(CHUNK_ID), on_ids
+    # ADJACENCY, not merely ordering: `index(POINT) < index(CHUNK)` is also
+    # satisfied by `[POINT, OTHER, CHUNK]`, i.e. by a rendering that is NOT the
+    # flat anchor-then-refs shape the comment above names.
+    assert on_ids.index(CHUNK_ID) == on_ids.index(POINT_ID) + 1, on_ids
     assert on["context_point_count"] == 3, on["context_point_count"]
 
     # …and the OFF window really was different (so the assertion above is a
