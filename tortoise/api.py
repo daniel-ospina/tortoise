@@ -387,9 +387,14 @@ class EventAPI:
         # (`_journal_snapshot_from_create_map` → `_emit_event`'s
         # `clean.setdefault("embedding", None)` for `create_point`, and the
         # `PointRevised` record's `emit_props` for `update_point`). This branch guards
-        # the vector a DIRECT `EventAPI` caller hands to `add_point(fields=…)` —
-        # `tests/test_write_path_unreachable_seam_5148.py` pins that it arrives and is
-        # carried. Two guards — not one — keep a foreign vector from minting a claim it
+        # the vector a DIRECT `EventAPI` caller hands to `add_point(fields=…)`. ⚠️ The
+        # cited test pins the CARRY, not this branch: it runs under an unimportable
+        # seam, where the branch body reduces to an assignment `p.update(fields)` has
+        # already made — so it stays green if this block is deleted, as its own
+        # docstring says ("This pins the GUARD, not the ASSIGNMENT ORDER"). What the
+        # block buys when the seam IS importable is the re-normalisation below: the
+        # caller's vector must not ride the SERVER's identity/text-hash attestation.
+        # Two guards — not one — keep a foreign vector from minting a claim it
         # has not earned: the carry-with-no-attestation below (it cannot carry OUR
         # attestation) and the `_forged` refusal a few lines down (the identity/marker
         # keys that would let it FORGE one are rejected outright).)

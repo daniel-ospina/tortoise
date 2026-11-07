@@ -4,13 +4,18 @@ cannot bypass silently **within the population the instrument can see**.
 ⛔ The qualifier is not decoration and `#11086` must not drop it: discovery is
 `tools/dod_5090_probe.py::_EMBED_WRITE` (a source-text regex) PLUS
 `_writes_an_embedding` (an AST pass that decides the CONTAINER-KEY shape
-`rec["embedding"] = …`, `#11274`), so a writer that spells its write as a map-merge
+`rec["embedding"] = …`, `#11274`), so a SHAPE spelled as a map-merge
 (`SET n += $p` carrying `{"embedding": …}`), an inline property map
 (`MERGE (n:Point {…, embedding: $e})`), a whole-node replace (`SET n = $map`), a property name
 INTERPOLATED into the clause (live: `tortoise.cache_projection::node_statement`), or through a
 container HELPER / COMPUTED key (`clean.setdefault("embedding", None)`, `d[KEY] = v`) is ABSENT
-from the census rather than undeclared — and every test below is green. `#11274` owns widening
-it; the register's module docstring states the same boundary.
+from discovery — and every test below is green. ⚠️ The SHAPE is what is blind, NOT necessarily the
+WRITER carrying it — do not drop this qualifier, which the register's docstring carries:
+`tortoise.sdk::update_point`'s computed key sits in the discovered map as `gated`, and
+`tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` (declared off its
+`set_embedding_clause`, not off its `SET n = $p`). A WRITER is absent only when it holds NO
+decidable statement (`tortoise.cache_projection::node_statement`, `tortoise.sdk::_emit_event`).
+`#11274` owns widening it; the register's module docstring states the same boundary.
 
 **What `#11085` is.** `#10541` *classified* the embedding-writer population (read `WRITER_CENSUS`
 for the class counts rather than a number restated here — the #11274 widening moved them) but left
@@ -241,9 +246,11 @@ def test_every_writer_the_instrument_finds_outside_the_gate_is_declared():
     what "an undeclared writer cannot bypass silently" means for this population once the census is
     not the only place the answer lives.
 
-    ⛔ What this does NOT claim: that discovery is exhaustive. A writer whose store neither the regex
-    nor the AST pass can decide (`SET n += $p`, an inline property map, `SET n = $map`, a clause
-    held in a module constant) is ABSENT from the census, so it does not red here — the `#10541`
+    ⛔ What this does NOT claim: that discovery is exhaustive. A writer whose ONLY embedding store
+    neither the regex nor the AST pass can decide (`SET n += $p`, an inline property map,
+    `SET n = $map`, a clause held in a module constant) is ABSENT from the census, so it does not
+    red here — while a writer that ALSO holds a decidable statement stays in the population
+    (`tortoise.hosted_backup::restore_graph`, in the census off its `set_embedding_clause`). The
     guard's own inherited lesson, and the reason an earlier version of this docstring ("a writer
     added tomorrow reds HERE") overstated the guard. The blind spot is stated in
     `tortoise/embed_writer_register.py`'s module docstring and PINNED by
@@ -486,8 +493,12 @@ INVISIBLE_SHAPES = {
         'def w(tx, e):\n    tx.query("MERGE (n:Point {id:$id, embedding: $e})")\n'
     ),
     "whole_node_replace": 'def w(tx, m):\n    tx.query("SET n = $m", {"m": m})\n',
+    # The LIVE spelling is an f-string handed to the builder (`cache_projection.py::node_statement`:
+    # `f", n.{prop} = {form}"`), NOT a bare concatenation into a local — the bare form executes no
+    # call and stores nothing, so a body like it was "undetected" for ANY detector and pinned
+    # nothing (review round 12).
     "interpolated_property": (
-        'def w(tx, prop, form):\n    q = "SET n." + prop + " = " + form\n'
+        'def w(tx, prop, form):\n    tx.query(f"SET n.{prop} = {form}")\n'
     ),
     # The two the LITERAL-slice AST pass cannot decide either (round-4 review): a container
     # HELPER is a `Call`, not a store, and a COMPUTED key makes `part.slice` a `Name`, not a
@@ -495,12 +506,14 @@ INVISIBLE_SHAPES = {
     # pinned here rather than only described in the docstring.
     "container_helper": 'def w(rec, v):\n    rec.setdefault("embedding", v)\n',
     "computed_key": 'def w(rec, key, v):\n    rec[key] = v\n',
-    # A clause held in a module CONSTANT (round-10 review): the regex reads the `query(...)` argument,
-    # which is a bare `Name` here, and the AST pass only inspects subscript targets — so the shape is
-    # absent with neither detector firing. It was NAMED in the `#:` comment above
-    # `EMBED_WRITER_CLASSES` (not in `register.__doc__`, which does not name it) and in this file's
-    # live-guard docstring, while nothing pinned it — which is the class this dict exists to make
-    # impossible.
+    # A clause held in a module CONSTANT (round-10 review): `_EMBED_WRITE` is only ever run over a
+    # FUNCTION's own source text (`probe._writes_an_embedding(node, source)`, `source` = the
+    # function's line range), so a clause literal at MODULE scope is outside the detector's input;
+    # the AST pass only inspects subscript targets — so neither fires. It was NAMED in the `#:`
+    # comment above `EMBED_WRITER_CLASSES` (not in `register.__doc__`, which does not name it) and
+    # in `test_every_writer_the_instrument_finds_outside_the_gate_is_declared`'s docstring (not in
+    # the live-guard docstring, which names only the clause and container-key halves), while nothing
+    # pinned it — which is the class this dict exists to make impossible.
     "module_constant_clause": (
         '_CLAUSE = "SET n.embedding = $e"\n'
         'def w(tx):\n    tx.query(_CLAUSE)\n'
