@@ -920,7 +920,10 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
                   for arm in ("legacy", "delta")
                   for lst in (a[arm].get("added_items") or {},
                               a[arm].get("corrected_items") or {}))
-    assert f"the largest list is {biggest}" in flat_all, biggest
+    # ⛔ ANCHOR on the document's closing delimiter: the bare substring matched
+    # a PREFIX, so a regeneration whose real maximum was 1 stayed green
+    # against the documented 17 (#11385 review P3).
+    assert f"the largest list is {biggest})" in flat_all, biggest
 
     for art in (pri, rer):
         s, comp = art["summary"], art["summary"]["composition"]
