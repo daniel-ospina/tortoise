@@ -133,6 +133,18 @@ _DEF_TEST = re.compile(r"^\s*(?:async\s+)?def test_", re.MULTILINE)
 #: that exits 1 — is "git did not answer", and every caller maps it to `None`.
 _GIT_UNRUNNABLE = 127
 
+#: git's own wording for an object store it cannot READ (as opposed to a
+#: pid/object it looked for and did not find). Measured on a corrupted
+#: loose object: `error: inflate: data stream error (incorrect header
+#: check)` + `fatal: unable to unpack <sha> header`. A miss says
+#: `fatal: Not a valid object name <sha>^{commit}` instead, which is a
+#: real verdict and stays `False`.
+_OBJECT_STORE_FAILURE = re.compile(
+    r"inflate: data stream error|unable to unpack|unable to read sha1 file"
+    r"|loose object .* is corrupt|object file .* is empty",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class Row:
@@ -251,13 +263,24 @@ def commit_exists(repo: Path, sha: str) -> bool | None:
     Measured with only `subprocess.run` faked (shallow -> `false`, `cat-file` ->
     `TimeoutExpired`): 29 DRIFT errors, exit 1, about a correct document.
     """
-    rc = _git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode
-    if rc == 0:
+    res = _git(repo, "cat-file", "-e", f"{sha}^{{commit}}")
+    if res.returncode == 0:
         return True
-    if rc == 128:
-        # git's ONLY negative verdict for `cat-file -e`: no such object, or the
-        # object is not a commit (`<tree>^{commit}` peels to one and exits 128).
-        # Measured: missing object -> 128.
+    if res.returncode == 128:
+        # 128 is BOTH of git's negatives here — "no such object" and "not a
+        # commit" (`<tree>^{commit}` peels and exits 128) — and ALSO the rc a
+        # BROKEN object store exits with while `rev-parse` still answers, e.g.
+        # `error: inflate: data stream error` on a corrupt loose object. Reading
+        # that as `False` reproduces the false DRIFT this tri-state exists to
+        # stop (the shallow answer is readable, so `check_anchors` takes its
+        # `shallow is False` branch and blames the document), so the store's own
+        # failure messages are separated out and reported as no answer.
+        # ⚠️ RESIDUAL: this is TEXT matching on git's stderr. A git release that
+        # rewords these turns the arm back into `False`, i.e. into the false
+        # DRIFT — which is why the arm is recorded here and in §9 rather than
+        # implied to be airtight.
+        if _OBJECT_STORE_FAILURE.search(res.stderr or ""):
+            return None
         return False
     return None
 

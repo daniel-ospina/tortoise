@@ -357,6 +357,16 @@ rounding:**
   It cannot prove the tests assert *this* defect: a pin pointed at a module whose
   assertions were deleted still passes. #2748's pin is the fixed file itself, so
   it is the weakest pin on the page — recorded rather than dressed up.
+- **A BROKEN object store can still read as drift.** `git cat-file -e` exits
+  **128** both for its real negatives ("no such object", "not a commit") and for a
+  store it cannot read (a corrupt loose object: `error: inflate: data stream
+  error`, `fatal: unable to unpack … header`). The guard separates the two by
+  matching git's own failure wording, and reports the second as UNVERIFIED — but
+  that arm is **TEXT matching**, so a git release that rewords those messages
+  turns it back into `False`, i.e. into exactly the false drift the tri-state
+  exists to stop. Pinned by a real corrupted object in
+  `test_a_corrupt_object_store_reads_as_no_answer_not_as_drift`, so a reword is
+  caught by that control rather than by a reader.
 - **The `#2730`-class error.** A row can be VERIFIED-FIXED with a docs-only
   anchor and a prose pin (that is what this page shipped first, at #2730). The
   guard passed it. Only a reviewer reading the anchor *as a fix* catches it, which

@@ -536,6 +536,51 @@ def test_an_anchor_on_a_non_ancestor_commit_is_drift(tmp_path):
     assert errors and "NOT an ancestor" in errors[0], (errors, report.unverified)
 
 
+def test_a_corrupt_object_store_reads_as_no_answer_not_as_drift(tmp_path):
+    """Fails if git's 128 is read as "no such commit" when the STORE is broken.
+
+    `cat-file -e` exits 128 for both of its real negatives ("no such object", "not
+    a commit") AND for a corrupt loose object — where git prints `error: inflate:
+    data stream error` / `fatal: unable to unpack … header` while
+    `rev-parse --is-shallow-repository` still answers `false`. That combination is
+    the false DRIFT this tri-state exists to stop: `check_anchors` takes its
+    `shallow is False` branch and blames the document.
+
+    Built with real git, on a real corrupted object — no monkeypatch, because the
+    thing under test IS git's rc/stderr contract. The missing-object half is
+    asserted alongside it, so the arm cannot be satisfied by answering "no
+    answer" to every 128.
+    """
+    repo = _git_repo(tmp_path)
+    env = {"PATH": "/usr/bin:/bin:/usr/local/bin", "HOME": str(tmp_path)}
+
+    def g(*a: str) -> str:
+        return subprocess.run(
+            ["git", *a], cwd=repo, capture_output=True, text=True, env=env
+        ).stdout
+
+    head = g("rev-parse", "HEAD").strip()
+    assert pmc.commit_exists(repo, head) is True
+    # A real miss: git looked and did not find it. This must stay `False`.
+    assert pmc.commit_exists(repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef") is False
+
+    # Corrupt the commit's loose object in place. `cat-file -e` then exits 128 with
+    # git's own inflate/unpack complaint — and `rev-parse` still answers, which is
+    # exactly the state that used to be reported as a document defect.
+    obj = repo / ".git" / "objects" / head[:2] / head[2:]
+    assert obj.exists(), f"loose object missing at {obj} — repo layout changed"
+    obj.chmod(0o644)  # git writes loose objects read-only (0444)
+    obj.write_bytes(b"not a zlib stream\n")
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{head}^{{commit}}"],
+        cwd=repo, capture_output=True, text=True, env=env,
+    )
+    assert probe.returncode == 128, probe.returncode
+    assert pmc.is_shallow(repo) is False
+    assert pmc.commit_exists(repo, head) is None, probe.stderr
+
+
+
 def test_an_ancestor_anchor_passes_on_the_same_repo(tmp_path):
     """The positive control for the test above — same fixture, no drift.
 
