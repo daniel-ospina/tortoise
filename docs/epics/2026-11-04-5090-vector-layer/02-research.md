@@ -294,21 +294,19 @@ own opening paragraph says it exists to prevent. Both fixed here, and the two ro
 
 **Rounds 7–9 (PR level, fresh context)** — three more rounds landed after the entry above and are recorded
 here for the same reason: the log had stopped while its own subject kept moving. (The `dc524f02e7` above is
-a pre-rebase head, so it is **not** an ancestor of the branch — read the round entries as an ordered
-disclosure, not as a `git range`.) Each was a **converted anchor that named the right topic but did not
-resolve to a location** — the defect class this PR exists to fix, one level up. **(7)** `d723dce1f70`:
-`if gap:` is not unique — `grep -n 'if gap:' tortoise/projection/__init__.py` returns three hits and the
-**first** is `_rebuild_all_replay`'s props-dict branch (`:16162`), not the inventory report — so it was
-qualified in all five places; and the `#3143`/`#3243` markers are prose tags, recurring 24x and 10x, which
-were replaced with the figure they name. **(8)** `32959faf7df`: round 7's own replacement was then refuted by
-measurement — `~28 sequential round trips` does not grep in `monitoring.py` because its copy is line-wrapped
-across `:72/:73`, so the exact literal hits only `:2774` (a `#3773` docstring ~2,700 lines away); re-anchored
-to the block header `#3143: the probe has TWO phases`, which is unique and unwrapped. **(9)** `d451a66fb71`:
-the `Point`-only DDL cell had been rewritten to drop the file name and name only two literals, each matching
-**9** `.py` files, with the first hit under a plain grep being `docs/runbook/4520_vector_write_index_churn.py`'s
-label-parameterised call — the opposite shape from the "`Point`-only" claim the cell supports; re-anchored to
-`_ensure_vector_index_api` (unique, `git grep -n 'def _ensure_vector_index_api'` → 1 hit), keeping both literal
-forms as evidence.
+a pre-rebase head and **not** an ancestor of the branch, so read these entries as an ordered disclosure, not
+as a `git range`.) All three closed the same defect class — **a converted anchor that named the right topic
+but did not resolve to a location**, which is this PR's own subject one level up.
+**(7)** `d723dce1f70`: `if gap:` is not unique in `projection/__init__.py` — an earlier hit sits in
+`_rebuild_all_replay`, not the inventory report — so every occurrence was qualified by its enclosing
+function; and the `#3143` / `#3243` markers are prose tags that recur throughout their files rather than
+locations, so they were replaced by the figure they name. **(8)** `32959faf7df`: round 7's replacement figure
+was then refuted by measurement — in `monitoring.py` its copy is line-wrapped, so the exact literal resolves
+to a different docstring many lines away; re-anchored to the block header, which is unwrapped and unique.
+**(9)** `d451a66fb71`: the `Point`-only DDL cell had been rewritten to drop the file name in favour of two
+literals that each resolve to many `.py` files, at least one of whose plain-grep hits is a
+label-parameterised runbook call — the opposite shape from the "`Point`-only" claim the cell supports;
+re-anchored to `_ensure_vector_index_api`, whose definition is unique among `.py` files.
 
 ### P1-a — `iterative_scan` was reported without its documented failure at correlated filters
 
