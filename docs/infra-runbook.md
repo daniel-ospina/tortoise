@@ -1724,6 +1724,18 @@ and it is not a substitute for the TCP check that catches a dead process. Do
 **not** replace it with `loop_stale_ms`: reading the loop's own tick to decide
 the loop is fine is the exact circularity that let this outage run unattended.
 
+> **OVERRIDES:** the industry-default liveness shape — a background heartbeat or
+> event-loop-lag gauge whose timestamp a health handler reads and reports back
+> (`loop_stale_ms` here; `toobusy-js`, `event-loop-lag` or a scheduler-lag probe
+> in comparable stacks) — this section's answer is a **served-request counter**
+> instead, because the default is the shape that failed on 2026-11-04:
+> `loop_liveness`'s predicate is `503 if (stale AND idle) else 200`, and
+> `workload_idle` is `False` for any box serving traffic, so it reported
+> `loop_lag_max_ms: 483685` and `passing` in the same payload (#10892). A guard
+> that errs to 200 whenever the box is serving cannot fail on the outage it
+> exists for, and a gauge the loop itself writes is not evidence the loop ran.
+> The marker is repeated on #10892, where a lane adopts or replaces this design.
+
 ⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
 `control_ok()` runs only on the restartable path (`availability-watchdog.sh:2507`,
 inside `if [ "$restart_mode" = "DOWN" ]`), because the disruptive action it
