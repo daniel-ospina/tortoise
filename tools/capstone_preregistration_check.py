@@ -385,11 +385,18 @@ COMPARATORS = ("<=", ">=", "<", ">", "=", "≤", "≥")
 #: Such a cell is complete only when its ground names the owner decision gating the row — and the
 #: floor clause beside it may never be what satisfies the numeric arm (see `check_completeness`).
 REGISTERED_NO_BAR = re.compile(r"\bUNMEASURED\(")
-OWNER_DECISION = re.compile(r"#\d+")
-#: The `… above the floor of `` >= 30 `` …` clause a threshold cell may carry *beside* its bar. It is
+#: The `… above the floor of `` >= 30 `` …` clause a threshold cell may carry *beside* its bar.
 #: STRIPPED before the comparator test on a registered non-bar, because a floor is a refusal
-#: boundary and not a bar (§3.7, §7 item 1).
-FLOOR_CLAUSE = re.compile(r"floor of[^;]*", re.IGNORECASE)
+#: boundary and not a bar (§3.7, §7 item 1). ⛔ It strips the COMPARATOR THE FLOOR OWNS, not a run of
+#: characters: an earlier `floor of[^;]*` ate everything to the next `;`, so a cell that declared its
+#: real bar AFTER the floor clause read as bar-less — the arm could not fail on the property it names
+#: (#10982 review round 3).
+FLOOR_CLAUSE = re.compile(
+    r"floor of\s*`{0,2}\s*(?:<=|>=|<|>|=)\s*\d+(?:\.\d+)?", re.IGNORECASE)
+#: A registered non-bar must name WHO gates it. ⛔ The check is `#\d+` — "names an issue" — NOT "names
+#: the row's registered decision": the record's cells and §7 item 1 were restated to claim exactly
+#: what this tests, because the stronger sentence would be a claim the code does not perform.
+OWNER_DECISION = re.compile(r"#\d+")
 
 #: The four-edge denominator as a RATE: ``\\d+ / 4`` — and never ``4 / 40``, hence the trailing
 #: guard. A count in words (``2 of 4``) is deliberately NOT matched: §1.4 states the history that
@@ -3776,7 +3783,7 @@ def check_completeness(rows: list[dict[str, str]]) -> list[str]:
             if not OWNER_DECISION.search(plain):
                 failures.append(
                     f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
-                    "declares UNMEASURED(...) but names no owner decision (#NNNN) that gates it — "
+                    "declares UNMEASURED(...) but names no issue (#NNNN) that gates it — "
                     "a registered non-bar must state who decides it"
                 )
             # INDEPENDENT of the arm above, never `elif`: a cell can name its owner decision and

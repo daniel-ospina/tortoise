@@ -481,6 +481,14 @@ def test_the_pinned_a1_family_is_a_WRITTEN_label_not_a_declared_spelling():
     assert "decomposesInto" in probe.A1_RELATION_FAMILY_FOLD["hasPart"], (
         "the fold must still NAME the declared spelling it absorbs, or a reader sees one family "
         "where the pack declares two")
+    # …and the fold itself is a THIRD copy (pins fence, machine record, instrument) — the families
+    # list got a parity arm and the fold did not, so the record's fold could be edited with the gate
+    # and the whole suite green (#10982 review round 3).
+    record_fold = {k: list(v) for k, v in _record()["a1_relation_family_fold"].items()}
+    assert record_fold == {k: list(v) for k, v in probe.A1_RELATION_FAMILY_FOLD.items()}, (
+        "the instrument and the machine record fold different declared spellings onto the pin")
+    assert dict(check.parse_pins(PREREG.read_text())["a1_relation_family_fold"]) == record_fold, (
+        "the pins fence and the machine record fold different declared spellings onto the pin")
     # ⛔ A graph whose only edges carry the DECLARED spelling must report 0 for the pinned family:
     # `type(r)` is what the query counts, and crediting the declared spelling here is exactly how
     # the first draft's bar read as satisfiable on a vocabulary no writer produces.
@@ -527,8 +535,13 @@ def test_a_registered_non_bar_must_name_its_owner_decision_and_cannot_borrow_the
 
     assert with_threshold("UNMEASURED(the bar is owner-gated — `#10988` decides)") == []
     for bad, needle in (
-        ("UNMEASURED(the bar is owner-gated on a fork nobody opened)", "owner decision"),
+        ("UNMEASURED(the bar is owner-gated on a fork nobody opened)", "names no issue"),
         ("UNMEASURED(nothing here) `>= 30` typed statements", "outside its floor"),
+        # ⛔ The cell that defeated the first cut of this arm: it declares a real bar AFTER the floor
+        # clause, and a `floor of[^;]*` strip ate it (#10982 review round 3). The strip is now the
+        # comparator THE FLOOR OWNS, so a bar stated afterwards is still seen.
+        ("UNMEASURED(owner-gated — `#10988` decides) above the floor of `>= 30` typed statements "
+         "and the bar it will be scored against is `>= 0.5` typed_share", "outside its floor"),
     ):
         failures = with_threshold(bad)
         assert any(needle in f for f in failures), (bad, failures)

@@ -2301,13 +2301,14 @@ A_CRITERIA = ("A1", "A2", "A3", "A4", "A5")
 #:
 #:   ⛔ `decomposesInto` is a DECLARED PREDICATE, never a stored relationship label. The dev pack
 #:   declares two hierarchy entries — `Theme -> Epic` and `Epic -> Issue`
-#:   (`packs/dev/manifest.yaml:192-196`) — and BOTH carry `type: hasPart`; the seam writes the
-#:   hierarchy entry's `type` (`tortoise/pack_hierarchy.py:215-224`: "the edge this function would
-#:   write carries ``decomposesInto``, which ``create_edge`` refuses"), and every writer folds
+#:   (`packs/dev/manifest.yaml`, `hierarchies:`) — and BOTH carry `type: hasPart`; the seam writes the
+#:   hierarchy entry's `type` (`tortoise/pack_hierarchy.py`, `_binding`: "the edge this function would
+#:   write carries ``decomposesInto``, which ``create_edge`` refuses"), and the operator writers fold
 #:   `composedOf`/`decomposesInto`/`contains`/`wraps` onto `hasPart`
-#:   (`tortoise/projection/edges.py:1513`, `record_projection.py:4572`, `mcp_server.py:4499`).
-#:   `hasPart` IS in `create_edge`'s own predicate set; `decomposesInto` is NOT
-#:   (`edges.py:621-632`).
+#:   (`tortoise/projection/edges.py`, the `op_type`->label map). `hasPart` IS in `create_edge`'s own
+#:   predicate set and `decomposesInto` is NOT (`edges.py`, `_VALID_EDGE_PREDICATES`).
+#:   ⚠️ Cited by SYMBOL and not by line: this bundle's own citation guard refuses a line number no
+#:   rule can verify, and an unverifiable number drifts silently (#10982 review round 3).
 #:
 #:   So a pin on `decomposesInto` names a label that occurs ZERO times on every graph this repo can
 #:   write, which made the registered bar "≥ 1 edge for EACH of the two families" **unsatisfiable** —

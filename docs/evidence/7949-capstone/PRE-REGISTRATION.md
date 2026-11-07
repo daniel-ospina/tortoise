@@ -441,7 +441,13 @@ one (`#7949` §2 R7).
   `decomposesInto` is not (`edges.py:621-632`). So the row pins the ONE written family and names the
   declared spellings that fold onto it (`a1_relation_family_fold`) — a pin on the declared spelling
   would name a label that occurs zero times on every graph this repository can write, i.e. an
-  unsatisfiable bar. *Basis:* the 2026-11-04
+  unsatisfiable bar. ⚠️ **What the family half does NOT prove:** `hasPart` is also in the generic
+  structural writer's predicate set and `create_edge` validates the RELATION, not the endpoint kinds,
+  so ONE `hasPart` edge between any two `:Object` nodes satisfies it — a green `A1` family half is
+  NOT by itself evidence that the pack's declared `Theme → Epic` / `Epic → Issue` hierarchy is wired.
+  `by_endpoint_kind` is emitted beside the count so a reader can tell the two apart; `#10984` (C3)
+  must read it, and tightening the bar to the pack's declared endpoint kinds is a `#10984` decision,
+  not something this registration asserts. *Basis:* the 2026-11-04
   reading measured `object→object edges []` — zero of every relation type — against 5,314 Objects,
   while the declared vocabulary already exists (`packs/dev/manifest.yaml:142` `decomposesInto`,
   `:148` `hasPart`). **Not `E6`** (`#11083`): `E6` measures the declared→writable→written chain per
@@ -606,11 +612,12 @@ Exit 0 only when **all** of these hold:
    - **It is no longer E1–E5.** The table carries twelve rows (§3.1); the arm applies to every row in
      it, not only the five the epic closes on.
    - **A REGISTERED non-bar is complete, and a floor is not a bar.** A threshold that declares
-     `UNMEASURED(<ground>)` is complete **only** when its ground names the owner decision that gates
-     the row (`#10988`/`#1022` for A4) — and the floor clause beside it (`… above the floor of
+     `UNMEASURED(<ground>)` is complete **only** when its ground names the issue that gates the row
+     (A4 names `#10988`/`#1022`) — and the floor clause beside it (`… above the floor of
      `` >= 30 `` …`) may never be what satisfies the numeric arm. A floor is a REFUSAL boundary
      (§3.7), so a row that has no bar must not pass the "has a bar" check on the floor's number.
-     `tools/capstone_preregistration_check.py` enforces both halves.
+     `tools/capstone_preregistration_check.py` enforces both halves: it strips the comparator THE
+     FLOOR OWNS and refuses any comparator left outside it, and it requires a `#NNNN` reference.
 2. **The registration precedes every scored evidence log, and every log it does not precede must
    prove it was never scored.** The commit that **adds** this file is **strictly older** than the
    commit that adds each `*.log` in this directory (`git log --diff-filter=A --format=%ct`). An
@@ -929,7 +936,7 @@ stops being true is visible as a log that does not carry `UNPREREGISTERED`.
 
 ---
 
-## 10. Deviations — the three amendments recorded after this registration was written
+## 10. Deviations — the amendments recorded after this registration was written
 
 **What this section is.** §8's own convention: a change to this registration is recorded **here**,
 with the date, the original value, the new value and the reason, and **the original text is preserved**
@@ -1324,10 +1331,13 @@ exists". A2 is the one genuine absence: no S3 RESOLVE attach/mint census has eve
 
 **⛔ A1's pinned relation families, corrected (`#10982` review round 2).** The first draft pinned
 `a1_relation_families: [decomposesInto, hasPart]` — the pack's two **declared hierarchy predicates**.
-`decomposesInto` is never a relationship **label**: both hierarchy entries are written `type: hasPart`
-and every writer folds `composedOf`/`decomposesInto`/`contains`/`wraps` onto it
-(`tortoise/pack_hierarchy.py:215-224`, `tortoise/projection/edges.py:1513`), while `create_edge`'s own
-predicate set carries `hasPart` and not `decomposesInto` (`edges.py:621-632`). A pin on the declared
+`decomposesInto` is never a relationship **label**: both hierarchy entries are written `type: hasPart`,
+and the OPERATOR writers fold `composedOf`/`decomposesInto`/`contains`/`wraps` onto that same label
+(`tortoise/projection/edges.py:1513`, `record_projection.py:4572`) while the hierarchy seam writes the
+entry's `type` and REFUSES a `decomposesInto` entry
+(`tortoise/pack_hierarchy.py:215-224`: *"the edge this function would write carries `decomposesInto`,
+which `create_edge` refuses"*); `create_edge`'s own predicate set carries `hasPart` and not
+`decomposesInto` (`edges.py:621-632`). A pin on the declared
 spelling therefore named a label that occurs zero times on every graph this repository can write, and
 the registered bar — *">= 1 edge for EACH of the two families"* — was **unsatisfiable**: `#10984` (C3)
 would have scored `A1` RED forever on a correct product. The pin is now the ONE written family
