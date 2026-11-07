@@ -34,25 +34,19 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below.
+# The #5128 interpreter guard MUST precede every other import: a module-level
+# 3.12-only import raises ImportError on an older interpreter BEFORE a later
+# guard could run, and the refusal then looks like a broken tool rather than a
+# floor. Print-then-`SystemExit(int)` is the shape the #5128 census's detector
+# accepts (`tests/test_entry_point_python_guard.py`), and exit 2 is reserved
+# here for "cannot answer" — 1 already means STALE under `--check`, and a
+# caller must never read an interpreter refusal as "regenerate the table".
+# Mirrors `tools/test_design_map_check.py`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    # #4053: this is an ENVIRONMENT failure, not a verdict. `SystemExit(<str>)`
-    # exits 1, and `--check` gives 1 to "the carrier is missing or stale" (see
-    # USAGE above and `main()`) — so a drift gate that never regenerated anything
-    # would report STALE, whose natural "repair" is regenerating under the same
-    # old interpreter or hand-editing a GENERATED artifact. Print on stderr and
-    # exit 2, which `main()` never returns (it returns 0 and 1 only).
-    # ⛔ 2 is NOT unused by this program: `argparse` exits 2 on a usage error, so
-    # the refusal shares a status with "you passed a wrong flag". That is the
-    # safe collision — both are "a bad invocation, no verdict about the
-    # carrier" — and it is the one that must never be taken: 1, which means
-    # STALE. (A caller that keys 2 = "re-run with the right interpreter" would
-    # loop; `tools/cache_evict.py` sets the higher bar with a `_UsageParser`
-    # because its verdicts occupy 2/3/4.)
     print(
         f"tools/gen_placement_table.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/gen_placement_table.py …`",
+        f"`uv run python tools/gen_placement_table.py`",
         file=sys.stderr,
     )
     raise SystemExit(2)

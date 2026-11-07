@@ -4060,14 +4060,20 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
     # `echo "...--check"` both left BOTH pins GREEN. Filtering comments first
     # (above) means exactness also rules out a commented-out command.
     # ONE list, shared with `tests/test_mcp_rename_table.py` (#11412 root 2): the
-    # copies were hand-typed and byte-identical, so #11084's fifth invocation
-    # reded BOTH shards on every PR at once. The list, its order and the reason
-    # each command is there live in `tests/_docs_drift_step.py`.
+    # copies were hand-typed and byte-identical, so an added invocation reded BOTH
+    # shards on every PR at once. The list, its order and the reason each command
+    # is there live in `tests/_docs_drift_step.py` — including the map guard's TWO
+    # arms, which `#11084` extended the step with.
+    #
+    # The count is deliberately NOT in this message: saying "the five verify-only
+    # commands" is the drift that made the duplicated copies stale, because an
+    # invocation added later does not necessarily carry a `--check` flag.
     expected = EXPECTED_DOCS_DRIFT_STEP
     assert code.strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the five "
-        "verify-only commands — no shell operator, no wrapper, no trailing "
-        f"anything, or a real failure reports green (#2656); got {code!r}"
+        "the drift step must invoke EXACTLY the commands in "
+        "`tests/_docs_drift_step.py`, in that order — no shell operator, no "
+        "wrapper, no trailing anything, or a real failure reports green "
+        f"(#2656); got {code!r}"
     )
     # The step may carry only the keys that cannot silence it. Enumerating the
     # silencing keys one at a time is what left the next one open, so the rule is

@@ -39,6 +39,12 @@ DOCS_DRIFT_STEP_COMMANDS = (
     # #11084: the #5090 vector-layer surface map's own guard. It takes no
     # `--check` — it verifies by default and exits 2 when the map cannot be read.
     "python3 tools/test_design_map_check.py",
+    # #11084: the map guard's SECOND arm. `--self-test` proves the checker still
+    # catches the mutations its "not trusted" claim rests on; an arm nothing runs
+    # would let a quietly weakened rule pass green. `#11292` added it to the step
+    # while this branch was de-duplicating the pin, so it is carried here rather
+    # than dropped by that refactor.
+    "python3 tools/test_design_map_check.py --self-test",
 )
 
 # The step's `run:` block, as `_code()`-filtered text, must equal this exactly.

@@ -1121,15 +1121,21 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
     # `echo` decoy, and a commented-out command alike, since `_code` has already
     # filtered comments.
     # ONE list, shared with `tests/test_merge_throughput.py` (#11412 root 2): the
-    # two copies were hand-typed and byte-identical, so #11084's fifth invocation
-    # reded BOTH shards on every PR at once. The list, its order and the reason
-    # each command is there live in `tests/_docs_drift_step.py`, so an addition is
-    # ONE edit and cannot move one pin without the other.
+    # two copies were hand-typed and byte-identical, so an added invocation reded
+    # BOTH shards on every PR at once. The list, its order and the reason each
+    # command is there live in `tests/_docs_drift_step.py`, so an addition is ONE
+    # edit and cannot move one pin without the other — including the map guard's
+    # TWO arms, which `#11084` extended the step with.
+    #
+    # The count is deliberately NOT in this message: saying "the five verify-only
+    # commands" is the drift that made the duplicated copies stale, because an
+    # invocation added later does not necessarily carry a `--check` flag.
     expected = EXPECTED_DOCS_DRIFT_STEP
     assert _code(str(step.get("run", ""))).strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the five "
-        "verify-only commands — no shell operator, no `echo` decoy, no wrapper, no "
-        f"trailing anything, or a real failure reports green (#2656); got "
+        "the drift step must invoke EXACTLY the commands in "
+        "`tests/_docs_drift_step.py`, in that order — no shell operator, no "
+        "`echo` decoy, no wrapper, no trailing anything, or a real failure "
+        f"reports green (#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
     )
     assert not docs_job.get("continue-on-error"), (
