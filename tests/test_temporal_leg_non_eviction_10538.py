@@ -731,9 +731,14 @@ def test_the_receipt_carries_the_guard_and_its_refusals():
         return False
 
     def _is_targeting_get(node: ast.AST) -> bool:
+        # the RECEIVER too (cycle 12, finding 2): without `node.func.value`
+        # being `_tl_guard_trace`, any other in-scope mapping Name satisfied
+        # this and the field degraded to `"none"` on every row.
         return (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "_tl_guard_trace"
                 and bool(node.args)
                 and isinstance(node.args[0], ast.Constant)
                 and node.args[0].value == "targeting")
@@ -775,7 +780,11 @@ def test_the_receipt_carries_the_guard_and_its_refusals():
                 and isinstance(value.func, ast.Name)
                 and value.func.id == "non_eviction_applied"
                 and len(value.args) == 1
-                and isinstance(value.args[0], ast.Name))
+                # the ARGUMENT must be the guard's trace (cycle 12, finding 2):
+                # any Name satisfied the previous form, so a shadow mapping
+                # reported `False` on every row with all four pins green.
+                and isinstance(value.args[0], ast.Name)
+                and value.args[0].id == "_tl_guard_trace")
 
     applied_slots = 0
     for node in stats:
@@ -1212,6 +1221,44 @@ def test_the_trace_holder_is_an_empty_dict_not_None():
     assert isinstance(holders[0].value, ast.Dict) and not holders[0].value.keys, (
         "_tl_guard_trace must be initialised to an empty dict, not "
         f"{ast.unparse(holders[0].value) if holders[0].value else None}")
+
+    # ⚠️ AND IT MUST BE THE ONLY BINDING IN THE SHIPPED FUNCTION (cycle 12,
+    # finding 1): counting declarations missed a later `_tl_guard_trace = {}`
+    # (or `.clear()`) after the leg call — a plausible "re-init after handing it
+    # over" refactor that erases the guard's entire receipt while the guard
+    # still enforces. Every receipt field and the empty-leg reason read this
+    # object, so the row would attest `applied: False`, `targeting: "none"`,
+    # `rejected: []` and revert a guard refusal to `no_window_candidates` — the
+    # false PASS this whole pin family exists to prevent.
+    fn = [
+        node for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "retrieve_for_question"
+    ]
+    assert len(fn) == 1, f"{len(fn)} definitions of retrieve_for_question"
+    body = fn[0].body
+    bindings = [
+        node for node in ast.walk(ast.Module(body=body, type_ignores=[]))
+        if (isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "_tl_guard_trace"
+                    for t in node.targets))
+        or (isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_tl_guard_trace")
+    ]
+    assert len(bindings) == 1, (
+        "_tl_guard_trace must be bound exactly ONCE in "
+        f"retrieve_for_question; found {len(bindings)} — a later rebind erases "
+        "the guard's receipt (#10538)")
+    clears = [
+        node for node in ast.walk(ast.Module(body=body, type_ignores=[]))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "clear"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_tl_guard_trace"
+    ]
+    assert not clears, "_tl_guard_trace.clear() would erase the guard's receipt"
 
 
 def test_the_shipped_call_arms_the_guard_with_the_QUESTION_WINDOW():
