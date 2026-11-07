@@ -65,10 +65,13 @@ an environment failure is never read as a broken cite).
 
 from __future__ import annotations
 
+import ast
+import io
 import itertools
 import json
 import re
 import subprocess
+import tokenize
 from pathlib import Path
 
 from tortoise import extractor_v2 as v2
@@ -1404,9 +1407,12 @@ def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
     lines = _extractor_lines()
 
     published = {int(n) for n in re.findall(r"extractor_v2\.py:(\d+)", text)}
-    # … and any bare continuation (``→ `:7495` ``, or a range end like
-    # ``:7489-7496``) counts as PUBLISHED, so a mapped number is not orphaned
-    # merely because its file is named once.
+    # … and any bare continuation (``→ `:NNNN` ``, or a range end whose start is
+    # a file-qualified cite) counts as PUBLISHED, so a mapped number is not
+    # orphaned merely because its file is named once. ⛔ No concrete number is
+    # spelled in this comment: an example that rots is the defect restated in
+    # the guidance, and `test_guidance_prose_quotes_only_numbers_the_pins_hold`
+    # now reds on one.
     for start, end in re.findall(r":(\d{4,5})(?:-(\d{4,5}))?", text):
         published.add(int(start))
         if end:
@@ -1606,14 +1612,20 @@ def test_the_census_clamps_with_the_writes_own_cut():
 def test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook():
     """The index row and the runbook must publish the SAME line for one gate.
 
-    They did not: `docs/00_index.md`'s `#2684` row said `:3603-3604` (prose in
-    the docstring) while §6 of the runbook said `:3613-3614` (the gate). A
+    They did not: `docs/00_index.md`'s `#2684` row pointed at prose INSIDE the
+    gate's docstring while §6 of the runbook pointed at the gate's own line. A
     summary that contradicts the document it summarises is the failure mode the
     bundle's cite convention exists to prevent, and nothing read either.
 
     #10742: this test covered ONE number while the file published nine, so
     eight rotted unread. It now emits the corrected pair too, and the other
     eight are held by `_PUBLISHED_CITES` / `_RUNBOOK_CITES` above.
+
+    ⛔ The two disagreeing numbers are described, not spelled: they were stale
+    the moment the gate moved, and spelling them here restated the very defect
+    (they pointed at unrelated code — one at a template slot's value, the other
+    at two blank lines). `test_guidance_prose_quotes_only_numbers_the_pins_hold`
+    is the guard that keeps a number out of this prose unless a pin holds it.
     """
     number, expected = _VALUE_FREE_GATE
     lines = _extractor_lines()
@@ -1631,3 +1643,105 @@ def test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook():
             f"{name} no longer publishes `{cite}` for the value-free gate — "
             "the two artifacts must name the same site, and a stale number here "
             "is a number nothing can self-detect")
+
+
+def _prose_of(src: str) -> list[tuple[int, str]]:
+    """(line, text) for every COMMENT and every DOCSTRING in `src`.
+
+    The class this guards is prose-only: a bare `:NNNN` written in guidance is
+    read by no sweep (the file arm of `_cites` is file-qualified-only), so it
+    rots silently the moment code moves above it. Docstrings come from the AST
+    (so a string that merely LOOKS like a docstring is not one) and comments
+    from `tokenize` (so a `#` inside a string is not one); both are used rather
+    than a line regex, which would flag the maps themselves — they are the pins,
+    not guidance.
+    """
+    prose: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                       ast.AsyncFunctionDef)):
+            continue
+        doc = ast.get_docstring(node, clean=False)
+        if doc is not None and node.body and isinstance(node.body[0], ast.Expr):
+            prose.append((node.body[0].lineno, doc))
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            prose.append((tok.start[0], tok.string))
+    return prose
+
+
+def _prose_cites(prose: list[tuple[int, str]]) -> list[tuple[int, int]]:
+    """(line, number) for every `:NNNN` / `:NNNN-NNNN` spelled in `prose`."""
+    cite_re = re.compile(r":(\d{4,5})(?:-(\d{4,5}))?")
+    out: list[tuple[int, int]] = []
+    for line_no, text in prose:
+        for m in cite_re.finditer(text):
+            for spelled in (m.group(1), m.group(2)):
+                if spelled:
+                    out.append((line_no, int(spelled)))
+    return out
+
+
+def test_the_prose_extractor_sees_both_a_comment_and_a_docstring():
+    """FAILS IF `_prose_of` stops finding prose, which would make the guard vacuous.
+
+    A guard over an extraction that silently returns nothing passes on every rot
+    it exists to catch — the `#8175` shape (a tool that holds the datum and does
+    not read it). Driven on a SYNTHETIC module so this check cannot rot with
+    this file's own prose.
+    """
+    sample = '''"""A module docstring with `:1111`."""
+
+
+def f():
+    """A function docstring with `:2222-3333`."""
+    x = "a # that is not a comment, and :9999 inside a string"
+    # a real comment with `:4444`
+    return x
+'''
+    found = _prose_cites(_prose_of(sample))
+    assert [n for _ln, n in found] == [1111, 2222, 3333, 4444], (
+        f"the prose extractor saw {found} — expected the module docstring, the "
+        "function docstring and the comment, and NOT the `:9999` inside the "
+        "string literal. A guard whose extraction is broken passes silently")
+
+
+def test_guidance_prose_quotes_only_numbers_the_pins_hold():
+    """FAILS IF this file's own guidance spells a `:NNNN` no pin verifies.
+
+    Twice now the file has repaired a cite while leaving the OLD number spelled
+    in the prose beside it (`_VALUE_FREE_GATE`'s comment, and the docstring of
+    `test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook`
+    which kept the twin of the same two numbers), and twice the example was
+    already wrong — pointing at a template slot's value and at two blank lines.
+    A number in guidance is a citation nobody re-checks, so the file's own rule
+    ("an example that rots is the defect restated in the guidance") can only be
+    enforced mechanically.
+
+    The contract it enforces is the one `#10742` established one level up: a
+    number may appear in this module's prose ONLY if one of the four maps
+    already pins it — in which case the sweeps above red when it rots, and the
+    example cannot go stale on its own. A live cite that is not yet pinned is
+    therefore reported with its fix: pin it, or drop it from the prose.
+    """
+    pinned = (
+        set(_PUBLISHED_CITES)
+        | set(_RUNBOOK_CITES)
+        | {n for _spelled, n in _CROSS_FILE_CITES}
+        | {_VALUE_FREE_GATE[0]}
+    )
+    bad = [
+        f"  line {line_no}: `:{number}` — not a key of "
+        f"_PUBLISHED_CITES / _RUNBOOK_CITES / _CROSS_FILE_CITES / "
+        f"_VALUE_FREE_GATE"
+        for line_no, number in _prose_cites(_prose_of(Path(__file__).read_text(
+            encoding="utf-8")))
+        if number not in pinned
+    ]
+    assert not bad, (
+        "this file's guidance spells `:NNNN` numbers no pin verifies, so they "
+        "rot unread — nothing in this module's sweeps reads an unqualified "
+        "number, and an example that rots is the defect restated in the "
+        "guidance. Either pin the number (add it to the map for its file) or "
+        "describe it without spelling it:\n" + "\n".join(bad))
