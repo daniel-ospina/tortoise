@@ -811,6 +811,14 @@ def test_recency_ordering_bounds_still_reject():
         "List the events from earliest to latest.",
         "Rank my jobs from the oldest to the latest.",
         "Give me the events latest first.",
+        # ATTRIBUTABLE to the always-veto ORDERING-BOUND arm: an interval-owned
+        # question whose `latest` is both a bound AND inside a relative clause
+        # still rejects. Drop the bound from `_RE_RECENCY` and this fires
+        # `interval` (the relative-clause exemption would admit it).
+        "How many days had passed since I bought the couch when I attended "
+        "the fair, where we ranked the films from earliest to latest?",
+        "How many days had passed since I bought the couch when I attended "
+        "the fair, where we listed the films latest first?",
     ]:
         assert classify_question(q) is None, q
 
@@ -1001,6 +1009,16 @@ def test_recency_residual_guard_site_takes_ownership_from_the_question():
     assert _recency_vetoes(residual, owns=None) is True
     # …and the question does not own it, so the day-lookup surface must reject
     assert classify_question(q) is None, q
+
+    # The ATTRIBUTABLE half: a residual whose `latest` DOES sit in a relative
+    # clause is exactly what a re-deriving mutant would exempt, so this is the
+    # row that reddens if `owns` is ever taken from the residual again.
+    q2 = ("last Saturday how many days had passed since I bought the couch "
+          "when I sold the lamp, where I discussed my latest novel?")
+    residual2 = _strip_anchor_spans(q2, find_anchor_spans(q2))
+    assert _RE_INTERVAL_SINCE.match(residual2), residual2
+    assert _recency_vetoes(residual2, owns=None) is True
+    assert classify_question(q2) is None, q2
 
 
 def test_census_duration_state_coverage():
