@@ -102,8 +102,8 @@ def lane():
     # `_assert_test_graph` AND the per-test wipe scope, so this handle has to
     # carry all three halves of the one ownership contract:
     #
-    # (a) per-test-UNIQUE (`os.urandom`) — a fixed literal would let
-    #     concurrent sessions DETACH each other's live writes;
+    # (a) per-test-UNIQUE — a per-run `urandom` suffix; a fixed literal would
+    #     let concurrent sessions DETACH each other's live writes;
     # (b) inside `_SWEEP_OWNED_PREFIXES` (the `test_` stem) — the session-end
     #     sweep's name gate is FAIL-CLOSED (#7795), so a journaled name outside
     #     that family is PRESERVED rather than dropped and one empty graph
@@ -116,15 +116,27 @@ def lane():
     #     below covers only this lane's own clean exit and does not run at all
     #     if the process dies.
     #
-    # Pinned by
+    # What
     # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
-    # — but for (a) and (c) ONLY (#11182): that census tests `os.urandom` and a
-    # real `_journal_append` CALL in the enclosing block, and it has NO prefix
-    # leg at all. Half (b) is therefore carried here DELIBERATELY and is NOT
-    # guarded: reverting the `test_` stem to a bare `evict_<hex>` while keeping
-    # (a) and (c) leaves the census GREEN (measured — its own non-vacuity arm
-    # pins a `g_<hex>` name and asserts no violations). Do not read that
-    # guard's green as covering the sweep-owned prefix.
+    # actually pins here, stated exactly (#11182):
+    #
+    #   (c) IS pinned — the census requires a real `_journal_append` CALL in the
+    #   enclosing block, matched on a MASKED copy, so a comment, an import, or a
+    #   `def` shadow cannot satisfy it.
+    #
+    #   (a) is pinned INCIDENTALLY at best. Its uniqueness leg is still a RAW
+    #   substring sniff over the UNMASKED block, so prose satisfies it — and
+    #   prose naming the token would satisfy it here. This comment therefore
+    #   does not spell that token: the sole occurrence in this block is the real
+    #   call, so reverting (a) to a non-unique name REDS the census instead of
+    #   sliding through on a comment. The leg remains prose-satisfiable in
+    #   general — that is the remaining half of #11182, recorded there rather
+    #   than fixed here.
+    #
+    #   (b) is NOT pinned at all: reverting the `test_` stem to a bare
+    #   `evict_<hex>` leaves the census GREEN (measured — the census's own
+    #   non-vacuity arm pins a `g_<hex>` name and asserts no violations). It is
+    #   carried here deliberately; do not read that guard's green as covering it.
     graph_name = f"test_10976_evict_{os.urandom(6).hex()}"
     _journal_append(graph_name)
     graph = db.select_graph(graph_name)
