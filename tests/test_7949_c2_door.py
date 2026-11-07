@@ -792,9 +792,13 @@ def test_the_door_citation_is_derived_not_typed():
         f"{line} while a text scan finds `def _capture_lane` at {scanned}, so "
         f"the citation is TYPED rather than derived (or the derivation is "
         f"broken) (#8506)")
-    assert "def _capture_lane" in text[line - 1], (
-        f"the derived cite {cite} does not land on the def — the derivation "
-        f"itself is broken")
+    # ⛔ No second `assert "def _capture_lane" in text[line - 1]` here. It is
+    # STRICTLY SUBSUMED by the assertion above (`scanned == [line]` already
+    # implies `text[line - 1].startswith("def _capture_lane")`), so it could
+    # never fire on its own and its message advertised a diagnosis it could not
+    # produce — the same #3442 rule-3 dead weight this test was rewritten to
+    # remove, and it was caught in the row that rewrote it (review at
+    # `7eb4a042`).
 
 
 # ── 2. the seam ledger, from the code ─────────────────────────────────────
