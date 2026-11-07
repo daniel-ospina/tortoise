@@ -4,7 +4,7 @@ type: research
 domain: engineering
 doc_status: draft
 created: 2026-11-04
-updated: 2026-11-04
+updated: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #5090, decision V1, filtered ANN, pgvector, FalkorDB HNSW, embed gate"
@@ -167,6 +167,43 @@ comparables now say what that measurement will probably show, and how to run it:
   is on synthetic or unrelated selectivity. ⇒ the measurement in **E1** (parked with V1) has no substitute.
 
 ---
+
+## Extractor-v4 alignment — the check this brief originally omitted (2026-11-05)
+
+**Why this section exists.** The first version of this brief never read `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` (1,882 lines, the design of record for the write path, home `#4894`). That was a Research-stage omission, and it matters because the epic's rule lives **inside** that write path. Reading it produced three findings, one of which is a genuine gap in what the epic asked for.
+
+### ⛔ v4 ALREADY RECORDS THE CONTRADICTION, as G2 — and it names more than a flag
+
+`EXTRACTOR-V4-ARCHITECTURE.md` §4.3, requirement **G2** (owner `#5008`, CLOSED COMPLETED):
+
+> *"**No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists … and this step list has no home for it. S2.3's kNN path **silently assumes every candidate is embedded.** ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list."*
+
+**⇒ So the epic's S1 was under-specified.** Arming a default does not resolve G2: the step list **S0–S6** still has no EMBED decision point, and `S2.3 — CLASSIFY` collects from `embed_list` (the whole candidate set) while `classify_consolidation` **never removes items from it** — so a `DISCARD` would be classified anyway and embedded anyway.
+
+### ⛔ The VALUE gate is off too, and v4 requires it ON
+
+v4 §S2.2, verbatim: *"the mechanical half is `tortoise/value_gate.py` (`#4899`), and it **must default ON and stay subordinate to VET** (`TORTOISE_VALUE_GATE` unset must not mean "the predicate never runs"). So the work is a **default and a subordination**, not a missing slot."*
+
+Verified at this head: `tortoise/value_gate.py` declares `ENV_FLAG = "TORTOISE_VALUE_GATE"`; `tortoise/embed_gate.py`'s module docstring records **both** as *"off by default"*. Since `embed_gate.RULE_SET` is assigned `value_gate.RULES` (one rule set, two enforcement points), **arming only the EMBED flag leaves the DISCARD question unenforced while the EMBED one reads green** — a rule enforced at one of its two points, reported as enforced. That is the same failure shape the epic's own research pass calls out repeatedly.
+
+### The ordering, as three constraints (v4 §4.2, §S2.2, §S2.3)
+
+| constraint | source |
+|---|---|
+| both gates stay **subordinate to VET** | v4 §S2.2: the gates are the mechanical half of the step whose adversarial question is VET's |
+| **DISCARD before EMBED** | v4's wiring note: *"a discarded candidate must be removed from (or marked in) `embed_list`, or `_collect_classify_items` must skip it … S2.3 pays for `#4899`'s savings"* |
+| **EMBED before `execute_embed`** | v4 §4.2's order table: the embed pass is last, and `classify_consolidation` lives **inside** it (`tortoise/extractor_v2.py`) |
+
+### Two v4 passages that CONFIRM the epic's sequencing
+
+- **The entity vector is an entry key, not a reasoning mechanism** (§5's traversal measurement, `:1045`; and storage §12.2c): *"Traversal is cheap enough to be the default … measured 1.55–2.35 ms … the why/who/when value does **not depend on vectorising the entity at all**. What a vector is for is FINDING the entry node, not reasoning from it."*
+- **The definite-description problem is upstream of the vector** (§1:108, §4.3 G5; measured 2026-09-25 under **`#5059`**): 62.3% of Objects are `the <X>`; and measured, **≈52% of the `the <X>` rows are load-bearing** (2,570 of 4,901), so a bare name-pattern delete carries **≈48% precision on an irreversible delete**. ⇒ **Any census that proposes deleting rows by name pattern is at coin-flip precision and must not be built.** #11088's census is about *vectors on labels with no index*, which is a different population — that distinction must be stated in the issue, and this is the number that makes it non-negotiable.
+
+### What this changes for the epic
+
+- **S1 / #11086** — now arms **both** gates (`03-scope.md`, S1) and requires the EMBED decision to have a home in the v4 step list; the issue body carries the same.
+- **S3 / #11088** — now states that it removes **vectors**, never rows, and cites the 48%-precision measurement as the reason that distinction is not negotiable (`03-scope.md`, S3).
+- **V1 stays out of scope** and unaffected: v4 is silent on where the index lives, and §14.3 remains the decision's home.
 
 ## Review gate
 
