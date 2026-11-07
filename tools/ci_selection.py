@@ -2928,8 +2928,8 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # not guarded, so "every" would overclaim.)
              # `tools/test_design_map_check.py` is a flat NON_PYTHON_PREFIXES entry
              # matching no SOURCE_PATTERNS row, so a diff touching ONLY it filtered to
-             # `changed == []` and took the docs-only early return — MEASURED at the
-             # head that added this entry: `select(["tools/test_design_map_check.py"],
+             # `changed == []` and took the docs-only early return — MEASURED with
+             # this entry REMOVED: `select(["tools/test_design_map_check.py"],
              # "pull_request", load_manifest())` -> surfaces=[], and
              # `test_entry_point_python_guard.py` ABSENT from `test_files`. That is
              # exactly the hole the guard is FOR: a branch rewrite that silently
