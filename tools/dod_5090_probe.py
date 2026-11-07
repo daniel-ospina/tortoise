@@ -126,10 +126,13 @@ none.
 ⛔ **EXACTLY WHAT A REGISTER EDIT BUYS — the precise contract, because the loose
 version of this paragraph was false for the case that matters.**
 
-* A name with **no writer discovery can see** behind it is STALE and HOLDS the
-  row (the same "unused suppression" contract ESLint enforces with a non-zero
-  exit). While the product is unchanged that is what an added name always is, so
-  a naming-only edit moves row 1 toward `PARTIAL`, never toward `MET`.
+* A name with **no writer behind it in the population row 1 scores** is STALE and
+  HOLDS the row (the same "unused suppression" contract ESLint enforces with a
+  non-zero exit). That is what a name for a writer **the product does not have**
+  always is — and it is also what a name becomes once that writer is FIXED to
+  route through the gate, so a declaration does not quietly accumulate: delete
+  it then, because an unused exemption is a stale one. It is NOT what naming a
+  LIVE outside-gate writer is — that is the next bullet, and it greens the row.
 * A `bypass` class, or any class outside the vocabulary, HOLDS the row as a
   DEFECT; an unreadable or malformed register holds it as `UNMEASURED`.
 * A `recognised_producer` claim is CORROBORATED against the writer's own body
@@ -1212,10 +1215,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
 #: ⛔ **WHAT A REGISTER EDIT CAN AND CANNOT BUY — the exact contract, because the loose version
 #: of this paragraph was a lie for the case that matters.**
 #:
-#: * A name with **no writer discovery can see** behind it is STALE and HOLDS the row (same
-#:   contract ESLint's *Bulk Suppressions* enforces with a non-zero exit on an unused
-#:   suppression). With the product unchanged that is what an added name always is, so a
-#:   naming-only edit moves row 1 toward `PARTIAL`, never toward `MET`.
+#: * A name with **no writer behind it in the scored population** is STALE and HOLDS the row
+#:   (same contract ESLint's *Bulk Suppressions* enforces with a non-zero exit on an unused
+#:   suppression). A name for a writer **the product does not have** is stale, and so is a
+#:   name whose writer has since been FIXED to route through the gate — delete it then, an
+#:   unused exemption is a stale one. Naming a LIVE outside-gate writer is the NEXT bullet,
+#:   and that one does green the row.
 #: * A name with **no admissible class** (``bypass``, or a class outside the vocabulary) HOLDS
 #:   the row as a DEFECT.
 #: * A `recognised_producer` claim is CORROBORATED: the writer's own body must reach one of the
@@ -1375,7 +1380,10 @@ def register_audit(outside_gate: dict[str, dict]) -> dict:
     * ``undeclared`` — outside the gate, not named (HOLDS);
     * ``violations`` — named, but a claim that does not re-derive (HOLDS);
     * ``credited`` — named and corroborated, or named as `exempt` (reading (b));
-    * ``stale`` — named but NOT outside the gate at all (HOLDS: a name with no writer behind it).
+    * ``stale`` — named but NOT outside the gate at all (HOLDS: the writer is gone or
+      renamed, its module is one the walk skips, or it now ROUTES THROUGH THE GATE — the fix
+      landing — in which case the declaration must be deleted, because an unused exemption
+      is a stale one).
 
     A malformed register raises rather than answering, so the caller can hold the row as
     UNMEASURED; the alternative — a partial answer — reads as the product declaring nothing.
@@ -1609,10 +1617,12 @@ def score_rule_bullet() -> Row:
     if stale:
         notes.append(
             "stale declarations (hold this row at PARTIAL — a name with no writer "
-            "DISCOVERY CAN SEE behind it: the writer is gone or renamed, its module "
-            "is one the walk skips (`tortoise/embeddings.py`), or its module would "
-            "not parse — so while the product is unchanged an added name can only "
-            f"move this row toward PARTIAL): {stale}"
+            "behind it in the population this row scores: the writer is gone or "
+            "renamed, its module is one the walk skips (`tortoise/embeddings.py`), "
+            "or its module would not parse; OR the writer now ROUTES THROUGH THE "
+            "GATE, which is the fix landing and means the declaration must be "
+            "deleted — an unused exemption is a stale one): "
+            f"{stale}"
         )
     if bypass_declarations:
         notes.append(
