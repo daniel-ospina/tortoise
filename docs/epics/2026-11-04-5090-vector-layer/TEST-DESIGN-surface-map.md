@@ -253,8 +253,10 @@ added this line touches a workflow file, which a lane's own preflight cannot pro
 so the PR body says so. ⚠️ **A residual worth stating, measured rather than estimated.** The
 population pin lives inside the tool an editor edits, so no self-test case mutates it — but a pin edit
 **on its own is not silent**: dropping a surface from `SURFACES` while its row is still there reds the
-check arm every time (`VIOLATION R1 SF<n>: surface is not in the pinned population SF1..SF15`, exit 1,
-measured for SF1/SF2/SF5/SF10/SF12/SF15); dropping SF13 from the pin **and** building the consistent
+check arm every time (`VIOLATION R1 SF<n>: surface is not in the pinned population SF<lo>..SF<hi>`,
+exit 1, measured for SF1/SF2/SF5/SF10/SF12/SF15). ⚠️ The range it prints is the SURVIVING pin, not a
+constant: an interior drop reads `SF1..SF15`, while dropping SF1 reads `SF2..SF15` and dropping SF15
+reads `SF1..SF14` (measured) — grep the `SF<n>` that moved, not the range. Dropping SF13 from the pin **and** building the consistent
 shrink reds the self-test too, because emptying §6.4's surface cell now trips `R5 §6.4: names no
 surface` — before that arm existed the same edit was the one case the arm reported as `NOT caught`
 (measured: `1/12` before, `14/14 refused` after). The pin is silent only when the shrink edits it
