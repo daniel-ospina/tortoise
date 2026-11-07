@@ -459,7 +459,15 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    # ambient =1 ADDS a :GraphEvent to the graph the run writes
                    # (change_feed.py:182 via sdk._change_feed_enabled) and the
                    # probe's S6 witness prints that count (measured: 2 vs 3).
-                   "TORTOISE_CHANGE_FEED")
+                   "TORTOISE_CHANGE_FEED",
+                   # cycle 10: read through a PARAMETER (`_pick(tau_hi,
+                   # "TORTOISE_SUBJECT_TAU_HI", ...)` -> `os.environ.get(env_name)`)
+                   # from the write path, and it decides whether the
+                   # `:aboutSubject`/`:aboutObject` edge is written at all
+                   # (measured: 0.90 -> bound at the defaults, suspected with
+                   # TORTOISE_SUBJECT_TAU_HI=0.99). Absent is the shipped
+                   # default, so pinning them UNSET matches today's behaviour.
+                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
