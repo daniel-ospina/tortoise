@@ -218,7 +218,7 @@ arm=before metric=real_facts count=90
 arm=after-vet-shipped metric=real_facts count=90
 ```
 
-Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 × before_share`,
+Against the registered bar (`PRE-REGISTRATION.md` §3.1, the E1/E1b rows; `after_share <= 0.50 × before_share`,
 `>= 90 of 90`):
 
 - **E1: `0.600000 <= 0.300000` → FALSE.** The share does not move at all (`reduction=-0.000000` is
@@ -395,15 +395,175 @@ measured non-empty; (d) the explicit `#4889` adjudication — confirmed with a r
 gh pr view 11213 --json state,mergeCommit,mergedAt
 gh pr view 11211 --json state,mergeCommit,mergedAt,closingIssuesReferences
 gh pr view 11212 --json state,mergeCommit,mergedAt        # MERGED 21:33:54Z, mergeCommit 80c912244
-# How an issue was actually CLOSED — the discriminator an empty closingIssuesReferences cannot give:
-gh api "repos/daniel-ospina/tortoise/issues/10999/timeline?per_page=100" \
-  --jq '.[] | select(.event=="closed") | {created_at, commit_id}'
-                                                          # a SHA => a commit's closing keyword closed it
-                                                          #   (#10999 -> 316a572ce2, message `Closes #10999`)
-                                                          # null => a MANUAL close (#11021 reads null)
-                                                          # ⛔ An empty closingIssuesReferences does NOT mean
-                                                          # "manual": the keyword can ride the squash COMMIT,
-                                                          # which never populates that PR-body-derived field
+gh pr view 11205 --json state,mergeCommit,mergedAt,closingIssuesReferences   # MERGED 22:40:32Z, 316a572ce2
+gh issue view 11237 --json state,closedAt                # the Object→Object WRITE path — this read
+                                                          # prints its state; do not quote the state
+# The arms' own evidence — the two PRs whose merge sha arm 1 can inherit, and arm 2's commit message.
+# Without these three lines the loop prints a sha but nothing says WHAT it must equal, so a reader
+# cannot tell arm 1 (a NON-EMPTY closedByPullRequestsReferences, whose commit_id may be NULL or that
+# PR's own merge sha) from arm 2 (empty refs + the keyword in the COMMIT message):
+gh pr view 11105 --json state,mergeCommit,mergedAt        # MERGED 11:18:49Z, mergeCommit 24d2dbcb
+gh pr view 10738 --json state,mergeCommit,mergedAt        # MERGED 16:14:21Z, mergeCommit fd6558c5
+git log -1 --format=%B 316a572ce2 | grep '^Closes #10999' # arm 2's keyword, in the COMMIT message
+# arm 1's OWN discriminator — an auto-detected keyword vs a PR linked BY HAND. `closedByPullRequestsReferences`
+# carries MANUALLY-linked closing references too: `userLinkedOnly` and its inverse `excludeUserLinked` both
+# default to `false`, and `addCloseIssueReferences` is the mutation that creates the manual kind. So a
+# NON-EMPTY field on its own does NOT prove a body/title keyword — a hand close carrying a linked PR reads
+# the same. `gh issue view` has no flag for that filter, so this is the GraphQL read that separates them.
+# Those names are read from the SCHEMA here, not remembered: the defaults are what let a `[]` mean
+# "auto-detected", and the mutation pair is what creates and removes the other kind. No count is quoted.
+# ⛔ The filter is NOT just the "Linked" pair — `includeClosedPrs` (default `false`) is the third switch,
+# and it is the one that decides whether a PR CLOSED WITHOUT MERGING still names the issue here. ⛔ `false`
+# does NOT mean "merged only": OPEN references are in the set too — that follows from the three argument
+# DEFAULTS read just below (all `false`), which is why they are read and not remembered — so the default
+# is "every reference except a PR closed without merging" — narrower than "any PR named it", not the same
+# as "only merged ones". #11337 is in the loop below, so whichever row holds the OPEN pole is
+# RE-DERIVED on every run rather than named here.
+# ⛔ No row's state is used as the BASIS of a classification here, on purpose: a row's state DRIFTS, and
+# an earlier draft cited #10848/11392 that way — it merged and closed within the day, leaving the sentence
+# re-deriving to its own opposite, beside the command that disproves it. The states quoted further down
+# sit beside the command that PRINTS them, which is the opposite contract: they are that loop's own
+# output, re-derived on every run, never relied on.
+gh api graphql -f query='{__type(name:"Issue"){fields{name args{name defaultValue}}}}' \
+  --jq '.data.__type.fields[]|select(.name=="closedByPullRequestsReferences")|.args[]|select(.name|test("Linked|ClosedPrs"))'
+                                                          # all three default FALSE — the inverse Linked
+                                                          # pair, and includeClosedPrs. The first two are why
+                                                          # an unfiltered read and a `userLinkedOnly` read can
+                                                          # differ at all (the discriminator this block rests
+                                                          # on); the third is why the default read UNDER-reports
+                                                          # the reference set — see arm 2 and the read below
+                                                          # the loop.
+gh api graphql -f query='{__schema{mutationType{fields{name}}}}' \
+  --jq '.data.__schema.mutationType.fields[].name|select(test("CloseIssueReferences"))'
+                                                          # addCloseIssueReferences /
+                                                          # removeCloseIssueReferences — how the manual kind
+                                                          # is created and removed, i.e. the arm a
+                                                          # keyword read cannot separate on its own
+for n in 11001 10997 10684 10698; do                    # arm 1's four rows; `[]` = auto-detected, not linked
+  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,userLinkedOnly:true,includeClosedPrs:true){nodes{number}}}}}" \
+    --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
+done
+                                                          # ⛔ BOTH filters, not just `userLinkedOnly`:
+                                                          # a hand link to a PR closed WITHOUT merging is
+                                                          # invisible to the narrow read, so the narrow one
+                                                          # cannot rule out "linked" on its own. With both
+                                                          # set the four rows still print `[]` — which is
+                                                          # what makes the parenthetical below a measurement
+                                                          # rather than a claim.
+# How an issue was actually CLOSED — THREE arms, and the PRIMARY field is closedByPullRequestsReferences,
+# NOT commit_id alone. Read it first, and read it WITH `state` on each node: that is the GraphQL read in
+# the loop below. (`gh issue view <n> --json state,closedByPullRequestsReferences` returns the same set
+# with no `state` on its nodes, so it cannot separate a MERGED reference from an OPEN one — arm 1 needs
+# that separation, arms 2 and 3 do not.)
+#   1. NON-EMPTY **on a MERGED node** => closed by that PR's keyword (either auto-detected from its
+#      body/title, which is what the four rows below are — `userLinkedOnly,includeClosedPrs` printed `[]`
+#      for all four when measured — or a MANUAL closing link, which that read rules out). ⛔ "MERGED" is
+#      load-bearing here for the SAME reason as in arms 2 and 3, one layer down: the default set carries
+#      OPEN references too, so a `Closes #n` on a STILL-OPEN PR reads NON-EMPTY for an issue closed by
+#      something else. ⛔ STILL-OPEN, not "never merged" — a CLOSED-unmerged PR's reference does NOT
+#      appear there (#10850 says `Closes #10812.` and #10812 still reads `[]`); that one is what
+#      `includeClosedPrs:true` reveals. So this arm guards the OPEN pole and that read guards the CLOSED
+#      one, and neither substitutes for the other. ⛔ AND THE STATE HAS TO BE PRINTED TO SEE IT — `gh issue view <n> --json
+#      closedByPullRequestsReferences` returns these nodes with NO `state` key at all, so the read that
+#      classifies is the GraphQL one in the loop below, not that line. ⛔ Its `commit_id` is NOT fixed: it reads
+#      NULL for #11001 ([11213]) and #10997 ([11212]), and that PR's own merge sha for #10684 ([11105])
+#      and #10698 ([10738]) — the same shape, both outcomes. A non-null sha here does NOT demote it to
+#      arm 2, which is exactly why the field above is read FIRST and commit_id cannot classify alone.
+#   2. empty + commit_id = SHA => the keyword rode the COMMIT message, and no MERGED PR named it
+#      (#10999 -> 316a572ce2, whose message carries `Closes #10999`). ⛔ "MERGED" is load-bearing, not
+#      decoration: the default read carries no reference from a PR closed WITHOUT merging, so #10812
+#      reads `[]` + a sha (c4a369b011) here while PR **10850** — CLOSED, `mergedAt: null` — opens with
+#      `Closes #10812.`. Read `includeClosedPrs:true` (the block below the loop) before calling a row
+#      arm 2, or the recipe re-creates the very mistake it exists to prevent, one arm over.
+#   3. empty + commit_id = null => no MERGED PR named it, and nothing in the DEFAULT set attributes the
+#      close (#11021: [] and null). ⛔ "in the DEFAULT set" is exact, not hedging: #8447 reads `[]` here
+#      AND is named in the tree (next sentence), so "nothing attributes this close" would be false of
+#      arm 3's own row. ⛔ "MERGED" is load-bearing HERE TOO, for arm 2's reason: #8447 reads
+#      `[]` + null + a human actor, yet PR **10562** — CLOSED, `mergedAt: null` — opens with
+#      `Closes #8447`, so a PR DOES name that close and only the default read hides it. Read
+#      `includeClosedPrs:true` here as well before writing the word "manual". ⚠️ "manual" is
+#      a partial label — a bot or a `not_planned` close reads the same [] + null — so the loop below prints
+#      the closed event's `actor` beside the sha: #11021's is a human (daniel-ospina), one second after
+#      #11211 merged, which is what makes the word a checked fact rather than an assumption.
+# ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 reads null in two of its four examples. And an
+#   empty closingIssuesReferences on the MERGED PR is not evidence either: that PR-body field stays empty
+#   in arms 2 and 3 while the PR merged (#11205 -> []). ⛔ It is NOT empty on a CLOSED-UNMERGED PR —
+#   #10850 reads [10812] and #10562 reads [8447] — so there it corroborates nothing either way; the field
+#   that stays empty is the ISSUE-side one above, and that is the one this section reads.
+# The loop BELOW re-derives every row above — arm 1's four named issues, one arm 2, one arm 3, and the
+# two counter-examples that NARROW arms 2 and 3 (#10812 and #8447: each reads `[]` here, and each is
+# named by a PR that never merged, which is why both tests say "MERGED" rather than "no PR"), plus
+# #11337, which is in the loop to re-derive the OPEN pole — the row that shows the default set is not
+# "merged only" whenever it reads OPEN. ⛔ The loop PRINTS every row's `state`; the prose must not
+# quote one, because a quoted state drifts: #10848/#11392 was this row until PR 11392 merged (#10848
+# closed two seconds later), and the quote then contradicted the command printed beside it.
+# Everything below is read, never recalled.
+# Every issue AND every PR the arms name is read here, and so are the facts that are
+# neither an issue nor a PR — arm 2's commit message, and arm 1's user-linked filter with the schema
+# names it rests on — so no row, and no equality a row rests on, is asserted without a command:
+# ⛔ the first read is GraphQL, not `gh issue view`, precisely because it has to print `state`: the
+# `gh issue view <n> --json closedByPullRequestsReferences` line returns the SAME set with no `state`
+# on its nodes, so it can show a row is non-empty but never whether the referring PR merged.
+for n in 11001 10997 10684 10698 10999 11021 10812 8447 10848 11337; do
+  echo "#$n"
+  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){state closedByPullRequestsReferences(first:10){nodes{number state}}}}}" \
+    --jq '.data.repository.issue | "issue=\(.state) refs=\([.closedByPullRequestsReferences.nodes[] | "\(.number):\(.state)"] | join(","))"'
+  gh api "repos/daniel-ospina/tortoise/issues/$n/timeline?per_page=100" --paginate \
+    --jq '.[] | select(.event=="closed") | {created_at, commit_id, actor: .actor.login}'
+done
+                                                          # The POSITION the note below rests on is a
+                                                          # read too, not a claim — the SAME timeline with
+                                                          # NO --paginate, reporting the closed event's INDEX
+                                                          # within the first page:
+gh api "repos/daniel-ospina/tortoise/issues/11021/timeline?per_page=100" \
+  --jq 'to_entries|map(select(.value.event=="closed"))|.[].key'
+                                                          # 27 — an index INSIDE page 1, which is why the
+                                                          # paginated read above prints for this issue; push
+                                                          # that same close past the page size and the
+                                                          # unpaginated read prints nothing at all
+                                                          # ⛔ --paginate is MANDATORY: without it gh
+                                                          # returns only the FIRST 100 events, and the
+                                                          # closed event is one line among many — a close
+                                                          # that happened late is not on page 1, so the
+                                                          # command prints NOTHING and "nothing" reads as
+                                                          # "no closed event". The failure is POSITIONAL,
+                                                          # not "timeline over 100 events": #11021's close
+                                                          # sits inside page 1, so the command prints — push
+                                                          # that same close past event 100 and it would print
+                                                          # nothing. No count is quoted here on purpose: a
+                                                          # count drifts, and quoting one is how this note
+                                                          # got it wrong twice. A truncated check is worse
+                                                          # than none.
+                                                          # ⛔ the `closedByPullRequestsReferences` read
+                                                          # above is the DEFAULT set: OPEN + MERGED
+                                                          # references; only a PR closed WITHOUT merging is
+                                                          # omitted. The same field with `includeClosedPrs:true`
+                                                          # is the full set — #10997 gains 11281 (CLOSED,
+                                                          # never merged) beside [11212], #10812 goes from
+                                                          # `[]` to [10850] (CLOSED), and #8447 is the same
+                                                          # shape one arm over: it reads `[]` + null, which
+                                                          # is arm 3's test, yet 10562 (CLOSED, never merged)
+                                                          # is in the set. The two PRs' first body lines are
+                                                          # the keywords that read cannot see, and their
+                                                          # PR-side closingIssuesReferences is the field the
+                                                          # paragraph above says is NOT empty — measured in
+                                                          # the same command. ⛔ The loop reads BOTH poles:
+                                                          # the three rows that GAIN an entry (10997, 10812,
+                                                          # 8447) and the two arm examples that must NOT
+                                                          # (#10999 is arm 2, #11021 is arm 3). Both arms
+                                                          # tell the reader to run this read BEFORE naming
+                                                          # the arm, so the negative result for their own
+                                                          # rows has to be printed here — arm 2's and arm
+                                                          # 3's classifications rest on it:
+for n in 10997 10812 8447 10999 11021; do
+  echo "#$n — includeClosedPrs:true"
+  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state}}}}}" \
+    --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
+done
+gh pr view 10850 --json state,mergedAt,closingIssuesReferences,body \
+  --jq '{state, mergedAt, closing: [.closingIssuesReferences[].number], firstLine: (.body|split("\n")[0])}'   # CLOSED, null, [10812], "Closes #10812."
+gh pr view 10562 --json state,mergedAt,closingIssuesReferences,body \
+  --jq '{state, mergedAt, closing: [.closingIssuesReferences[].number], firstLine: (.body|split("\n")[0])}'   # CLOSED, null, [8447], "Closes #8447"
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128

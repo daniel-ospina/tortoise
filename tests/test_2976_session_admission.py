@@ -536,3 +536,294 @@ def test_a_breadth_refusal_that_depth_recovers_is_not_a_drop():
     assert len(out2) < len(pool)
     assert tight["dropped_by_breadth_bound"] > 0, tight
     assert tight["stopped_by"] == "token_cap", tight
+
+
+def test_tr_complete_sessions_splices_on_the_wire_identity_10540(monkeypatch):
+    """#10540: the SPLICE must key the pool the same way the SEED does.
+
+    ``seeded_sessions`` keys through ``retrieval.session_key_of``, which
+    resolves a product turn hit from its wire ``sessionId``. The splice used
+    to read ``h.get("session_id")`` directly, so the two halves could
+    disagree: on a camel-only pool — the exact population #10540 exists for —
+    the seed fires, the graph fetch runs, and nothing is spliced.
+
+    ⚠️ Scope of that disagreement, measured and scoped: it is a state this PR
+    PASSES THROUGH, not the base it starts from. At ``origin/main`` the
+    authority has no camel leg either, so ``seeded_sessions`` returns ``[]``
+    on this pool and ``_tr_complete_sessions`` returns BEFORE the splice — the
+    sibling docstring in ``tests/test_session_reinjection_rules.py`` states
+    that baseline. With this PR's authority change ALONE (``40c4d85578``) the
+    seed fires and the snake-only splice then matches nothing (``seeded: 1``,
+    ``injected: 0``). Both halves land together here so a later revert of
+    either cannot leave the seam half-wired: with the snake-only splice
+    restored this test reds (``sessions=0, injected=0``) while the fixed tree
+    reports ``sessions=1, injected=1``.
+
+    This is the ONE assertion that makes the snake-only splice red — the
+    snake-keyed sibling above exercises the leg that did not change.
+    """
+    from tools.longmem_eval import retrieve as R
+    from tortoise import session_reinjection as SR
+
+    def _wire(content: str, sid: str, idx: int) -> dict:
+        # a PRODUCT turn hit: the point fetch POPS the snake prop, so the only
+        # identity is the camel wire key (see tests/test_d3_session_identity.py)
+        return {"id": f"lme:q:s0:t{idx}", "content": content,
+                "sessionId": sid, "session_date": "2023-01-08",
+                "match_source": "fts"}
+
+    base = [_wire("a0", "sess-a", 0), _wire("b0", "sess-b", 0),
+            _wire("a1", "sess-a", 1)]
+    injected = {"lme:q:s0:t9": {"content": "a2-injected", "sessionId": "sess-a"}}
+
+    class _Seed:
+        session_id = "sess-a"
+        point_id = "lme:q:s0:t0"
+
+    monkeypatch.setattr(SR, "seeded_sessions", lambda *a, **k: [_Seed()])
+    monkeypatch.setattr(
+        SR, "source_session_chunk_pass",
+        lambda *a, **k: {"ok": True, "dropped_by_cap": 0, "total_cap_hit": False,
+                         "by_session": {"sess-a": [{"id": "lme:q:s0:t9"}]}})
+    monkeypatch.setattr(R, "point_props_for_hits",
+                        lambda proj, ids: {i: injected[i] for i in ids})
+    monkeypatch.setattr(R, "_speaker_for_turns", lambda proj, ids: {})
+
+    class _Sdk:
+        def _get_proj(self):
+            return object()
+
+    out, report = R._tr_complete_sessions(
+        _Sdk(), list(base), ["2023-01-01", "2023-01-02"], seed_window=2,
+        seed_sessions=1, total_cap=5, per_session_cap=5)
+    assert report["ok"] is True
+    # the splice consumed the seeded group at all — the defect is `injected: 0`
+    assert report["sessions"] == 1 and report["injected"] == 1
+    assert report["applied"] is True
+    # ... and landed it after sess-a's LAST base hit, not in a tail
+    assert [h["content"] for h in out] == ["a0", "b0", "a1", "a2-injected"]
+
+
+def test_tr_complete_sessions_never_splices_an_idx_bucket_onto_a_phantom_hit(monkeypatch):
+    """#10540 R10: the SPLICE carries the SEED's guard, not just its key.
+
+    ``seeded_sessions`` admits only a REAL session key
+    (``_is_real_session_id``), because an ``idx:N`` bucket names no graph
+    session. The splice keyed through ``session_key_of`` but did NOT apply
+    that guard — so a fetched group whose key happens to be spelled in the
+    ``idx:`` namespace could equal a phantom hit's bucket and be spliced into
+    an UNRELATED hit's block, with ``report["sessions"]`` counting a splice
+    the seed never admitted.
+
+    The fused POOL is the shape no in-repo lane produces: the ``idx:``-named
+    session itself IS writer-producible (``ids.session_id_refusal`` refuses
+    BLANK and non-``str`` ids while refusing nothing about ``idx:3``, and
+    ``_SAFE_SESSION_TAG_RE`` admits ``:``), but the
+    colliding bucket requires an eval-stamped ``lme_session_index``. So this
+    pins DEFENCE — the two halves must agree on the one key class that
+    separates a session from a bucket — not a measured live defect.
+
+    Discriminating: removing the gate reds the four BEHAVIOURAL assertions
+    (``sessions``, ``injected``, the merged order, the foreign-id absence);
+    the ``ok`` flag, the fixture check and the input-pool invariant hold
+    either way and are not part of that count.
+    """
+    from tools.longmem_eval import retrieve as R
+    from tortoise import session_reinjection as SR
+    from tortoise.retrieval import session_key_of
+
+    base = [
+        {"id": "P_0", "content": "phantom-0", "lme_session_index": 3,
+         "session_date": "2023-01-08", "match_source": "fts"},
+        {"id": "A_0", "content": "a0", "session_id": "sess-a",
+         "session_date": "2023-01-08", "match_source": "fts"},
+        {"id": "P_1", "content": "phantom-1", "lme_session_index": 3,
+         "session_date": "2023-01-08", "match_source": "fts"},
+    ]
+    # the fixture must actually reach the phantom bucket the guard rejects
+    assert [session_key_of(h) for h in base] == ["idx:3", "sess-a", "idx:3"]
+
+    injected = {"G_foreign": {"content": "FOREIGN", "session_id": "idx:3"},
+                "A_9": {"content": "a9-injected", "session_id": "sess-a"}}
+
+    class _Seed:
+        session_id = "sess-a"
+        point_id = "A_0"
+
+    monkeypatch.setattr(SR, "seeded_sessions", lambda *a, **k: [_Seed()])
+    monkeypatch.setattr(
+        SR, "source_session_chunk_pass",
+        lambda *a, **k: {"ok": True, "dropped_by_cap": 0, "total_cap_hit": False,
+                         "by_session": {"idx:3": [{"id": "G_foreign"}],
+                                        "sess-a": [{"id": "A_9"}]}})
+    monkeypatch.setattr(R, "point_props_for_hits",
+                        lambda proj, ids: {i: injected[i] for i in ids})
+    monkeypatch.setattr(R, "_speaker_for_turns", lambda proj, ids: {})
+
+    class _Sdk:
+        def _get_proj(self):
+            return object()
+
+    out, report = R._tr_complete_sessions(
+        _Sdk(), list(base), ["2023-01-01", "2023-01-02"], seed_window=2,
+        seed_sessions=2, total_cap=5, per_session_cap=5)
+
+    assert report["ok"] is True
+    # the phantom bucket is NOT a splice anchor: one real session, one group
+    assert report["sessions"] == 1, report
+    assert report["injected"] == 1, report
+    # the real group still lands after its OWN session's last base hit …
+    assert [h["content"] for h in out] == [
+        "phantom-0", "a0", "a9-injected", "phantom-1"]
+    # … and the foreign group lands NOWHERE
+    assert not any(h["id"] == "G_foreign" for h in out)
+    # the input pool is untouched (the sibling pin's contract, re-asserted here
+    # because a wrong splice would have mutated `added` before this point)
+    assert [h["id"] for h in base] == ["P_0", "A_0", "P_1"]
+
+
+def test_admission_grain_agrees_with_the_pool_authority_on_a_camel_only_pool():
+    """#10540/#11381: the #2976 admission grain must key a hit the SAME way
+    the pool authority does.
+
+    `session_key_of` gained the camel wire `sessionId` leg (#10540) because
+    the product's point fetch pops the snake prop, leaving `sessionId` as a
+    product hit's only identity. `_session_admission_key` is the OTHER
+    consumer of "what a hit's session identity is", and it had no camel leg —
+    so on the very pool #10540 makes seedable, the pool said ONE session
+    while admission built one block PER HIT, degrading the
+    whole-session-or-skip depth pass to the fragment admission #2976 exists
+    to replace.
+
+    Measured before the leg: `session_blocks` over the three hits below →
+    three blocks of one, and `assemble_session_context(item_cap=2)` admitted
+    two fragments instead of one session's first two turns.
+    """
+    from tortoise.retrieval import session_key_of
+
+    def _wire(pid: str, sid: str, text: str) -> dict:
+        # a PRODUCT turn hit: the point fetch pops the snake prop, so the
+        # camel wire key is the only identity (see #10540)
+        return {"id": pid, "sessionId": sid, "content": text}
+
+    pool = [_wire("A_t0", "sessA", "a0"), _wire("A_t1", "sessA", "a1"),
+            _wire("A_t2", "sessA", "a2")]
+    assert [session_key_of(h) for h in pool] == ["sessA"] * 3
+    blocks = session_blocks(pool)
+    assert len(blocks) == 1 and len(blocks[0]) == 3
+    # the invariant, stated against the authority rather than a literal
+    assert len(blocks) == len({session_key_of(h) for h in pool})
+
+    # the snake leg still wins where the eval grain carries it (byte-identical
+    # keys — the #8713 census cannot move), and a camel hit of another session
+    # never fuses with it
+    mixed = [_wire("B_t0", "sessB", "b0"),
+             {"id": "E_t0", "session_id": "lme_s1", "content": "e0"},
+             {"id": "E_t1", "session_id": "lme_s1", "sessionId": "sessZ",
+              "content": "e1"}]
+    assert [len(b) for b in session_blocks(mixed)] == [1, 2]
+
+    # fails CLOSED in the same direction as the authority: whitespace-only and
+    # non-str camel values are not identities, so those hits stay singletons
+    junk = [{"id": "J_t0", "sessionId": "  ", "content": "j0"},
+            {"id": "J_t1", "sessionId": 7, "content": "j1"}]
+    assert [len(b) for b in session_blocks(junk)] == [1, 1]
+
+
+def test_the_agreement_with_the_pool_authority_is_scoped_to_identified_hits():
+    """#10540/#11381: the grains agree on IDENTIFIED hits and deliberately
+    diverge on the identity-LESS ones — the SCOPE of
+    `_session_admission_key`'s claim, pinned so it cannot be re-widened.
+
+    The camel leg exists so a product pool is ONE session to both grains. It
+    is not an unconditional equality, and the docstring says so out loud: a
+    reader who takes "agrees" for "cannot disagree" re-derives the
+    divergence below as a bug. Measured here, both directions:
+
+    * `lme_session_index: -1` (the eval annotator's DEFAULT, with
+      `session_id: ""`): `session_key_of` keeps the historical `idx:-1`
+      bucket for the whole pool, while `session_blocks` refuses to fuse
+      identity-less hits and gives each its own block. Both are intended —
+      #3591 kept the sentinel's key, and fusing unrelated conversations is
+      the defect this file exists to prevent;
+    * the same shape WITH the wire id now groups in admission (`sessA`) and
+      still keys `idx:-1` in the pool — one block, but not the pool's key;
+    * a padded snake id is RAW in the pool authority (it strips nothing) and
+      STRIPPED in the admission grain.
+
+    Neither divergence ships a wrong answer: no module under `tortoise/`
+    imports `session_reinjection`, so the `-1` shape arrives only through the
+    eval annotator, and the identified shapes — the ones the camel leg is
+    about — are asserted EQUAL at the end of this test.
+    """
+    from tortoise.retrieval import (
+        _session_admission_key,
+        dedup_pool,
+        session_key_of,
+    )
+
+    sentinel = [{"id": "X_t0", "session_id": "", "lme_session_index": -1},
+                {"id": "X_t1", "session_id": "", "lme_session_index": -1}]
+    assert {session_key_of(h) for h in sentinel} == {"idx:-1"}
+    assert [len(b) for b in session_blocks(sentinel)] == [1, 1]
+    assert [_session_admission_key(h)[0] for h in sentinel] == ["hit", "hit"]
+
+    sentinel_wire = [{"id": "Y_t0", "sessionId": "sessA",
+                      "lme_session_index": -1},
+                     {"id": "Y_t1", "sessionId": "sessA",
+                      "lme_session_index": -1}]
+    assert {session_key_of(h) for h in sentinel_wire} == {"idx:-1"}
+    assert len(session_blocks(sentinel_wire)) == 1
+
+    padded = {"id": "P_t0", "session_id": " sessA "}
+    assert session_key_of(padded) == " sessA "
+    assert _session_admission_key(padded) == ("session", "sessA")
+
+    # a BOOL index is the other type seam, and it diverges too — but NOT the
+    # way the sentinel does: the pool's leg is `is not None`, so `True` keys
+    # `idx:True` and OUTRANKS the wire id, while the admission grain excludes
+    # bool, skips the index leg, and therefore NAMES the session. Pinned here
+    # (where divergence is allowed) because the identified-hits branch AT THE
+    # END of this test legitimately branches on the bool exclusion and no
+    # other fixture reaches it: a loosened predicate (`isinstance(idx, int)`
+    # alone) would answer `('index', True)` in the two admission assertions
+    # below.
+    bool_idx = {"id": "B_t0", "sessionId": "sessB",
+                "lme_session_index": True}
+    assert session_key_of(bool_idx) == "idx:True"
+    assert _session_admission_key(bool_idx) == ("session", "sessB")
+    assert _session_admission_key(
+        {"id": "B_t1", "lme_session_index": True})[0] == "hit"
+
+    # and the C5 cap's delta, measured: a camel-only RAW-CHUNK pool now caps
+    # per session, where N per-hit phantoms left the cap unable to bind
+    # (`is_raw_chunk` is the only population the cap touches at all)
+    chunks = [{"id": f"A_c{i}", "sessionId": "sessA", "content": f"a{i}",
+               "point_kind": "session-transcript"} for i in range(3)]
+    assert len(dedup_pool(chunks, max_chunks_per_session=1)) == 1
+
+    # the claim the docstring DOES make: every identified hit is ONE session in
+    # both grains (the two ENCODE it differently — a string there, a tagged
+    # tuple here — so this compares identity, never encoding)
+    for h in ({"id": "I_t0", "session_id": "sessA"},
+              {"id": "I_t1", "sessionId": "sessA"},
+              {"id": "I_t2", "sessionId": "sessA",
+               "lme_session_index": 3}):
+        # ⚠️ This branch mirrors `_session_admission_key`'s OWN index
+        # predicate (`isinstance(int)`, not a bool, `>= 0` —
+        # `retrieval.py:2401`), NOT the pool's index leg, which is
+        # `lme_session_index is not None` (`retrieval.py:834-836`, no type
+        # check, no bool exclusion, `-1` included). Keeping the two apart is
+        # the whole comparison: an `-1`/`"3"`/bool fixture belongs with the
+        # DIVERGENCE cases above and would red this else-branch rather than
+        # exercise it (measured: `-1` → pool `idx:-1`, admission
+        # `('hit', …)`; `"3"` → `idx:3` vs `('hit', …)`).
+        idx = h.get("lme_session_index")
+        if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
+            # the index outranks the wire id in BOTH grains; each names the
+            # same identity in its own encoding, and above all NEITHER grain
+            # is left unasserted here
+            assert session_key_of(h) == f"idx:{idx}"
+            assert _session_admission_key(h) == ("index", idx)
+        else:
+            assert _session_admission_key(h) == ("session", session_key_of(h))

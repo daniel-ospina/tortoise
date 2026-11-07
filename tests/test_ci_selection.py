@@ -216,6 +216,14 @@ def test_docs_scanning_gates_stay_in_tier1():
     )
 
 
+    assert "test_problem_map_2820.py" in tier1, (
+        "#2820: the problem map's drift guard must be in tier1 — the map IS a "
+        "document (`docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`), and "
+        "`docs/` is in NON_PYTHON_PREFIXES and the map matches no "
+        "SOURCE_PATTERNS entry, so the docs-only edit that can falsify 26 "
+        "status rows selects no surface and runs tier1 ONLY"
+    )
+
     assert "test_substrate_map.py" in tier1, (
         "#5086 review (P1-2): the substrate map's drift guard must be in tier1 — "
         "the map IS a document (`docs/architecture/SUBSTRATE-REBUILD-MAP.md`), "
@@ -449,6 +457,56 @@ def test_substrate_map_guard_runs_on_the_diffs_it_guards():
     symbol_move = _sel(["tortoise/projection/edges.py"])
     assert "core" in symbol_move["surfaces"], symbol_move["surfaces"]
     assert "test_substrate_map.py" in symbol_move["test_files"]
+
+
+def test_problem_map_guard_runs_on_the_diffs_it_guards():
+    """#2820 review (P3): pin the SELECTION of the problem-map guard on all arms.
+
+    `tests/test_problem_map_2820.py` re-measures
+    `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md` against the tree, and four
+    distinct diffs can make it wrong. This mirrors
+    `test_substrate_map_guard_runs_on_the_diffs_it_guards` — the #5086 lane's own
+    recorded lesson, which this guard's registration inherited but did not pin:
+    with no ``assert "test_problem_map_2820.py" in tier1`` a later re-cut could
+    drop the row and every registered check would stay green while the map's own
+    controls stopped running on the one change class that can falsify it.
+
+    Measured at this head: a docs-only edit of the map gives ``surfaces == []``
+    with the pin present (the ``tier1`` row is the whole fix for that arm, and it
+    is the arm that matters — the map IS a document); a tool-only edit resolves
+    through ``CORE_ALSO`` (the entry beside its `substrate_map_check.py` sibling,
+    added in review round 11 — before it, that arm reached the pin only through
+    ``tier1``, which is thinner than the sentence above implies); and an
+    index-only edit is ``core`` for the same reason.
+    """
+    docs = _sel(["docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md"])
+    assert docs["full"] is False
+    assert docs["surfaces"] == [], docs["surfaces"]
+    assert "test_problem_map_2820.py" in docs["test_files"], (
+        "a docs-only edit of the problem map must run the guard that re-measures "
+        "it — this is the change class that can make 26 status claims wrong with "
+        "every matrix gate green"
+    )
+
+    tool = _sel(["tools/problem_map_check.py"])
+    assert tool["full"] is False
+    # ⛔ THE ARM ITSELF, not just the pin. Without this line the `CORE_ALSO`
+    # entry added in review round 11 was pinned by NOTHING: the pin arrives
+    # through `tier1` whether the entry is there or not, `--integrity` does not
+    # read `CORE_ALSO` (`tools/ci_selection.py:1479`), so deleting the entry
+    # dropped this arm from `surfaces: ['core']` (779 tests) to `[]` (80) with
+    # every gate green — the silent-drop class the entry exists to close, found by
+    # round 12 reading the test against its own comment (#1349/#3332/#3616).
+    assert tool["surfaces"] == ["core"], tool["surfaces"]
+    assert "test_problem_map_2820.py" in tool["test_files"], (
+        "a tool-only edit must run the tool's own negative controls — `tools/` is "
+        "swallowed by NON_PYTHON_PREFIXES, so CORE_ALSO is the only thing that "
+        "keeps this out of the docs-only early return"
+    )
+
+    index = _sel(["docs/00_index.md"])
+    assert index["surfaces"] == ["core"], index["surfaces"]
+    assert "test_problem_map_2820.py" in index["test_files"]
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
@@ -1203,6 +1261,60 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
             f"{changed} selects {guard} again — a non-gating lane file is back "
             "on a pre-merge leg, which is the regression #10194 exists to "
             f"prevent (selected: {sorted(selected)[:8]} ...)"
+        )
+
+
+def test_7949_c2_door_runs_on_both_surfaces_that_can_move_it():
+    """#10983 review round 11: the DOOR pin must run on EVERY diff that moves it.
+
+    `tests/test_7949_c2_door.py` pins the fleet's capture lane:
+    `hosted_api._capture_lane()` -> `sdk._extract_session_v2` ->
+    `extractor_v2.extract_session_v2`. Two modules can move that lane and they
+    fall on DIFFERENT surfaces:
+
+      * `tortoise/hosted_api.py` is an EXACT `SOURCE_PATTERNS["api"]` entry that
+        REPLACES the `core` fallback in `select()` (measured: surfaces
+        `['api','onboarding']`), so the file's `core` registration alone runs on
+        NO leg — a diff flipping `else "v2"` to another lane would ship green
+        with the assertion that names the door never executed;
+      * `tortoise/extractor_v2.py` matches no SOURCE_PATTERN and falls through to
+        `core` (measured: surfaces `['core']`).
+
+    MEASURED before the fix, on the head this pin was added at:
+    `--changed-files tortoise/hosted_api.py` -> the file is NOT in
+    `slow_selected` and NOT in `test_files`, i.e. the #1349/#2938 silent-drop
+    class in its harmful direction, and nothing else in `tests/` reds on that
+    mutation.
+
+    The second assertion is not cosmetic: the file is named by TWO surfaces, so
+    it must stay in the FAST pool. A `slow_files` entry named by a second
+    surface is dropped from the fast set AND never re-added to `slow_selected`
+    (first-match ownership — #6234, `test_every_slow_file_a_second_surface_
+    names_runs_for_that_surface`), so "register the `api` row" taken alone
+    would have moved the hole from the `hosted_api.py` diff to the
+    `extractor_v2.py` one. Asserting BOTH surfaces here is what makes a
+    partial fix red.
+    """
+    door = "test_7949_c2_door.py"
+    assert door not in set(load_manifest()["slow_files"]), (
+        f"{door} is back in `slow_files` while named by two surfaces — it will "
+        "run on NEITHER leg for one of them (#6234)"
+    )
+    for changed, surface in (
+            ("tortoise/hosted_api.py", "api"),
+            ("tortoise/extractor_v2.py", "core")):
+        assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+        r = _sel([changed])
+        assert surface in r["surfaces"], (
+            f"{changed} selects {r['surfaces']}, not {surface} — the premise "
+            "of this pin changed; re-derive it"
+        )
+        selected = set(r["test_files"]) if r["test_files"] != "ALL" else set()
+        selected |= set(r["slow_selected"])
+        assert door in selected, (
+            f"{changed} does not run the door pin {door} — the pin that names "
+            "the capture lane sleeps on a diff that can move it "
+            f"(surfaces={r['surfaces']}, selected slow={r['slow_selected']})"
         )
 
 
@@ -19033,6 +19145,32 @@ def test_cache_evict_runs_on_a_tools_only_change():
     assert "test_cache_eviction_evictor.py" in (load_manifest()["uri_requiring"] or []), (
         "test_cache_eviction_evictor.py must be declared under `uri_requiring:` — it "
         "module-skips without TORTOISE_DB_URI")
+
+
+def test_entry_point_guard_census_runs_on_a_tools_only_change():
+    # #11320: `tests/test_entry_point_python_guard.py` (registered
+    # `core`) is the census that holds every GUARDED `tools/` entry point's #5128
+    # interpreter guard — it EXECs the guard node with `sys.version_info` faked
+    # to (3, 9, 6), so a dropped refusal reds it. `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and `tools/test_design_map_check.py` matched no
+    # SOURCE_PATTERNS row, so a diff touching ONLY that file was filtered to
+    # `changed == []` BEFORE the "not matched -> core" fallback and selected no
+    # surface at all: MEASURED before the CORE_ALSO entry, `surfaces=[]` and the
+    # census ABSENT from `test_files`.
+    #
+    # ⛔ That is the hole the guard exists to close, reopened for one file: a
+    # branch rewrite that silently dropped this file's refusal would merge with
+    # the census green-by-omission, because the one file whose guard it dropped
+    # selected nothing that runs the census. Every sibling editor of `tools/` that
+    # already has its row — `tools/cache_evict.py`, `tools/gen_placement_table.py`
+    # — was registered the same way; this file landed in `2cb1f35c21` (PR #11276)
+    # without one.
+    # Mutation check: removing the CORE_ALSO entry fails the arms below
+    # (surfaces == [] and the census absent from test_files).
+    r = _sel(["tools/test_design_map_check.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_entry_point_python_guard.py" in r["test_files"], r
 
 
 def test_turn_parity_census_guard_runs_on_a_tools_only_change():

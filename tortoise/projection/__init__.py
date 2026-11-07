@@ -727,16 +727,19 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #
 # ⛔ THE KEY IS A STORE IDENTITY, NOT AN OBJECT ADDRESS, AND BOTH THIS REGISTER
 # AND THE WARNING LATCH USE IT. The key once came from
-# `_falkordb_version_cache_key() or id(self)`, and on a redis-py that hides the
-# endpoint behind `connection_pool.connection_kwargs` that helper answers None —
-# so on the per-request path both the warning and this report were keyed on the
-# ADDRESS of a projection object: one entry (and one WARNING) per live request
-# slot, never evicted, with dedup depending on allocator address recycling
-# rather than on store identity. `_stable_endpoint()` resolves the endpoint from
-# the cache key, then the projection's own `_host` together with the client's
-# port out of `connection_pool.connection_kwargs`, and only then the address —
-# that last case is a bare unit mock, the one shape with no endpoint identity at
-# all.
+# `_falkordb_version_cache_key() or id(self)`, and back then that helper answered
+# None on any redis-py that hides the endpoint behind
+# `connection_pool.connection_kwargs` (redis 7.4.1) — so on the per-request path
+# both the warning and this report were keyed on the ADDRESS of a projection
+# object: one entry (and one WARNING) per live request slot, never evicted, with
+# dedup depending on allocator address recycling rather than on store identity.
+# The helper now resolves that same pool seam (#11328), so on the hosted path it
+# carries the endpoint and `_stable_endpoint()` returns it directly;
+# `_stable_endpoint()`'s remaining lanes — the pool's host+port as a PAIR when the
+# key does not resolve, then `_host` with no port, then the address — exist for
+# clients that resolve no (or only half an) endpoint: a bare unit mock, and any
+# client whose endpoint is incomplete. A half-resolved client deliberately gets
+# NO endpoint identity rather than a mixed tuple (see that method).
 _VECTOR_INDEX_PAIR_REPORTED: dict[tuple, tuple[frozenset, frozenset]] = {}
 _VECTOR_INDEX_PAIR_LOCK = threading.Lock()
 
@@ -18625,43 +18628,100 @@ class FalkorProjection(
     def _falkordb_version_cache_key(self):
         """Process-lifetime cache key for version detection.
 
-        Server mode → ('server', host, port) from the raw redis connection
-        (redis Connection objects carry ``_host``/``port``). Embedded mode →
+        Server mode → ('server', host, port). Embedded mode →
         ('embedded', db path) — redislite's bundled module version is fixed
         per binary, so the path just isolates distinct DBs. Returns None for
-        unidentified clients (unit mocks with no endpoint attrs) — those are
+        unidentified clients (unit mocks with no endpoint identity) — those are
         probed fresh every call.
+
+        ⛔ THE ENDPOINT IS NOT AN ATTRIBUTE OF THE CLIENT (#11328). On the
+        pinned ``redis 7.4.1`` a client carries NO ``.host``/``.port``/``._host``
+        of its own — the configured endpoint lives in
+        ``connection_pool.connection_kwargs``. This method used to read only the
+        connection's attributes, so it answered ``None`` on exactly the hosted
+        per-request lane, ``_get_falkordb_version`` never populated
+        ``_FALKORDB_VERSION_CACHE``, and its 2-RTT probe (MODULE LIST + INFO
+        server) ran on **every** projection construction — the cost the cache
+        exists to remove. So: connection attributes first (a raw
+        ``redis.Connection`` does carry them), then the pool kwargs, which is
+        the seam ``event_store._store_identity``, ``cypher_guard._client_store_key``
+        and ``_stable_endpoint`` all resolve a store's endpoint from. Both
+        fields always come from ONE source, so a partially-resolving client can
+        never mint a hybrid endpoint that matches neither.
+
+        Embedded stays keyed on its PATH: the fallback is skipped whenever a
+        `_path` is present — the same attribute the embedded key is built from,
+        so the guard and the fallthrough cannot disagree — and an embedded
+        client's pool kwargs carry ``path``, never ``host``/``port``.
         """
         conn = getattr(getattr(self, "db", None), "connection", None)
+        host = port = None
         if conn is not None:
-            host = getattr(conn, "_host", None) or getattr(conn, "host", None)
-            port = getattr(conn, "port", None)
-            if host is not None and port is not None:
-                return ("server", str(host), int(port))
+            conn_host = getattr(conn, "_host", None) or getattr(conn, "host", None)
+            conn_port = getattr(conn, "port", None)
+            # ⛔ BOTH fields from ONE source (#11360 review P3): filling host
+            # from the connection and port from the pool mints a hybrid tuple
+            # like ('server', conn-host, pool-port) that matches NEITHER
+            # source and can equal a different store's real endpoint — which
+            # would serve one store's version to another AND merge the two
+            # stores' `#4997`/`#11087` registers.
+            if conn_host is not None and conn_port is not None:
+                host, port = conn_host, conn_port
         path = getattr(self, "_path", None)
+        if host is None and path is None:
+            # The guard reads the SAME attribute the fallthrough below reads, so
+            # the two cannot disagree: an embedded store is keyed on its path by
+            # construction, never re-keyed as a network store by the fallback.
+            kwargs = _client_pool_kwargs(getattr(self, "db", None)) or {}
+            pool_host = kwargs.get("host")
+            pool_port = kwargs.get("port")
+            if pool_host is not None and pool_port is not None:
+                host, port = pool_host, pool_port
+        if host is not None and port is not None:
+            try:
+                return ("server", str(host), int(port))
+            except (TypeError, ValueError):
+                # An unparseable port is no endpoint identity — fall through
+                # rather than mint a key that would collide across stores.
+                # (`int(float('inf'))` raises OverflowError, which is uncaught:
+                # a non-finite port is not a shape any client produces, and
+                # raising here would fail store construction at
+                # `__init__` — the loud failure, kept deliberately.)
+                pass
         if path is not None:
             return ("embedded", str(path))
         return None
 
     def _stable_endpoint(self):
         """The STORE identity both the `#4997` warning latch and the `#11087`
-        pair register key on — stable across projections of one store.
+        pair register key on — stable across projections of one store, for
+        every client shape a real projection can build.
 
-        `_falkordb_version_cache_key()` answers `None` when the redis client
-        hides its endpoint (redis-py exposes it at
-        `connection_pool.connection_kwargs`, not as `_host`/`host`), which used
-        to collapse the key to `id(self)` on exactly the hosted per-request
-        path these registers exist for: one latch entry — and one WARNING — per
-        live request slot, never evicted.
+        `_falkordb_version_cache_key()` answers `None` when the client resolves
+        no endpoint — including a client that resolves only HALF of one — and
+        the lanes below add only what the key cannot, never a second field from
+        a second source:
 
-        So, in order: the cache key when it resolves; else the projection's
-        `_host` (set by `__init__` on every server projection) together with the
-        client's PORT, read from `connection_pool.connection_kwargs` (⛔ the port
-        is NOT a projection attribute and NOT a client attribute — the pool is
-        the seam `event_store._store_identity` and
-        `cypher_guard._client_store_key` already resolve it from); else the
-        address, which is a bare unit mock and the one shape with no endpoint
-        identity at all.
+        * the pool's host AND port **together** (both, or this lane declines);
+        * else `_host` with **no** port, only when no port resolves anywhere —
+          a DEGRADED bucket (it cannot separate two servers on one host) but a
+          stable one;
+        * else the ADDRESS (`("instance", id(self))`), which is reached by a
+          bare unit mock AND by any client that resolves only part of an
+          endpoint.
+
+        ⛔ A HALF-RESOLVED CLIENT GETS NO ENDPOINT IDENTITY, and that is a
+        deliberate trade of STABILITY for SAFETY. It could be combined as
+        `(projection _host, pool port)`, but nothing proves the two fields name
+        the same server, and such a mixed tuple can equal the real endpoint of a
+        DIFFERENT store — which merges two stores' registers and silences one of
+        them. So the mixed shape falls to the address lane instead. The cost is
+        bounded and stated: if one projection of a store resolves its endpoint
+        fully while another resolves only half of it, the two land in different
+        buckets (two reports rather than one) — a duplicate, where the mixed key
+        would produce a MISSING warning on a genuinely different store. Real
+        clients do not split: redis-py's client resolves host+port from its pool
+        together, or carries neither.
 
         ⛔ THE PORT IS PART OF THE IDENTITY, and keying on the host alone is a
         defect rather than a graceful degradation
@@ -18674,21 +18734,43 @@ class FalkorProjection(
         on a genuinely different store. The server shape here is
         `("server", host, port)` — the SAME tuple `_falkordb_version_cache_key`
         answers — so one store cannot land in two buckets depending on which of
-        the two lanes resolved its endpoint.
+        the two lanes resolved its endpoint. The only host-only bucket left is
+        the no-port-anywhere lane above, which cannot distinguish two ports and
+        says so.
         """
         endpoint = self._falkordb_version_cache_key()
         if endpoint is not None:
             return endpoint
         kwargs = _client_pool_kwargs(getattr(self, "db", None)) or {}
-        host = getattr(self, "_host", None) or kwargs.get("host")
-        if host is None:
-            return ("instance", id(self))
+        pool_host = kwargs.get("host")
         raw_port = kwargs.get("port")
-        try:
-            port = int(raw_port) if raw_port is not None else None
-        except (TypeError, ValueError):  # an unparseable port is no port
-            port = None
-        return ("server", str(host), port)
+        pool_port = None
+        if raw_port is not None:
+            try:
+                pool_port = int(raw_port)
+            except (TypeError, ValueError, OverflowError):
+                # ⛔ An unparseable port is NO PORT, not "a port is present" —
+                # the host-only lane below must still fire, or this shape loses
+                # its stable bucket and takes one address-keyed register entry
+                # per projection object (the never-evicted leak the pair
+                # register's own comment names) for no safety gain: a
+                # `("server", host, None)` bucket can never equal a real
+                # `("server", host, port)` one.
+                pool_port = None
+        if pool_host is not None and pool_port is not None:
+            return ("server", str(pool_host), pool_port)
+        own_host = getattr(self, "_host", None)
+        if own_host is not None and pool_port is None:
+            # ⛔ A HOST-ONLY bucket is a DEGRADED identity (it cannot separate
+            # two servers on one host) but it is all this store can offer, and
+            # it is *stable* — which is what keeps a per-request projection in
+            # one bucket. It is only minted when NO port resolves anywhere.
+            # Never combine `_host` with a pool port: nothing proves the two
+            # name the same server, and a mixed tuple can equal a real
+            # endpoint of a DIFFERENT store — merging two stores' registers
+            # and silencing one of them (round-2 review P3).
+            return ("server", str(own_host), None)
+        return ("instance", id(self))
 
     def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
         """Measure which of the labels the vector leg SERVES carry a VECTOR
