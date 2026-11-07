@@ -1692,8 +1692,13 @@ _RESIDUAL_OPENNESS = (
     # `hasn't ever opened again` were GREEN while the arm read only `open again`
     # (no match at all) and RED the moment it read the inflection. An inflection
     # added to the arm needs its own negation form HERE, and every form in this run
-    # has a must-stay-GREEN partner in `_RESIDUAL_TRUTHFUL_STATEMENTS`. The run is
-    # carried in BOTH sites because the two drift independently.
+    # has a must-stay-GREEN partner in `_RESIDUAL_TRUTHFUL_STATEMENTS`.
+    # ⛔ AND EACH SITE HAS ITS OWN PARTNERS, not a shared assumption (#11258 review
+    # round 18 `P0`, MEASURED): the run is carried in BOTH sites because the two
+    # drift independently, and only the `_RESIDUAL_OPENNESS` copy was falsifiable —
+    # deleting this site's copy left the whole file GREEN while five honest waived
+    # denials went RED. The `the ADJACENCY half …` partners pin occurrence #1; the
+    # `the SPELLING gap …` partners pin THIS one.
     r"(?<!no longer\s)(?<![n']t\syet\s)(?<![n']t\sever\s)"
     r"\bopen(?:s|ed|ing)?\s+again\b",
 )
@@ -1873,8 +1878,13 @@ _SPELLING_FLOOR = (
     # `hasn't ever opened again` were GREEN while the arm read only `open again`
     # (no match at all) and RED the moment it read the inflection. An inflection
     # added to the arm needs its own negation form HERE, and every form in this run
-    # has a must-stay-GREEN partner in `_RESIDUAL_TRUTHFUL_STATEMENTS`. The run is
-    # carried in BOTH sites because the two drift independently.
+    # has a must-stay-GREEN partner in `_RESIDUAL_TRUTHFUL_STATEMENTS`.
+    # ⛔ AND EACH SITE HAS ITS OWN PARTNERS, not a shared assumption (#11258 review
+    # round 18 `P0`, MEASURED): the run is carried in BOTH sites because the two
+    # drift independently, and only the `_RESIDUAL_OPENNESS` copy was falsifiable —
+    # deleting this site's copy left the whole file GREEN while five honest waived
+    # denials went RED. The `the ADJACENCY half …` partners pin occurrence #1; the
+    # `the SPELLING gap …` partners pin THIS one.
     r"(?<!no longer\s)(?<![n']t\syet\s)(?<![n']t\sever\s)"
     r"\bopen(?:s|ed|ing)?\s+again\b",
 )
@@ -1966,7 +1976,16 @@ def _residual_region(text: str) -> str:
 #: boundary; a joiner not named here still joins. That residual is disclosed in
 #: `WHAT THIS CANNOT CATCH` rather than implied to be covered.
 _RESIDUAL_CLAUSE_SPLIT = (
-    r";|,?\s+(?:and|but|while|whereas|although|though|yet)\s+"
+    # ⛔ `yet` IS BARRED BEHIND A NEGATOR (#11258 review round 18 `P1`, MEASURED).
+    # The splitter bit at `yet` in `hasn't yet opened again`, dropped the honest
+    # `spelling` clause and rejoined the survivors with ` , ` — so the negator and
+    # the participle landed in different segments and `the SPELLING gap hasn't yet
+    # opened again.` went RED while the same denial WITHOUT an honest clause was
+    # GREEN (pinned). A verdict must not depend on unrelated content in the
+    # sentence. The bar is fixed-width and applies to `yet` ONLY, so `has yet to be
+    # closed` still splits and its own guard below still holds.
+    r";|,?\s+(?:(?:and|but|while|whereas|although|though)\s+"
+    r"|(?<![n']t\s)(?<!\bnot\s)(?<!\bnever\s)yet\s+)"
     # ⛔ THE COORDINATOR MUST NOT BITE INSIDE A VERDICT'S OWN TEXT. `has yet to be
     # closed` splits at `yet` and `anything but closed` at `but`; severing them put
     # the two halves of `_RESIDUAL_CLOSED_VERDICT` in different segments, so after an
@@ -2728,6 +2747,25 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the ADJACENCY half is not kept open.",
     "the ADJACENCY gap is not held open.",
     "the ADJACENCY gap isn't kept open.",
+    # ⛔ ROUND 18 `P0`: `(?<!\bnever )` was the ONE third of the round-17 verb guard
+    # that no entry pinned — deleting exactly that term left the whole file green
+    # while `the ADJACENCY half is never kept open.` went RED. Each term of a
+    # lookbehind run needs its own partner, or the arm is deletable a term at a time.
+    "the ADJACENCY half is never kept open.",
+    # ⛔ ROUND 18 `P0`: the round-17 negation RUN is carried at TWO sites and only
+    # one was falsifiable. These are the WAIVED-path partners — the only shape that
+    # reaches `_SPELLING_FLOOR` — so deleting occurrence #2 of the run no longer
+    # leaves the suite green.
+    "the SPELLING gap no longer opens again.",
+    "the SPELLING gap is no longer opened again.",
+    "the SPELLING gap is no longer opening again.",
+    "the SPELLING gap hasn't ever opened again.",
+    # ⛔ ROUND 18 `P1`: the splitter no longer severs a negator from its participle,
+    # so these two honest denials are GREEN — pinned because the bar is the only
+    # thing that decides them, and the second is the shape whose verdict used to
+    # depend on an unrelated honest clause elsewhere in the sentence.
+    "the SPELLING gap hasn't yet opened again.",
+    "the SPELLING gap is open by design, and the ADJACENCY half has not yet opened again.",
 )
 
 #: ⛔ THE OVER-BLOCK LEDGER: truthful statements this pin REFUSES, each MEASURED
@@ -2998,10 +3036,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
         "A `>=` at the current length costs nothing on growth and refuses any "
         "shrinkage; raise it in the same commit that adds proofs.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 53, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 60, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (53 — raised in the commit AFTER the two contraction "
+        "CURRENT LENGTH (60 — raised in the commit AFTER the two contraction "
         "falsifiers landed, which is the 2-entry slack this closed), i.e. ZERO "
         "SLACK, the same rule the ledger and the "
         "mutation list carry: it was `>= 30` against a 33-entry list, so three "
