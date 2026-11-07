@@ -894,8 +894,11 @@ overhead remains in two halves: ≈0.33 ms resolving the base (`_migrations_dir(
 `Path.exists()` per consult) and ≈0.33 ms of fingerprint passes, because `replay_plan` drives both cached
 readers and each consult pays both — the filed fix (#11388) saves ONE fingerprint pass (0.160–0.169 ms) and
 leaves the resolution half in place. (An earlier revision of this line said "0.32–0.34 ms of pure stat",
-which was the whole warm call attributed to the fingerprint; measured on one box: resolution median 0.169 ms,
-fingerprint median 0.166 ms, warm `table_columns()` median 0.341 ms.) Batching the per-record insert was explicitly deferred, not forgotten (see
+which was the whole warm call attributed to the fingerprint; the three consult medians it now rests on are
+the artifact's SIXTH "items that are neither" — a local observation, printed not committed, re-takeable by
+`fingerprint_cost.py --column-consult` — measured on one box at that PR's head: resolution median 0.169 ms,
+fingerprint median 0.166 ms, warm `table_columns()` median 0.341 ms, and 0.68 ms/record charges BOTH cached
+consults, since `replay_plan` drives both readers.) Batching the per-record insert was explicitly deferred, not forgotten (see
 above).
 **What it blocks:** capture latency at volume. **Not a first-customer gate** — hosted capture is off
 by owner ruling (2026-10-14) and the beta volume is unmeasured. **But it must land before the per-record cost of a real

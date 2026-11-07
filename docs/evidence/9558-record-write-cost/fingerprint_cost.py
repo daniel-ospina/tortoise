@@ -6,21 +6,75 @@ Reproduces the figures the #9558 artifact and docstrings cite for:
 
 Writes `fingerprint-cost.json` beside itself so the numbers have a citable source,
 exactly like `runs/*.json`.
+
+⛔ `--column-consult` is the RE-TAKE for the three medians the README names as a
+local observation rather than a committed figure: the base resolution a consult
+pays before the key is built (`_migrations_dir()` -> `_complete()`, fifteen
+`Path.exists()` calls), the fingerprint pass, and a WARM `table_columns()`. It
+PRINTS and writes nothing, deliberately: it describes the AFTER-side tree (the
+one carrying the cache), which is not necessarily this one, and a committed file
+is only honest when it names the tree it was taken on.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import statistics
 import time
 from pathlib import Path
 
-from tortoise.record_projection import RECORD_MIGRATIONS, _migrations_fingerprint
+from tortoise.record_projection import (
+    RECORD_MIGRATIONS,
+    _migrations_dir,
+    _migrations_fingerprint,
+)
 
 
-def main() -> int:
-    base = Path(__file__).resolve().parents[3] / "supabase" / "migrations"
+def column_consult_medians(reps: int = 200) -> dict[str, object]:
+    """The three medians the README's residual bullet quotes (print only)."""
+    from tortoise.record_projection import table_columns
+
+    base = _migrations_dir()
+
+    def resolution() -> None:
+        _migrations_dir()
+
+    def fingerprint() -> None:
+        _migrations_fingerprint(base)
+
+    def warm_columns() -> None:
+        # ⛔ NO ARGUMENT: the per-record path calls `table_columns()` and so pays
+        # the base resolution too. Passing `base` would skip `_migrations_dir()`
+        # and measure one half while the README calls it the whole warm call.
+        table_columns()
+
+    out: dict[str, object] = {
+        "tree": "the tree this was run in — state its HEAD in the report",
+        "reps": reps,
+        "note": ("wall-clock on the box this was taken on; the RATIO between the "
+                 "two halves is the transferable figure, the absolute values are not"),
+    }
+    for label, fn in (("resolution", resolution),
+                      ("fingerprint_pass", fingerprint),
+                      ("warm_table_columns", warm_columns)):
+        fn()                                    # warm the page cache / the map
+        samples: list[float] = []
+        for _ in range(reps):
+            started = time.perf_counter()
+            fn()
+            samples.append((time.perf_counter() - started) * 1000.0)
+        out[label] = {
+            "mean_ms": round(statistics.fmean(samples), 4),
+            "median_ms": round(statistics.median(samples), 4),
+            "min_ms": round(min(samples), 4),
+            "max_ms": round(max(samples), 4),
+        }
+    return out
+
+
+def measure(base: Path, reps: int = 200) -> dict[str, object]:
     names = list(RECORD_MIGRATIONS)
     total_bytes = sum((base / name).stat().st_size for name in names)
 
@@ -33,7 +87,6 @@ def main() -> int:
             handle.update(name.encode())
             handle.update((base / name).read_bytes())
 
-    reps = 200
     out: dict[str, object] = {
         "migrations": len(names),
         "total_bytes": total_bytes,
@@ -55,6 +108,24 @@ def main() -> int:
             "min_ms": round(min(samples), 4),
             "max_ms": round(max(samples), 4),
         }
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="re-take the #9558 cost figures")
+    parser.add_argument("--column-consult", action="store_true",
+                        help="print the three consult medians and write nothing")
+    parser.add_argument("--reps", type=int, default=200)
+    parser.add_argument("--tree", type=Path, default=None,
+                        help="the tree to measure (default: this checkout)")
+    args = parser.parse_args(argv)
+
+    if args.column_consult:
+        print(json.dumps(column_consult_medians(args.reps), indent=2, sort_keys=True))
+        return 0
+
+    base = args.tree or (Path(__file__).resolve().parents[3] / "supabase" / "migrations")
+    out = measure(base, args.reps)
     target = Path(__file__).with_name("fingerprint-cost.json")
     target.write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
     print(json.dumps(out, indent=2, sort_keys=True))

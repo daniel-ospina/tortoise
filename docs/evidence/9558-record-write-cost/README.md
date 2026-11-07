@@ -43,7 +43,7 @@ the BEFORE-tree paragraph's three counts are `git` (`rev-list --count`,
 `FALSIFIER:` blocks over the file the tests name. Re-derive instead of trusting
 the prose.
 
-**The FIVE items that are neither**, each named so a reader knows what to
+**The SIX items that are neither**, each named so a reader knows what to
 re-derive and what to read as a local observation:
 
 1. the server-logged `connection authorized` counts — a `grep -c` delta on the
@@ -60,7 +60,27 @@ re-derive and what to read as a local observation:
 5. the re-measurement paragraph under "Review cycle 2" — its four runs' JSON was
    not kept, so it carries no measured VALUES; only the run count and the
    `connect` count it observed, and that count is corroborated by all four
-   committed AFTER runs (`per_timed_record.connect_calls = 0` in each).
+   committed AFTER runs (`per_timed_record.connect_calls = 0` in each);
+6. the RESOLUTION half of the residual — the fifteen `Path.exists()` calls
+   `_migrations_dir()` -> `_complete()` pays BEFORE the key is built —
+   **0.169 ms**. This is the narrowest honest statement, because the other two
+   numbers in bullet (a) DO have committed sources: the warm total is
+   `runs/*.json`'s `table_columns_isolated_ms.median` (0.332 / 0.339 / 0.342 /
+   0.353 ms) and the fingerprint pass is `fingerprint-cost.json`'s
+   `fingerprint_pass` (0.160–0.169 ms), so 2 x the warm median (≈0.66–0.71 ms) is
+   arithmetic on a committed file and only the SPLIT between the two halves needs
+   the resolution figure. That one was taken at `d51c7897d6` — this PR's head at
+   the time, a descendant of the AFTER tree `6ab6848b8b` (verified) and not either
+   compared tree, because the code it describes only exists after the change.
+   Re-take it on the AFTER-side tree with
+   `python docs/evidence/9558-record-write-cost/fingerprint_cost.py --column-consult`
+   — it prints and commits nothing, deliberately, because a wall-clock file is
+   only honest when it names the tree it was taken on. Re-taken at `860e85c91c` by
+   two independent runs on this box (mine at `--reps 300`, a reviewer's at
+   `--reps 100`): resolution **0.162–0.166 ms**, fingerprint **0.161 ms**, warm
+   `table_columns()` **0.345–0.349 ms** — the ABSOLUTE values move with the box,
+   which is exactly why they are a declared local observation; what carries is the
+   sum property (warm ≈ resolution + one fingerprint pass), and that holds in both.
 
 Earlier revisions quoted a run set whose JSON was not kept,
 which made its numbers unfalsifiable — that is what `runs/` and
@@ -118,19 +138,32 @@ server's own log across one run, recorded beside the JSON.
 
 ## Reading the numbers honestly
 
-**(a) The connection half is ~92 % of the win, and it is now a REUSE, not a
+**(a) The connection half is ~83–85 % of the win, and it is now a REUSE, not a
 claim.** The saving is 18.889–20.102 → 3.819–3.908 ms (means), i.e. 14.98–16.28 ms.
-The column-map half is **~1.2 ms** of that — and on the MEDIAN, because the warm
+The column-map half is **~2.4–2.5 ms** of that — **TWO consults, not one**: the
+per-record path drives BOTH cached readers (`table_columns()` AND
+`refused_props_names()`, 1.00 call/record each in the table above, and at the
+BEFORE tree `refused_props_names` called `_read_migrations` — the same full
+read+parse `table_columns` paid), so the figure is twice one consult's delta — and
+on the MEDIAN, because the warm
 cost is what the per-record path pays: the probe's 20-sample loop runs before the
 first write, so its single cache-miss sample sits in the mean (AFTER mean
 0.460–0.583 vs median 0.332–0.353; the BEFORE pair is 1.582–1.651 vs 1.546–1.588,
 a **1.5–4.7 % gap** per run — 1.54 / 3.36 / 4.69 / 3.72 % — which shows the miss is
 an AFTER-tree artifact: the AFTER means sit 35–76 % above their medians, the
 BEFORE means a few per cent). 1.546–1.588 →
-0.332–0.353 ms = **1.193–1.256 ms**. The connection half is therefore the rest —
-**13.7–15.1 ms**, pairing the win's lower end with the column half's UPPER end and
-its upper end with the column half's lower end — i.e. **91.6–92.7 %**, ~92 % of the
-win. `_default_connect` returns an idle handle when it has one, so the live
+0.332–0.353 ms = **1.193–1.256 ms per consult**, ×2 = **2.386–2.512 ms**. The
+connection half is therefore the rest — **12.5–13.9 ms**, pairing the win's lower
+end with the column half's UPPER end and its upper end with the column half's
+lower end — i.e. **83.2–85.3 %**, ~84 % of the win. ⚠️ That agrees with this
+bullet's ORIGINAL "~80-85 % of the ~15 ms saved", and the agreement is the
+arithmetic, not a coincidence to be waved off: that revision already charged the
+schema consult TWICE. What it got wrong was the INPUTS to the charge (an
+uncommitted 0.135–0.166 ms fingerprint band, and `_migrations_dir()`'s resolution
+never priced at all), never the shape — so the intervening ~92 %, which charged
+ONE consult, is the anomaly in this history and this figure is the original
+magnitude restored.
+`_default_connect` returns an idle handle when it has one, so the live
 door's per-record "open, commit, close" became "borrow, commit, return". The
 remaining 3.82–3.91 ms/record is one transaction boundary (prologue + plan + COMMIT)
 plus plan materialisation — **plus, and this was under-stated in the first
@@ -139,20 +172,34 @@ bullet used to conflate**: `replay_plan` drives BOTH cached readers, and each
 consult costs (i) `_migrations_dir()` → `_complete()`, fifteen `Path.exists()`
 calls resolving the base **before** the key is built (`record_projection.py:1659`
 with `:1497`/`:1502`), and (ii) one `_migrations_fingerprint` pass over the same
-fifteen files (0.160–0.169 ms, `fingerprint-cost.json`). Measured on one box at
-`d51c7897d6`: resolution median **0.169 ms**, fingerprint median **0.166 ms**, and
+fifteen files (0.160–0.169 ms, `fingerprint-cost.json`). The three consult
+medians are item 6 of the list at the top — taken on one box at `d51c7897d6`,
+re-takeable by the command there: resolution median **0.169 ms**, fingerprint
+median **0.166 ms**, and
 a warm `table_columns()` **0.341 ms** — i.e. the committed warm medians
 (0.332–0.353 ms) ARE those two halves summed, not the fingerprint alone. So the
 residual is ≈**0.68 ms/record** (2 × 0.34), ≈0.33 ms resolution + ≈0.33 ms
 fingerprint. The known fix — compute the fingerprint once per plan build — saves
-ONE pass, **0.160–0.169 ms**, and **leaves the resolution half in place**, so
-#11388 must not be read as removing the whole residual; it is filed rather than
-hidden in "the work the record is for".
+ONE pass, **0.160–0.169 ms**, and **leaves the resolution half in place**, so #11388
+must not be read as removing the whole residual; it is filed rather than hidden in
+"the work the record is for".
 
-⛔ **Four earlier revisions of this bullet, and why each was wrong.** It said
-"~80-85 % of the win" (that is the connection half as a share of the BEFORE TOTAL,
-not of the win). It said "~92-94 %" (94 % only falls out of the superseded ~0.9–1.0
-ms column-half estimate the same bullet replaced). It said "≈0.9–1.0 ms of pure
+⛔ **Five earlier revisions of this bullet, and why each was wrong.** It said
+"~80-85 % of the ~15 ms saved" — the ORIGINAL, whose magnitude this bullet now
+reproduces (83.2–85.3 %) because it already charged the consult twice; what was
+wrong was its inputs (an uncommitted 0.135–0.166 ms fingerprint band, resolution
+unpriced), so the agreement was luckier than it was sound. ⛔ **CORRECTED:** an
+earlier revision of THIS erratum read that 80-85 % as "the connection half as a
+share of the BEFORE TOTAL, not of the win" — falsified by its own text,
+`git show 6ab6848b8b:docs/evidence/9558-record-write-cost/README.md` reading
+"~80-85 % of the ~15 ms saved" (a share OF the win) and charging two fingerprints
+in the same bullet; no denominator puts the connection half at 80-85 %
+except the win. It also said "~92-94 %" (94 % only falls out of the
+superseded ~0.9–1.0 ms column-half estimate the same bullet replaced). It said
+"~91.6–92.7 %" — **the revision immediately before this one**, which charged ONE
+column consult while the per-record path pays TWO (both cached readers, above), so
+the column half is 2.386–2.512 ms and the connection share 83.2–85.3 %, not
+1.193–1.256 ms and 92 %. It said "≈0.9–1.0 ms of pure
 stat" for the residual — which is 2 x the WHOLE cached call (stat + the per-call
 dict copy), not 2 x the stat pass. And the revision that replaced it said
 "0.32–0.34 ms of stat overhead", which is the whole warm call attributed to the
@@ -235,7 +282,7 @@ bounds are deliberately not the same shape) — and the pin parks
 release comment claimed "no round trip" — true of the write door's happy path
 (`commit()` leaves the connection IDLE), false of a read, which ends INTRANS and
 therefore takes a `rollback()` on 100% of borrows. One round trip against the
-**13.7–15.1 ms** of connect+auth it replaces (bullet (a)'s connection half — not
+**12.5–13.9 ms** of connect+auth it replaces (bullet (a)'s connection half — not
 the whole 18.9–20.1 ms BEFORE record, which also contains work the read still
 does); named here rather than averaged away.
 
