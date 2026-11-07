@@ -135,6 +135,15 @@ USAGE
     uv run python tools/ci_runner_topology.py apply --disengage # strip the fallback everywhere
     uv run python tools/ci_runner_topology.py check --queued-floor-seconds 1800
 
+EXIT CODES (a script reads the code, not the prose — `0`/`1` alone encoded "the write failed"
+and "the write landed, an owner decision remains" as the same byte):
+    0  clean
+    1  the write did not take, the read-back failed, a capacity gate fired, or a violation this
+       tool should have closed survived the reconcile
+    2  usage refusal (a fixture write without `--dry-run`, a disarmed engaging cap)
+    3  every planned write landed AND the pool was read back, but an OWNER-GATED residual remains
+       (#6897/#9878) — re-run with `--strip-non-x64`, or record the reopen on #10912
+
 `apply` ENGAGES by default. The strip direction is `--disengage`, stated
 explicitly, because a verb whose DEFAULT silently performs the destructive
 direction is how a pool ends up with no runner answering a label every queued
@@ -241,6 +250,21 @@ VIOLATION_ARM_CAP_UNREADABLE = "ARM_CAP_UNREADABLE"
 #: "0 changes — already at the desired topology" under it would be that false PASS.
 ENGAGE_REFUSED_CAP_ZERO = "ENGAGE_REFUSED_CAP_ZERO"
 
+#: EXIT CODES, because a script reads the code and not the prose. `0` and `1` alone encode "the
+#: write failed" and "the write landed but an OWNER DECISION remains" as the same byte, so a
+#: wrapper cannot tell a broken reconcile from one that did exactly what this tool is allowed to
+#: do (review round 3, P2: "on this pool the default verb can never exit 0 — the verdict is right,
+#: the encoding is lossy").
+EXIT_OK = 0
+#: A write did not take, the read-back failed, a capacity gate fired, or a violation this tool
+#: SHOULD have closed survived the reconcile.
+EXIT_FAILED = 1
+#: Reserved: argument/usage refusal (`--from-fixture` without `--dry-run`, a disarmed cap).
+EXIT_USAGE = 2
+#: Every planned write landed AND the pool was read back, but a residual this tool MUST NOT heal
+#: remains (it is owner-gated: `#6897/#9878`). Not a failure — re-run with `--strip-non-x64`.
+EXIT_OWNER_GATED = 3
+
 #: "read the cap from the environment" — distinct from an explicit `None` (an ILLEGAL cap). Using
 #: `None` as the default would make "no cap configured" and "bad cap configured" one value, and the
 #: second is a refusal.
@@ -305,6 +329,10 @@ class Plan:
     unclassified: dict[str, str] = field(default_factory=dict)
     #: A defect this tool MUST NOT heal by default (owner-gated), keyed by runner name.
     owner_gated: dict[str, str] = field(default_factory=dict)
+    #: Runners a VIOLATION's stated remedy cannot reach, keyed by runner name -> why: another
+    #: platform, no pool marker, or no derivable arch. `apply` skips these by design, so a reader
+    #: of `check` must not be told to run a command this tool will refuse.
+    out_of_scope: dict[str, str] = field(default_factory=dict)
     #: Runners the engaging-arm cap keeps this run from arming (or keeps carrying the label from a
     #: previous, wider arm), keyed by runner name -> why. Reported, never written.
     over_cap: dict[str, str] = field(default_factory=dict)
@@ -416,6 +444,19 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
             if wrong_arch
             else "its platform is not Linux"
         )
+        # ⛔ A REMEDY THIS TOOL CANNOT PERFORM IS NOT A REMEDY. `apply --strip-non-x64` skips a
+        # runner `unmanaged_reason` excludes (another platform, no pool marker, no derivable arch),
+        # so a bare `strip it` promised a diff no run of this tool could ever close — the reader
+        # concludes the tool is broken instead of out of scope (review round 3, P2).
+        gate = unmanaged_reason(runner)
+        remedy = (
+            f"REMEDY: strip {FALLBACK_LABEL!r} from this runner."
+            if gate is None
+            else (
+                f"REMEDY: strip {FALLBACK_LABEL!r} from this runner MANUALLY — it {gate}, so "
+                f"this tool will not relabel it and `--strip-non-x64` skips it."
+            )
+        )
         found.append(
             Violation(
                 kind=VIOLATION_FALLBACK_ON_NON_X64,
@@ -423,7 +464,7 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
                 why=(
                     f"carries {FALLBACK_LABEL!r} but {because}; an x64 Ubuntu-expected job "
                     f"routed here is silently mis-served (#6897). "
-                    f"REMEDY: strip {FALLBACK_LABEL!r} from this runner."
+                    f"{remedy}"
                 ),
             )
         )
@@ -675,6 +716,14 @@ def plan(
         why = unmanaged_reason(runner)
         if why is not None:
             result.unclassified[runner.name] = why
+            # ⛔ AND IF IT IS A CARRIER, `check` PRINTS A REMEDY THIS RUN WILL NOT PERFORM. Recorded
+            # on the WRITE's own payload so `apply` says it too: a silent skip is how a reader
+            # concludes the tool is broken rather than out of scope.
+            if runner.serves_fallback:
+                result.out_of_scope[runner.name] = (
+                    f"carries {FALLBACK_LABEL!r}, so `check` names it as a violation, but it "
+                    f"{why} — the strip it prints is MANUAL; no run of this tool performs it"
+                )
             continue
         in_arm = runner.name in armed
         result.add(
@@ -752,6 +801,7 @@ def check(
             "unclassified": {},
             "owner_gated": {},
             "over_cap": {},
+            "out_of_scope": {},
             "arm_cap": None,
             "arm": [],
             "engage": engage,
@@ -793,6 +843,7 @@ def check(
         "unclassified": dict(pending.unclassified),
         "owner_gated": dict(pending.owner_gated),
         "over_cap": dict(pending.over_cap),
+        "out_of_scope": dict(pending.out_of_scope),
         "arm_cap": pending.arm_cap,
         "arm": list(pending.armed),
         "engage": engage,
@@ -826,16 +877,103 @@ def fetch_runners(repo: str = REPO) -> list[Runner]:
     return [parse_runner(row) for row in rows]
 
 
-def fetch_oldest_queued_seconds(repo: str = REPO) -> int | None:
-    """Age of the oldest QUEUED run, or None when unreadable. Never guesses.
+#: The queue-head scan bound the OWNING gate applies, read from the SAME variable and with the SAME
+#: default (`ci_runner_gate.sh`, the `QUEUE_HEAD_SCAN_MAX` declaration:
+#: `QUEUE_HEAD_SCAN_MAX="${CI_GATE_QUEUE_HEAD_SCAN_MAX:-5}"`). One value, two readers.
+QUEUE_HEAD_SCAN_MAX_ENV = "CI_GATE_QUEUE_HEAD_SCAN_MAX"
+QUEUE_HEAD_SCAN_MAX_DEFAULT = 5
 
-    ⛔ `List workflow runs` takes **no** `sort`/`direction` parameter — an earlier version
-    sent `per_page=1&sort=created&direction=asc` and got the NEWEST queued run (measured:
-    2026-11-07T17:51Z returned for a queue whose oldest entry was 2026-11-05T16:29Z). The
-    tool then printed a fresh-looking age beside a two-day-old queue and
-    `starvation_suspected` — the one signal this verb exists to emit — could never fire.
-    So take the MINIMUM over every queued run, and read them all.
+
+@dataclass(frozen=True)
+class QueueProbe:
+    """What the queue read actually established. `oldest_seconds is None` NEVER means "no queue".
+
+    `oldest_seconds`   age of the HEAD OF REAL DEMAND — the oldest run that HAS a job in
+                       `queued` status — or None when there is no such run (a readable zero) or
+                       nothing could be measured (`note` says which).
+    `ghosts`           QUEUED runs in front of the head with ZERO queued jobs, excluded from the
+                       age. GitHub leaves a run whose jobs were never created in `queued`
+                       permanently (measured on daniel-ospina/agent-infra: three runs still
+                       `queued` 30 days later with no jobs, so the age read 2,612,687 s of "queue
+                       wait" on a repo whose real demand was hours old).
+    `head_run`         the run the age was taken from, so a reader can check the measurement.
+    `note`             why there is no age, or why the head could not be proved.
     """
+
+    oldest_seconds: int | None = None
+    ghosts: int = 0
+    head_run: int | None = None
+    note: str | None = None
+
+
+def queue_head_scan_max() -> int | None:
+    """The gate's queue-head scan bound, or None when the configured value is not a legal bound.
+
+    Same fail-closed contract as `fallback_arm_cap`: `ci_runner_gate.sh` refuses the pass on a
+    non-numeric bound (and on `0`, which would disarm the leg rather than bound it), so a bad
+    value here measures NOTHING rather than scanning an arbitrary number of runs.
+    """
+    raw = os.environ.get(QUEUE_HEAD_SCAN_MAX_ENV)
+    if raw is None or raw == "":
+        return QUEUE_HEAD_SCAN_MAX_DEFAULT
+    if not raw.isdigit() or int(raw) == 0:
+        return None
+    return int(raw)
+
+
+def _queued_job_count(repo: str, run_id: int) -> int | None:
+    """How many jobs of this run are in `queued` status; None when the read could not be made.
+
+    A run is DEMAND FOR A RUNNER only if it has a job in `queued` status — nothing else can be
+    scheduled, and nothing else is evidence a runner is missing. `None` is "could not look",
+    which is a different fact from `0` ("looked, and this run is a ghost") and must never be
+    collapsed into it: discounting real demand on a failed call is the fail-open direction.
+    """
+    proc = subprocess.run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100",
+            "--jq",
+            '[.jobs[] | select(.status == "queued") | .id] | length',
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    # `--paginate` applies `--jq` PER PAGE, so the counts arrive one line per page and must be
+    # summed: reading line 1 alone undercounts a run whose queued jobs sit on a later page, which
+    # is the GHOST shape on exactly the runs this scan exists to judge.
+    total = 0
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not line.isdigit():
+            return None
+        total += int(line)
+    return total
+
+
+def fetch_queue_probe(repo: str = REPO) -> QueueProbe:
+    """The queue's HEAD OF REAL DEMAND, measured the way the gate that owns this signal does.
+
+    ⛔ THE DEFINITION IS THE GATE'S, NOT `min(created_at)` OVER EVERY QUEUED RUN (review round 3,
+    P2). `ci_runner_gate.sh`'s head scan walks the page oldest-first and stops at the first run
+    that HAS a queued job, because a run GitHub calls `queued` with nothing in a schedulable state
+    is a GHOST: its age is unbounded and means nothing, and it is not demand any runner could
+    serve. `min(created_at)` over every queued run reports a ghost's age as "queue wait", which is
+    how a two-day-old phantom became this tool's starvation signal.
+
+    ⛔ EVERY EXIT IS THE GATE'S OWN DOCTRINE: a ghost is discounted only on POSITIVE evidence (a
+    readable jobs read showing zero queued jobs), an UNREADABLE jobs read is not evidence of
+    anything and keeps the run as the head, and a scan that runs out of window without finding
+    demand measures nothing (it does not fall back to the oldest run).
+    """
+    import datetime as _dt
+
     proc = subprocess.run(
         [
             "gh",
@@ -843,30 +981,117 @@ def fetch_oldest_queued_seconds(repo: str = REPO) -> int | None:
             "--paginate",
             f"repos/{repo}/actions/runs?status=queued&per_page=100",
             "--jq",
-            ".workflow_runs[].created_at // empty",
+            r'.workflow_runs[] | "\(.id)\t\(.created_at)"',
         ],
         capture_output=True,
         text=True,
     )
     if proc.returncode != 0:
-        return None
-    import datetime as _dt
+        return QueueProbe(note="the queued-run read failed, so the queue age is UNMEASURED")
 
-    created: _dt.datetime | None = None
+    candidates: list[tuple[int, _dt.datetime]] = []
     for line in proc.stdout.splitlines():
-        stamp = line.strip()
-        if not stamp:
+        row = line.strip()
+        if not row:
+            continue
+        run_id, _, stamp = row.partition("\t")
+        if not run_id.isdigit() or not stamp:
+            # A row we cannot identify is not a candidate: it cannot be scanned, and inventing a
+            # timestamp for it would age the queue from something nobody read.
             continue
         try:
-            one = _dt.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.UTC)
+            created = _dt.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.UTC)
         except ValueError:
             continue
-        created = one if created is None or one < created else created
-    if created is None:
-        # A successful call whose payload carried no readable timestamp measured NOTHING; it
-        # is not "no queue", which is why it yields None rather than 0.
-        return None
-    return max(0, int((_dt.datetime.now(_dt.UTC) - created).total_seconds()))
+        candidates.append((int(run_id), created))
+
+    if not candidates:
+        # A successful read with no readable queued run is a READABLE ZERO (an idle queue) when the
+        # payload carried no rows at all; a payload that carried rows we could not parse measured
+        # nothing. `proc.stdout.strip()` is what separates the two.
+        if proc.stdout.strip():
+            return QueueProbe(note="no queued-run row in the read carried an id and a timestamp")
+        return QueueProbe(note="no run is queued")
+
+    cap = queue_head_scan_max()
+    if cap is None:
+        return QueueProbe(
+            note=(
+                f"{QUEUE_HEAD_SCAN_MAX_ENV}={os.environ.get(QUEUE_HEAD_SCAN_MAX_ENV)!r} is not a "
+                f"legal scan bound, so the head of demand was NOT measured (`ci_runner_gate.sh` "
+                f"refuses the pass on the same value)"
+            )
+        )
+
+    candidates.sort(key=lambda row: row[1])  # oldest first — the gate's own walk order
+    scanned = 0
+    ghosts = 0
+    for index, (run_id, created) in enumerate(candidates):
+        if scanned >= cap:
+            return QueueProbe(
+                ghosts=ghosts,
+                note=(
+                    f"the {scanned} oldest of {len(candidates)} queued run(s) report ZERO jobs in "
+                    f"'queued' status and the head of real demand is beyond the "
+                    f"{QUEUE_HEAD_SCAN_MAX_ENV}-run scan window — UNMEASURED"
+                ),
+            )
+        scanned += 1
+        queued_jobs = _queued_job_count(repo, run_id)
+        if queued_jobs is None:
+            # Could not look: this is NOT a ghost. Keep it as the head and say so — discounting
+            # real demand on a failed read is how a stalled pool reads healthy.
+            return QueueProbe(
+                oldest_seconds=_age_seconds(created),
+                ghosts=ghosts,
+                head_run=run_id,
+                note="the jobs read FAILED for a candidate run, so it is kept as the queue head (no discount)",
+            )
+        if queued_jobs == 0:
+            ghosts += 1
+            continue
+        return QueueProbe(
+            oldest_seconds=_age_seconds(created),
+            ghosts=ghosts,
+            head_run=run_id,
+        )
+
+    # Every queued run in the read was scanned and every one of them has zero queued jobs: a
+    # COMPLETE measurement whose answer is "nothing is waiting for a runner". A readable zero, not
+    # a failed read.
+    return QueueProbe(
+        ghosts=ghosts,
+        note=f"all {ghosts} queued run(s) report ZERO jobs in 'queued' status — nothing is waiting for a runner",
+    )
+
+
+def _age_seconds(created: "datetime.datetime") -> int | None:
+    """Seconds since `created`, or None for a timestamp in the FUTURE (a clock skew no reading can
+
+    resolve — the gate leaves the age empty for the same input rather than rounding it to 0 and
+    reporting a fresher queue than anyone measured).
+    """
+    import datetime as _dt
+
+    age = int((_dt.datetime.now(_dt.UTC) - created).total_seconds())
+    return max(0, age) if age >= 0 else None
+
+
+def fetch_oldest_queued_seconds(repo: str = REPO) -> int | None:
+    """Age of the queue's HEAD OF REAL DEMAND, or None when there is none / it is unmeasured.
+
+    ⛔ `List workflow runs` takes **no** `sort`/`direction` parameter — an earlier version sent
+    `per_page=1&sort=created&direction=asc` and got the NEWEST queued run (measured
+    2026-11-07T17:51Z for a queue whose oldest entry was 2026-11-05T16:29Z), so
+    `queued_oldest_seconds >= floor` never held and `starvation_suspected` — the one signal this
+    verb exists to emit — was unreachable.
+
+    Taking `min(created_at)` over every run GitHub calls `queued` fixed that and introduced the
+    gate's own known failure: a GHOST run (nothing in a schedulable state) ages without bound.
+    So the answer is the head of REAL demand — see `fetch_queue_probe` — and this is the thin
+    reader `check` uses. Ghosts are counted there, not silently dropped.
+    """
+    return fetch_queue_probe(repo).oldest_seconds
 
 
 def project(runners: Sequence[Runner], pending: Plan) -> list[Runner]:
@@ -1011,6 +1236,11 @@ def _print_human(report: Mapping[str, Any]) -> None:
     # class in the other direction.
     for name, why in sorted(report.get("over_cap", {}).items()):
         print(f"  ⚠️  OVER-CAP {name}: {why}")
+    # ⛔ THE SAME CHANNEL AS `unclassified`, FOR THE ONE CASE WHERE IT MATTERS: a runner whose
+    # stated REMEDY this tool cannot execute. Printing it as plain `UNRECONCILED` right beside
+    # `REMEDY: strip it` is what made the pair read as a bug rather than as a scope boundary.
+    for name, why in sorted(report.get("out_of_scope", {}).items()):
+        print(f"  ⚠️  OUT-OF-SCOPE {name}: {why}")
     if not report["violations"]:
         print(f"verdict: {report['verdict']}")
     else:
@@ -1079,7 +1309,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "from it would relabel runners nobody asked it to touch.",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_USAGE
 
     # ⛔ A CAP OF ZERO IS A DISARMED GATE, NOT A QUIET NO-OP. `ci_runner_gate.sh`'s
     # `FALLBACK_ARM_MAX` block:
@@ -1096,7 +1326,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"reporting a successful engage carrying nothing. Nothing was written.",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_USAGE
 
     if args.from_fixture:
         runners = parse_runners(json.loads(args.from_fixture.read_text()))
@@ -1210,6 +1440,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     file=sys.stderr,
                 )
 
+    # ⛔ THE EXIT CODE MUST SEPARATE "THE WRITE FAILED" FROM "THE WRITE LANDED, AN OWNER DECISION
+    # REMAINS". Both used to be `1`, so a wrapper could not tell a broken reconcile from one that
+    # did exactly what this tool is permitted to do: on the measured pool a bare `apply` can never
+    # reach `0` (three ARM64 carriers keep the label until `--strip-non-x64`, which is #6897/#9878's
+    # decision), and calling that "failure" is how a correct run gets retried forever. A residual is
+    # owner-gated ONLY when every planned write applied, the pool was read back, and every surviving
+    # violation is one the operator can heal by naming the flag.
+    owner_gated_only = False
+    if not ok and post is not None and not args.dry_run and all(rec["applied"] for rec in records):
+        remaining = post.get("violations", [])
+        owner_gated_only = bool(remaining) and all(
+            v["kind"] == VIOLATION_FALLBACK_ON_NON_X64 and v["runner"] in pending.owner_gated
+            for v in remaining
+        )
+    if ok:
+        exit_code = EXIT_OK
+    elif owner_gated_only:
+        exit_code = EXIT_OWNER_GATED
+    else:
+        exit_code = EXIT_FAILED
+
     payload = {
         "ok": ok,
         "ok_before": report["ok"],
@@ -1224,9 +1475,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "unclassified": dict(pending.unclassified),
         "owner_gated": dict(pending.owner_gated),
         "over_cap": dict(pending.over_cap),
+        "out_of_scope": dict(pending.out_of_scope),
         "arm_cap": pending.arm_cap,
         "arm": list(pending.armed),
         "post": post,
+        "owner_gated_only": owner_gated_only,
+        "exit": exit_code,
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -1256,6 +1510,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         # DECISION, so the runners it withheld are named, with the route that would widen it.
         for name, why in sorted(pending.over_cap.items()):
             print(f"  ⚠️  {name}: {why}")
+        # ⛔ WHY THE REMEDY THE OPERATOR JUST READ IS NOT THIS TOOL'S TO PERFORM. `check` tells them
+        # to strip a marker-less / foreign-platform carrier; `apply` skips it by design
+        # (`managed_ids` / `labels_for` conservatism). Without this line the run looks like it
+        # silently dropped the work it had just named.
+        for name, why in sorted(pending.out_of_scope.items()):
+            print(f"  ⚠️  OUT-OF-SCOPE {name}: {why}")
         if pending.armed:
             print(
                 f"  arm: {len(pending.armed)} runner(s) at most (cap {pending.arm_cap} — "
@@ -1279,7 +1539,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"post-state verdict: {post['verdict']} "
                 f"(x64 serving={x64_serving}, non-x64 serving={others_serving} — {where})"
             )
-    return 0 if ok else 1
+        if owner_gated_only:
+            print(
+                f"  ⚠️ exit {EXIT_OWNER_GATED}: every planned write landed and the pool was read "
+                f"back, but {len(post['violations'])} owner-gated residual(s) remain "
+                f"(#6897/#9878) — re-run with `--strip-non-x64` to perform them"
+            )
+    return exit_code
 
 
 if __name__ == "__main__":

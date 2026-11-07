@@ -1028,58 +1028,144 @@ def test_engage_and_strip_non_x64_are_ONE_topology_not_a_conflict(tmp_path: Path
 
 
 # ------------------------------------------- the queue age is the OLDEST run, and it is proven
-def test_the_oldest_queued_run_is_the_minimum_not_the_newest(monkeypatch):
-    """REGRESSION (#11435 review, fresh-context cycle 2 P1): the pre-fix code asked for
-    `?per_page=1&sort=created&direction=asc`, but `List workflow runs` accepts NO `sort` /
-    `direction`, so the API returned the NEWEST queued run — measured on this repo:
-    2026-11-07T17:51Z for a queue whose oldest entry was 2026-11-05T16:29Z. With that reading,
-    `queued_oldest_seconds >= floor` never holds and `starvation_suspected` — the one signal this
-    verb exists to emit — is unreachable, while the render prints a fresh-looking age beside a
-    two-day-old queue.
+def test_the_queue_age_is_the_head_of_demand_not_the_oldest_ghost(monkeypatch):
+    """REGRESSION (#11435 review round 3, P2): the age was `min(created_at)` over every run GitHub
+    calls `queued`, which is NOT the gate's definition and which the gate explicitly rejects.
 
-    ⛔ THE MUTATION IS THE PROOF, and the previous round had none: flipping the MIN (`one <
-    created`) to MAX (`one > created`) left all 38 tests green, because every other test stubs
-    this function out. This one asserts the VALUE, so the flip reds.
+    `ci_runner_gate.sh`'s head scan: "the age of the HEAD OF REAL DEMAND (#2344), i.e. of the
+    oldest run that HAS a queued job — not `min(created_at)` over every run GitHub calls queued (a
+    ghost run's age is unbounded and means nothing)", with `QUEUE_GHOSTS` machinery because ghosts
+    occur on these repos.
+
+    The fixture puts a GHOST 90 days out in front (0 queued jobs), the real head at 30 days, and a
+    fresh run at 60 seconds, so all three candidate readings are 3+ orders of magnitude apart:
+    pre-#2344 MIN reports ~90 days, the newest-run bug reports ~60 s, and the answer is ~30 days.
     """
-    # ⛔ THE TIMESTAMPS ARE RELATIVE TO `now`, NOT FROZEN. A frozen payload plus an absolute
-    # threshold (`age >= 24*3600`) DECAYS: a day after the fixture was written the MAX mutant also
-    # satisfies it (every stamp is then >24h old), so the pin silently stops discriminating — the
-    # exact failure this test exists to prevent, in the test itself. With a 90-day-old head and a
-    # one-minute-old tail, MIN and MAX stay ~90 days apart no matter when this runs.
     _now = datetime.datetime.now(datetime.UTC)
-    payload = "\n".join(
+
+    def stamp(**delta):
+        return (_now - datetime.timedelta(**delta)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    runs = "\n".join(
         [
-            (_now - datetime.timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ"),  # NEWEST
-            (_now - datetime.timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ"),  # OLDEST
-            (_now - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            f"30\t{stamp(days=90)}",
+            f"20\t{stamp(days=60)}",
+            f"10\t{stamp(days=30)}",
+            f"40\t{stamp(seconds=60)}",
         ]
     )
+    queued_jobs = {30: 0, 20: 0, 10: 1, 40: 1}
 
     def fake_run(argv, **kwargs):
         assert argv[:2] == ["gh", "api"], argv
-        url = argv[3]
-        # ⛔ THE QUERY ITSELF IS THE DEFECT. `sort`/`direction` are not parameters of this
-        # endpoint; sending them is what made a "oldest" read return the newest.
-        assert "sort=" not in url, url
-        assert "direction=" not in url, url
+        url = next(a for a in argv if "actions/runs" in a)
         assert "--paginate" in argv, argv
+        # ⛔ `sort`/`direction` are not parameters of the runs endpoint; sending them is what made
+        # an "oldest" read return the newest.
+        assert "sort=" not in url and "direction=" not in url, url
 
         class P:
             returncode = 0
-            stdout = payload
             stderr = ""
+
+        if "/jobs" in url:
+            rid = int(re.search(r"/runs/(\d+)/jobs", url).group(1))
+            P.stdout = str(queued_jobs[rid])
+        else:
+            P.stdout = runs
+        return P()
+
+    monkeypatch.setattr(topo.subprocess, "run", fake_run)
+    probe = topo.fetch_queue_probe("daniel-ospina/tortoise")
+    assert probe.head_run == 10, f"the head of real demand is run 10; got {probe.head_run}"
+    assert probe.ghosts == 2, f"the two runs in front of it are ghosts; got {probe.ghosts}"
+    assert probe.oldest_seconds is not None
+    assert 29 * 24 * 3600 <= probe.oldest_seconds <= 31 * 24 * 3600, (
+        f"the age must be the HEAD OF DEMAND (~30 days); got {probe.oldest_seconds}s — ~90 days "
+        f"means the oldest GHOST was aged (the pre-#2344 reading), ~60 s means the newest run was"
+    )
+    # The thin reader `check` uses reports the same number.
+    assert topo.fetch_oldest_queued_seconds("daniel-ospina/tortoise") == probe.oldest_seconds
+
+
+def test_a_ghost_only_queue_is_a_readable_zero_and_counts_the_ghosts(monkeypatch):
+    """Every queued run has zero queued jobs ⇒ nothing is waiting for a runner. That is a
+    COMPLETE measurement (a readable zero), not a failed read and not an unbounded age."""
+    _now = datetime.datetime.now(datetime.UTC)
+    runs = "\n".join(
+        f"{rid}\t{(_now - datetime.timedelta(days=d)).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        for rid, d in ((7, 30), (8, 20))
+    )
+
+    def fake_run(argv, **kwargs):
+        class P:
+            returncode = 0
+            stderr = ""
+            stdout = "0"  # every run: zero queued jobs
+
+        if "actions/runs?" in argv[3]:
+            P.stdout = runs
+        return P()
+
+    monkeypatch.setattr(topo.subprocess, "run", fake_run)
+    probe = topo.fetch_queue_probe("r")
+    assert probe.oldest_seconds is None, "nothing is waiting, so there is no head to age"
+    assert probe.ghosts == 2
+    assert "ZERO jobs" in (probe.note or ""), probe.note
+
+
+def test_an_unreadable_jobs_read_keeps_the_run_as_the_queue_head(monkeypatch):
+    """The gate's doctrine: a ghost is discounted only on POSITIVE evidence. "Could not look" is
+    not evidence, so the run STAYS the head — discounting real demand on a failed call is how a
+    stalled pool reads healthy."""
+    _now = datetime.datetime.now(datetime.UTC)
+    old = (_now - datetime.timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def fake_run(argv, **kwargs):
+        class P:
+            returncode = 0
+            stderr = ""
+            stdout = f"9\t{old}"
+
+        if "/jobs" in argv[3]:
+            P.returncode = 1  # the jobs read FAILED
+            P.stdout = ""
+        return P()
+
+    monkeypatch.setattr(topo.subprocess, "run", fake_run)
+    probe = topo.fetch_queue_probe("r")
+    assert probe.head_run == 9, "an unreadable jobs read must NOT discount the run"
+    assert probe.ghosts == 0
+    assert probe.oldest_seconds is not None and probe.oldest_seconds >= 3 * 24 * 3600 - 60
+    assert "FAILED" in (probe.note or ""), probe.note
+
+
+def test_the_queue_scan_bound_is_the_gates_own_and_an_illegal_one_measures_nothing(monkeypatch):
+    """One ruling, two readers: the scan bound is read from the gate's variable, and a value the
+    gate refuses (non-numeric, or 0 — "a bound of zero would disarm the leg rather than bound it")
+    measures NOTHING here rather than silently scanning an arbitrary number of runs."""
+    monkeypatch.delenv(topo.QUEUE_HEAD_SCAN_MAX_ENV, raising=False)
+    assert topo.QUEUE_HEAD_SCAN_MAX_ENV == "CI_GATE_QUEUE_HEAD_SCAN_MAX"
+    assert topo.queue_head_scan_max() == 5, "the gate's default is ${CI_GATE_QUEUE_HEAD_SCAN_MAX:-5}"
+    for bad in ("zero", "0"):
+        monkeypatch.setenv(topo.QUEUE_HEAD_SCAN_MAX_ENV, bad)
+        assert topo.queue_head_scan_max() is None, bad
+    _now = datetime.datetime.now(datetime.UTC)
+    runs = f"9\t{(_now - datetime.timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+    def fake_run(argv, **kwargs):
+        class P:
+            returncode = 0
+            stderr = ""
+            stdout = runs
 
         return P()
 
     monkeypatch.setattr(topo.subprocess, "run", fake_run)
-    age = topo.fetch_oldest_queued_seconds("daniel-ospina/tortoise")
-    assert age is not None
-    # ~90 days for the MIN; ~60 seconds for the MAX. The gap is 3 orders of magnitude and does not
-    # depend on the wall clock, so the mutant cannot drift into passing.
-    assert age >= 30 * 24 * 3600, (
-        f"the oldest queued run must be the MINIMUM created_at, so its age is ~90 days; got {age}s — "
-        f"a small value means the NEWEST run was read (the pre-fix defect)"
-    )
+    monkeypatch.setenv(topo.QUEUE_HEAD_SCAN_MAX_ENV, "zero")
+    probe = topo.fetch_queue_probe("r")
+    assert probe.oldest_seconds is None, "an illegal bound must not age the queue from a guess"
+    assert "not a legal scan bound" in (probe.note or ""), probe.note
 
 
 def test_an_unreadable_queue_age_is_none_never_zero(monkeypatch):
@@ -1434,3 +1520,115 @@ def test_a_zero_cap_is_a_disarmed_gate_and_apply_refuses(tmp_path: Path):
     # …and the cap of 0 still arms nothing, so a caller reading `plan` sees the same answer.
     pending = topo.plan(_x64_pool(POOL_5), engage=True, arm_cap=0)
     assert pending.armed == [] and pending.changes == {}
+
+
+# ------------------------------- a remedy the tool cannot perform is not a remedy
+def test_a_carrier_the_tool_cannot_relabel_never_gets_an_unperformable_remedy():
+    """REGRESSION (#11435 review round 3, P2): the marker gate made `FALLBACK_ON_NON_X64`'s remedy
+    UNPERFORMABLE for a carrier that carries no pool marker.
+
+    `check` printed `REMEDY: strip 'ubuntu-latest' from this runner`, while `apply --strip-non-x64`
+    skips exactly that runner (`unmanaged_reason` -> `managed_ids`: a runner with neither marker is
+    not ours to relabel). So the diff could never close, and the pair of outputs read as a broken
+    tool rather than as a scope boundary: `check` says "strip it", `apply` silently does not.
+
+    The fix keeps the conservative gate (an unenrolled box must not be relabelled on a guess) and
+    makes BOTH halves honest: the remedy names who performs it, and the write payload carries the
+    runner under `out_of_scope` so `apply` says it too.
+    """
+    # A Linux/ARM64 carrier with NO pool marker: a real violation (it cannot serve an x64 image),
+    # but not a runner this tool will relabel.
+    orphan = topo.parse_runner(
+        _runner(41, "legacy-arm-box", ["self-hosted", "Linux", "ARM64", topo.FALLBACK_LABEL])
+    )
+    report = topo.check([orphan])
+    assert report["ok"] is False, report
+    why = next(v["why"] for v in report["violations"] if v["runner"] == "legacy-arm-box")
+    assert "MANUALLY" in why, (
+        f"the remedy must name the human action it requires, not promise a strip this tool refuses: {why}"
+    )
+    assert topo.VIOLATION_FALLBACK_ON_NON_X64 in {v["kind"] for v in report["violations"]}
+    # …and the write verb names the runner it cannot help instead of passing over it in silence.
+    pending = topo.plan([orphan], engage=True, strip_non_x64=True)
+    assert pending.changes == {}, "no write may target a runner outside the pool"
+    assert "legacy-arm-box" in pending.out_of_scope, pending.out_of_scope
+    assert "MANUAL" in pending.out_of_scope["legacy-arm-box"]
+
+    # A runner the tool CAN relabel keeps the plain, performable remedy — the gate is not over-broad.
+    member = topo.parse_runner(
+        _runner(
+            42, "pi-runner-vm-2",
+            ["self-hosted", "Linux", "ARM64", "self-hosted-arm64", topo.FALLBACK_LABEL],
+        )
+    )
+    member_report = topo.check([member])
+    member_why = next(v["why"] for v in member_report["violations"] if v["runner"] == "pi-runner-vm-2")
+    assert "MANUALLY" not in member_why, member_why
+    assert member_report["out_of_scope"] == {}, "a reconcilable carrier is not out of scope"
+    assert topo.plan([member], engage=True, strip_non_x64=True).changes, (
+        "and the strip the remedy names IS performed for it"
+    )
+
+
+def test_the_check_render_names_the_out_of_scope_carrier(capsys):
+    """The channel must reach the form the docstring calls the tripwire, not only `--json`."""
+    orphan = topo.parse_runner(
+        _runner(43, "legacy-arm-box", ["self-hosted", "Linux", "ARM64", topo.FALLBACK_LABEL])
+    )
+    topo._print_human(topo.check([orphan]))
+    out = capsys.readouterr().out
+    assert "OUT-OF-SCOPE legacy-arm-box" in out, out
+
+
+# ------------------------------- a lossy exit code is a false signal in a script
+def test_apply_separates_a_failed_write_from_an_owner_gated_residual(monkeypatch, capsys):
+    """REGRESSION (#11435 review round 3, P2): `apply`'s exit code could not distinguish "writes
+    failed" from "writes succeeded, owner-gated residual remains".
+
+    On the measured pool a bare `apply` can never reach 0: the three ARM64 carriers keep
+    `ubuntu-latest` until `--strip-non-x64`, which is #6897/#9878's decision. Reporting that as
+    `1` — the same byte a failed PUT or an unreadable read-back produces — tells a wrapper
+    "retry, something is broken" about a run that did exactly what the tool is permitted to do.
+
+    So: 0 clean · 1 the write/verify failed · 3 writes landed, an OWNER-GATED residual remains.
+    """
+    pre = measured()
+    # ENGAGE ONLY: every planned write lands, the ARM64 carriers are left byte-identical.
+    post = _post_pool(topo.plan(pre, engage=True))
+    reads = [pre, post]
+    monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO: reads.pop(0))
+    monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
+    monkeypatch.setattr(
+        topo,
+        "apply_plan",
+        lambda pending, *, dry_run, repo=topo.REPO: [
+            {"runner": n, "id": rid, "before": b, "after": a, "applied": True}
+            for n, (rid, b, a) in pending.changes.items()
+        ],
+    )
+    rc = topo.main(["apply", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == topo.EXIT_OWNER_GATED == 3, (rc, payload)
+    assert payload["exit"] == topo.EXIT_OWNER_GATED
+    assert payload["owner_gated_only"] is True
+    assert payload["ok"] is False, "the pool is not clean — the code says WHY it is not clean"
+    # …and the survivors are exactly the owner-gated ones, not a mixed bag.
+    assert {v["kind"] for v in payload["post"]["violations"]} == {topo.VIOLATION_FALLBACK_ON_NON_X64}
+    assert {v["runner"] for v in payload["post"]["violations"]} == set(payload["owner_gated"])
+
+    # A FAILED WRITE IS A DIFFERENT CODE — same pool, one PUT that did not take.
+    reads = [pre, post]
+    monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO: reads.pop(0))
+    monkeypatch.setattr(
+        topo,
+        "apply_plan",
+        lambda pending, *, dry_run, repo=topo.REPO: [
+            {"runner": n, "id": rid, "before": b, "after": a, "applied": False, "error": "422"}
+            for n, (rid, b, a) in pending.changes.items()
+        ],
+    )
+    rc = topo.main(["apply", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == topo.EXIT_FAILED == 1, (rc, payload)
+    assert payload["owner_gated_only"] is False
+    assert payload["exit"] == topo.EXIT_FAILED
