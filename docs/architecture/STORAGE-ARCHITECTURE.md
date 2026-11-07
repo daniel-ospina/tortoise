@@ -125,15 +125,15 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > `docs/architecture/SEARCH-ARCHITECTURE.md`, which also **resolves V1** (§14.3).
 >
 > **NARROWED — "keep the limit in falkor high":** the cache stays **complete through private-beta**, and becomes a **bounded
-> window only after M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9), sized by the tier's 30 %-of-price cost budget (a complete graph is $8.75/tenant against a
-> $5.70 budget, and density cannot divide a per-tenant line). So the full cache is retained *temporarily*, not
+> window only after the search doc's M2 measures retrieval quality, windowed vs complete** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9 — a DIFFERENT M2 from §15's invoice measurement), sized by the tier's 30 %-of-price cost budget (a complete graph is $8.75/tenant against a
+> $5.70 budget, and density cannot shrink a tenant's own graph bytes — `$58.33` is already the densest tier's per-GB rate). So the full cache is retained *temporarily*, not
 > indefinitely.
 >
 > **OVERRIDES:** §2.0's *"keep the limit in falkor high"* — the 30 %-of-price storage target ($5.70 of a $19 price, strictly tighter than §1's
 > < $9 total-cost ceiling — `SEARCH-ARCHITECTURE.md` §7 states both) makes a complete cache unaffordable at any density, and the
 > vector index is 467× cheaper per byte on disk *at the 8 GB tier's $43.75/GB-month, after the 75 % rule, against Postgres disk at $0.125/GB — the same
 > comparison §17.4 states as 584× (pure RATE) and 778.7× (with that density headroom); 467× is the 8 GB tier's basis*, so the cache is bounded by a
-> budget-derived window only after M2 measures retrieval quality (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9).
+> budget-derived window only after the search doc's M2 measures retrieval quality (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5, §9).
 
 **This is the governing decision for this document.** Everything below is either (a) the reasoning behind it, or (b) the work that remains.
 
@@ -1138,7 +1138,7 @@ Against the live production graph, warm, 6–12 samples per class (`/tmp/lat.py`
 
 **Three things this settles:**
 
-1. **Latency is not a constraint, and never was** (§12.1). It is **~1.5–5 ms** against a model call in the hundreds-to-thousands. **A cross-store hop to Supabase Postgres would land around ~10–15 ms — still noise.** The 5–15 ms the research predicted is confirmed as irrelevant at our scale — **so the ONLY open question about where the vectors live is cost** (§12.1c).
+1. **Latency is not a constraint, and never was** (§12.1). It is **~1.5–5 ms** against a model call in the hundreds-to-thousands. **A cross-store hop to Supabase Postgres would land around ~10–15 ms — still noise.** The 5–15 ms the research predicted is confirmed as irrelevant at our scale — **so the only question about where the vectors live that remains is cost** (§12.1c; the location itself was decided 2026-11-07).
 2. **The index earns very little today and more later.** An HNSW lookup is **2.74 ms**; a **full linear scan of all 7,859 Object vectors is 9.26 ms** — **so the index is worth ~6 ms at our size.** At month-6 (~300–500k vectors) a scan would be ~300–500 ms, **so it earns its keep later, not now** — and that is precisely the case for keeping the index but not renting FalkorDB RAM for it (§12.1c).
 3. **⭐ Traversal is cheap enough to be the default.** *"How does this Object relate to events, subjects and points — the why, who, when"* is answered by **1.55–2.35 ms walks** — **and needs no vector at all** (§12.2c).
 
@@ -1251,7 +1251,7 @@ embedding:
 | **3** | **Density** — pack more graphs onto one instance (≤75% of its RAM) | the only lever that lowers **per-tenant** cost without dropping anything | ops, not code |
 | **4** | ⚠️ **Partition the vector index per tenant** | **See §12.1a — this is TWO mechanisms, and they behave oppositely.** **Declarative `PARTITION BY tenant` is FLAT** (measured 6.4 → 1.8 → 6.9 ms at T=10/100/500) and **is available**; it is the **partial-index-per-tenant** pattern that degrades (6.9 → 12.5 → 83.3 ms) — a per-relation planner cost, with no lock exhaustion observed at any count tested. **The decision is neither — it is the size-earned conditional index** (§12.1a). | low, **measured** |
 | **5** | **Self-host the engine** (SSPLv1, free) | removes the `$0.10/GB-hour` rent entirely; same engine, no rewrite | ops work — **self-hosting is deferred until there are users** |
-| **6** | **Quantization** — a vector-store option, not a graph one | shrinks the vector bytes; the graph term is untouched | **not applicable to hosted FalkorDB**; it becomes available with the vectors, if V1 moves them |
+| **6** | **Quantization** — a vector-store option, not a graph one | shrinks the vector bytes; the graph term is untouched | **not applicable to hosted FalkorDB**; it becomes available with the vectors, which V1 decided to move (2026-11-07) |
 
 **⇒ Ranked honestly: levers 1 and 2 are the same work — write less, and write things worth keeping.** Lever 3 is the ops dial. **Lever 5 is the largest remaining ENGINE-side cost lever — the central cost move is the record/cache split itself (§2.0) — and it is deferred until there are users.**
 
@@ -1294,7 +1294,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 > **Taking *"objects must be vectorised"* literally would index 7,859 strings that are 62.3% low-information, with no description field, and buy near-zero discriminating power for BOTH jobs a vector could do** — while paying the dominant RAM cost.
 
-**⭐ What we already have is the right shape:** `Object.name` **already has a FULLTEXT index**, as do `Event.subject`/`Event.name` (measured, §12.1b). **Lexical entity lookup is the resolution signal every system above pairs with the vector — and we have it.** What we lack is (a) the **description field** that would make an entity vector meaningful, and (b) a ruling on whether `:Object`/`:Event` embeddings should exist at all — the open **V1/§12.1c** decision (`#4997`).
+**⭐ What we already have is the right shape:** `Object.name` **already has a FULLTEXT index**, as do `Event.subject`/`Event.name` (measured, §12.1b). **Lexical entity lookup is the resolution signal every system above pairs with the vector — and we have it.** What we lack is (a) the **description field** that would make an entity vector meaningful, and (b) a ruling on whether `:Object`/`:Event` embeddings should exist at all — the **V1/§12.1c** decision, which RESOLVED the vector's location on 2026-11-07 and left this indexing question OPEN (`#4997`).
 
 **⚠️ Weak names are a SEQUENCING fact, not an argument against the vector (owner, 2026-09-24).** The definite-description problem **belongs to the extractor workstream** (VET/CLASSIFY, the `DISCARD` path); it is not a reason to doubt entity vectors. The correct reading:
 
@@ -1520,8 +1520,8 @@ follows is the evidence each ruling rests on, which is design.
 
 **The ruling (owner, 2026-10-08, §2.0):** *"we do hybrid now, data goes to postgres and it's loaded to hot (falkor); for now we keep the limit in falkor high…"*
 
-> ⛔ **Split by the 2026-11-07 ruling — see §2.0's marker.** The dual-store read path is adopted (search in Postgres,
-> traversal in the graph); the full cache is retained through private-beta and bounded only after M2 measures retrieval quality (`SEARCH-ARCHITECTURE.md` §1.5, §9).
+> ⛔ **Split by the 2026-11-07 ruling — see §2.0's marker.** The dual-store read path is adopted (vector search in Postgres,
+> traversal in the graph); the full cache is retained through private-beta and bounded only after the search doc's M2 measures retrieval quality (`SEARCH-ARCHITECTURE.md` §1.5, §9).
 
 **FalkorDB stays hosted, and there is still no engine rewrite. What changes is its ROLE:**
 

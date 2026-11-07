@@ -38,11 +38,13 @@ engineering principles. Then we'll measure and optimise after beta launch."*
 ⇒ **No decision below rests on a measured proportion of the graph.** The share a hot cache would hold is
 an **output** we measure from real tenants, never an input. An earlier draft sized the split from an
 estimated "structure ≈ 17% of the graph"; that figure was a subtraction across three measurements and two
-different tenants, taken from a total the vendor's own field list shows is incomplete (FalkorDB's memory
-readout is blind to the vector index, which lives in a separate module). A published FalkorDB breakdown
+different tenants, taken from a total the vendor's own field list shows is incomplete (FalkorDB's `GRAPH.MEMORY USAGE`
+readout is blind to the HNSW `vectorset` module — `#5331`, `docs/evidence/10000-turns-bytes/README.md` — so it
+under-reports the vector bytes, while `INFO memory`'s `used_memory` counts them; the two instruments are not
+interchangeable and a figure from one is not comparable to a figure from the other). A published FalkorDB breakdown
 puts non-index structure at **41 %**. **Our own share is unmeasured** — the earlier 17 % figure is deleted, the 41 % is a vendor-published breakdown of a *different* population (a graph without our label mix), and **no range we could state would be one**. It is not an input to anything here.
 
-**⚠️ PROVENANCE — the EXTERNAL figures this document leans on.** Each of the following is a **third-party published measurement, not ours and not reproduced here**: the **41 %** non-index structure; the **0.0015 nDCG@10** spread at 381,559 vectors; the **0-of-10** filtered-ANN result and its **0.975/0.847** relax-order recall; the **8–23 nDCG@10** Postgres-FTS-vs-BM25 gap; the cache studies behind §7's policy table (**62.4 %** naive-pinning miss vs **60.2 %** LRU, and 1-/2-hop closure prefetch raising hit ratio); and the **4.9–5.9×** rebuild-peak range. They are cited by RESULT — their specific citations are **owed before this document is quoted as measurement evidence**, and the fix is to attach them, not to drop the claims. **Anything that reads as *our* measurement names its pin inline**, and a figure with neither a citation nor a pin is not evidence yet.
+**⚠️ PROVENANCE — the EXTERNAL figures this document leans on.** Each of the following is a **third-party published measurement, not ours and not reproduced here**: the **41 %** non-index structure; the **0.0015 nDCG@10** spread at 381,559 vectors; the **0-of-10** filtered-ANN result and its **0.975/0.847** relax-order recall; the **8–23 nDCG@10** Postgres-FTS-vs-BM25 gap; the cache studies behind §7's policy table (**62.4 %** naive-pinning miss vs **60.2 %** LRU, and 1-/2-hop closure prefetch raising hit ratio); and the **4.9–5.9×** rebuild-peak range; and the **~54 %** hit rate the best trace-aware policy reached for 2-hop expansions. They are cited by RESULT — their specific citations are **owed before this document is quoted as measurement evidence**, and the fix is to attach them, not to drop the claims. **Anything that reads as *our* measurement names its pin inline**, and a figure with neither a citation nor a pin is not evidence yet.
 
 ---
 
@@ -96,8 +98,9 @@ candidates* come from Postgres. Two systems are already in the path either way.
 
 **The price multiple decides the rest** (§17.4.1; vendor pages verified 2026-10-10): FalkorDB rents
 **provisioned RAM at $43.75–73/GB-month**, and a graph may occupy **75 %** of it ⇒ **$58.33 per GB of graph
-data**. Postgres disk is **$0.125/GB**. **~467×.** An embedding costs the same to store in either; the
-*index over it* is 467× dearer in RAM.
+data**. Postgres disk is **$0.125/GB**. **~467×.** An embedding's *bytes* are the same size in either store — which is
+the point, not a defence: at these rates **every** byte of payload is 467× dearer in RAM, so the payload moves
+with the index and is the bulk of the saving, not a rounding error beside it.
 
 **And the vector move is quality-neutral on the evidence.** At 381,559 vectors — inside our range —
 independent measurement puts pgvector/Qdrant/OpenSearch **within 0.0015 nDCG@10 of exact search**; the
@@ -196,7 +199,7 @@ as authority**; the record schema carries **no column** for them and its `chk_po
 table comment restates the carve-out). ⚠️ **The one narrowed exception, stated so this section does not
 overstate the carve-out:** `baseline_source` / `baseline_alpha` / `baseline_beta` **are** columns —
 PRIMARY when `baseline_source = 'set-by-author'`, because an author-set prior is a non-reconstructible
-input rather than a derived value (the `#7955` correction to §17.5; `STORAGE-ARCHITECTURE.md:2051` says
+input rather than a derived value (the `#7955` correction to §17.5; `STORAGE-ARCHITECTURE.md:2052` says
 the carve-out is **not** reopened by it). That ruling stands and nothing here reverses it.
 
 **Which is why the retention unit must be a CLOSED component (§7):** a closed subgraph has no missing
@@ -217,8 +220,8 @@ the ranker refuses to order on.
 ## 7. The window — what the graph holds once it must be bounded
 
 **Why the window exists at all:** a *complete* graph costs **$8.75/tenant** against a **$5.70** budget
-(30 % of $19). Density cannot fix that — density divides the *fixed* lines, and this is a per-tenant line.
-**The window is what makes the pricing work at scale.**
+(30 % of $19). Density does not fix it — `$58.33` is already the DENSEST tier's per-GB rate, and density cannot
+shrink a tenant's own graph bytes; it only spreads the *fixed* lines. **The window is what makes the pricing work at scale.**
 
 ⚠️ **Where the $5.70 comes from, because the document it amends records a different ceiling.** `STORAGE-ARCHITECTURE.md` §1
 records the product constraint as *"a $19 price with < $9 total cost per user"*, and its M2 row prices against a
@@ -247,7 +250,7 @@ makes EP recomputation exact (§6.3).
 | **retain closed components / 2-hop closures** | closure is what makes a walk and an EP recompute correct; measured cache studies show 1-/2-hop closure prefetch raises hit ratio for **every** policy tested |
 | **cap the pin: count, bytes, AND a degree ceiling** | unconditional hub pinning is a *measured* anti-pattern ("they can thrash each other"; naive pinning scored 62.4 % miss vs LRU at 60.2 %). Degree is **U-shaped** — helpful mid-tail, harmful at the head; a single huge hub can eat a 77 MB window |
 | **window-local touch counters + admission control** | recency beats static degree ranking, and adaptive policies beat every static one measured; eviction must be budget-triggered, not per-request, or the cycle "demote a leaf → the next query needs it → re-materialise → evict another leaf" becomes a storm. ⚠️ **The counter is WINDOW-LOCAL cache state — a different artifact from `tortoise/read_ledger.py`.** That ledger is TENANT-WIDE and is explicitly not a product input: `STORAGE-ARCHITECTURE.md` §17.4.6 states that reading it for any product decision *"would be a violation"* (it exists to measure `f`). Wiring it as the eviction signal is exactly the violation it names. |
-| **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **measured**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~300–460 MB, and the engine has **no per-graph memory cap**. This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each) |
+| **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **measured**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~380–455 MB, and the engine has **no per-graph memory cap**. This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each) |
 | **a walk materialises its seeds first** | search returns ids from Postgres; a non-resident seed must be written into the graph before traversing — a write on the query path, which is why the headroom above is mandatory |
 | **label what was truncated** | a confidence within 2 hops of a truncated boundary is **refused**; beyond that it may be returned as degraded. ⚠️ **The two reason strings this rule needs are OWED, not shipped** — `degraded: "insufficient_graph"` / `degraded: "truncated_boundary"` appear nowhere in the tree at this head, and `STATUS-VOCABULARY` (`STORAGE-ARCHITECTURE.md` §17.2) records `degraded` as one of four terms whose own text forbids a fifth, so the *reason* has to attach to `degraded` rather than mint a term. **Required before private-beta (§1.5).** What DOES exist is the marker's on/off mechanism (`residency.py`, `not-hot`, `TORTOISE_RESIDENCY`) and it is currently OFF |
 
