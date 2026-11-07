@@ -236,7 +236,13 @@ artifact.
     existing (the block renders entities/points/events only — the 35 `operators`
     are never shown, in production too) — the
     delta arm nevertheless emitted **0** corrections in all 7 sessions of both
-    runs. Production can only offer fewer, so this channel cannot be better there.
+    runs. **0 is the minimum a correction channel can emit**, so production cannot do
+    better on this channel whatever its block offers — the comparison needs no claim
+    about which items production shows, and the "fewer" reading does not hold anyway:
+    this block's 231 is a 7-session total while production's search is bounded
+    PER SESSION (`max_queries=15` x `limit=3` = 45), and this block offers 25–45 items
+    per session — so in 6 of the 7 sessions production's cap is the LARGER number and
+    in the seventh the two are equal (45).
   - the **gap** channel is measured at its *minimum*: an input that says
     everything already exists leaves a "emit only what is missing" contract
     nothing to find, which is consistent with the delta arm's narrower gap
@@ -260,7 +266,8 @@ artifact.
   figure is an upper bound on the DELTA ARM's tax-surface component — it bounds production
   from neither side — and a floor only on those responses' total; the residual is visible
   in the data the artifact does keep: wp05 and wp07 emitted the same channel COUNTS (3
-  gap items, 0 corrections each) and cost 968 vs 530, and the other **540** / **567** tokens
+  gap items, 0 corrections each) and cost 968 vs 530 (958 vs 522 in the re-run), and the
+  other **540** / **567** tokens
   sit on the 5 rows whose `s4_items` is 0, with `s4_delta_empty` `false` on all 7 delta
   rows — a third channel this instrument does not classify, present on every row and
   therefore not excluded from the figures above. The **legacy** arm carries the SAME gap channel, and it

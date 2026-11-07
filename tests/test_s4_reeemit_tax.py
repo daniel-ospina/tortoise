@@ -1140,8 +1140,9 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # are a ROW PARTITION of whole-output tokens, not a channel split, and the
         # sentence must not call them "tokens the channels account for" (the
         # earlier wording did, which inverted the bound: the component is AT MOST
-        # the response). The artifact itself shows the residual: wp05/wp07 emitted
-        # identical channel content for 968 vs 530 (#11385 review P2).
+        # the response). The artifact itself shows the residual: wp05 and wp07
+        # emitted the same channel COUNTS (3 gap items, 0 corrections) for 968 vs
+        # 530 in the primary, 958 vs 522 in the re-run (#11385 review P2/P3).
         _zero_tok = sum(a["delta"]["out_tokens"] for a in pri["arms"]
                         if (a["delta"].get("s4_items") or 0) == 0)
         _tax_tok = sum(a["delta"]["out_tokens"] for a in pri["arms"]) - _zero_tok
@@ -1179,11 +1180,40 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         assert (_r_zero, _r_tax) == (567, 1480), (_r_zero, _r_tax)
         assert f"**{_thousands(_r_tax)}** (re-run)" in flat_all, _r_tax
         assert f"**{_thousands(_r_zero)}**" in flat_all, _r_zero
-        _wp = {a["session"]: a["delta"] for a in pri["arms"]}
-        _a, _b = _wp["wp05_retro_writeup"], _wp["wp07_bluepeak_followup"]
-        assert _a["s4_items"] == _b["s4_items"] == 3, "the identical-content case"
-        assert (_a["out_tokens"], _b["out_tokens"]) == (968, 530), (
-            _a["out_tokens"], _b["out_tokens"])
+        # ⛔ the COUNTS are what match — the ITEMS do not (wp05 emits 3 points, wp07
+        # 1 point + 2 operators with empty content), so the document must not say
+        # "identical channel content"; and BOTH runs are pinned, because the
+        # sentence quotes a primary pair and a re-run pair (#11385 review P3).
+        for _art in (pri, rer):
+            _wp = {a["session"]: a["delta"] for a in _art["arms"]}
+            _a, _b = _wp["wp05_retro_writeup"], _wp["wp07_bluepeak_followup"]
+            assert _a["s4_items"] == _b["s4_items"] == 3, "the same-counts case"
+            assert (_a["added_by_s4"], _b["added_by_s4"]) == (3, 3), "same counts"
+            assert (_a["corrected_by_s4"], _b["corrected_by_s4"]) == (0, 0)
+        assert "the same channel COUNTS" in flat_all
+        assert "identical channel content" not in flat_all, (
+            "the falsified characterisation is back")
+        _pa = {a["session"]: a["delta"] for a in pri["arms"]}
+        _ra = {a["session"]: a["delta"] for a in rer["arms"]}
+        _costs = (_pa["wp05_retro_writeup"]["out_tokens"],
+                  _pa["wp07_bluepeak_followup"]["out_tokens"],
+                  _ra["wp05_retro_writeup"]["out_tokens"],
+                  _ra["wp07_bluepeak_followup"]["out_tokens"])
+        assert _costs == (968, 530, 958, 522), _costs
+        assert (f"cost {_costs[0]} vs {_costs[1]} " in flat_all), _costs
+        assert (f"({_costs[2]} vs {_costs[3]} in the re-run)" in flat_all), _costs
+        # ⛔ and the per-session comparison that replaced "Production can only offer
+        # fewer": production's cap is PER SESSION (15 x 3 = 45), this block offers
+        # 25-45 per session, so the cap is LARGER in 6 of 7 and equal in the seventh.
+        # Derived from the receipts + the rendered sections (#11385 review P3).
+        _off = [sum(len(v) for v in tool.search_from_s2(x["s2"]).values())
+                for x in _sess]
+        assert (min(_off), max(_off)) == (25, 45), (min(_off), max(_off))
+        assert sum(1 for x in _off if x < 45) == 6, sorted(_off)
+        assert "offers 25–45 items" in flat_all
+        assert "in 6 of the 7 sessions production's cap is the LARGER number" in flat_all
+        assert "Production can only offer fewer" not in flat_all, (
+            "the cross-session/per-session overreach is back")
         # ⛔ two more artifact-derivable figures the index row claims are
         # "re-derived": 29-49 -> 30-49 and 12/9 -> 12/8 were both green
         # (#11385 review P3).

@@ -203,10 +203,12 @@ graph, so S4's search results are the S2 items themselves").
     production too. The 7 receipts carry 84 entities + 33 events + 114 points +
     35 ``operators`` = 266, so the 35 operator items are never shown, their
     correction channel is STRUCTURALLY ZERO for this input, and the delta arm's
-    0 collisions is NOT evidence that it declined operator corrections. The
-    direction argument is unaffected (production's block is a subset of this
-    one, so the reasoning still holds) — the COUNT is, and an earlier revision of
-    the evidence document said "all 266".
+    0 collisions is NOT evidence that it declined operator corrections. The direction
+    argument does not run through a subset relation at all — production's block
+    holds PREVIOUS-graph hits, not this session's own items — it runs through the
+    floor: 0 is the minimum a correction channel can emit, so production cannot do
+    better on that channel whatever its block offers. The COUNT was wrong, and an
+    earlier revision of the evidence document said "all 266".
 
     ⛔ THE IDS ARE SYNTHETIC (`s2-ent-0`, `s2-pt-1`, …): the receipts record no
     graph ids. Production would offer real node ids (or none), so any output
