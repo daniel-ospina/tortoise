@@ -126,6 +126,36 @@ def lane():
             pass
 
 
+def test_lane_graph_name_is_owned_by_the_sweep_s_ownership_record(lane):
+    """The journal is an ownership RECORD only inside the sweep's vocabulary.
+
+    `_journal_append` is the third half of the raw-client contract BECAUSE the
+    session-end sweep reads the journal through `owns_by_ownership_record`
+    (`_SWEEP_OWNED_PREFIXES` = `test_`, `tortoise_test`, `team_`, `org_`). A
+    journaled name outside that vocabulary makes the append INERT: `_sweep_drop`
+    classifies it `preserved`, drops nothing, and then removes the journal anyway
+    (its `failed` list is empty) — so the graph this fixture minted can never be
+    reclaimed. That is the #1647 cycle-8 P2-2 leak still open with the raw-DETACH
+    census GREEN, which is the one thing this guard pair must not produce.
+
+    Red-first: the fixture named its graph `evict_<12hex>` when this test was
+    written — `evict_` is outside every owned prefix, so both assertions below
+    fail on that spelling and pass on the `test_evict_<hex>` this fixture now
+    mints.
+    """
+    _client, _graph, graph_name = lane
+
+    from tests._embedded import _owned_names, owns_by_ownership_record
+
+    assert owns_by_ownership_record(graph_name), (
+        f"{graph_name!r} is journaled but NOT owned — the sweep PRESERVES it and "
+        "consumes the journal, so the graph leaks for ever")
+    # `_owned_names` is the sweep's DELETE set, i.e. the same predicate applied
+    # to this fixture's single recorded name. Keeping both halves in one test is
+    # what stops the record and the drop set from drifting apart.
+    assert _owned_names([graph_name], None) == {graph_name}
+
+
 def _seed(graph, count: int, *, prefix: str = "n") -> list[str]:
     """Create `count` episodic `:Point` nodes with a deterministic coldness order."""
     keys: list[str] = []
