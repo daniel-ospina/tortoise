@@ -74,11 +74,26 @@ assert that a refused/errored pass issued none.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # #4053: `SystemExit(<str>)` exits 1, and 1 is this tool's own USAGE code
+    # (`CACHE_EVICTION_EXIT_USAGE`, `tortoise/cache_eviction.py:137`) — not a
+    # verdict about the graph (those are 2/3/4), so an old interpreter is
+    # correctly reported as a usage mistake HERE. The two siblings in this diff
+    # cannot use this shape (their exit 1 means STALE / violations) and print +
+    # exit 2 instead.
+    raise SystemExit(
+        f"tools/cache_evict.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/cache_evict.py …`"
+    )
+
 import argparse
 import contextlib
 import importlib
 import json
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any

@@ -40,10 +40,28 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # #4053: this is an ENVIRONMENT failure, not a map verdict. `SystemExit(<str>)`
+    # exits 1, and this tool's contract gives 1 to "violations found" (see the
+    # docstring: `0` clean · `1` violations · `2` unreadable) — so a check that
+    # never read the map would report "the map has violations", and a lane would
+    # hunt violations that do not exist. Print the message on stderr and exit 2,
+    # the code `main()` already gives a `Refusal` (docstring: "the document could
+    # not be parsed — exit 2, never a silent pass").
+    print(
+        f"tools/test_design_map_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/test_design_map_check.py …`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import json
 import re
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
