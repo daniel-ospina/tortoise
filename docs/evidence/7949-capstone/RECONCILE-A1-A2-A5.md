@@ -399,20 +399,32 @@ gh pr view 11205 --json state,mergeCommit,mergedAt,closingIssuesReferences   # M
 gh issue view 11237 --json state,closedAt                # OPEN — the Object→Object WRITE path
 # How an issue was actually CLOSED — THREE arms, and the PRIMARY field is closedByPullRequestsReferences,
 # NOT commit_id alone. Read it first: `gh issue view <n> --json state,closedByPullRequestsReferences`.
-#   1. NON-EMPTY => closed by that PR's body/title keyword (#11001 -> [11213], #10997 -> [11212]);
-#      ⛔ the closed event's commit_id is NULL in this arm — this is the trap
-#   2. empty + commit_id = SHA => the keyword rode the COMMIT message (#10999 -> 316a572ce2, whose
-#      message carries `Closes #10999`)
+#   1. NON-EMPTY => closed by that PR's body/title keyword. ⛔ Its `commit_id` is NOT fixed: it reads
+#      NULL for #11001 ([11213]) and #10997 ([11212]), and that PR's own merge sha for #10684 ([11105])
+#      and #10698 ([10738]) — the same shape, both outcomes. A non-null sha here does NOT demote it to
+#      arm 2, which is exactly why the field above is read FIRST and commit_id cannot classify alone.
+#   2. empty + commit_id = SHA => the keyword rode the COMMIT message and no PR body/title named it
+#      (#10999 -> 316a572ce2, whose message carries `Closes #10999`)
 #   3. empty + commit_id = null => a MANUAL close (#11021: [] and null)
-# ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 prints null too. And an empty
-#   closingIssuesReferences is not evidence either: that PR-body field stays empty in arms 2 and 3.
-gh api "repos/daniel-ospina/tortoise/issues/10999/timeline?per_page=100" --paginate \
-  --jq '.[] | select(.event=="closed") | {created_at, commit_id}'
-                                                          # ⛔ --paginate is MANDATORY: `per_page=100`
-                                                          # alone prints NOTHING once a timeline passes
-                                                          # 100 events (#11021 is at 91 today) and
-                                                          # "nothing" reads as "no closed event" — a
-                                                          # truncated check is worse than none
+# ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 reads null in two of its four examples. And an
+#   empty closingIssuesReferences is not evidence either: that PR-body field stays empty in arms 2 and 3.
+# The matrix above is this loop's OUTPUT, not prose — one arm-1 pair, one arm-2, one arm-3 per run:
+for n in 11001 10684 10999 11021; do
+  echo "#$n"
+  gh issue view $n --json state,closedByPullRequestsReferences --jq '[.closedByPullRequestsReferences[].number]'
+  gh api "repos/daniel-ospina/tortoise/issues/$n/timeline?per_page=100" --paginate \
+    --jq '.[] | select(.event=="closed") | {created_at, commit_id}'
+done
+                                                          # ⛔ --paginate is MANDATORY: without it gh
+                                                          # returns only the FIRST 100 events, and the
+                                                          # closed event is one line among many — a close
+                                                          # that happened late is not on page 1, so the
+                                                          # command prints NOTHING and "nothing" reads as
+                                                          # "no closed event". The failure is POSITIONAL,
+                                                          # not "timeline over 100 events": #11021 has 91
+                                                          # and prints, #4899 has 109 with an early close
+                                                          # and prints too — but a late close on either
+                                                          # would not. A truncated check is worse than none.
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
