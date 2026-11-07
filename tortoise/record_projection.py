@@ -1537,9 +1537,12 @@ def _read_migrations(migrations_dir: Path | None = None) -> str:
 #:
 #: Bounded because the process is long-lived and a test suite builds dozens of
 #: temporary migration trees; on overflow the whole cache is dropped rather than
-#: evicted one entry at a time, because a production process holds exactly ONE
-#: entry and an eviction policy would be a second thing to get right for a
-#: population that never grows (#9558).
+#: evicted one entry at a time, which is enough because the live set is tiny.
+#: ⛔ The population is NOT static: the key is `(tree, fingerprint)`, so a
+#: production process holds ONE entry while the migration files are unchanged and
+#: gains one more per distinct FILE STATE it observes — an edit, an addition, a
+#: removal (measured 1 → 2 → 3 across three reads with an edit between). Stale
+#: states are exactly what the wholesale drop clears (#9558).
 _SCHEMA_CACHE_LIMIT = 8
 
 #: `{(base, fingerprint): {"sql": str | None, "parsed": {name: result}}}` —
@@ -2047,8 +2050,10 @@ def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
     cost of a plan build. The answer is memoised for
     :data:`_JSONB_CACHE_TTL_SECONDS` — long enough that a plan (or a burst of
     writes) parses once, short enough that a migration landing while the process
-    runs is seen without a restart. `table_columns()` is uncached; this one is
-    bounded, and the difference is stated at the constant rather than implied.
+    runs is seen without a restart. `table_columns()` is CACHED on the same
+    migration fingerprint (:func:`_schema_entry`) — it is a per-RECORD read, so
+    it pays a stat pass — while this one is TTL-bounded; two caches, two
+    invalidation costs, stated at the constant rather than implied.
     """
     if migrations_dir is not None:
         return _jsonb_columns_for_dir(migrations_dir)

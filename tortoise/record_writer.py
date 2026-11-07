@@ -1001,8 +1001,10 @@ RECORD_POOL_MAX_CONNECTIONS = 2
 #: credential, a per-tenant DSN — `record_dsn()` re-reads the environment on
 #: every call) would leave up to two live sockets behind for EVERY value it ever
 #: saw. Past this many buckets the least-recently-created one is drained and its
-#: handles closed, which is the same eviction `_SCHEMA_CACHE_LIMIT` performs for
-#: the schema cache and for the same reason: the process is long-lived.
+#: handles closed, one bucket at a time. ⛔ The schema cache does the OPPOSITE on
+#: overflow — it drops WHOLESALE (`_SCHEMA_CACHE.clear()`) — because its entries
+#: are cheap to rebuild and its live set is tiny; do not model one on the other.
+#: Both bounds exist for the same reason: the process is long-lived.
 RECORD_POOL_MAX_IDLE_KEYS = 4
 
 #: Idle connections, keyed by the SHA-256 of their DSN (never the DSN itself: the
