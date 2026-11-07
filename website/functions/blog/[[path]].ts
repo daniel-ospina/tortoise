@@ -81,6 +81,7 @@ ${tags.map((t) => `<a class="tag ${tag === t ? "on" : ""}" href="/blog?tag=${enc
     description:
       "Memory for agents to remember why, not just what. Notes on the epistemic graph, EP belief propagation, and building agents that reason over what they know.",
     url: indexUrl,
+    imageAlt: "Tortoise blog — memory for agents to remember why, not just what.",
     type: "website",
     jsonLd: [
       {
@@ -128,6 +129,7 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
     description,
     url,
     image: post.cover_image_url,
+    imageAlt: post.title,
     type: "article",
     // BlogPosting + BreadcrumbList, plus FAQPage when the body has an FAQ
     // section — see articleJsonLd (pure, so the wiring is unit-tested).
