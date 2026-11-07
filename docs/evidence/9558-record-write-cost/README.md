@@ -43,7 +43,7 @@ the BEFORE-tree paragraph's three counts are `git` (`rev-list --count`,
 `FALSIFIER:` blocks over the file the tests name. Re-derive instead of trusting
 the prose.
 
-**The SIX items that are neither**, each named so a reader knows what to
+**The SEVEN items that are neither**, each named so a reader knows what to
 re-derive and what to read as a local observation:
 
 1. the server-logged `connection authorized` counts — a `grep -c` delta on the
@@ -80,7 +80,16 @@ re-derive and what to read as a local observation:
    `--reps 100`): resolution **0.162–0.166 ms**, fingerprint **0.161 ms**, warm
    `table_columns()` **0.345–0.349 ms** — the ABSOLUTE values move with the box,
    which is exactly why they are a declared local observation; what carries is the
-   sum property (warm ≈ resolution + one fingerprint pass), and that holds in both.
+   sum property (warm ≈ resolution + one fingerprint pass), and that holds in both;
+7. the SECOND cached reader's price relative to the first — **0.79×**, measured by a
+   reviewer of this artifact on one box at `860e85c91c` and quoted here only as a
+   SENSITIVITY. It is neither committed nor re-takeable: the instrument records
+   `refused_props_names()`'s CALL COUNT (`probe_record_write_cost.py`, and
+   `per_timed_record.refused_props_calls` in every `runs/*.json`) and never its
+   TIME, and `fingerprint_cost.py --column-consult` measures `table_columns()`
+   only. Nothing in the code bounds one reader's regex parse below the other's, so
+   bullet (a) charges both consults at the one price the committed probe actually
+   priced and reports the 0.79× case as a band, not a bound.
 
 Earlier revisions quoted a run set whose JSON was not kept,
 which made its numbers unfalsifiable — that is what `runs/` and
@@ -146,10 +155,13 @@ per-record path drives BOTH cached readers (`table_columns()` AND
 BEFORE tree `refused_props_names` called `_read_migrations` — the same full READ
 of the same bytes `table_columns` paid; ⚠️ the READ is shared, the PARSE is not:
 the two readers run different regexes over it, and the second's uncached-minus-warm
-delta measures **0.79×** the first's on this box, so charging it at the first's
-price is an UPPER BOUND on the column half — 2 × 1.193–1.256 = 2.386–2.512 ms —
-and the measured ratio narrows it to ≈2.14–2.25 ms). Both readers are charged on
-the MEDIAN, because the warm
+delta measured **0.79×** the first's on this box, so the column half is
+**2 × 1.193–1.256 = 2.386–2.512 ms** under the artifact's convention (both consults
+charged at the one price the committed probe priced) and **≈2.14–2.25 ms** if the
+second reader is 0.79× as dear — ⚠️ that ratio is item 7 of the list at the top, a
+SENSITIVITY, not a committed figure or a bound: a *costlier* second parse moves the
+column half the other way, and nothing in the code or the committed runs fixes the
+ratio). Both readers are charged on the MEDIAN, because the warm
 cost is what the per-record path pays: the probe's 20-sample loop runs before the
 first write, so its single cache-miss sample sits in the mean (AFTER mean
 0.460–0.583 vs median 0.332–0.353; the BEFORE pair is 1.582–1.651 vs 1.546–1.588,
@@ -157,12 +169,13 @@ a **1.5–4.7 % gap** per run — 1.54 / 3.36 / 4.69 / 3.72 % — which shows th
 an AFTER-tree artifact: the AFTER means sit 35–76 % above their medians, the
 BEFORE means a few per cent). 1.546–1.588 →
 0.332–0.353 ms = **1.193–1.256 ms** for the `table_columns` consult, charged twice
-for the two readers (upper bound; see above) = **2.386–2.512 ms**. The connection
-half is therefore the rest — **12.5–13.9 ms** at that upper bound, pairing the
-win's lower end with the column half's UPPER end and its upper end with the column
-half's lower end — i.e. **83.2–85.3 %**; at the measured 0.79× ratio the column
+for the two readers (the artifact's convention; see above) = **2.386–2.512 ms**. The
+connection half is therefore the rest — **12.5–13.9 ms**, pairing the win's lower
+end with the column half's UPPER end and its upper end with the column half's
+lower end — i.e. **83.2–85.3 %**; if the second reader is 0.79× as dear the column
 half is 2.14–2.25 ms, the connection half **12.7–14.1 ms** and its share
-**85.0–86.9 %**. So the honest headline is **~83–87 %**, ~84–85 % of the win. ⚠️ This lands near the
+**85.0–86.9 %**. So the headline is **~83–87 %**, ~84–85 % of the win, the second
+band being a SENSITIVITY on item 7 rather than a second measurement. ⚠️ This lands near the
 ORIGINAL "~80-85 % of the ~15 ms saved", and that is a coincidence of BAND, not
 arithmetic: the original did charge the consult twice, but at 0.27–0.33 ms of stat
 (an uncommitted 0.135–0.166 ms band, with `_migrations_dir()`'s resolution never
@@ -179,9 +192,10 @@ revision, ≈0.68 ms of cache-consult overhead per record, in two halves this
 bullet used to conflate**: `replay_plan` drives BOTH cached readers, and each
 consult costs (i) `_migrations_dir()` → `_complete()`, fifteen `Path.exists()`
 calls resolving the base **before** the key is built (`_schema_entry`'s
-`base = migrations_dir or _migrations_dir()`, with `_complete` at `:1497`/`:1502`;
-cited by SYMBOL, because an added line above it re-stales a bare line number —
-this PR's own `record_projection.py` edit moved it 1659 → 1665), and (ii) one
+`base = migrations_dir or _migrations_dir()`, with `_complete` at `:1497` and
+`_migrations_dir` at `:1502`; the seam is cited by SYMBOL on purpose — a bare line
+number re-stales under exactly the edits this PR makes, and this one moved twice
+inside it), and (ii) one
 `_migrations_fingerprint` pass over the same
 fifteen files (0.160–0.169 ms, `fingerprint-cost.json`). The RESOLUTION half is
 item 6 of the list at the top — taken on one box at `d51c7897d6`, re-takeable by
@@ -210,8 +224,9 @@ bullet. It also said "~92-94 %" (94 % only falls out of the
 superseded ~0.9–1.0 ms column-half estimate the same bullet replaced). It said
 "~91.6–92.7 %" — **the revision immediately before this one**, which charged ONE
 column consult while the per-record path pays TWO (both cached readers, above), so
-the column half is 2.386–2.512 ms at its upper bound (2.14–2.25 ms at the measured
-ratio) and the connection share 83.2–86.9 %, not 1.193–1.256 ms and 92 %. It said "≈0.9–1.0 ms of pure
+the column half is 2.386–2.512 ms under the artifact's convention (2.14–2.25 ms if
+the second reader is 0.79× as dear, item 7) and the connection share 83.2–86.9 %,
+not 1.193–1.256 ms and 92 %. It said "≈0.9–1.0 ms of pure
 stat" for the residual — which is 2 x the WHOLE cached call (stat + the per-call
 dict copy), not 2 x the stat pass. And the revision that replaced it said
 "0.32–0.34 ms of stat overhead", which is the whole warm call attributed to the

@@ -1619,10 +1619,12 @@ def _migrations_fingerprint(base: Path) -> tuple:
     scale: `replay_plan` drives BOTH cached readers, so a record pays two consults
     and therefore two digests, and both sides of the fraction double. ⚠️ Read that
     against the artifact's bullet (a), which charges the column half as 2 × this
-    one consult's delta — an UPPER bound, since the second reader parses the same
-    bytes with different regexes and measures ~0.79× the first's delta (2.39–2.51
-    ms at the bound, 2.14–2.25 ms measured, of a 14.98–16.28 ms win; connection
-    half ~83–87 %) — one consult alone is NOT the column half of the win. Real but
+    one consult's delta — the artifact's convention, since the committed probe priced
+    only THIS reader; the second reader parses the same bytes with different regexes
+    and a reviewer measured its delta at ~0.79× this one's (2.39–2.51 ms under the
+    convention, 2.14–2.25 ms at that ratio, of a 14.98–16.28 ms win; connection half
+    ~83–87 %), a SENSITIVITY rather than a bound. One consult alone is NOT the
+    column half of the win. Real but
     not decisive, and not worth it for a residual that needs an archive extraction
     landing inside a single inode-clock tick. The trade is therefore explicit:
     covered for every writer except that one. The test reds it if the fingerprint

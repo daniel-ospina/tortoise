@@ -123,8 +123,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # ⛔ NO `--tree`, deliberately (both directions of the same hazard):
-    #   * this path WRITES `fingerprint-cost.json`, the committed source five docs
-    #     cite — a foreign tree's numbers written here would carry no field saying
+    #   * this path WRITES `fingerprint-cost.json`, the committed source the artifact,
+    #     the docs index, the epic's R10 paragraph and a module docstring all cite — a
+    #     foreign tree's numbers written here would carry no field saying
     #     so, silently replacing the band every reader trusts; and
     #   * `--column-consult` measures the module THIS PROCESS imported, so a
     #     `--tree` there would print one tree's medians under another's name.

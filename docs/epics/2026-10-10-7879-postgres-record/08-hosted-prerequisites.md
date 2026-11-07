@@ -895,10 +895,11 @@ overhead remains in two halves: ≈0.33 ms resolving the base (`_migrations_dir(
 readers and each consult pays both — the filed fix (#11388) saves ONE fingerprint pass (0.160–0.169 ms) and
 leaves the resolution half in place. (An earlier revision of this line said "0.32–0.34 ms of pure stat",
 which was the whole warm call attributed to the fingerprint; the RESOLUTION half it now rests on (median 0.169 ms, measured on one box at that
-PR's head) is the artifact's SIXTH "items that are neither" — printed not committed, because a wall-clock file must name
-the tree it was taken on, re-takeable by `fingerprint_cost.py --column-consult` — while its siblings ARE committed (the
-fingerprint pass in `fingerprint-cost.json`, the warm total in `runs/*.json`'s `table_columns_isolated_ms`), and 0.68 ms/record
-charges BOTH cached consults, since `replay_plan` drives both readers.) Batching the per-record insert was explicitly deferred, not forgotten (see
+PR's head) is item 6 of the artifact's SEVEN "items that are neither" — printed not committed, because a wall-clock file
+must name the tree it was taken on, re-takeable by `fingerprint_cost.py --column-consult` — while its siblings ARE committed
+(the fingerprint pass in `fingerprint-cost.json`, the warm total in `runs/*.json`'s `table_columns_isolated_ms`); the second
+reader's 0.79x price ratio is item 7, a SENSITIVITY the probe cannot re-take (it records that reader's call count, never its
+time). 0.68 ms/record charges BOTH cached consults, since `replay_plan` drives both readers.) Batching the per-record insert was explicitly deferred, not forgotten (see
 above).
 **What it blocks:** capture latency at volume. **Not a first-customer gate** — hosted capture is off
 by owner ruling (2026-10-14) and the beta volume is unmeasured. **But it must land before the per-record cost of a real
