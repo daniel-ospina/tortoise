@@ -611,6 +611,13 @@ _KNOWN_NARROW_READS: dict[tuple[str, str], tuple[int, str]] = {
         (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value swaps the "
             "real LLM for a deterministic mock; this site is the refusal that keeps the "
             "seam out of hosted mode"),
+    ("tortoise/session_source_prose_migration.py",
+     "TORTOISE_11070_CENSUS_DEDUPE_DISABLED"):
+        (1, "OVERRIDES (#4128): #4097's truthy-set parsing — the truthy value restores the "
+            "PRE-FIX census (#11176: one record per ROW, first-row tail mark), which is the "
+            "instrument that can serve a truncated transcript as COMPLETE and count one "
+            "`:Source` twice; a `=true` written for legibility would silently report a "
+            "census number taken by the wrong instrument"),
 }
 
 def _module_string_constants(tree: ast.Module) -> dict[str, str]:
