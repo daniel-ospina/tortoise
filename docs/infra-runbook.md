@@ -1703,8 +1703,10 @@ Two halves close that, and neither is a health *reading*:
    Fly token. `curl --max-time 5` is what turns *no answer* into a DOWN verdict
    and a page — during the outage the app took 9–12 s to `000` from outside and
    ~45 s to the eventual 504, so a 5 s bound alarms within one cycle. The URL is
-   in the script's production set (an unrecognised URL is a **DRILL**: no page)
-   and deliberately NOT restartable — the primary API probe owns restarting the
+   in the script's production set (an unrecognised URL is a **DRILL**: `[DRILL]`-titled,
+   **never restartable** — but it still PAGES, with a `[DRILL]` label; a drill is
+   not silent, it is only non-production. Cases 88b and the e2e(l) arm pin both
+   halves) and deliberately NOT restartable — the primary API probe owns restarting the
    machine, and a second restart arm would spend `MAX_RESTARTS_PER_HOUR` twice.
    Pinned in BOTH directions by cases 99 (the step, its label, its production-set
    membership and its 5 s bound), 88b (`000` → `PROD DOWN` + the machine-backed
@@ -1725,7 +1727,7 @@ and it is not a substitute for the TCP check that catches a dead process. Do
 the loop is fine is the exact circularity that let this outage run unattended.
 
 ⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
-`control_ok()` runs only on the restartable path (`availability-watchdog.sh:2507`,
+`control_ok()` runs only on the restartable path (`availability-watchdog.sh:2529`,
 inside `if [ "$restart_mode" = "DOWN" ]`), because the disruptive action it
 guards — a machine restart — cannot happen on a hard-disarmed arm. So a TOTAL
 runner-side egress failure pages `PROD DOWN` from THIS step instead of
@@ -2159,9 +2161,18 @@ limits.
 2. **One GitHub issue** appears (or an existing one gets a comment):
    `[monitor] PROD DOWN — api.premiselabs.co is not answering the availability
    probe` (or `PROD DEGRADED` for the UNEXPECTED class), labelled `auto-filed`.
-   The auth target files a **separate** incident with its own host in the title
-   (`[monitor] PROD DOWN — app.premiselabs.co is not answering the
-   availability probe`). An external page (Telegram) also fires on the
+   Each of the **three** production targets files its **own** incident, titled by
+   its own host — so read the title before you conclude anything about the API:
+
+   | target | title host | what a DOWN means |
+   |---|---|---|
+   | API (default) | `api.premiselabs.co` | the API machine is not answering (§7.1a) |
+   | Pages auth | `app.premiselabs.co` | the Pages auth surface is not answering (§7.1b) |
+   | served-request liveness | `api.premiselabs.co (served request)` | the API accepts TCP but a request that must be **served** did not answer inside 5 s (§7.1c) |
+
+   ⚠️ The liveness incident is the one that fires when the API's Fly checks are
+   still green — that combination is the whole point of #10892, so do not dismiss
+   it because `/health` answers. An external page (Telegram) also fires on the
    transition when the paging secrets are set.
 3. The issue **body** is machine-managed and carries the verdict, the first
    observation time, the failing-run count, the raw probe evidence, and the
@@ -2597,7 +2608,7 @@ tracked as **#5798**.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
   `CONTROL_URL` check) — **on the restartable Fly API target only.** The control
   probe is consulted inside the restart decision
-  (`availability-watchdog.sh:2507`), so the TWO hard-disarmed arms — the Pages
+  (`availability-watchdog.sh:2529`), so the TWO hard-disarmed arms — the Pages
   auth surface and the served-request liveness surface — never reach it: a total
   runner-side egress failure pages them as `PROD DOWN`/`PROD DEGRADED` (a TRUE
   alert about the runner, not the app), and the case is disambiguated by the

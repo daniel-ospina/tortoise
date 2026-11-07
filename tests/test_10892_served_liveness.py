@@ -273,8 +273,11 @@ def test_a_blocked_loop_cannot_serve_either_endpoint(monkeypatch):
         "must be impossible to produce without the loop running it")
     # The two assertions above accept either no answer at all (the probe's own
     # bound expired) or a 5xx (the outermost WaitBound fired first) — BOTH are
-    # "no usable answer inside the client's bound", and which one arrives depends
-    # on the machine's timing, not on the implementation. So the evidence that
+    # "no usable answer inside the client's bound". ⚠️ The 5xx arm is ROBUSTNESS,
+    # not a path this test measures: `_TRANSPORT_WAIT_BOUND_S` is 10 s while
+    # `PROBE_BUDGET_S` is 5 s and the block is held for `BLOCK_S`, so the client
+    # budget always expires first and both probes end as a read timeout. So the
+    # evidence that
     # the loop was genuinely HELD is not the ANSWER's shape, it is the TIME: a
     # probe that returned in a few ms never met the block at all. Asserting that
     # directly is deterministic where asserting "both timed out" was not (#10892

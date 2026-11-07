@@ -2378,7 +2378,7 @@ assert_not_contains "$JOB_ENV" "GH_TOKEN" "GH_TOKEN is NOT job-level (step env o
 # GitHub env precedence is STEP > JOB > WORKFLOW, so refusing PROD_PROBE_URLS on
 # the step is not enough: a job-level value reaches the script just as well and
 # narrows the production set, classifying the auth probe a DRILL ([DRILL]-titled,
-# no page, self-heal disarmed) while the diff looks correct. Found in review — the
+# never restartable, but still paged with a [DRILL] label) while the diff looks correct. Found in review — the
 # step-scoped refusal below passes with a job-level PROD_PROBE_URLS present.
 assert_not_contains "$JOB_ENV" "PROD_PROBE_URLS" \
   "PROD_PROBE_URLS is NOT job-level either (env precedence: job-level reaches the script and silently drills the auth probe)"
@@ -2449,7 +2449,8 @@ assert_contains "$AUTH_STEP" "PROBE_HOST_LABEL: $AUTH_HOST" \
   "the auth step's host label matches the host it actually probes (its dedupe key)"
 # …and the script must classify that same URL as PRODUCTION. PROD_PROBE_URLS is
 # built from AUTH_PROBE_URL; if only the workflow moves, the step still runs but
-# is classified a DRILL — [DRILL]-titled, no page, self-heal disarmed — while
+# is classified a DRILL — [DRILL]-titled, never restartable, but still PAGED with
+# a [DRILL] label (it is not silent; see the e2e(l) arm) — while
 # looking correct in the diff. Setting PROD_PROBE_URLS in the step would do the
 # same thing through another route, so it is refused too.
 assert_contains "$(grep '^AUTH_PROBE_URL=' "$WATCHDOG" || true)" "$AUTH_PROBE_URL_STEP" \

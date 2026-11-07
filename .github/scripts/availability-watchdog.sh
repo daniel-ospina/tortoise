@@ -918,7 +918,8 @@ is_restartable_url() { # <url>
 # because it lists every machine-backed production target, so adding a
 # machine-backed target to `PROD_PROBE_URLS` without adding it HERE silently
 # sends on-call to a Pages deploy during a machine outage (#10892 review round
-# 4). `docs/infra-runbook.md` §7.2 names this set for exactly that reason.
+# 4). `docs/infra-runbook.md` §7.1c and §7.7 name this set for exactly that
+# reason (⚠️ NOT §7.2 — that is the operator's "How to read a failure" page).
 is_machine_backed_url() { # <url>
   local u p
   u="${1%/}"
