@@ -3854,10 +3854,16 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
         #    sentences hit it ("…runs the SDK's own default …", "…`:Object` on
         #    its default path").
         # Measured on this doc: 1 hit with the clause, 1 with the `inner def`
-        # rewording, 0 with the clause deleted.
+        # rewording, 0 with the clause deleted, 0 with the clause REVERSED
+        # ("Inside the walk, and therefore reported").
+        #  · the polarity cue is why the reversed doc reds: `"decorator" and
+        #    "default"` alone stays GREEN on a sentence that asserts the exact
+        #    inverse the comment above names (#11389 review, P3).
         s3 = _doc_section(text, "## 3.", "## 4.").lower()
         residual = [sentence for sentence in s3.split(". ")
-                    if "decorator" in sentence and "default" in sentence]
+                    if "decorator" in sentence and "default" in sentence
+                    and ("not" in sentence or "never" in sentence
+                         or "outside" in sentence)]
         assert residual, (
             "the doc claims the declaration is total; the walk does not visit a "
             "nested def's defaults/decorators, and no sentence of §3 says so")
