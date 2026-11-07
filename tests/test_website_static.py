@@ -4021,9 +4021,15 @@ class TestSiteIconAndSocialPreviewContract:
     # The encoded-size floor a link-preview card must clear. MEASURED, not guessed:
     # a FLAT 1200x630 JPEG at maximum quality is 22,016 B (`sips -s formatOptions
     # best`), so the first cut's 20 KB floor passed the very image it was written to
-    # reject. The authored card is 94,066 B, so 40 KB sits 1.82x above a flat one and
-    # 2.35x below the real card. `test_the_content_guards_reject_a_blank_image` holds
-    # this floor ABOVE that measurement, so lowering it to 20 KB again is red.
+    # reject. The floor is enforced on EVERY page's declared card, and the three cards
+    # at this head are 94,066 B (og-tortoise.jpg), 49,555 B (investors-og.jpg) and
+    # 50,393 B (design-partners-intro-og.jpg) — i.e. 2.35x, 1.24x and 1.26x the floor,
+    # not 2.35x each. Re-encoding the SAME pixels is what eats the margin: with
+    # `ffmpeg -q:v 4` the two smaller cards measure 37,024 B and 39,818 B, both under
+    # the floor. That is the one false red this bound can produce, which is why
+    # `_card_floor_violation`'s message tells the reader to LOOK at the card first.
+    # `test_the_content_guards_reject_a_blank_image_and_keep_their_measured_floors`
+    # holds this floor ABOVE the flat measurement, so lowering it to 20 KB again is red.
     CARD_MIN_BYTES = 40_000
     # What a flat 1200x630 JPEG measures — the image CARD_MIN_BYTES exists to reject.
     # Recorded as a number so the relationship is ASSERTED (`FLAT_CARD_BYTES <
@@ -4150,7 +4156,7 @@ class TestSiteIconAndSocialPreviewContract:
         """Every reason a decoded icon is not a mark; empty means it carries art.
 
         Split out of the guard so the SAME predicate can be run against a blank
-        fixture (see `test_the_content_guards_reject_a_blank_image`). A check whose
+        fixture (see `test_the_content_guards_reject_a_blank_image_and_keep_their_measured_floors`). A check whose
         failure path is never executed cannot be told apart from a no-op.
         """
         counts = cls._png_palette(data)
@@ -4185,10 +4191,14 @@ class TestSiteIconAndSocialPreviewContract:
         """Why an encoded card is too small to BE a card — None when it clears."""
         if len(data) >= cls.CARD_MIN_BYTES:
             return None
-        return (f"{page}'s card {path.name} is only {len(data)} bytes — a 1200x630 "
-                f"JPEG that small is near-uniform (a flat rectangle of one colour "
-                f"measures {cls.FLAT_CARD_BYTES // 1000} KB), and a link preview of "
-                "it is an empty block rather than a card")
+        return (f"{page}'s card {path.name} is only {len(data)} bytes, under the "
+                f"{cls.CARD_MIN_BYTES // 1000} KB floor — a flat 1200x630 card of one "
+                f"colour measures {cls.FLAT_CARD_BYTES // 1000} KB, so a card this "
+                "small is usually near-uniform and a link preview of it is an empty "
+                "block. If this card is REAL, open it: a legitimate re-encode can land "
+                "here (the smallest real card is 49,555 B; re-saving it with "
+                "`ffmpeg -q:v 4` measures 37,024 B). Then lower CARD_MIN_BYTES in "
+                "tests/test_website_static.py and record what you measured.")
 
     @staticmethod
     def _jpeg_size(data: bytes) -> tuple[int, int]:
@@ -4437,12 +4447,22 @@ class TestSiteIconAndSocialPreviewContract:
             assert not problems, "\n".join(problems)
 
     def test_the_wordmark_is_never_used_as_an_icon(self):
-        """`/logo.png` is a 400x244 wordmark — a tab renders it as a squashed bar."""
+        """`/logo.png` is a 400x244 wordmark — a tab renders it as a squashed bar.
+
+        Reads the same parsed `<link>` elements the trio assertion reads, and splits
+        `rel` the same way: a regex over the raw markup is case-sensitive,
+        double-quote-only and order-sensitive, so `rel="shortcut icon"` — which the
+        trio assertion deliberately accepts — walked straight past it.
+        """
         for page in self._pages():
             head = self._head(page.read_text())
-            for tag in re.findall(r"<link[^>]*rel=\"(?:apple-touch-)?icon\"[^>]*>", head):
-                assert "/logo.png" not in tag, (
-                    f"{page.name} uses the wordmark as an icon: {tag}")
+            for ln in self._links(head):
+                rel = ln.get("rel", "").lower().split()
+                if "icon" not in rel and "apple-touch-icon" not in rel:
+                    continue
+                assert "/logo.png" not in ln.get("href", ""), (
+                    f"{page.name} uses the wordmark as an icon: rel={ln.get('rel')!r} "
+                    f"href={ln.get('href')!r}")
 
     # --- 2. the preview resolves and is the size it claims ---------------
 
