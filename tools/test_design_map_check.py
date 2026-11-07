@@ -420,6 +420,20 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     # with a MISSING crosswalk header is therefore a false RED — the direction that
     # costs a re-run, never a gate that reports green over an ungraded row.
     headed = [block for block in blocks if _is_crosswalk_block(block)]
+    # The header is a HINT, never the authority. A reworded FIRST header cell made the
+    # real crosswalk unheaded while a DECOY headed block elsewhere in §5 kept `headed`
+    # non-empty, so the fallback never fired and the real rows went UNGRADED: blanking
+    # AND deleting §6.4's surface cell both graded CLEAN, exit 0 on the REQUIRED `docs`
+    # job (measured; the pre-shape tool caught both). The pinned seam tokens are the
+    # crosswalk's ACTUAL signature — its first column is the plan section — so when no
+    # headed block carries one, grade every block instead of trusting the hint.
+    if headed and not any(
+        re.match(r"^\|\s*" + re.escape(seam), line)
+        for block in headed
+        for line in block
+        for seam in PLAN_SEAMS
+    ):
+        headed = []
     if headed:
         # A block with NO separator is a continuation of the table above it (a blank
         # line splits the markdown table in the parser but not on the page). Grading
@@ -860,6 +874,17 @@ def self_test(text: str) -> int:
         return 1
     failures = 0
     untestable = 0
+    # The verdict the SHIPPED document already earns. A "clean"-expected case is a
+    # NEGATIVE control — it asserts the mutation does not CHANGE that verdict — so the
+    # baseline is what it is compared against. Compared against an ABSOLUTE "clean",
+    # every unrelated violation in the map made the control FAIL and the summary accuse
+    # the checker of being a rubber stamp on a map that merely carried a violation
+    # (measured: one `R2 SF10` violation produced `1/17 NOT caught`), which is the false
+    # diagnosis this arm exists to avoid.
+    try:
+        baseline_violations: list[str] = check(text)[0]
+    except Refusal:
+        baseline_violations = []
     for name, mutate, expected in SELF_TEST_MUTATIONS:
         try:
             mutated = mutate(text)  # type: ignore[operator]
@@ -871,13 +896,25 @@ def self_test(text: str) -> int:
             print(f"  UNTESTABLE {name}: {exc}", file=sys.stderr)
             untestable += 1
             continue
+        violations: list[str] | None = None
         try:
             violations, _stats = check(mutated)
             actual = "violation" if violations else "clean"
             detail = violations[0] if violations else "no rule fired"
         except Refusal as exc:
             actual, detail = "refusal", str(exc)
-        if actual == expected:
+        if expected == "clean":
+            # NEGATIVE control: the verdict must be UNCHANGED, not globally clean.
+            ok = violations is not None and violations == baseline_violations
+            if ok:
+                detail = (
+                    f"verdict unchanged — {len(violations or [])} violation(s) before and after"
+                )
+            else:
+                detail = f"the mutation changed the verdict — {detail}"
+        else:
+            ok = actual == expected
+        if ok:
             print(f"  ok   {name} → {actual} ({detail})")
         else:
             print(

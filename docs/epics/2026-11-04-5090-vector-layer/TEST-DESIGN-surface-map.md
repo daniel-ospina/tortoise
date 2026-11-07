@@ -198,7 +198,7 @@ test-design-map-check: CLEAN — every rule holds
   ok   rename the §7 label AND blank its surface cell (a row the gate cannot see) → violation (R5 §7: missing from the §5/§6 crosswalk)
   ok   add a crosswalk row with no `§` label and a blank surface cell → violation (R5 extra row: names no surface)
   ok   delete the §6.4 surface cell outright (a crosswalk row one column short) → refusal (§6.4 crosswalk row has 3 column(s); the table needs exactly 4 (plan § · seam / interface · surface(s) · note) — a DELETED cell shifts the note into the surface column, where its own words satisfy the arm below)
-  ok   append an ordinary §5 table with a `surface` column (must stay CLEAN) → clean (no rule fired)
+  ok   append an ordinary §5 table with a `surface` column (must stay CLEAN) → clean (verdict unchanged — 0 violation(s) before and after)
   ok   splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   splice a `\\|` into SF2's contract cell (escaped backslash + REAL delimiter) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   delete the child table's section heading → refusal (section `## 4.` is missing — cannot check the map)
@@ -212,7 +212,8 @@ cell**, **add a crosswalk row with no `§` label and a blank cell**, **append an
 layer as a mechanism, retype a crosswalk surface as one that has no row, **splice a raw `|` into a cell**,
 **splice a `\\|` into a cell**, drop a child, drop a capability, forget a seam, destroy the section
 structure) to an in-memory
-copy and **requires each to be caught**. That is the same discipline the epic applies to its own probe
+copy and **requires each mutation's stated outcome** — sixteen must be caught, and one, a
+**NEGATIVE control**, must leave the verdict UNCHANGED. That is the same discipline the epic applies to its own probe
 — *an instrument that cannot fail is not an instrument.* "Every mention of it" is meant literally: the
 case deletes the mentions, because the first version of the case **renamed** them to `SF1` and so
 never built the consistent shrink its own label claimed.
@@ -253,14 +254,25 @@ an appended `| area | kind | surface |` table, exit 2, `CLEAN` before the per-bl
 landed). Requiring both cells AND the four-column width closes it: appended `surface` /
 `surfaces` / `note` / 4-column tables and a `| plan § | note |` table all stay `CLEAN` again, while a
 second, validly-headed crosswalk table is still graded (its 3-cell row refuses, its blank cell
-violates) and a deleted header still fails CLOSED.
+violates) and a deleted header still fails CLOSED. ⚠️ **The header is a hint, never the authority.**
+A reworded FIRST header cell left the real crosswalk unheaded while a DECOY headed table elsewhere in
+§5 kept the headed set non-empty, so the fail-closed fallback never fired and blanking AND deleting
+§6.4's surface cell both graded `CLEAN` (measured). The pinned seam tokens are the crosswalk's actual
+signature, so a headed set in which NO block carries one is discarded and every block is graded: with
+the first cell reworded to `seam` / `Plan §` / `plan`, the blanked cell reds (`R5 §6.4: names no
+surface`) and the deleted one REFUSES, while the untouched map stays `CLEAN`.
 
 The false-RED direction has its own self-test case, `append an ordinary §5 table with a
 surface column (must stay CLEAN)`, and it is a **NEGATIVE control**: the one case whose expected
-outcome is `clean`, which is why the summary line counts `N/N mutation(s) behaved as designed`
-rather than "refused". It is load-bearing in the measured direction — restoring content-only header
-matching makes it FAIL (`expected clean, got refusal`, exit 1) — so the shape requirement cannot
-silently relax back to a content hint.
+outcome is that the verdict is UNCHANGED, which is why the summary line counts `N/N mutation(s)
+behaved as designed` rather than "refused". It is compared against the verdict the SHIPPED map already
+earns, not against an absolute "clean" — an absolute comparison failed the control on any map carrying
+a single unrelated violation and accused the checker (`1/17 NOT caught`) of the document's fault
+(measured). It is load-bearing in the measured direction: restoring content-only header matching makes
+it FAIL (`expected clean, got refusal`, exit 1). ⚠️ Like the width rule it is a ONE-place guarantee,
+not a three-place one — reverting the shape test, deleting the case and lowering the floor to 16 leaves
+the arm green with the false RED back (measured: self-test exit 0, the `surface`-column table exit 2),
+while deleting the case alone is already red (`16 mutation(s) registered, at least 17 required`).
 
 **The parity case is the one this review added, because the rule that had no case was the parity
 rule.** `cells()` splits on backslash **parity** — a pipe delimits only after an **even** run of
