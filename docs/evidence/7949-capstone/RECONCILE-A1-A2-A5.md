@@ -396,15 +396,6 @@ gh pr view 11213 --json state,mergeCommit,mergedAt
 gh pr view 11211 --json state,mergeCommit,mergedAt,closingIssuesReferences
 gh pr view 11212 --json state,mergeCommit,mergedAt        # MERGED 21:33:54Z, mergeCommit 80c912244
 gh pr view 11205 --json state,mergeCommit,mergedAt,closingIssuesReferences   # MERGED 22:40:32Z, 316a572ce2
-gh pr view 11105 --json state,mergeCommit,mergedAt        # MERGED 11:18:49Z, mergeCommit 24d2dbcb — arm 1's
-                                                          # non-null sha for #10684 IS this PR's MERGE commit,
-                                                          # not a branch commit: compare the loop's commit_id
-                                                          # to THIS value, because that equality is the only
-                                                          # thing keeping arm 1 from collapsing into arm 2
-gh pr view 10738 --json state,mergeCommit,mergedAt        # MERGED 16:14:21Z, mergeCommit fd6558c5 — the
-                                                          # same read on the second arm-1 issue (#10698), so
-                                                          # the pair is re-derived rather than asserted from
-                                                          # the arm's own prose
 gh issue view 11237 --json state,closedAt                # OPEN — the Object→Object WRITE path
 # The arms' own evidence — the two PRs whose merge sha arm 1 inherits, and arm 2's commit message.
 # Without these three lines the loop prints a sha but nothing says WHAT it must equal, so a reader
@@ -424,8 +415,9 @@ git log -1 --format=%B 316a572ce2 | grep '^Closes #10999' # arm 2's keyword, in 
 # ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 reads null in two of its four examples. And an
 #   empty closingIssuesReferences is not evidence either: that PR-body field stays empty in arms 2 and 3.
 # The matrix above is this loop's OUTPUT, not prose — arm 1's four named issues, plus one arm 2 and
-# one arm 3. Every issue AND every PR the arms name is read here, so no row is asserted without
-# a command:
+# one arm 3. Every issue AND every PR the arms name is read here, and so is arm 2's commit message —
+# the third kind of fact, neither an issue nor a PR — so no row, and no equality a row rests on, is
+# asserted without a command:
 for n in 11001 10997 10684 10698 10999 11021; do
   echo "#$n"
   gh issue view $n --json state,closedByPullRequestsReferences --jq '[.closedByPullRequestsReferences[].number]'
@@ -445,14 +437,6 @@ done
                                                           # count drifts, and quoting one is how this note
                                                           # got it wrong twice. A truncated check is worse
                                                           # than none.
-# arm 2's load-bearing fact, which the loop cannot settle: it prints a SHA but not the MESSAGE that made
-# the SHA close anything. #10999 is arm 2 precisely because `Closes #10999` rode the commit message and
-# no PR body/title named it — so read the message, and read it here:
-git log -1 --format=%B 316a572ce2 | grep -n '^Closes #10999$'   # 45: the keyword ALONE on its line — anchor
-                                                          # it, because an unanchored grep also matches prose
-                                                          # in the same squashed body that merely NAMES the
-                                                          # phrase; a keyword and a mention of it are not the
-                                                          # same fact, and only the keyword closes an issue
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
