@@ -408,8 +408,9 @@ gh issue view 11237 --json state,closedAt                # OPEN — the Object�
 #   3. empty + commit_id = null => a MANUAL close (#11021: [] and null)
 # ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 reads null in two of its four examples. And an
 #   empty closingIssuesReferences is not evidence either: that PR-body field stays empty in arms 2 and 3.
-# The matrix above is this loop's OUTPUT, not prose — one arm-1 pair, one arm-2, one arm-3 per run:
-for n in 11001 10684 10999 11021; do
+# The matrix above is this loop's OUTPUT, not prose — arm 1's four named issues, plus one arm 2 and
+# one arm 3. Every issue the arms name is read here, so no row is asserted without a command:
+for n in 11001 10997 10684 10698 10999 11021; do
   echo "#$n"
   gh issue view $n --json state,closedByPullRequestsReferences --jq '[.closedByPullRequestsReferences[].number]'
   gh api "repos/daniel-ospina/tortoise/issues/$n/timeline?per_page=100" --paginate \
@@ -421,10 +422,12 @@ done
                                                           # that happened late is not on page 1, so the
                                                           # command prints NOTHING and "nothing" reads as
                                                           # "no closed event". The failure is POSITIONAL,
-                                                          # not "timeline over 100 events": #11021 has 91
-                                                          # and prints, #4899 has 109 with an early close
-                                                          # and prints too — but a late close on either
-                                                          # would not. A truncated check is worse than none.
+                                                          # not "timeline over 100 events": #11021 above has
+                                                          # 91 events and its close is in page 1, so it
+                                                          # prints — let that close drift past event 100 and
+                                                          # the same command would print nothing. No count is
+                                                          # quoted here on purpose: it drifts. A truncated
+                                                          # check is worse than none.
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
