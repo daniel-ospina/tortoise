@@ -512,12 +512,12 @@ class _DeepSeekStubJudge(_StubJudge):
     """The same offline grading rule, under the PRE-REGISTERED identity.
 
     ``score`` honours a caller-declared spec only on an EXACT model-id match
-    (substring containment let ``model_id="gpt-4o"`` claim the official spec),
-    so this stub carries the spec itself. No network, no key, no judge call —
-    the identity is what these tests measure.
+    against ``judge_model_id(declared)`` (which strips the ``provider:`` prefix),
+    so the stub carries the MODEL ID, not the full spec. No network, no key, no
+    judge call — the identity is what these tests measure.
     """
 
-    model_id = m.PREREGISTERED_JUDGE_SPEC
+    model_id = m.judge_model_id(m.PREREGISTERED_JUDGE_SPEC)
 
 
 def test_the_committed_protocol_is_registered_to_the_owner_ruled_judge(
@@ -569,14 +569,43 @@ def test_the_protocol_states_its_target_metric_population_bar_and_falsifier():
     # the denominator is named, and the exclusion rule is "there is none"
     assert "denominator" in measurement["population"]
     assert measurement["exclusion_rule"].startswith("there is none")
-    # the two-number split is IN the record (#9097 relay §4)
+    # the two-number split is IN the record (#9097 relay §4) — and stated as it
+    # ACTUALLY holds here: the D8 gate is judge-free and authoritative, while
+    # `committed` (the rate + the paired comparison) IS the judge's grade
     split = record["scoring"]["two_number_split"]
-    assert "AUTHORITATIVE" in split["authoritative"]
-    assert "NEVER enters `metrics`" in split["additive"]
+    assert "AUTHORITATIVE" in split["mechanical_and_authoritative"]
+    assert "anscheck judge's grade" in split["judge_labelled"]
+    # ⛔ the record must NOT claim the judge stays out of `metrics`: for this
+    # benchmark it does not, and that claim would let a later lane treat a
+    # judge-derived clause as mechanical (#11460 review P1-4).
+    assert "never enters `metrics`" not in json.dumps(split)
+    assert "permissive" in json.dumps(split).lower()
     # …and the per-category ROW SURFACE is pre-registered, with #2516 declared
     per_category = record["decision_rule"]["per_category"]
     assert len(per_category["rows"]) == 2
     assert "#2516" in per_category["mechanism_dependency"]
+    # the per-class claim does not promise a sealed per-class verdict
+    assert "not claimed to be implemented here" in per_category[
+        "verdict_per_class"]
+
+
+def _scored_deepseek(tmp_path: Path):
+    """A small-corpus run graded by the PRE-REGISTERED judge spec.
+
+    ``_scored`` declares the stub's *model id*; these tests need the full
+    ``provider:model`` spec the record names, because the recorded spec is what
+    the bar compares. No network, no key, no judge call.
+    """
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(_RecordingReader(_answer_map(), [])))
+    scored = m.score(run_report=run, corpus_root=root,
+                     judge=_DeepSeekStubJudge(),
+                     judge_spec=m.PREREGISTERED_JUDGE_SPEC)
+    scored["bar"] = m.evaluate_exit_bar(
+        scored=scored, manifest=ask_corpus.verify_manifest(root),
+        prereg=_mock_prereg(root, judge_spec=m.PREREGISTERED_JUDGE_SPEC))
+    return root, run, scored
 
 
 def test_a_run_graded_by_the_pre_registered_judge_is_not_a_config_mismatch(
@@ -588,7 +617,7 @@ def test_a_run_graded_by_the_pre_registered_judge_is_not_a_config_mismatch(
     official spec, so every DeepSeek-graded run was ``inconclusive`` by
     construction.
     """
-    _, scored = _scored(tmp_path, judge=_DeepSeekStubJudge())
+    _, _, scored = _scored_deepseek(tmp_path)
     root = Path(scored["corpus_root"])
     assert scored["judge_model_spec"] == m.PREREGISTERED_JUDGE_SPEC
     assert scored["judge_pin"] == f"unpinned:{m.PREREGISTERED_JUDGE_SPEC}"
@@ -606,7 +635,7 @@ def test_the_official_judge_still_cannot_grade_this_pre_registration(tmp_path):
     A run graded by DeepSeek against the OLD (official) record must still be
     ``inconclusive: config_mismatch``.
     """
-    _, scored = _scored(tmp_path, judge=_DeepSeekStubJudge())
+    _, _, scored = _scored_deepseek(tmp_path)
     root = Path(scored["corpus_root"])
     old = _mock_prereg(root, judge_spec="openai:gpt-4o-2024-08-06")
     bar = m.evaluate_exit_bar(
@@ -614,6 +643,91 @@ def test_the_official_judge_still_cannot_grade_this_pre_registration(tmp_path):
     assert bar["verdict"] == "inconclusive", bar
     assert bar["failure_origin"] == "config_mismatch"
     assert any("judge" in reason for reason in bar["reasons"]), bar["reasons"]
+
+
+def test_the_scorer_BUILDS_the_judge_it_records(tmp_path, monkeypatch):
+    """#11460 review P1-1 — the recorded spec and the judge that GRADES must be
+    the same spec.
+
+    ``build_judge`` has its own fallback (the official LongMemEval judge).
+    Resolving only the RECORDED spec let a run with no ``--judge`` be graded by
+    gpt-4o while the record — and therefore the bar's config check — named
+    DeepSeek: a false PASS on the one clause that exists to prove who graded the
+    numbers. This pins that ``score`` builds from the resolved spec.
+    """
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(
+                           _RecordingReader(_answer_map(), [])))
+    built: list[str] = []
+    real_build = m.build_judge
+
+    def _spy(spec):
+        built.append(spec)
+        return _DeepSeekStubJudge()
+
+    monkeypatch.setattr(m, "build_judge", _spy)
+    try:
+        scored = m.score(run_report=run, corpus_root=root)
+    finally:
+        monkeypatch.setattr(m, "build_judge", real_build)
+    # the judge was BUILT from the resolved (pre-registered) spec, not from None
+    assert built == [m.PREREGISTERED_JUDGE_SPEC], built
+    assert scored["judge_model_spec"] == m.PREREGISTERED_JUDGE_SPEC
+
+
+def test_an_injected_judge_does_not_crash_the_key_name_lookup(tmp_path):
+    """#11460 review P1-3 — ``score`` records an honest synthetic identity for an
+    injected judge object (``injected:<model-id>``), and that string is not a
+    provider name: resolving a credential for it raised ``KeyError`` and killed
+    the score step. An unnamed key is recorded as unnamed, never guessed."""
+    assert m.judge_key_env_name(f"{m.INJECTED_SPEC_PREFIX}test-stub-judge") is None
+    assert m.judge_key_env_name("not-a-provider:whatever") is None
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(
+                           _RecordingReader(_answer_map(), [])))
+    # a judge OBJECT whose id does not match the declared spec → the honest
+    # synthetic identity, which must not be fed to the provider table
+    scored = m.score(run_report=run, corpus_root=root, judge=_StubJudge(),
+                     judge_spec="openai:gpt-4o-2024-08-06")
+    assert scored["judge_model_spec"].startswith(m.INJECTED_SPEC_PREFIX)
+    assert scored["judge_key_env"] is None
+
+
+def test_the_per_category_rows_never_show_a_class_green_under_inconclusive(
+        tmp_path, monkeypatch):
+    """#11460 review P2-5 — §2b may not print a class ``PASS`` on a run whose bar
+    is ``inconclusive``: the bar's denominator floor rejects exactly that vacuity
+    ("the raw arm committed NO verbatim case"), and a per-class green would
+    re-introduce it in the audit surface.
+
+    Also: a class this bar has no clause for is *not graded*, never ``PASS``.
+    """
+    root = _small_corpus(tmp_path)
+    run = m.run_sealed(corpus_root=root,
+                       reader_factory=_factory(
+                           _RecordingReader(_answer_map(), [])))
+    scored = m.score(run_report=run, corpus_root=root,
+                     judge=_DeepSeekStubJudge(),
+                     judge_spec=m.PREREGISTERED_JUDGE_SPEC)
+    # a runner error: unmeasured cases are never a pass
+    for row in scored["cases"]:
+        row["arms"]["raw"]["ok"] = False
+    scored["metrics"] = m.aggregate(scored["cases"])
+    scored["bar"] = m.evaluate_exit_bar(
+        scored=scored, manifest=ask_corpus.verify_manifest(root),
+        prereg=_mock_prereg(root, judge_spec=m.PREREGISTERED_JUDGE_SPEC))
+    assert scored["bar"]["verdict"] == "inconclusive", scored["bar"]
+    receipt = _receipt(scored, commit="e" * 40, cost_usd=0.0,
+                       prereg_sha256="0" * 64)
+    report = m.render_report(
+        receipt=receipt, scored=scored,
+        prereg=_mock_prereg(root, judge_spec=m.PREREGISTERED_JUDGE_SPEC),
+        prereg_sha256="0" * 64)
+    per_category = report.split("### 2b.", 1)[1].split("## 3.", 1)[0]
+    assert "| PASS |" not in per_category, per_category
+    assert "inconclusive" in per_category, per_category
 
 
 def test_the_receipt_and_report_name_the_eval_key_and_never_its_value(
@@ -629,7 +743,7 @@ def test_the_receipt_and_report_name_the_eval_key_and_never_its_value(
     for other in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
         monkeypatch.delenv(other, raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", sentinel)
-    _, scored = _scored(tmp_path, judge=_DeepSeekStubJudge())
+    _, _, scored = _scored_deepseek(tmp_path)
     root = Path(scored["corpus_root"])
     # the NAME is resolved through the judge transport's own resolver
     assert scored["judge_key_env"] == "DEEPSEEK_API_KEY"

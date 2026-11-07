@@ -48,16 +48,19 @@ distillation, never a corpus difference.
 `preregistration.json` is the **authoritative** record; this section is the
 readable copy of it, and it is committed **before** any arm runs. A
 pre-registration is citable later as *"this was decided before the number
-existed"*, so everything below is a field of that file — not prose beside it —
-and each field restates a clause the exit bar actually enforces
-(`evaluate_exit_bar`).
+existed"*, so everything below is a field of that file — not prose beside it.
+**What that does and does not mean:** the bar (`evaluate_exit_bar`) *reads*
+`corpus`, `reader`, `judge`, `seed`, `arms` and `gate_arm`; the target, metric,
+population, pass line and falsifier below state **what that bar is** and are
+citable, but they are not separately re-checked — do not read a field here as an
+enforced gate unless it is one of those six.
 
 ### Judge — re-registered to the owner-ruled DeepSeek judge
 
 | | value |
 |---|---|
-| judge | `deepseek/deepseek-v4-pro` |
-| pin | `unpinned:deepseek/deepseek-v4-pro` (an honest label — see below) |
+| judge | `deepseek:deepseek-v4-pro` (provider **named** — see below) |
+| pin | `unpinned:deepseek:deepseek-v4-pro` (an honest label — see below) |
 | rubric | `longmemeval-official`, hash `82d07b0de05daa48` (**unchanged**: only *who* grades moved, not *what* they grade with) |
 | credential | the eval's dedicated key, **by name only** — `judge_key_env` in the receipt/report, never its value and never a fragment of it |
 
@@ -71,11 +74,17 @@ and each field restates a clause the exit bar actually enforces
 Why this had to move: the decision rule makes any run whose resolved judge
 differs from the record **`inconclusive: config_mismatch`**. Frozen against
 the official spec, a DeepSeek-graded run was inconclusive *by construction*,
-however green it was. Both sides of that comparison now read one function
-(`resolve_judge_spec`), so the protocol and the run name the same judge. The
-clause itself is **not** weakened: a DeepSeek-graded run against the *old*
-record still returns `config_mismatch` (pinned by
+however green it was. The scorer now **builds** the judge from the same resolved
+spec it records (`resolve_judge_spec`), so a run with no `--judge` is graded by
+the judge the record names — and the clause is **not** weakened: a DeepSeek
+judge against the *old* record still returns `config_mismatch` (pinned by
 `test_the_official_judge_still_cannot_grade_this_pre_registration`).
+
+The provider is part of the spec (`deepseek:…`, not the OpenRouter-namespaced
+`deepseek/…`) so the **record** — not the box's ambient key set — decides the
+endpoint, the model id and the credential name; otherwise `_PROVIDER_PRIORITY`
+tries `openrouter` first and a shared routing key could grade the eval while the
+report printed that name.
 
 ### Target, metric, population, bar, falsifier
 
@@ -120,23 +129,37 @@ record still returns `config_mismatch` (pinned by
 
 The record pre-registers the **row surface**, so a headline can never merge the
 classes away: one row for `knowledge-update` (the D8 gate + the reported rate)
-and one for `verbatim` (the paired comparison). The run report renders
-§2b *Per-category readings* from the same per-case rows the bar reads, and each
-class gets its own `PASS`/`FAIL`/`inconclusive` reading — **with no per-class
-threshold**, exactly as there is none for the headline. The **type-stratified
-gate MECHANISM** is [#2516](https://github.com/daniel-ospina/tortoise/issues/2516)'s:
-it is declared as a dependency, not re-implemented here.
+and one for `verbatim` (the paired comparison). The run report renders §2b *Per-category readings* from the same per-case rows
+the bar reads, and each class is read against the clauses that **apply** to it —
+`knowledge-update` (the D8 gate + the reported rate) and `verbatim` (the paired
+comparison) — **with no per-class threshold**, exactly as there is none for the
+headline. A class this bar has no clause for is reported *not graded*, and on an
+`inconclusive` run every class reads `inconclusive` rather than a class green
+under an inconclusive headline. The **type-stratified gate MECHANISM** is
+[#2516](https://github.com/daniel-ospina/tortoise/issues/2516)'s: it is declared
+as a dependency, **not** implemented here.
 
-### Two-number split (D14 / #5085) — written into the record
+### Two-number split (D14 / #5085 shape) — stated as it actually holds
 
-The **mechanical checks are authoritative**: corpus verification, superseded
-`seen`/`rendered_live`, and the paired verbatim/raw comparison. The judge's
-grade is **additive** — it never enters `metrics`, never enters a verdict, and
-is never folded into the headline. That is the harness's own posture
-(`tests/eval/write_path/runner.py`: mechanical checks are authoritative over
-judge output; the judged arm never enters `metrics`). It is also why a
-substituted (`unpinned:`) judge cannot weaken the published bar — and why no
-rate is claimed from it.
+The **judge-free half is the authoritative half**: corpus verification
+(manifest + hashes) and the D8 supersession gate (`seen` / `rendered_live` /
+`flagged`, attributed by the validity window) need no judge and cannot be
+influenced by one.
+
+The **judge-labelled half** is `committed` — whether the reader's answer matched
+the sealed gold — which feeds the knowledge-update **rate** (reported, never
+thresholded) and the paired verbatim/raw comparison. Both arms are graded by the
+**same** judge inside **one** run, so a *systematic* judge bias cancels across
+the arms; a *permissive* judge does not, which is why **no absolute rate is
+published** from this half and why the judge is pinned at all.
+
+⚠️ The write-path harness keeps its judged arm entirely out of `metrics`
+(`tests/eval/write_path/runner.py`). **This benchmark cannot** — its `committed`
+IS the judge's grade — so the record states the equivalent guarantee instead of
+borrowing a stronger claim: no rate is published, and the judge-labelled half is
+only ever a paired comparison between two arms of one run. The judge-free half
+is **not** a makeshift substitute for a skipped judge; it is the bar's
+authoritative half, and the judge-labelled half is labelled as such.
 
 ### Re-registering
 

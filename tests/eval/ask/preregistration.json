@@ -47,7 +47,7 @@
         "verbatim \u2014 the no-regression half: raw.committed vs distilled.committed per case, with the regressed case ids listed"
       ],
       "threshold": "NONE is pre-set per class either. The knowledge-update rate is reported, the verbatim comparison is a regression, and neither needs an absolute to be read",
-      "verdict_per_class": "the same clauses are read per class, so a `pass`/`regression`/`inconclusive` is returned for each class and for the run as a whole \u2014 a single class can never be aggregated away by the headline"
+      "verdict_per_class": "each class is read against the clauses that APPLY to it (the D8 gate for knowledge-update, the paired comparison for verbatim). A class with no clause in this bar is reported as not graded, never as a pass, and on a run whose bar is `inconclusive` EVERY class reports `inconclusive` rather than a class green under an inconclusive headline; the per-class GATE MECHANISM (a verdict sealed per class) is #2516's and is not claimed to be implemented here"
     },
     "regression": [
       "D8: any superseded claim RENDERED LIVE on the distilled arm",
@@ -61,8 +61,8 @@
   "gate_arm": "distilled",
   "issue": "9097",
   "judge": {
-    "model_spec": "deepseek/deepseek-v4-pro",
-    "pin": "unpinned:deepseek/deepseek-v4-pro",
+    "model_spec": "deepseek:deepseek-v4-pro",
+    "pin": "unpinned:deepseek:deepseek-v4-pro",
     "rubric_id": "longmemeval-official",
     "rubric_id_hash": "82d07b0de05daa48"
   },
@@ -79,7 +79,7 @@
     "metric": {
       "gate": "superseded_live@<gate_arm> \u2014 per planted superseded claim: seen / rendered_live / flagged, attributed by the validity window",
       "no_regression": "verbatim_no_regression \u2014 per verbatim case: raw.committed vs distilled.committed, and the list of cases the gate arm lost",
-      "not_a_metric": "the judge's semantic grade. It is ADDITIVE and never enters `metrics` \u2014 see `scoring.two_number_split`",
+      "not_a_metric": "the judge's semantic grade is never published as a rate and never enters an absolute claim. It enters `metrics` only as the per-arm `committed` count behind the paired within-run comparison \u2014 see `scoring.two_number_split`",
       "reported_not_thresholded": "current_state@<arm> \u2014 the knowledge-update current-state rate; reported, never gated (D8)"
     },
     "not_claimed": "no rate is published as a benchmark result, and no absolute judge-scored accuracy is claimed. The published claim is the two mechanical clauses above; the judge's reading is additive and the D8 rate is reported without a threshold",
@@ -109,10 +109,10 @@
     "committed": "the official anscheck semantic judge (build_judge) grades the reader's answer against the SEALED gold answer, per case per arm, using the official template the sealed gold names (knowledge-update | single-session-user)",
     "superseded_live": "the assembled READER EVIDENCE is searched for the superseded claim's own text (ask_spotcheck._superseded_live_state): seen / rendered_live / flagged, attribution by the validity window so a raw turn is never mistaken for a distilled claim",
     "two_number_split": {
-      "additive": "the judge's semantic grade is ADDITIVE. It NEVER enters `metrics`, it never enters a verdict, and it is never folded into the headline",
-      "authoritative": "the MECHANICAL checks \u2014 corpus verification, superseded seen/rendered, and the paired verbatim/raw comparison \u2014 are AUTHORITATIVE",
-      "consequence": "the judge being DeepSeek (and therefore `unpinned:`) is a statement about who graded the ADDITIVE number. It cannot degrade the authoritative half, which is why this measurement stays publishable under a substituted judge \u2014 and why no rate is claimed from it",
-      "why": "D14/#5085, the harness's own posture (`tests/eval/write_path/runner.py`: mechanical checks are authoritative over judge output; the judged arm never enters `metrics`)"
+      "d14_5085_shape": "the write-path harness keeps the judged arm entirely out of `metrics` (`tests/eval/write_path/runner.py`); this benchmark cannot \u2014 its `committed` IS the judge's grade \u2014 so the equivalent guarantee is pre-registered explicitly instead: no rate is published, and the judge-labelled half is only ever a paired comparison between the two arms of one run",
+      "judge_labelled": "`committed` \u2014 whether the reader's answer matched the sealed gold \u2014 is the anscheck judge's grade. It feeds the knowledge-update rate (REPORTED, never thresholded) and the paired verbatim/raw comparison. Both arms are graded by the SAME judge inside ONE run, so a SYSTEMATIC judge bias cancels across the arms; a PERMISSIVE judge does not, which is why no absolute rate is published from this half and why the judge is pinned",
+      "mechanical_and_authoritative": "corpus verification (manifest + hashes) and the D8 supersession gate (seen / rendered_live / flagged, from the validity window) need NO judge and are AUTHORITATIVE",
+      "what_it_does_not_mean": "the judge-free D8 half is NOT a makeshift substitute for a judge that was skipped \u2014 it is the bar's authoritative half, and the judge-labelled half is declared as such"
     },
     "verbatim_regression": "for a verbatim-class case: raw.committed AND NOT distilled.committed"
   },
