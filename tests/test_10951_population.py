@@ -724,3 +724,118 @@ def test_the_off_switch_is_case_insensitive(monkeypatch, value):
     _population_verdicts(REPO_ROOT, snap)
     assert snap.population == {}
     assert snap.population_source.startswith("OFF")
+
+
+# ── the WIRING: `collect()` must actually call the rule ───────────────────
+def test_collect_wires_the_population_rule_in(monkeypatch):
+    """The live integration point — the one seam every other test bypasses.
+
+    Measured by a reviewer: replacing `collect()`'s `_population_verdicts(...)` call
+    with `pass` left 377/377 GREEN, on both the runner shape and a box with
+    `scripts/`. That mutant is not cosmetic — `snap.population` stays `{}`, the
+    provenance prints nothing, and every container (`epic:`, `design(…)`, `#10175`)
+    is handed `merge-one.sh` / `dispatch-merge.sh` again. Exactly #10951, with a
+    fully green suite.
+
+    Every other test here calls `_population_verdicts` or `build_units` directly;
+    this one goes through `collect()`, which is what a live run executes.
+    """
+    container = {
+        "number": 9001,
+        "title": "epic: a container the rule must withhold",
+        "priority": "P0-blocker",
+        "labels": [],
+        "assignees": [],
+    }
+
+    class FakeClient:
+        def _get_list(self, path, params="", select=".[]"):
+            return []
+
+        def list_check_runs(self, repo, sha):
+            return []
+
+    monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", str(FIXTURE_RULE))
+    monkeypatch.setenv("NEXT_WORK_POPULATION", "1")
+    monkeypatch.delenv("AGENT_INFRA_PATH", raising=False)
+    monkeypatch.setattr(next_work, "GhCli", lambda: FakeClient())
+    monkeypatch.setattr(
+        next_work, "_search_issues",
+        lambda c, r, label, s: [dict(container)] if label == "P0-blocker" else [],
+    )
+    monkeypatch.setattr(next_work, "_closing_refs", lambda *a, **k: {})
+    monkeypatch.setattr(next_work, "_local_holders", lambda *a, **k: {})
+    monkeypatch.setattr(next_work, "_claim_verdicts", lambda *a, **k: None)
+
+    snap, _cfg, _src = next_work.collect(REPO, REPO_ROOT)
+
+    assert snap.population == {"9001": REASON_CONTAINER}, snap.population
+    assert "sha256:" in snap.population_source, snap.population_source
+    unit = units_by_issue(snap)[9001]
+    assert unit.pickable is False
+    assert next_command(unit, REPO) is None
+
+
+def test_the_empty_pick_footer_names_the_class_that_withheld(monkeypatch):
+    """The footer used to say "held, superseded, or a duplicate" over a container queue.
+
+    That is the misdescription the earlier stolen-target finding was filed for, and
+    the arm that fixes it had no assertion — reverting it left the suite green.
+    """
+    snap = snap_with(
+        [
+            issue(9100, "epic: a container", labels=[], assignees=[]),
+            issue(9101, "design(x): a decision", labels=[], assignees=[]),
+        ],
+        monkeypatch,
+    )
+    text, pick = next_work.render(build_units(snap, None), None, snap, repo=REPO, top=5)
+    assert pick is None
+    assert "withheld as" in text, text
+    assert REASON_CONTAINER in text
+    assert "every measured one is held, superseded, or a duplicate" not in text
+
+
+def test_a_wrong_typed_population_source_is_a_named_refusal():
+    """Not an AttributeError raised from inside INCOMPLETE."""
+    raw = {"repo": REPO, "base": "main", "issues": [], "population": {},
+           "population_source": 5}
+    snap = Snapshot.from_json(raw)
+    assert any("population_source" in u for u in snap.unreadable), snap.unreadable
+    # The refusal resets it; because the MAP is usable the replay label then takes
+    # over — the point is that the wrong-typed value never survives as a source.
+    assert isinstance(snap.population_source, str)
+    assert snap.population_source != 5
+
+
+def test_a_refused_map_does_not_claim_to_be_a_replay_measurement():
+    """`population: null` must not print a provenance line asserting a measurement."""
+    raw = {"repo": REPO, "base": "main", "issues": [], "population": None}
+    snap = Snapshot.from_json(raw)
+    assert any("not a map" in u for u in snap.unreadable), snap.unreadable
+    assert "REPLAY" not in snap.population_source, snap.population_source
+
+
+def test_a_superseded_container_is_not_reported_as_population_withheld():
+    """The flag mirrors the reason that WON, so `--json` cannot contradict itself."""
+    snap = Snapshot(
+        repo=REPO,
+        base="main",
+        issues=[issue(9200, "epic: a container AND a fold constituent", labels=[], assignees=[])],
+        pulls=[dict(_pull(9300, [9200]), labels=[{"name": "superseded-by-fold"}])],
+        population={"9200": REASON_CONTAINER},
+        population_source="replay fixture",
+    )
+    unit = units_by_issue(snap)[9200]
+    assert unit.reason == next_work.REASON_SUPERSEDED
+    assert unit.withheld_by_population is False
+    assert unit.pickable is False
+
+
+def test_a_zero_row_queue_still_names_the_rule_it_would_have_used(monkeypatch):
+    """`the source is printed ALWAYS` is a render property, not a non-empty-run one."""
+    monkeypatch.setenv("NEXT_WORK_POOL_JQ_SH", str(FIXTURE_RULE))
+    monkeypatch.delenv("NEXT_WORK_POPULATION", raising=False)
+    snap = Snapshot(issues=[])
+    _population_verdicts(REPO_ROOT, snap)
+    assert "sha256:" in snap.population_source

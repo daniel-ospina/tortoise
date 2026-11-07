@@ -426,11 +426,21 @@ class Snapshot:
         # surface. That is the same defect one level up: an absent measurement
         # granted as a pass. ABSENT is INCOMPLETE (exit 2); an EMPTY map is a real
         # answer from a real measurement and is honoured.
-        if "population" in raw and not (snap.population_source or "").strip():
-            # ⛔ A REPLAY THAT CARRIES VERDICTS BUT NO SOURCE IS STILL A REPLAY
-            # (#10951 review, follow-up). Without this the provenance line — the
-            # one thing that lets a closer tell a DEPLOYED measurement from a
-            # carried-forward one — was silent on exactly the replays.
+        # …and the field beside it, so `population_source: 5` is a NAMED refusal
+        # rather than an AttributeError raised from inside INCOMPLETE.
+        if not isinstance(snap.population_source, str):
+            snap.unreadable.append(
+                f"population_source: the snapshot's population_source is "
+                f"{type(snap.population_source).__name__}, not a string"
+            )
+            snap.population_source = ""
+        # ⛔ THE REPLAY SOURCE BELONGS TO A MAP THAT WAS ACTUALLY USABLE (#10951
+        # review, F4). Set unconditionally it claimed "verdicts from the snapshot's
+        # own map" about a map the door had just REFUSED, and the render's ⚠️ marker
+        # only fires for OFF/UNREADABLE/ABSENT — so the text path printed an
+        # unwarned provenance line asserting a measurement that did not happen.
+        usable_map = "population" in raw and isinstance(raw_population, dict)
+        if usable_map and not (snap.population_source or "").strip():
             snap.population_source = "REPLAY — verdicts from the snapshot's own map"
         if "population" not in raw:
             snap.population_absent = True
@@ -1339,7 +1349,11 @@ def build_units(snap: Snapshot, cfg: QueueConfig | None) -> list[Unit]:
             )
         holder, readable = _claim_of(snap, issue=number, pr=pr_number, head=str(pr.get("head") or ""))
         superseded = bool(folds) or CONSTITUENT_LABEL in _labels(pr)
-        withheld_by_population = bool(population)
+        # The flag mirrors the REASON that actually won (`superseded` outranks the
+        # population verdict), so `--json` never reports `withheld_by_population:
+        # true` beside `reason: SUPERSEDED-BY-FOLD` — and a superseded row keeps
+        # registering its action target, which is the pre-existing behaviour.
+        withheld_by_population = bool(population) and not superseded
         if superseded:
             reason = REASON_SUPERSEDED
             if folds:
@@ -2169,6 +2183,14 @@ def _population_verdicts(repo_root: Path, snap: Snapshot) -> None:
     property of the ROW and not of the run.
     """
     if not snap.issues:
+        # Even an EMPTY queue names the rule it would have used: "the source is
+        # printed, ALWAYS" is a property of the render, not of a non-empty run.
+        script = _population_script(repo_root)
+        if script:
+            prog = _pool_jq(script)
+            if prog:
+                digest = hashlib.sha256(prog.encode()).hexdigest()[:12]
+                snap.population_source = f"{script} · POOL_JQ sha256:{digest} (no rows)"
         return
     # ⛔ THE OFF-SWITCH IS NAMED AND LOUD (#10951). When it is off, this tool
     # consults NO population rule at all: every collected row is admitted on its
