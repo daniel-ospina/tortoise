@@ -2166,7 +2166,8 @@ def vector_leg_surface() -> list[dict]:
     by_binding = {t.name for t in TOOL_REGISTRY
                   if getattr(t, "sdk_method", None) == VECTOR_LEG_SDK_METHOD}
     by_handler, handler_error = _handlers_forwarding_entity_type()
-    fixed_by_method, fixed_error = _sdk_methods_on_vector_leg()
+    fixed_by_method, fixed_error, fixed_declared = \
+        _sdk_methods_on_vector_leg()
     #: Tool name → the `entity_type` values its SDK method asks the leg for
     #: WITHOUT the caller choosing one (third source — see
     #: `_sdk_methods_on_vector_leg`).
@@ -2217,6 +2218,15 @@ def vector_leg_surface() -> list[dict]:
         if fixed is not None and name in by_handler:
             entry["also_fixed_entity_types"] = fixed
         out.append(entry)
+    # ⛔ THE DERIVED-FAILURE LINE IS DECIDED FROM THE SCAN, NOT FROM `out`
+    # (#11389 review, P2). The DECLARED BOUND below is appended to `out`, which
+    # made `not out` UNREACHABLE whenever a declaration existed: a surface that
+    # could not be derived AT ALL then published only the by-reference caveat,
+    # which reads as "the scan ran and this is its known edge" — the two
+    # channels separated in one direction (#11337) and silently collapsed in the
+    # other. `derived_tool_rows` is the scan's own verdict, captured before
+    # either caveat line is added.
+    derived_tool_rows = bool(out)
     for error in (handler_error, fixed_error):
         if error:
             out.append({"tools": error})
@@ -2227,13 +2237,51 @@ def vector_leg_surface() -> list[dict]:
     # change` naming real types: the under-reporting direction, produced by the
     # very drift the resolution pin exists to catch — a pin protects the repo,
     # not the instrument as shipped (review round 2, P2).
-    if not out or isinstance(takes, str):
+    if not derived_tool_rows or isinstance(takes, str):
         out.append({"tools": f"UNMEASURED(the surface could not be derived: "
                              f"{takes if isinstance(takes, str) else 'no tool resolves'})"})
+    # ⛔ The DECLARED BOUND is published on its own line, never merged into the
+    # scan-failure channel: it says the scan ran and this is its known edge, which a
+    # reader must be able to tell apart from "the scan could not run" (#11337).
+    # Emitted AFTER the derived-failure line for the same reason (#11389 review,
+    # P2): the failure is the more important fact, and appending it last would
+    # leave it present but unreachable when both apply.
+    if fixed_declared:
+        out.append({"tools": fixed_declared})
     return out
 
 
-def _sdk_methods_on_vector_leg() -> tuple[dict[str, set[str]], str | None]:
+#: The comprehension forms, each of which introduces its OWN scope (#11389
+#: review, P2). Named once so the two walks that must agree about them cannot
+#: drift apart.
+_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
+                        ast.GeneratorExp)
+
+
+def _comprehension_targets(node: ast.AST) -> frozenset[str]:
+    """The names a comprehension binds in its OWN scope.
+
+    ⛔ A COMPREHENSION IS A SCOPE (#11389 review, P2). Its `for` target shadows
+    an enclosing binding for the element, the `if` clauses and the body, so a
+    `Load` of that name INSIDE the comprehension refers to the comprehension —
+    not to a leg-reaching function of the enclosing method. Reading it as a
+    mention published a spurious `declared bound` entry for
+    `[_review_pool for _review_pool in rows]` and
+    `[r for _review_pool in rows if _review_pool]`: the cry-wolf direction this
+    channel exists to narrow, and invisible to the pinned fixture because its
+    element is `x`. Collects TARGETS only (which may destructure, `for a, b in
+    …`), never the element expression.
+    """
+    bound: set[str] = set()
+    for gen in getattr(node, "generators", ()):
+        for sub in ast.walk(gen.target):
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                bound.add(sub.id)
+    return frozenset(bound)
+
+
+def _sdk_methods_on_vector_leg(
+        ) -> tuple[dict[str, set[str]], str | None, str | None]:
     """SDK methods that call the vector leg, and the `entity_type` they ask for.
 
     ⛔ THE THIRD SOURCE, and the one neither of the other two can see (#11088
@@ -2252,15 +2300,23 @@ def _sdk_methods_on_vector_leg() -> tuple[dict[str, set[str]], str | None]:
     affected the same way. A non-literal argument is reported as
     `UNKNOWN(<expression>)`, never guessed into a type.
 
-    Returns `(method name → entity types, error)`; `error` is the reason the
-    scan could not be taken, so a missing source is REPORTED rather than read as
-    "no SDK method reaches the leg".
+    Returns `(method name → entity types, error, declared_bound)`.
+
+    ⛔ THE TWO REFUSAL CHANNELS ARE SEPARATE (#11337 review, P1). `error` is the
+    reason the scan could not be TAKEN — a missing or unparseable source — and it
+    is what makes a caller read "no SDK method reaches the leg" correctly. The
+    declared bound is a DIFFERENT fact: the scan ran and its claim has a known
+    edge. Overloading one slot for both made a legitimate by-reference shape red
+    the real-tree tests whose precondition is `error is None`, under a message
+    that reads like a scan failure — a false block on a correct tree, whose
+    cheapest repair is to delete the declaration.
     """
     path = REPO_ROOT / "tortoise" / "sdk.py"
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except Exception as e:
-        return {}, f"UNMEASURED(SDK scan failed: {type(e).__name__}: {e})"
+        return ({}, f"UNMEASURED(SDK scan failed: {type(e).__name__}: {e})",
+                None)
 
     #: The SDK's declared default for the argument, read from the source rather
     #: than restated here: `entity_type: str = "point"` in
@@ -2283,15 +2339,77 @@ def _sdk_methods_on_vector_leg() -> tuple[dict[str, set[str]], str | None]:
                              else f"UNKNOWN({ast.unparse(kw.value)[:40]})")
         return found or [default_entity_type]
 
+    def _reachable_by_name(node: ast.AST, entrant: dict[str, set[str]],
+                           shadowed: set[str] | None = None) -> str | None:
+        """The leg-reaching function this expression names, if any.
+
+        Used ONLY to declare a reach this scan cannot resolve — never to add an
+        entrant. `self.<name>` and a bare `<name>` are in-module method
+        references; `getattr(self, "<name>")` is the same reach with the name
+        in a string literal, and `getattr(self, <expr>)` is a reach whose target
+        cannot be resolved at all — declared, because declaring adds no entrant
+        and a possibly-short caller list is the safe direction to report.
+        """
+        # ⛔ `shadowed` is the local bindings of the enclosing function: a bare
+        # `recall_state = 5` binds the NAME without referring to the method, and
+        # declaring it would caveat a complete table — the same cry-wolf failure
+        # the resolved-call exclusion removes (#11337 review, P2).
+        # ⛔ A STORE/DEL name is a BINDING, not a mention (#11389 review, P2 —
+        # a regression introduced by skipping comprehension scopes: the mention
+        # walk then reached `[_pool for _pool in rows]` and read the target as a
+        # reference, a spurious caveat on a complete table).
+        if (isinstance(node, ast.Name) and node.id in entrant
+                and isinstance(node.ctx, ast.Load)
+                and node.id not in (shadowed or ())):
+            return node.id
+        # ⛔ `ctx` applies to an Attribute too (#11389 review, P3): `self._pool = v`,
+        # `self._pool += v`, `self._pool: T = v` and `del self._pool` are BINDINGS,
+        # and publishing one is the same spurious caveat the bare-Name guard
+        # prevents.
+        if (isinstance(node, ast.Attribute) and node.attr in entrant
+                and isinstance(node.ctx, ast.Load)):
+            receiver = node.value
+            # `self`, and the in-module receivers that stand for it (#11389
+            # review, P3): `super()` and `type(self)`. A genuinely FOREIGN
+            # receiver (`self.conn.helper(1)`) is excluded HERE — but note the
+            # scope of that statement: this channel only. The transitive CLOSURE
+            # above matches `func.attr` with no receiver check, so it still names
+            # such a caller (pre-existing behaviour, unchanged by #11337). This
+            # channel's job is to add the caveat, not to correct the closure.
+            if isinstance(receiver, ast.Name) and receiver.id == "self":
+                return node.attr
+            if (isinstance(receiver, ast.Call)
+                    and isinstance(receiver.func, ast.Name)
+                    and receiver.func.id in ("super", "type")):
+                return node.attr
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr" and len(node.args) in (2, 3)
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == "self"):
+            name = node.args[1]
+            if (isinstance(name, ast.Constant) and isinstance(name.value, str)
+                    and name.value in entrant):
+                return name.value
+            if not isinstance(name, ast.Constant):
+                # ⛔ The name is not in the tree, so whether this reaches the leg
+                # is UNKNOWABLE here — not "no" (#11337 review). Reporting it
+                # costs a declaration and prevents the silent-short-list class.
+                return f"getattr(self, {ast.unparse(name)[:40]})"
+        return None
+
     def _scan(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
         found: set[str] = set()
         # Only THIS function's own body: a nested `def` is its own method, and
         # attributing its call to the enclosing scope would name the wrong one.
+        # ⛔ But a nested `class` BODY IS this function's body (#11389 review,
+        # P3): it executes when the method does, so a leg call sitting in it is
+        # a real fixed-type use — the same doctrine the mention walk follows.
+        # Skipping it here left such a call in NEITHER channel: not measured by
+        # this walk, and excluded from the mention walk as a call it "owns".
         stack: list[ast.AST] = list(fn.body)
         while stack:
             node = stack.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if isinstance(node, ast.Call) and _is_target(node.func):
                 found.update(_types_for(node))
@@ -2333,8 +2451,9 @@ def _sdk_methods_on_vector_leg() -> tuple[dict[str, set[str]], str | None]:
         stack = list(fn.body)
         while stack:
             node = stack.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
+            # Same doctrine as `_scan`: a nested class body runs with this
+            # function, so its calls are this function's edges.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if isinstance(node, ast.Call):
                 func = node.func
@@ -2353,8 +2472,39 @@ def _sdk_methods_on_vector_leg() -> tuple[dict[str, set[str]], str | None]:
     # .sdk_method`) and then dropped the tool with no entry anywhere — a silent
     # hole in the caller list of an approval request. The transitive closure
     # over in-module calls closes that class: a method is an entrant iff any
-    # path from it reaches the leg, and it carries the entity types found along
-    # the paths it can take.
+    # path from it reaches the leg THROUGH A NAME-RESOLVED in-module call, and
+    # it carries the entity types found along the paths it can take.
+    #
+    # ⚠️ DECLARED BOUND (#11337): "name-resolved" is the whole claim. The callee
+    # extraction ABOVE reads `func.attr` / `func.id`; the walk below collects
+    # mentions instead, so a reach that takes a
+    # leg-reaching function BY REFERENCE is not an edge in this graph and the
+    # closure cannot traverse it. The forms are not a list to keep current —
+    # `_safe(self._review_pool, …)`, a `key=`/callback, `functools.partial`,
+    # `getattr(self, <name>)`, an alias, a container, a bare `return` — the
+    # rule is that the function is MENTIONED without being called — anywhere in
+    # a function BODY, and not shadowed by a function-scope binding.
+    # ⚠️ OUTSIDE THE WALK, and named rather than implied: a nested `def`'s
+    # decorators and parameter DEFAULTS (evaluated when the outer method runs —
+    # `def inner(cb=self._review_pool)` IS a real reach), and a comprehension's
+    # own binding targets. Those are not reported, so the census doc says so too;
+    # the class-definition-time argument that would justify excluding a METHOD
+    # signature's default does not apply to a nested def, and the previous
+    # comment wrongly used it for both. (A mention INSIDE a comprehension body
+    # IS walked and IS reported — EXCEPT a `Load` that reuses THAT comprehension's
+    # own target name: the target binds in the comprehension's own scope, so such
+    # a `Load` is the comprehension's binding, not the enclosing method's
+    # (#11389 review, P3).) Also NOT
+    # modelled in `shadowed`: `*args`/`**kwargs` names, lambda parameters, `match`
+    # patterns and `global`/`nonlocal` — those produce a spurious entry rather
+    # than a missed one, and are owned by `#11397`. Under-
+    # reporting is the dangerous direction for a surface an owner approves, so
+    # the shape is REPORTED through the same `UNMEASURED` channel the handler
+    # scan uses for its own bound (see `by_reference` below) instead of being
+    # dropped. It is deliberately not GUESSED into the entrant set: bare
+    # attribute-name matching would also over-attribute a foreign receiver
+    # (`self.conn.helper(1)`), and a guess dressed as a measurement is the class
+    # this instrument exists to refuse.
     changed = True
     while changed:
         changed = False
@@ -2367,7 +2517,178 @@ def _sdk_methods_on_vector_leg() -> tuple[dict[str, set[str]], str | None]:
                 if merged != direct.get(name):
                     direct[name] = merged
                     changed = True
-    return {name: direct[name] for name in sorted(direct)}, None
+
+    # ⛔ The declared bound, MADE OBSERVABLE (#11337). A method that hands a
+    # leg-reaching function to another call instead of calling it cannot be
+    # resolved by a `Call.func` scan — so if that shape is present the caller
+    # list is SHORT, and the only honest report is to say so. Emitted through
+    # the `UNMEASURED` channel the caller already prints, so it rides beside the
+    # tools rather than in a docstring nobody reads at report time.
+    # ⛔ MEASURED at this head, against the SOURCE: `tortoise/sdk.py` holds
+    # exactly ONE by-reference shape — `volunteer_context`'s
+    # `_search_fn=self.tortoise_fts_query` — so this does NOT stay empty and a
+    # clean run DOES publish a declared-bound line. Grepping for `_safe(`
+    # answers a SPELLING, not the shape; that inference is what made an earlier
+    # version of this comment certify the opposite of the truth, and the
+    # cheapest repair for a reader who trusted it would be to delete the
+    # declaration as a false positive. A previous cycle read five entries off this
+    # scan's output and published them as "LIVE" — they were all the
+    # resolved-call false positive above, which is why the negative pin exists
+    # beside the positive one: the instrument's own output is not evidence about
+    # itself.
+    # ⛔ EVERY NODE, not a set of positions (#11337 review, P3). Naming the
+    # shapes that carried the reach — a call argument, a `key=`/callback, a
+    # `functools.partial`, a `getattr`, a plain `ast.Assign` — pinned only the
+    # spellings the fixture happened to write, while `f: T = self._pool`, a
+    # walrus, a container (`[self._pool]`), an `if`-expression and a bare
+    # `return self._pool` were all still dropped with no entry. A mention of an
+    # entrant by name IS the fact this channel reports, whatever syntax carries
+    # it, so the rule is the mention — which is also the only rule that cannot
+    # go stale when the SDK's shape changes.
+    # ⛔ NOT SKIPPING ENTRANTS (#11337 review, P2). This used to skip any
+    # function already in `direct`, on the reasoning that it is named anyway.
+    # It is — but its ENTITY-TYPE SET is not: `direct[name]` is what
+    # `vector_leg_surface` publishes as `entity_types`, so a method that calls
+    # one leg-reaching helper and PASSES another lost the second helper's types
+    # with nothing saying so. The list being complete is not the claim; the set
+    # is. Only the leg itself is skipped (it is not its own caller).
+    #
+    # ⛔ AND A RESOLVED CALL IS NOT A BY-REFERENCE REACH (#11337 review, P0).
+    # `_reachable_by_name` matches a `self.<entrant>` Attribute, and a plain
+    # call's own `func` IS such an attribute — so `self._review_pool(scope)`,
+    # which the closure above has already traversed, was being declared as an
+    # unresolved reference. Measured: every one of the five entries this scan
+    # produced on the real `tortoise/sdk.py` was that false positive, and the
+    # published caveat said the caller table might be short when it was not —
+    # the cry-wolf failure that makes a real declaration ignorable, produced by
+    # the very channel meant to prevent it. The `func` of a `Call` is therefore
+    # excluded: the closure owns it.
+    #: ⛔ THE LEG IS IN THE MENTION SET (#11389 review, P1). `direct` excludes it
+    #: (it is not its own caller), but a mention OF the leg is the by-reference
+    #: case in its purest form — `_search_fn=self.tortoise_fts_query` in
+    #: `volunteer_context` passes the leg itself into the volunteer pipeline, which
+    #: calls it with `entity_type="point"`. Without the leg in this set that reach
+    #: was neither traversed (not a `Call.func`) NOR declared, and three artifacts
+    #: asserted no such shape existed. A name-resolved CALL of the leg is still
+    #: excluded, by `call_funcs` above — that is the closure's.
+    mentionable: dict[str, set[str]] = {**direct, VECTOR_LEG_SDK_METHOD: set()}
+    by_reference: dict[str, set[str]] = {}
+    for fn in functions:
+        if fn is leg:
+            continue
+        # ⛔ ONLY A NAME-RESOLVED CALL'S `func` IS THE CLOSURE'S (#11389 review,
+        # P2). Excluding every `Call.func` also excluded `getattr(self, n)(…)`,
+        # whose func is itself a `Call`: the closure cannot resolve that call,
+        # so the reach was neither traversed NOR declared — the silent-short-list
+        # class in the dangerous direction, hidden by the guard against false
+        # alarms. Only `Attribute`/`Name` funcs (the forms `calls` extracts) are
+        # excluded; anything else stays visible to the mention walk.
+        call_funcs = {id(c.func) for c in ast.walk(fn)
+                      if isinstance(c, ast.Call)
+                      and isinstance(c.func, (ast.Attribute, ast.Name))}
+        # ⛔ SCOPED TO THE BODY WALK BELOW, not `ast.walk(fn)` (#11337 review,
+        # P2). The whole-subtree walk collected a NESTED def's locals, so a
+        # nested `_review_pool = 5` suppressed a genuine mention in the
+        # ENCLOSING body — the silent-short-list direction this channel exists
+        # to prevent, produced by the guard against false alarms.
+        # ⚠️ NOT the same rule as the mention walk, and the difference is
+        # deliberate (#11389 review, P3): this walk skips `ClassDef` — a class
+        # namespace is not FUNCTION scope, so a class-body binding must not
+        # suppress an enclosing mention — while the mention walk descends into a
+        # class body, because a mention there IS a real reach. The two disagree
+        # about `class` on purpose; the residual that follows (a class-body
+        # binding reusing an entrant's name is an OVER-report) is on `#11397`.
+        shadowed: set[str] = set()
+        for sub in fn.args.args + fn.args.kwonlyargs + fn.args.posonlyargs:
+            shadowed.add(sub.arg)
+        for sub in list(fn.body):
+            stack_s = [sub]
+            while stack_s:
+                n = stack_s.pop()
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                    continue
+                # ⛔ NOT a comprehension target: `[x for _pool in …]` binds in the
+                # comprehension's OWN scope, so treating it as a function local
+                # suppresses a genuine mention elsewhere in the body — the
+                # under-report direction this guard exists to narrow, not create
+                # (#11389 review). Comprehension scopes are skipped entirely.
+                if isinstance(n, _COMPREHENSION_NODES):
+                    continue
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                    shadowed.add(n.id)
+                # ⛔ These two bind a name on the NODE, not as `Name(Store)`
+                # (#11389 review, P3): `except X as _pool` keeps the name in
+                # `ExceptHandler.name`, and `import _pool` in the alias. A local
+                # that reuses an entrant's name is not a reach either way.
+                elif isinstance(n, ast.ExceptHandler) and n.name:
+                    shadowed.add(n.name)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for alias in n.names:
+                        bound = alias.asname or alias.name.split(".")[0]
+                        shadowed.add(bound)
+                stack_s.extend(ast.iter_child_nodes(n))
+        # ⛔ A COMPREHENSION'S OWN BINDINGS SHADOW WITHIN IT (#11389 review,
+        # P2). `shadowed` above skips comprehension subtrees ON PURPOSE — a
+        # comprehension target binds in its own scope, so it must not suppress a
+        # mention elsewhere in the enclosing body. But this walk DESCENDS into
+        # the comprehension, where that target is exactly the binding a `Load`
+        # refers to; without the scope, `[_review_pool for _review_pool in
+        # rows]` and `[r for _review_pool in rows if _review_pool]` each read as
+        # a mention of the enclosing method's name.
+        stack: list[tuple[ast.AST, frozenset[str]]] = [
+            (n, frozenset()) for n in fn.body]
+        while stack:
+            node, comp_bound = stack.pop()
+            # ⛔ A nested `class` BODY IS WALKED (#11389 review, P3): it executes
+            # when the enclosing method does, and `self` inside it resolves to that
+            # method's — so `class K: cb = _safe(self._review_pool)` is a real
+            # by-reference reach. Only nested FUNCTIONS are their own scope here.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if id(node) not in call_funcs:
+                reached = _reachable_by_name(node, mentionable,
+                                             shadowed | comp_bound)
+                if reached:
+                    by_reference.setdefault(fn.name, set()).add(reached)
+            if isinstance(node, _COMPREHENSION_NODES):
+                # ⛔ The OUTERMOST `for`'s ITERABLE is evaluated in the
+                # ENCLOSING scope, not the comprehension's (#11389 review, P3):
+                # `[x for _pool in _pool]` iterates the METHOD's `_pool`, so a
+                # mention there is a real reach and suppressing it was an
+                # under-report. Only the later `for` clauses and the element
+                # live inside the comprehension's own scope.
+                here = comp_bound | _comprehension_targets(node)
+                for f in ("elt", "key", "value"):
+                    child = getattr(node, f, None)
+                    if child is not None:
+                        stack.append((child, here))
+                for i, gen in enumerate(getattr(node, "generators", ())):
+                    stack.append((gen.iter, comp_bound if i == 0 else here))
+                    stack.append((gen.target, here))
+                    for cond in getattr(gen, "ifs", ()):
+                        stack.append((cond, here))
+                continue
+            for child in ast.iter_child_nodes(node):
+                stack.append((child, comp_bound))
+    declaration = None
+    if by_reference:
+        # ⛔ Every TARGET, not just the first: a method can take two different
+        # leg-reaching helpers by reference, and a per-method single string
+        # silently dropped the second (#11337 review, P2).
+        named = ", ".join(f"{fn} ({', '.join(sorted(targets))})"
+                          for fn, targets in sorted(by_reference.items()))
+        # ⛔ `declared bound:` is a MACHINE-READABLE marker, not decoration: the
+        # published entry carries the same dict shape and `UNMEASURED(` prefix
+        # as a scan failure, so without it a consumer cannot tell "the scan ran
+        # and has a known edge" from "the scan could not run" (#11337 review).
+        # The prose is count-neutral so one entry does not read ungrammatically.
+        declaration = (
+            f"UNMEASURED(declared bound: {named} — a leg-reaching function is "
+            "taken by reference here, which this scan follows as a name-resolved "
+            "call only; the caller list and its entity-type set may be short by "
+            "that reach)")
+    return {name: direct[name] for name in sorted(direct)}, None, declaration
 
 
 def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
@@ -2413,11 +2734,11 @@ def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
     def _calls_with_entity_type(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         # Only THIS function's own body — a nested `def` is its own handler and
         # attributing its call to the outer scope would name the wrong tool.
+        # A nested CLASS body is this handler's body (same doctrine as `_scan`).
         stack: list[ast.AST] = list(fn.body)
         while stack:
             node = stack.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if isinstance(node, ast.Call):
                 passes_entity_type = any(k.arg == "entity_type"
@@ -2617,8 +2938,18 @@ def vector_census(graph, graph_name: str, at: str | None = None,
                 # wrong in an unbounded direction, in the figure #11088 exists
                 # to produce, with nothing marking it as estimated (review
                 # round 7, P2; measured 5x1024 + 1x384 → 24,576 B reported for
-                # a true 22,016 B). An indexed label cannot hold mixed widths,
-                # so the disagreement is the no-index case's own hazard.
+                # a true 22,016 B). ⚠️ A covering index does NOT make the
+                # disagreement impossible — measured: an index of dimension
+                # 384 over a label holding one 384-wide and five 1024-wide
+                # rows publishes `stored x dimension` on a 384-majority
+                # sample and refuses (`stored widths disagree`) on a mixed
+                # one, so a disagreement is BOTH arms' hazard. What the
+                # covering arm adds is a cross-check, not an invariant: it
+                # publishes `stored x dimension` only where the PROBED width
+                # agrees with the index dimension (`probed width W agrees`)
+                # and refuses otherwise. The census never establishes that an
+                # indexed label holds a single width, so that invariant is
+                # not assumed here — census doc §2 states the same.
                 probe = _read(
                     graph,
                     f"MATCH (n:{_cypher_label(label)}) "
@@ -2638,7 +2969,25 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             except Exception:
                 width = None
         if isinstance(stored, str):
-            unindexed = "UNMEASURED(stored count unreadable)"
+            # ⛔ THE SAME MASKING, ONE BRANCH UP (#11389 review, P2). The
+            # two-cause rule below was wired only to the `dim`/`width` pair, so
+            # a row whose stored-count read FAILED **and** whose covering index
+            # `dimension` was unreadable still reported the count ALONE, with
+            # `indexed: true` beside it — the identical round trip this change
+            # exists to remove: repair the count, re-run, be refused again on
+            # the dimension, never told both causes existed. Measured with a
+            # fake that raises on `count(n)`.
+            # ⚠️ The WIDTH is deliberately NOT named here, unlike the
+            # dim/width arm: a width probe can only measure rows, and the count
+            # is exactly the fact that could not be read, so "no rows, nothing
+            # to probe" and "the probe failed" are indistinguishable and naming
+            # it would be a guess. The `dimension` is a CATALOGUE cell and
+            # independent of the count, so it is a cause we can name.
+            # The single-cause text is byte-identical to before.
+            unindexed = (
+                "UNMEASURED(stored count unreadable and the index dimension "
+                "unreadable)" if covering and dim is None
+                else "UNMEASURED(stored count unreadable)")
         elif covering and width is not None and dim is not None and width != dim:
             unindexed = f"UNMEASURED(index dim {dim} != stored width {width})"
         elif covering and stored != 0 and (width is None or dim is None):
@@ -2653,19 +3002,21 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             # (docs.falkordb.com › Indexing › Vector Index), so an absent one is
             # an unreadable catalogue cell, not a label with no dimension;
             # `width` is None when the vecf32 probe failed or returned nothing.
-            missing = " and ".join(
-                name for name, value in
-                (("the index dimension", dim), ("the stored width", width))
-                if value is None
-            )
-            # ⛔ Name the MEASURED cause when the width was read and the readings
-            # disagreed: "unreadable" sends a reader to debug a probe failure
-            # that did not happen (review round 9, P3).
-            if width is None and width_reason:
-                missing = f"the stored width ({width_reason})"
-                unindexed = f"UNMEASURED(coverage not provable: {missing})"
-            else:
-                unindexed = f"UNMEASURED(coverage not provable: {missing} unreadable)"
+            # ⛔ NAME BOTH CAUSES WHEN THERE ARE TWO (#11337). This used to
+            # compute the cause from every unmeasured input and then REASSIGN
+            # it to the width cause alone, so a row whose index `dimension` was
+            # unreadable AND whose sampled widths disagreed reported only the
+            # width: a reader repairs the width probe, re-runs, is refused again
+            # with different text, and is never told the second cause exists.
+            # The single-cause texts are unchanged.
+            causes: list[str] = []
+            if dim is None:
+                causes.append("the index dimension unreadable")
+            if width is None:
+                causes.append(f"the stored width ({width_reason})"
+                              if width_reason else "the stored width unreadable")
+            unindexed = ("UNMEASURED(coverage not provable: "
+                         + " and ".join(causes) + ")")
         elif covering:
             unindexed = 0
         else:
@@ -2680,20 +3031,55 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             # and `unindexed` already do (review round 1, P2: the row said
             # `indexed: UNMEASURED(...)` and, one field over, "NO covering
             # index" — a coverage fact it had not measured).
-            payload = {"derived_payload_B": "UNMEASURED(the catalogue row was "
-                                            "unreadable, so coverage is not "
-                                            "provable)",
-                       "how": f"catalogue row unreadable: {unreadable_here[0]}"}
+            # ⛔ BUT A FAILED CATALOGUE READ DOES NOT CANCEL WHAT THE WIDTH
+            # PROBE MEASURED (#11389 review, P2). The probe is an independent
+            # read and its disagreement is a MEASURED fact; discarding it made
+            # a reader repair the catalogue, re-run, and be refused again on
+            # the width — the same round trip, in the one arm the previous
+            # enumeration did not count. Measured before the fix: `disagree`
+            # appeared nowhere in the row while the probe had returned both
+            # widths. The catalogue text is otherwise unchanged.
+            payload = {"derived_payload_B": (
+                           "UNMEASURED(the catalogue row was unreadable, so "
+                           "coverage is not provable"
+                           + (f"; {width_reason}" if width_reason else "")
+                           + ")"),
+                       "how": (f"catalogue row unreadable: {unreadable_here[0]}"
+                               + ("; the width probe did run" if width_reason
+                                  else ""))}
         elif width is None:
             # ⛔ The refusal, BEFORE the index is consulted: without a measured
             # width there is no byte figure, indexed or not — and when the probe
             # saw more than one width, the reason is that, not "unprobeable".
+            # ⛔ NAME BOTH CAUSES HERE TOO (#11389 review, P2). The two-cause
+            # rule reached `unindexed` but stopped one branch short of the BYTE
+            # FIGURE: with a covering index whose `dimension` is unreadable over
+            # a mixed-width label, `unindexed` named both causes while
+            # `derived_payload_B` named the width alone — so a reader repairs
+            # the width, re-runs, and is refused again on the dimension. Same
+            # round trip, one field over. Measured before the fix.
+            # The single-cause texts are byte-identical: when `dim` is readable
+            # — or the label has no covering index, where an index `dimension`
+            # is not a cause at all — the old string is unchanged.
+            # ⛔ AND `how` NAMES IT TOO (#11389 review, P2). `how` is the
+            # REMEDY channel in this function (the dim-only arm says "needs the
+            # index dimension to cross-check the measured width"), so a `how`
+            # that names only the width sends the reader to re-probe something
+            # that will not lift the refusal. The refusal and the remedy must
+            # name the same causes or the field is worse than absent.
+            payload_causes: list[str] = []
+            dim_cause = "the index dimension unreadable"
+            if covering and dim is None:
+                payload_causes.append(dim_cause)
+            payload_causes.append(width_reason or "stored width not probeable")
+            how = ("a single width cannot stand for this label's stored vectors"
+                   if width_reason else "needs a width probe")
+            if covering and dim is None:
+                how += f", and {dim_cause}"
             payload = {"derived_payload_B": "UNMEASURED("
-                                            + (width_reason or
-                                               "stored width not probeable") + ")",
-                       "how": ("a single width cannot stand for this label's "
-                               "stored vectors" if width_reason
-                               else "needs a width probe")}
+                                            + " and ".join(payload_causes)
+                                            + ")",
+                       "how": how}
         elif not covering:
             # ⛔ #11088: THE UNINDEXED LABELS ARE THE POPULATION THIS CENSUS IS
             # FOR, and they had no byte figure at all. The payload used to be
@@ -2720,9 +3106,11 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             payload = {"derived_payload_B": stored * width * 4,
                        "how": f"stored {stored} x probed width {width} dims x 4 B "
                               f"(vecf32); NO covering index, so the width comes "
-                              f"from {width_samples} sampled row(s) and is not "
-                              "cross-checked — a narrower minority width outside "
-                              "that sample would not be seen"}
+                              f"from {width_samples} sampled row(s) "
+                              "chosen by the engine (the probe carries no "
+                              "ORDER BY), and is not cross-checked — a narrower "
+                              "minority width outside that sample would not be "
+                              "seen"}
         elif dim is None:
             # A covering index EXISTS and its `dimension` is unreadable. The
             # stored width is still measured, but coverage is not provable —
@@ -2784,8 +3172,13 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             "indexed": ("UNMEASURED(catalogue row unreadable: "
                         f"{unreadable_here[0]})" if unreadable_here
                         else bool(covering)),
-            "unindexed": (f"UNMEASURED(catalogue row unreadable: {unreadable_here[0]})"
-                          if unreadable_here else unindexed),
+            "unindexed": (
+                f"UNMEASURED(catalogue row unreadable: {unreadable_here[0]}"
+                # ⛔ …and the width the probe DID measure is not cancelled by
+                # it (#11389 review, P2): `width_reason` is a measured fact
+                # from an independent read. Same rule as the payload above.
+                + (f"; {width_reason}" if width_reason else "")
+                + ")" if unreadable_here else unindexed),
             "vector_indexes_on_label": found or "none",
             "index": idx or "none",
             # ⛔ EVERY index kind, not only VECTOR: §3.1's deciding datum for

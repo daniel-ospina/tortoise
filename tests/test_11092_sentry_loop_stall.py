@@ -35,6 +35,7 @@ import asyncio
 import importlib
 import logging
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -508,6 +509,20 @@ def live_sentry_client(monkeypatch: pytest.MonkeyPatch):
     """A REAL sentry_sdk client wired through OUR init, capturing to memory."""
     transport = _CaptureTransport()
     real_init = sentry_sdk.init  # captured BEFORE the patch or the wrapper recurses
+    # ⛔ The REAL `sentry_sdk.init` is a GLOBAL stdlib side effect, not a local one:
+    # `ThreadingIntegration` is a DEFAULT integration, and its `setup_once` does
+    # `threading.Thread.start = sentry_start` where `sentry_start` is
+    # `functools.wraps`-decorated around the start it found — i.e. around THIS
+    # repo's `_thread_start_inherit_stem` stamp (installed by conftest). The
+    # wrapper therefore keeps the stamp's `__name__` but not its object identity
+    # or its globals, and nothing in the SDK ever undoes it. Left in place, every
+    # later test in the process runs on a sentry-wrapped start and
+    # `tests/test_redirect_seam.py::test_stem_registry_prod_parity_and_patch_idempotence`
+    # reds with a misleading "Thread.start was double-wrapped" — measured, and
+    # it is how the required `test (b)` shard went red for every PR. Restoring
+    # the pre-fixture start in `finally` is this fixture's isolation contract;
+    # pinned by `test_the_real_init_fixtures_restore_thread_start`.
+    stamp_before = threading.Thread.start
 
     def _init_with_transport(**kwargs):
         kwargs["transport"] = transport
@@ -527,6 +542,7 @@ def live_sentry_client(monkeypatch: pytest.MonkeyPatch):
         # for removal; the pin ``sentry-sdk>=2.0`` has no upper bound) — review
         # round 16, P3.
         sentry_sdk.get_global_scope().set_client(None)
+        threading.Thread.start = stamp_before
         importlib.reload(tsentry)
 
 
@@ -540,6 +556,10 @@ def real_sentry(monkeypatch: pytest.MonkeyPatch):
     builder what the configured value actually does.
     """
     previous_client = sentry_sdk.get_client()
+    # Same isolation contract as `live_sentry_client`: the REAL init patches
+    # `threading.Thread.start` (default `ThreadingIntegration`) and the SDK never
+    # unpicks it, so the fixture must restore what it found.
+    stamp_before = threading.Thread.start
     monkeypatch.setenv("SENTRY_DSN", "https://public@example.invalid/1")
     monkeypatch.delenv("SENTRY_ENV", raising=False)
     monkeypatch.delenv("SENTRY_TRACES_SAMPLE_RATE", raising=False)
@@ -549,10 +569,65 @@ def real_sentry(monkeypatch: pytest.MonkeyPatch):
         yield sentry_sdk
     finally:
         sentry_sdk.get_global_scope().set_client(previous_client)
+        threading.Thread.start = stamp_before
         # ``_enabled`` is module state, which monkeypatch does not unwind; reload it
         # back to OFF so no later test inherits an enabled module with a dead client.
         monkeypatch.delenv("SENTRY_DSN", raising=False)
         importlib.reload(tsentry)
+
+
+def test_the_real_init_fixtures_restore_thread_start(monkeypatch):
+    """The REAL `sentry_sdk.init` is a stdlib side effect, and these fixtures must undo it.
+
+    `ThreadingIntegration` is one of `sentry_sdk`'s DEFAULT integrations, and its
+    `setup_once` assigns `threading.Thread.start = sentry_start` where `sentry_start`
+    is `functools.wraps`-decorated around whatever start it found — i.e. around
+    THIS repo's `_thread_start_inherit_stem` stamp that conftest installs. The
+    result is a SECOND object that still reports `__name__ ==
+    "_thread_start_inherit_stem"` but whose `__globals__` are sentry's, and the SDK
+    never unpicks it. So any later test in the process that asserts what start is
+    sees a foreign wrapper.
+
+    Measured on the required `test (b)` shard at `ee19b11646`: this file precedes
+    `tests/test_redirect_seam.py`, whose `test_stem_registry_prod_parity_and_patch_idempotence`
+    then reds with "Thread.start was double-wrapped (installer re-ran without the
+    marker guard)" — a message that names an installer bug it did not measure, on
+    a tree where the installer never re-ran. Reproduced deterministically:
+
+        pytest "tests/test_11092_sentry_loop_stall.py::test_the_real_sdk_builds_an_event_with_no_source_context" \
+               "tests/test_redirect_seam.py::test_stem_registry_prod_parity_and_patch_idempotence"
+
+    Both real-init fixtures are driven here through `.__wrapped__` (their generator,
+    the established spelling in this tree — see
+    `tests/test_server_hygiene_gate.py:237`) so the TEARDOWN is what is asserted:
+    setup, then `gen.close()`, then the start object must be the one from before.
+    The `patched` flag keeps the pin non-vacuous: if a future SDK stops installing
+    `ThreadingIntegration` by default, this test says so instead of passing for the
+    wrong reason.
+    """
+    patched = False
+    for fixture in (live_sentry_client, real_sentry):
+        stamp_before = threading.Thread.start
+        gen = fixture.__wrapped__(monkeypatch)
+        next(gen)  # setup: OUR `tsentry.init()` runs the REAL `sentry_sdk.init`
+        try:
+            patched = patched or threading.Thread.start is not stamp_before
+        finally:
+            gen.close()  # teardown under test — this is the isolation contract
+        assert threading.Thread.start is stamp_before, (
+            f"{getattr(fixture, '__name__', fixture)!s} left "
+            f"`threading.Thread.start` replaced by {threading.Thread.start!r} — the "
+            "REAL sentry_sdk.init installs ThreadingIntegration (a DEFAULT "
+            "integration), which wraps Thread.start with functools.wraps around the "
+            "tortoise stamp, and the SDK never undoes it. Every later test in the "
+            "process then runs on a sentry-wrapped start and "
+            "test_redirect_seam's stamp assertion reds with a misleading "
+            "'double-wrapped' message (the required `test (b)` shard went red "
+            "exactly that way)")
+    assert patched, (
+        "vacuous pin: the real sentry_sdk.init no longer replaces "
+        "threading.Thread.start, so this test proves nothing about restoring it "
+        "— re-derive it if the SDK drops ThreadingIntegration from its defaults")
 
 
 def _recorded_event(sdk, client) -> dict:

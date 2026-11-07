@@ -1480,7 +1480,7 @@ def test_door_two_is_DENIED_on_BOTH_anchors_and_the_residual_says_so():
         assert "story_arc" not in cache_projection.projected_columns(table), (
             f"`projected_columns({table!r})` keeps `story_arc` again, so the "
             f"RECORD → CACHE restore writes it back onto `:{node_label}` and "
-            "the graph-side purge is undone by the next routine restore "
+            "#10000's write deletion is undone by the next routine restore "
             "(#10394 door 2)")
 
     # ── the claim: the design document names BOTH anchors ─────────────────
@@ -1497,7 +1497,7 @@ def test_door_two_is_DENIED_on_BOTH_anchors_and_the_residual_says_so():
         )
     assert "public.event.story_arc" in residual, (
         "§9.1's residual (b) does not state WHERE the `:Event` half lives — the "
-        "reader weighing `#10017`'s purge against the record needs the column, "
+        "reader weighing a graph-side removal against the record needs the column, "
         "not just the label")
 
 
