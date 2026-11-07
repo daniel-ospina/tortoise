@@ -1139,7 +1139,9 @@ place a machine reads it.
   `:12995`/`:13142`.
 - **Why:** `#11368` gave the declared-span verdict ONE home (`_verified_span_source`) and routed
   both mention builders through it, a net **+74** lines (`126` inserted / `52` deleted) confined to
-  the mention-builder region (`:12128`–`:12607`). Every cite **below** that region therefore moves
+  the mention-builder region (`:12128`–`:12628` — the last hunk is `+12607,22`, so `:12607` is its
+  START, and the bound is `:12628`; it must contain BOTH calls the section claims, `:12273` in
+  `_mention_record` and `:12624` in `_clamped_mention`). Every cite **below** that region therefore moves
   by exactly `+74` — `:12908`→`:12982`, `:13057`→`:13131`, `:12921`→`:12995`, `:13068`→`:13142` —
   while `_collect_classify_items` (`:11098`), which sits **above** it, does not move at all. The
   `+0` on the collector and the `+74` on the four cites below it are one measurement, and quoting
