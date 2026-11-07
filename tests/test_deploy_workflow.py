@@ -7655,14 +7655,19 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "fail-open the widening bought (#11191 review r31, P2; class #11301):\n  "
         + "\n  ".join(_correction_verb_now_accepted)
     )
-    # ⛔ …AND THE `_CORRECTION_CUE` SCOPE IS A LOAD-BEARING ARM WITH NO CONTROL (#11191
-    # review r31, P2 — MEASURED). The r14 comment above records that reading the cue on
-    # `norm` instead of `own` ACCEPTED `row + " The 3-line figure was corrected to 10; the
-    # tree is `ff6379eb2`."` — the pin disabled on the LIVE §A8 cell. Nothing in the file
-    # reds when that scoping is reverted: measured at this head, reverting it to
-    # `_CORRECTION_CUE.search(norm)` leaves the full suite GREEN (111 passed) while this
-    # exact splice flips REFUSE -> accept. Pinned on the ARTEFACT, the way the A2 controls
-    # above are, so a future edit cannot quietly re-open it.
+    # ⛔ …AND THE `_CORRECTION_CUE` SCOPE IS A LOAD-BEARING ARM WHOSE CONTROL ARRIVED LATE
+    # (#11191 review r31, P2 — MEASURED). The r14 comment above records that reading the cue
+    # on `norm` instead of `own` ACCEPTED `row + " The 3-line figure was corrected to 10; the
+    # tree is `ff6379eb2`."` — the pin disabled on the LIVE §A8 cell. ⛔ UNTIL THIS BLOCK,
+    # NOTHING RED WHEN THAT SCOPING WAS REVERTED: measured at `198ed21b8c` (the head BEFORE
+    # this control), the revert left the full suite GREEN (111 passed) while the splice
+    # flipped REFUSE -> accept — a load-bearing arm no test defended. AT THIS HEAD the
+    # measurement is the opposite, and the assertion below is what makes it so: the same
+    # revert now reds this test on the `_cue_splice` assertion and nothing else
+    # (`1 failed, 110 passed`, measured). The two figures are dated to different heads on
+    # purpose — quoting the pre-control 111 as "this head" would be present-tense false
+    # and would read as a stale comment to the next lane (#11191 review r32, P3).
+    # Pinned on the ARTEFACT, the way the A2 controls above are.
     _cue_splice = " The 3-line figure was corrected to 10; the tree is `ff6379eb2`."
     assert not _refuses_before_9548(row), (
         "§A8's own evidence cell is now REFUSED by the pin that guards it — the cell and "
