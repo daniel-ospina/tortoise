@@ -1,8 +1,10 @@
 # tests/test_redirect_seam.py
 """Unit surface: the class-level URI-aware redirect (epic #1647 Task 1)."""
+import functools
 import os
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -553,8 +555,78 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     # the marker is set, and re-invoking the installer is a no-op.
     assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
         "Thread.start stamp not installed in the test session"
-    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
-        "Thread.start was double-wrapped (installer re-ran without the marker guard)"
+    # The stamp must be IN the installed chain, exactly once — not the WHOLE of it.
+    # A third-party integration wraps `Thread.start` on TOP of whatever is
+    # installed and offers no uninstall: `sentry_sdk.integrations.threading` does
+    # exactly that when a REAL client is initialised
+    # (`tests/test_11092_sentry_loop_stall.py::live_sentry_client`), and its
+    # `functools.wraps` links our stamp as `__wrapped__`. Bare identity therefore
+    # reds for the whole rest of the session once such a test has run — a FALSE
+    # red about a stamp that is installed and still executes (it is the wrapper's
+    # `old_start`), and it red the `test` shard in CI (#11373). What the contract
+    # actually needs is that the stamp is reachable in the chain and present once.
+    installed = threading.Thread.start
+    chain = _installed_start_chain()
+    stamps = [f for f in chain if f is proj_mod._thread_start_inherit_stem]
+    assert len(stamps) == 1, (
+        "the test-stem stamp must appear exactly ONCE in the installed "
+        f"Thread.start chain (found {len(stamps)}; installed {installed!r}; "
+        f"chain {chain!r}) — absent means worker threads lose the per-thread "
+        "test-module attribution #1686 depends on, twice means the installer "
+        "re-ran without the marker guard"
+    )
     proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
-    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
+    assert threading.Thread.start is installed, \
         "re-invoked installer double-wrapped Thread.start"
+
+
+def _installed_start_chain() -> list:
+    """`Thread.start` plus every wrapper it delegates to, outermost first.
+
+    Each wrapper installed with `functools.wraps` (or any wrapper that sets
+    `__wrapped__`) links the previous start, so the chain — not the single
+    outermost function — is what makes "is the test-stem stamp installed?"
+    decidable once a third party has wrapped on top of it. Cycles are cut at the
+    first repeat so a self-referential wrapper cannot hang the walk.
+    """
+    chain: list = []
+    fn = threading.Thread.start
+    while fn is not None and fn not in chain:
+        chain.append(fn)
+        fn = getattr(fn, "__wrapped__", None)
+    return chain
+
+
+def test_a_third_party_wrapper_on_top_cannot_hide_the_stamp(monkeypatch):
+    """#11373: a REAL sentry client wraps `Thread.start` over the stamp for the
+    rest of the session, which turned the identity assertion above into a false
+    red on the `test` shard.
+
+    Measured on the pre-fix assertion: `threading.Thread.start is
+    proj_mod._thread_start_inherit_stem` is False the moment this wrapper exists,
+    although the stamp is installed and still runs as the wrapper's inner start.
+    Both arms are pinned here, so the chain reading cannot go vacuous: a wrapped
+    start still FINDS the stamp, and a start with the stamp removed does NOT.
+    """
+    from tortoise import projection as proj_mod
+
+    def _third_party_start(self, *args, **kwargs):  # pragma: no cover - delegated
+        return inner(self, *args, **kwargs)
+
+    inner = threading.Thread.start
+    wrapped = functools.wraps(inner)(_third_party_start)
+    monkeypatch.setattr(threading.Thread, "start", wrapped)
+    assert threading.Thread.start is not proj_mod._thread_start_inherit_stem, (
+        "the fixture did not actually wrap Thread.start"
+    )
+    assert proj_mod._thread_start_inherit_stem in _installed_start_chain(), (
+        "a third-party wrapper hid the test-stem stamp — the chain walk must "
+        "follow `__wrapped__` (this is the false red that red the shard)"
+    )
+    # Non-vacuity: the SAME reading reports absence when the stamp is not there,
+    # so it is a real check and not a constant True.
+    monkeypatch.setattr(threading.Thread, "start", proj_mod._ORIG_THREAD_START)
+    assert proj_mod._thread_start_inherit_stem not in _installed_start_chain(), (
+        "the chain reading claims the stamp is installed on a start that never "
+        "carries it"
+    )
