@@ -18625,19 +18625,49 @@ class FalkorProjection(
     def _falkordb_version_cache_key(self):
         """Process-lifetime cache key for version detection.
 
-        Server mode → ('server', host, port) from the raw redis connection
-        (redis Connection objects carry ``_host``/``port``). Embedded mode →
+        Server mode → ('server', host, port). Embedded mode →
         ('embedded', db path) — redislite's bundled module version is fixed
         per binary, so the path just isolates distinct DBs. Returns None for
-        unidentified clients (unit mocks with no endpoint attrs) — those are
+        unidentified clients (unit mocks with no endpoint identity) — those are
         probed fresh every call.
+
+        ⛔ THE ENDPOINT IS NOT AN ATTRIBUTE OF THE CLIENT (#11328). On the
+        pinned ``redis 7.4.1`` a client carries NO ``.host``/``.port``/``._host``
+        of its own — the configured endpoint lives in
+        ``connection_pool.connection_kwargs``. This method used to read only the
+        connection's attributes, so it answered ``None`` on exactly the hosted
+        per-request lane, ``_get_falkordb_version`` never populated
+        ``_FALKORDB_VERSION_CACHE``, and its 2-RTT probe (MODULE LIST + INFO
+        server) ran on **every** projection construction — the cost the cache
+        exists to remove. So: connection attributes first (a raw
+        ``redis.Connection`` does carry them), then the pool kwargs, which is
+        the seam ``event_store._store_identity``, ``cypher_guard._client_store_key``
+        and ``_stable_endpoint`` all resolve a store's endpoint from.
+
+        Embedded stays keyed on its PATH: an embedded client's pool kwargs
+        carry ``path``, never ``host``/``port``, and the fallback is skipped for
+        it explicitly so a future default in a vendored pool cannot re-key a
+        bundled-module install as a network store.
         """
         conn = getattr(getattr(self, "db", None), "connection", None)
+        host = port = None
         if conn is not None:
             host = getattr(conn, "_host", None) or getattr(conn, "host", None)
             port = getattr(conn, "port", None)
-            if host is not None and port is not None:
+        if (host is None or port is None) and not getattr(
+                self, "_is_embedded", False):
+            kwargs = _client_pool_kwargs(getattr(self, "db", None)) or {}
+            if host is None:
+                host = kwargs.get("host")
+            if port is None:
+                port = kwargs.get("port")
+        if host is not None and port is not None:
+            try:
                 return ("server", str(host), int(port))
+            except (TypeError, ValueError):
+                # An unparseable port is no endpoint identity — fall through
+                # rather than mint a key that would collide across stores.
+                pass
         path = getattr(self, "_path", None)
         if path is not None:
             return ("embedded", str(path))
@@ -18647,12 +18677,13 @@ class FalkorProjection(
         """The STORE identity both the `#4997` warning latch and the `#11087`
         pair register key on — stable across projections of one store.
 
-        `_falkordb_version_cache_key()` answers `None` when the redis client
-        hides its endpoint (redis-py exposes it at
-        `connection_pool.connection_kwargs`, not as `_host`/`host`), which used
-        to collapse the key to `id(self)` on exactly the hosted per-request
-        path these registers exist for: one latch entry — and one WARNING — per
-        live request slot, never evicted.
+        `_falkordb_version_cache_key()` answers `None` when the client resolves
+        no endpoint at all — a bare unit mock, the one shape with no store
+        identity — which used to collapse the key to `id(self)` on exactly the
+        hosted per-request path these registers exist for: one latch entry — and
+        one WARNING — per live request slot, never evicted. (That client shape
+        is also what made the version cache inert until #11328 taught the key to
+        read `connection_pool.connection_kwargs`.)
 
         So, in order: the cache key when it resolves; else the projection's
         `_host` (set by `__init__` on every server projection) together with the

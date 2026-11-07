@@ -242,6 +242,95 @@ class TestVersionProbeCached:
             _reset_falkordb_version_cache()
 
 
+class TestVersionProbeCacheKeyServerMode:
+    """The cache key must resolve on the client shape a HOSTED REQUEST builds
+    (#11328).
+
+    redis-py 7.4.1's client carries NO ``.host``/``.port``/``._host`` of its
+    own — the configured endpoint lives in
+    ``connection_pool.connection_kwargs``. Reading only the connection's
+    attributes therefore answered ``None`` here, so ``_get_falkordb_version``
+    never read or wrote ``_FALKORDB_VERSION_CACHE`` and the 2-RTT probe
+    (MODULE LIST + INFO server) ran on **every** projection construction —
+    i.e. per hosted request on the paid tier, which is the exact cost the
+    cache exists to remove.
+
+    These tests use the REAL client object (a ``redis.Redis`` built without
+    connecting), not a fake with ``.host``/``.port`` bolted on: a fake that
+    carried those attributes would pin a client that does not exist and would
+    stay green through this defect.
+    """
+
+    def _proj(self, db) -> FalkorProjection:
+        proj = object.__new__(FalkorProjection)
+        proj.db = db
+        return proj
+
+    def _pool_only_client(self, host: str = "10.0.0.5", port: int = 6379):
+        import redis
+
+        client = redis.Redis(host=host, port=port)
+        # The premise of the whole class: assert the shape, not the assumption.
+        assert not hasattr(client, "host") and not hasattr(client, "_host"), (
+            "the pinned redis-py now exposes .host — the defect this pins is gone, "
+            "so re-measure rather than leaving a test that proves nothing"
+        )
+        return client
+
+    def test_pool_only_client_resolves_a_server_key(self):
+        """A client whose endpoint lives only in the pool kwargs still keys."""
+        db = type("_Db", (), {"connection": self._pool_only_client()})()
+        assert self._proj(db)._falkordb_version_cache_key() == (
+            "server", "10.0.0.5", 6379)
+
+    def test_the_key_is_the_same_bucket_as_the_store_identity(self):
+        """One store must not land in two buckets: the key the version cache
+        uses and the endpoint the `#4997`/`#11087` registers key on are the
+        SAME tuple for a resolved server client."""
+        proj = self._proj(
+            type("_Db", (), {"connection": self._pool_only_client()})())
+        proj._host = "10.0.0.5"
+        assert proj._stable_endpoint() == proj._falkordb_version_cache_key()
+
+    def test_second_projection_of_a_pool_only_client_skips_the_probe(self):
+        """The consequence, end to end: two projections of ONE store probe the
+        version ONCE. This is the per-request cost #11328 removes."""
+        _reset_falkordb_version_cache()
+        try:
+            probes = {"n": 0}
+
+            def _counting_probe(self):
+                probes["n"] += 1
+                return (4, 18, 3)
+
+            first = self._proj(
+                type("_Db", (), {"connection": self._pool_only_client()})())
+            first._probe_falkordb_version = _counting_probe.__get__(first)
+            assert first._get_falkordb_version() == (4, 18, 3)
+            assert probes["n"] == 1
+
+            second = self._proj(
+                type("_Db", (), {"connection": self._pool_only_client()})())
+            second._probe_falkordb_version = _counting_probe.__get__(second)
+            assert second._get_falkordb_version() == (4, 18, 3)
+            assert probes["n"] == 1, (
+                "a second projection of the same store must hit the cache, not "
+                "re-run the 2-RTT probe (this is the per-hosted-request cost)"
+            )
+        finally:
+            _reset_falkordb_version_cache()
+
+    def test_embedded_still_keys_on_the_path(self):
+        """Regression pin: the embedded lane must not be re-keyed as a server
+        bucket by the pool fallback (an embedded client's pool carries `path`,
+        never `host`/`port`)."""
+        proj = self._proj(type("_Db", (), {"connection": object()})())
+        proj._path = "/tmp/embedded.db"
+        proj._is_embedded = True
+        assert proj._falkordb_version_cache_key() == (
+            "embedded", "/tmp/embedded.db")
+
+
 # ── _ensure_indexes vector branch ───────────────────────────────────────────
 
 class TestEnsureIndexesVectorApi:

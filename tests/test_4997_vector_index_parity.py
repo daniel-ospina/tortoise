@@ -273,9 +273,11 @@ class _ServerClient:
     ⛔ No `.host`, `.port` or `._host` of its own: the endpoint lives in
     `connection_pool.connection_kwargs` (measured on the pinned `redis 7.4.1`,
     and the reason `FalkorProjection.__init__` records `_host` on the
-    PROJECTION instead of reading it off the client). That is also why
-    `_falkordb_version_cache_key()` answers `None` here, so every hosted
-    per-request projection takes `_stable_endpoint()`'s fallback lane.
+    PROJECTION instead of reading it off the client). Until #11328 that also
+    made `_falkordb_version_cache_key()` answer `None` here, so every hosted
+    per-request projection took `_stable_endpoint()`'s fallback lane; the key
+    now resolves from these pool kwargs, so the fallback lane is exercised by
+    the no-pool mock only.
 
     A fake that carried `.port` directly would pin a client that does not
     exist and would stay green through the port-dropping defect (#11311).
@@ -810,12 +812,13 @@ def test_a_second_projection_of_the_same_store_does_not_repeat_the_pair(caplog):
     one (endpoint, graph).
 
     ⛔ Falsifiable only because `_bare()` carries a `_host` and (with `port=`) a
-    pool-backed server client: keyed on `id(self)` — which is what
-    `_falkordb_version_cache_key() or id(self)` yields once the redis client
-    hides its endpoint — the two projections get two keys and this records 2
+    pool-backed server client: keyed on `id(self)` — which is what a bare
+    `_falkordb_version_cache_key() or id(self)` yields for a mock with no
+    endpoint identity — the two projections get two keys and this records 2
     (measured on #11311's first cut). `port=` puts the two projections on the
-    PRODUCTION client shape, so this pin covers the fallback lane that the
-    hosted path actually takes rather than the no-pool mock lane.
+    PRODUCTION client shape, where the key now resolves from the pool kwargs
+    (`_falkordb_version_cache_key`, #11328); the no-pool mock is the remaining
+    fallback lane.
     """
     rows_for_both = [_vector_row("Point")]
     first = _bare(rows_for_both, graph="test_11087_pair_stable", port=6379)
