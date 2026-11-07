@@ -222,10 +222,12 @@ def test_captured_turn_hits_seed_their_own_session_10540():
     ``retrieval.hit_session_id`` → ``SID_A`` for both hits, while
     ``session_key_of`` → ``idx:point:{sid}_t0`` / ``idx:point:{sid}_t1`` and
     ``seeded_sessions`` → ``[]``. ``_is_real_session_id`` refuses an
-    ``idx:`` bucket, so no TURN hit could seed its own session — the arm
-    fired only where a hit already carried an id the authority read (an
-    extracted point's snake ``session_id``, an ``annotate_ask_hits`` Event
-    join, or an eval hit).
+    ``idx:`` bucket, and the fetch pops the snake ``session_id`` from every
+    point hit, so on the raw search pool NO hit could seed a session — see
+    ``session_reinjection``'s module docstring for the exact scope (an
+    ASK-lane hit can carry a snake id re-attached by ``annotate_ask_hits``,
+    but that lane keys with its own ``ask_session_key`` and the arm is off
+    in the product).
     """
     from tortoise.session_reinjection import seeded_sessions
 

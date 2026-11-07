@@ -75,15 +75,17 @@ ONE bounded graph pass:
 
    ✅ SEED identity — CLOSED by #10540, and the closure is the whole point
    of that change. The fetch TARGET was already product-real; the SEED gate
-   used to be inert on a turn hit, because the pool key authority
-   (``retrieval.session_key_of``) read the snake ``session_id`` prop ONLY. A
-   product turn Point has no such prop (``capture_session`` writes
-   content/kind/speaker/is_episodic and links ``Session-[:CONTAINS]->Point``),
-   so a turn HIT keyed as the per-hit phantom ``idx:point:{id}`` and
-   :func:`seeded_sessions` dropped it — no TURN hit could seed its own
-   session, so the arm could fire only on a pool whose hits carried a real
-   id in a spelling the authority read (an extracted point still carrying
-   ``session_id``, or an eval hit).
+   was blind, because the pool key authority
+   (``retrieval.session_key_of``) read the snake ``session_id`` prop ONLY and
+   the product's point fetch POPS that prop from EVERY point hit it returns
+   (turn and extracted alike — ``sdk.tortoise_fts_query`` builds the entry,
+   then ``entry.pop("session_id")``), leaving the camel ``sessionId`` as the
+   hit's only identity. So a product pool hit keyed as the per-hit phantom
+   ``idx:point:{id}`` and :func:`seeded_sessions` dropped it: on the raw
+   search pool the arm could seed nothing at all, and an ASK-lane pool only
+   where ``annotate_ask_hits`` had re-attached a snake id from its ``:Event``
+   join (that lane dedups with its own ``ask_session_key``, and the arm is
+   off in the product).
 
    ``session_key_of`` now also reads the CAMEL wire identity ``sessionId``,
    which is the spelling the product's own point fetch emits: it resolves the
@@ -92,12 +94,15 @@ ONE bounded graph pass:
    reader ALREADY saw the identity (``retrieval.hit_session_id`` → ``[session
    A]``) while the pool one layer below it did not. So a turn hit seeds its
    own session, and :func:`reinjection_merge_order` anchors that session's
-   injected group after its own base ranks instead of dumping it in the
-   defensive tail. The GRAPH side is unchanged and that is deliberate: the
-   fetch still scopes by ``(s:Session)-[:CONTAINS]->(p:Point)`` and still
-   RETURNs ``coalesce(p.session_id, s.id)``, because the Point property is
-   what a *turn Point* does not have — only the PASSAGE-side hit identity was
-   missing.
+   injected group after its own base ranks. (The defensive tail is NOT the
+   pre-fix symptom and not a fallback either: a group only exists for a key
+   in ``seed_order``, whose own pool hit always supplies an anchor rank, so
+   an absent group key is DROPPED by the merge rather than tailed — see
+   :func:`source_session_chunk_pass`.) The GRAPH side is unchanged and that is
+   deliberate: the fetch still scopes by ``(s:Session)-[:CONTAINS]->(p:Point)``
+   and still RETURNs ``coalesce(p.session_id, s.id)``, because the Point
+   property is what a *turn Point* does not have — only the PASSAGE-side hit
+   identity was missing.
 
    **Turn-shape constraint.** ``pointKind``'s vocabulary is open
    (``create_point`` accepts any registered kind), so ``pointKind='event'``

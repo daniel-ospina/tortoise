@@ -711,18 +711,19 @@ def session_key_of(hit: dict) -> str:
       (**#10540**). This is the spelling the product's own point fetch
       emits: ``tortoise_fts_query`` resolves a Point's session from
       ``n.sessionId`` / the snake prop / the ``:Session`` ``CONTAINS`` edge
-      and then POPs the snake key, so a TURN hit carries the CAMEL key
-      ALONE (:func:`hit_session_id` names the same two sources). Before
-      this the authority read the snake ``session_id`` only, so a PRODUCT
-      turn hit — the grain the C4 arm EXPANDS — keyed as a phantom and
-      ``seeded_sessions`` dropped it: no turn hit could seed its own
-      session, and ``reinjection_merge_order`` could not find a turn-seeded
-      session's own base ranks. What this fixes is the SEED's blindness at
-      the turn grain, NOT the arm's measured effect: #8713's own receipt
+      and then POPs the snake key — for EVERY point hit it returns, turn and
+      extracted alike — so a product pool hit carries the CAMEL key ALONE
+      (:func:`hit_session_id` names the same two sources). Before this the
+      authority read the snake ``session_id`` only, so every product point
+      hit keyed as a phantom and ``seeded_sessions`` dropped it: nothing on
+      the raw product search pool could seed a session, and
+      ``reinjection_merge_order`` could not find a seeded session's own base
+      ranks. What this fixes is the SEED's blindness on the product grain,
+      NOT the arm's measured effect: #8713's own receipt
       records the arm firing on the EVAL grain (``seeded_sessions: 354``,
       ``injected_total_merged: 617/617 at cap10``, ``recall_all@5 0.6761 →
-      0.8592``), so the arm was never globally inert — on a product TURN
-      pool it could not seed at all. Pre-change there was no seed and
+      0.8592``), so the arm was never globally inert — on a product pool it
+      could not seed at all. Pre-change there was no seed and
       therefore no fetch, so no injected group existed to place; and a
       group whose key the merge does not expect is DROPPED, not tailed
       (see ``session_reinjection.source_session_chunk_pass``). The identity
@@ -868,9 +869,15 @@ def dedup_pool(annotated: list[dict], *,
     with nothing at all to key on (see :func:`session_key_of`).
     ``idx:point:`` keys are per-hit, so the cap does NOT bind across the
     identity-less population: the pool-wide budget is what bounds it.
-    ⚠️ #10540: a raw chunk carrying ONLY the camel ``sessionId`` used to be
-    exempt from this cap by accident (its phantom bucket was unique per
-    hit); it is now grouped by its real session, so the cap BINDS there.
+    ⚠️ #10540: a raw chunk carrying ONLY the camel ``sessionId`` would now be
+    grouped by its real session instead of getting a per-hit phantom bucket,
+    so this cap would BIND there. No in-repo producer reaches that shape —
+    ``is_raw_chunk`` requires ``point_kind == "session-transcript"``, which
+    only the eval ingest writes, and it stamps ``session_id`` AND
+    ``lme_session_index`` (both outrank the camel leg) — so this is the shape
+    of the delta, not a live drop today. It is stated because a hand-built or
+    third-party chunk pool could reach it, and a future reader of this cap
+    should not have to re-derive it.
     Points/turn points are never capped (compact epistemic surface, D3).
 
     ``session_key`` (#1987 Task 4, P2-20): optional per-hit key extractor.

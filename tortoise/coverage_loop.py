@@ -444,8 +444,9 @@ def _session_of(hit: dict, session_key: Callable[[dict], str] | None = None) -> 
     stdlib-only leaf at import time and the ``retrieval → coverage_loop``
     dependency stays one-way (no cycle under either import order).
 
-    The camel ``sessionId`` leg is #10540: without it a product turn hit —
-    whose only identity is that camel key — censused as a phantom, so for a
+    The camel ``sessionId`` leg is #10540: without it a product pool hit —
+    whose only identity is that camel key (the fetch pops the snake prop
+    from every point hit) — censused as a phantom, so for a
     captured-session pool of TURN hits this census counted zero real
     sessions. #10632's own instrument INHERITED that blindness rather than
     covering it (``reader_window_displacement`` keys through this same
