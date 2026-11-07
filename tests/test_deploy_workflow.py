@@ -5429,7 +5429,8 @@ def test_the_sync_step_honours_the_mitigation_ledger():
     # must anchor on the leading AND trailing space: the `case` matches by the
     # ARG's name, so without the delimiters an ENTRY for the LONGER name also
     # matches the SHORTER arg. This payload really carries `TORTOISE_BACKUP_KEY`
-    # next to `TORTOISE_BACKUP_KEY_PREVIOUS` (deploy-hosted.yml:1189 / :1194), and
+    # next to `TORTOISE_BACKUP_KEY_PREVIOUS` (deploy-hosted.yml:1197 / :1202, pinned
+    # by `test_every_citation_of_the_backup_key_pair_resolves`), and
     # `TORTOISE_BACKUP_KEY_PREVIOUS` is the entry an operator is most likely to
     # write after a rotation — so the LIVE key would silently stop syncing on every
     # deploy, with no gate reporting it (rotation breaks, #2318). Executed coverage
@@ -5519,19 +5520,49 @@ def test_the_shipped_ledger_is_a_tracked_contract_file():
     )
 
 
-def test_the_backup_key_pair_the_delimiter_pin_cites_is_still_those_lines():
-    """The citation above is a CLAIM, so it is pinned rather than trusted.
+def test_every_citation_of_the_backup_key_pair_resolves():
+    """EVERY citation of the pair, not just the pin's own numbers (#11332 round 5, P2).
 
-    Two review rounds in a row found the line numbers in the delimiter pin stale
-    (`:1097/:1102`, then `:1189/:1194`) because the payload above them grew. A
-    citation that is wrong is worse than none: it sends the reader to an unrelated
-    line and reads as verification. Pinning the pair by CONTENT makes the next
-    drift a red test instead of a wrong comment (#11332 review round 4, P2).
+    Three rounds in a row a `deploy-hosted.yml:<n>` citation in these comments went
+    stale as the payload above it grew. A pin that iterates a hardcoded tuple proves
+    only that the tuple matches — it cannot see a citation in some OTHER comment, and
+    exactly that survived one round of "fixed". So this walks every citation in BOTH
+    test files whose surrounding text names a backup-key variable, and requires the
+    cited line to actually be the assignment of a backup-key name.
     """
+    expected = {1197: "TORTOISE_BACKUP_KEY", 1202: "TORTOISE_BACKUP_KEY_PREVIOUS"}
     lines = _WORKFLOW.read_text().splitlines()
-    for number, name in ((1197, "TORTOISE_BACKUP_KEY"), (1202, "TORTOISE_BACKUP_KEY_PREVIOUS")):
-        assert 0 < number <= len(lines), f"the workflow shrank past line {number}"
-        assert f"ARGS+=({name}=" in lines[number - 1], (
-            f"the delimiter pin cites deploy-hosted.yml:{number} for {name}, but that "
-            f"line is {lines[number - 1].strip()!r} — update the citation"
-        )
+    citation = re.compile(r"deploy-hosted\.yml:(\d+)(?:\s*/\s*:(\d+))?")
+    seen: set[int] = set()
+    for path in (
+        ROOT / "tests" / "test_deploy_workflow.py",
+        ROOT / "tests" / "test_fly_secret_drift.py",
+    ):
+        text = path.read_text()
+        for match in citation.finditer(text):
+            window = text[max(0, match.start() - 400) : match.end() + 400]
+            numbers = [int(n) for n in match.groups() if n]
+            if not any(
+                name in window
+                for name in ("TORTOISE_BACKUP_KEY", "TORTOISE_BACKUP_KEY_PREVIOUS")
+            ):
+                continue
+            for number in numbers:
+                seen.add(number)
+                assert 0 < number <= len(lines), (
+                    f"{path.name} cites deploy-hosted.yml:{number}, past the end of "
+                    f"the workflow ({len(lines)} lines)"
+                )
+                assert number in expected, (
+                    f"{path.name} cites deploy-hosted.yml:{number} for a backup-key "
+                    f"variable, but that line is {lines[number - 1].strip()!r} — the "
+                    f"pair is at {sorted(expected)}"
+                )
+                assert f"ARGS+=({expected[number]}=" in lines[number - 1], (
+                    f"{path.name} cites deploy-hosted.yml:{number} for "
+                    f"{expected[number]}, but that line is {lines[number - 1].strip()!r}"
+                )
+    assert seen == set(expected), (
+        f"the citation walk found {sorted(seen)} — it must see both halves of the "
+        "pair, or this guard passes vacuously"
+    )

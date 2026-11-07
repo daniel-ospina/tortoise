@@ -3678,6 +3678,38 @@ class TestTheMitigationLedger:
         assert "BACKUP_SWEEP_ENABLED" in proc.stdout, proc.stdout
         assert "flyctl secrets unset BACKUP_SWEEP_ENABLED" in proc.stdout, proc.stdout
 
+        # ⛔ THE SECOND DELIVERY PATH: a non-empty `fly.toml [env]` value supplies the
+        # name whatever the secret list says, so the omission is not in effect either —
+        # and testing only `fly_names` left `LEDGER-EMPTIED` GREEN over exactly that
+        # state, which is the false record the `mitigated` half already refuses
+        # (`env_assignments`, check 0b-ii). Latent today only because no `workflow`
+        # name is in `[env]`; the asymmetry is the bug (#11332 review round 5, P1).
+        toml = _fixture(
+            "derived-live-env.toml",
+            _FLY_TOML.replace(
+                "[env]\n", '[env]\n  BACKUP_SWEEP_ENABLED = "true"\n', 1
+            ),
+        )
+        assert 'BACKUP_SWEEP_ENABLED = "true"' in toml.read_text()
+        via_env = _run(
+            _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], "derived-env-secrets.json"),
+            manifest=manifest,
+            workflow=workflow,
+            toml=toml,
+            present={"FASTAPI_INTERNAL_KEY", "OPT_SECRET", "SENTRY_DSN"},
+            extra_env={
+                "FLY_MITIGATION_TODAY": "2026-11-07",
+                "FLY_MITIGATION_LEDGER": str(_ledger(_entry("SENTRY_DSN"), name="de.txt")),
+            },
+        )
+        assert via_env.returncode == 1, (
+            "a NON-EMPTY fly.toml [env] value keeps supplying the derived name after "
+            "the payload drops it, so the recorded absence is not in effect — the run "
+            "must not be green: " + via_env.stdout
+        )
+        assert "MITIGATION NOT IN EFFECT" in via_env.stdout, via_env.stdout
+        assert "BACKUP_SWEEP_ENABLED" in via_env.stdout, via_env.stdout
+
     def test_the_gate_runs_over_the_REAL_workflow_with_a_non_empty_ledger(self):
         """The other end-to-end test pins the ledger EMPTY (round-2 F5).
 
@@ -3822,6 +3854,40 @@ class TestTheMitigationLedger:
         )
         assert red.returncode == 2, red.stdout + red.stderr
         assert "LEDGER NOT HONOURED" in red.stdout, red.stdout
+
+    def test_the_belt_is_SILENT_on_a_run_it_blocks(self):
+        """The belt must not announce a CREATE on a run it then refuses.
+
+        It sat above the `unhonourable`/`violations` returns, so a blocked run still
+        printed "this deploy will CREATE N secret(s)" — a claim about a payload that
+        was never staged, and a distraction from the violation the reader must act on.
+        Moving it was necessary but not sufficient: every existing assertion about
+        that warning is on a GREEN run, so moving it back above the returns left the
+        whole suite green (#11332 review round 5, P2).
+        """
+        # exit 2 — a ledgered name the payload still stages.
+        unhonourable = _ledger_run(
+            _ledger(_entry()), workflow=LEDGER_WORKFLOW_UNFILTERED
+        )
+        assert unhonourable.returncode == 2, unhonourable.stdout
+        assert "LEDGER NOT HONOURED" in unhonourable.stdout
+        assert "will CREATE" not in unhonourable.stdout, (
+            "the belt named a secret this blocked run would never stage: "
+            + unhonourable.stdout
+        )
+
+        # exit 1 — an expired entry, with a createable absent name in the payload, so
+        # the belt WOULD have fired had it still been above the returns.
+        lapsed = _ledger_run(
+            _ledger(_entry("OPT_SECRET", expires="2020-01-01")),
+            present={"FASTAPI_INTERNAL_KEY", "SENTRY_DSN", "OPT_SECRET"},
+        )
+        assert lapsed.returncode == 1, lapsed.stdout + lapsed.stderr
+        assert "MITIGATION LAPSED" in lapsed.stdout
+        assert "will CREATE" not in lapsed.stdout, (
+            "the belt named a secret this blocked run would never stage: "
+            + lapsed.stdout
+        )
 
     def test_the_shipped_ledger_exists_and_parses(self):
         """The tracked contract: a missing/rotted file hard-blocks every deploy."""
