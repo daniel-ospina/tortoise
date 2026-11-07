@@ -64,6 +64,7 @@ is the product home; this file is its proof.
 | `test_every_writer_the_instrument_finds_outside_the_gate_is_declared` | the issue's second row, LIVE (D3) | the tree grows a writer **discovery decides** whose vector the gate does not see and the product has no declaration for it — the population is the syntax the AST/regex pass can decide, and what it cannot are NAMED (`UNDECIDABLE_WRITE_SHAPES` in the instrument, `INVISIBLE_SHAPES` below for the forms neither pass decides AND the scopes the walk never enters) and pinned by `test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented` |
 | `test_the_live_guard_has_teeth_on_an_INJECTED_writer` | the same guard, driven through **DISCOVERY** (`probe._embedding_writers` on an injected tree) rather than through set arithmetic | the guard goes vacuous when the tree's population is all-declared (the `#10541` guard's own lesson), or the discovery filter regresses and stops seeing a writer — in EITHER the clause shape or the container-key shape (`#11274`) |
 | `test_the_register_names_the_shapes_its_discovery_cannot_see` | `#11274` — the guard is exactly as wide as discovery, so discovery's blind spots are NAMED rather than implied | the instrument stops naming a shape it cannot decide, claims to decide one it cannot (or the reverse), or the register's docstring stops scoping its claim to the mechanism |
+| `test_the_seam_CALL_population_is_the_one_the_register_names` | the register's ONE duty to a `gated` writer — an accurate statement of WHO is in that population, since it owes no declaration | the sentence that says *why* the shape-holding writers are in the map anyway enumerates a SUBSET of the writers that reach the seam by CALL (it named 4 of 9 at `#11373`'s review), or discovery grows/removes a member |
 | `test_the_instrument_and_the_product_declare_the_same_writers` | `04-plan.md` §6.2 — *"the instrument and the product cannot disagree about which writer a row is about"* | a class changes in one place, the census keeps an entry the register dropped, or the register invents one the instrument does not find |
 | `test_the_three_writers_that_carried_no_declaration_now_carry_one` | **this issue's own objective** (`03-scope.md` S2) | one of the three named writers loses its declaration, or the declaration stops naming `#11085` as the issue that accepted it |
 | `test_every_declaration_cites_a_seam_and_an_owning_issue` | the issue's `{class, reason, owning issue}` shape | an entry carries a claim with no symbol behind it, or an owner that is not an issue |
@@ -418,6 +419,71 @@ def test_the_register_names_the_shapes_its_discovery_cannot_see():
         "the register's own docstring must scope its claim to what discovery can decide — a "
         "measured limitation nobody reading the register can see is the claim being wider than "
         "the mechanism"
+    )
+
+
+def test_the_seam_CALL_population_is_the_one_the_register_names():
+    """A `gated` writer owes NO declaration — so the register's only duty to it is an accurate
+    statement of WHO is in that population, and this is the one claim about it that can go stale.
+
+    `probe._embedding_writers` classes a writer `gated` the moment it CALLS the seam
+    (`probe.SEAM_CALL`) — the write predicate is not consulted — so membership is INDEPENDENT of
+    the write shape. The register's paragraph that says exactly that therefore has to name every
+    member: it named four (the ones the AST pass bought) until `#11373`'s review measured five more
+    in `tortoise/projection/entities.py` that hold the same container-key shape AND are in the
+    population by this same branch, which turned "every writer" into a claim wider than its
+    mechanism — the class this whole line of work exists to remove.
+
+    The list is not counted in the register on purpose (a count re-stales with every writer), so it
+    is re-derived here, from the instrument, at HEAD: a member that appears in the tree and not in
+    the sentence REDS, and so does a name in the sentence that discovery does not class `gated` by
+    CALL.
+    """
+    by_call = {
+        key for key, row in probe.embedding_writers().items()
+        if row["kind"] == "gated" and row.get("callee") == probe.SEAM_CALL
+    }
+    assert by_call, (
+        "no writer reaches the seam by CALL — the sentence this test reads has lost its subject, "
+        "or discovery stopped taking the `SEAM_CALL` branch"
+    )
+
+    doc = register.__doc__ or ""
+    anchor = "every writer that reaches the seam by CALL"
+    start = doc.find(anchor)
+    assert start != -1, (
+        "the register no longer states why the shape-holding writers are in the population: "
+        f"{anchor!r}"
+    )
+    # Read the ENUMERATION, not a paragraph: the sentence's list is the maximal run of backticked
+    # `module::symbol` tokens after the anchor, separated only by commas / `and` / whitespace. A
+    # paragraph slice would over-reach — the same docstring block names `sdk::_update_entity` and
+    # `sdk::_journal_event_raw_write` further down for different mechanisms, and neither is in this
+    # population.
+    separator = re.compile(r"[\s,:()]*(?:and\s+)?`([A-Za-z_][\w.]*)::([A-Za-z_]\w*)`")
+    stated: list[tuple[str, str]] = []
+    position = start + len(anchor)
+    while match := separator.match(doc, position):
+        stated.append((match.group(1), match.group(2)))
+        position = match.end()
+    assert stated, f"the sentence after {anchor!r} names no writer: {doc[position:position + 120]!r}"
+
+    def matches(key: str, module: str, symbol: str) -> bool:
+        """`sdk::x` and `tortoise.sdk::x` are the same writer — the register shortens the module."""
+        writer_module, writer_symbol = key.split("::", 1)
+        return writer_symbol == symbol and (
+            writer_module == module or writer_module.endswith(f".{module}")
+        )
+
+    unstated = sorted(key for key in by_call if not any(matches(key, *t) for t in stated))
+    assert not unstated, (
+        "the register says `every` writer that reaches the seam by CALL and then names a subset — "
+        f"in the population and not in the sentence: {unstated} (named: {stated})"
+    )
+    overstated = sorted(t for t in stated if not any(matches(k, *t) for k in by_call))
+    assert not overstated, (
+        "the sentence names a writer discovery does not class `gated` through the CALL branch — the "
+        f"enumeration and the instrument disagree: {overstated}"
     )
 
 

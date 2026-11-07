@@ -60,9 +60,19 @@ claim and a slogan:
   this shape and are in the population ANYWAY, so none of them is evidence the shape was seen:
   `sdk::_journal_event_raw_write` (the `embedding=None` in its SIGNATURE matches `_EMBED_WRITE`) and
   — because the `encode_for_row` branch assigns `gated` WITHOUT consulting the write predicate —
-  every writer that reaches the seam by CALL (`api::_point`, `sdk::create_point`, `sdk::update_point`,
-  `projection::_revise_point`). Membership and visibility are different questions; the writers whose
-  membership the AST pass actually bought are the four named just above, and nothing else.
+  every writer that reaches the seam by CALL: `api::_point`, `projection::_revise_point`,
+  `projection.entities::_upsert_point_props`, `projection.entities::_upsert_subject`,
+  `projection.entities::_upsert_object`, `projection.entities::_upsert_document`,
+  `projection.entities::_upsert_event`, `sdk::create_point`, `sdk::update_point`. ⛔ That list is
+  not maintained by hand and is not counted here — it is re-derived at HEAD from the instrument by
+  `tests/test_embed_writer_register.py::test_the_seam_CALL_population_is_the_one_the_register_names`,
+  which reds when this sentence loses a member or names one discovery does not class that way. It
+  had to be re-derived once already: this paragraph named four of the population (the AST pass's own
+  exemplars) while five `projection.entities` writers hold the SAME container-key shape AND reach
+  the seam by the same branch, one file over — so "every" read as a complete extension of a
+  population a `#11086` reader would then have under-counted. Membership and visibility are different
+  questions; the writers whose membership the AST pass actually bought are the four named just
+  above, and nothing else.
   ⚠️ "Every module discovery walks" is not every module in `tortoise/`: the walk SKIPS `tortoise/embeddings.py` on purpose (the
   seam primitives are not write paths), and two functions there use exactly this form —
   `stamp_journal_embedding` (`payload["embedding"] = vec`) and `_drop_journalled_embedding`
