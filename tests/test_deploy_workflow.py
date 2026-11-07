@@ -6476,14 +6476,25 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                     ) and _arming_id.search(_rest) is not None
 
                 return all(_admits(_named) for _named in _SHA_LIKE_RE.finditer(_rest))
-            #: ⛔ THE PHRASE'S OWN OBJECT — a copula that belongs to the phrase, then a sha
-            #: within 40 characters of it. Deliberately NOT "any third sha in the clause"
-            #: (r27 P2): the clause-wide test refused the two truthful sentences above, and
-            #: a wider window would swallow `not the retired <sha>` / `thirteen commits
-            #: after <sha>` — a denial or a MEASUREMENT of a different tree, not the claim.
-            _PHRASE_OBJECT = re.compile(
-                r"\b(?:is|was|means|denotes|refers?\s+to)\b[^.;\u2014\u2013]{0,40}?"
-                r"[`\"']?([0-9a-f]{7,40})\b",
+            #: ⛔ …AND THE OBJECT IS DECIDED LEXICALLY, NOT BY DISTANCE (#11191 review r28,
+            #: P2 ×2 — MEASURED at `9e7080ac76` in BOTH directions). The r27 form read the
+            #: object as "a sha within 40 characters of the phrase's copula", which is a
+            #: window and not a scope: one aside of 41+ characters walked a THIRD tree back
+            #: onto the §A8 cell with the pin GREEN, and a relative clause AFTER a true
+            #: object was read as a SECOND object, refusing a truthful measurement. The
+            #: discriminator that survives both is the word GOVERNING the sha — the denial
+            #: vocabulary `_third_sha_in_clause` already owns, plus the prepositions that
+            #: date a measurement to a DIFFERENT tree. Anchored at the end, so it is a local
+            #: lexical test and not another window.
+            #: …and the cue may carry a short DENIAL NOUN PHRASE with it — `not the retired
+            #: <sha>` is the document's own spelling — but never across a comma, semicolon or
+            #: dash, which is what keeps a cue on a DIFFERENT proposition ("the census is not
+            #: 5, …") from being borrowed by this one.
+            _NOT_THE_PHRASES_OBJECT = re.compile(
+                r"\b(?:not|never|rather\s+than|instead\s+of|unlike"
+                r"|as\s+opposed\s+to|cannot\s+be|isn['\u2019]t"
+                r"|after|before|since|than|versus|from|until|older|newer|at)\b"
+                r"[^,;:\u2014\u2013]{0,24}$",
                 re.I,
             )
 
@@ -6496,15 +6507,22 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 IS `<sha>`" — where `<sha>` is neither `047c91f7a` (the true tree) nor
                 `785bb2b59` (the arming commit, an ancestor). Read from the phrase forward to
                 the end of its clause, so a third tree named in an EARLIER clause (the r27
-                fail-open) cannot answer for it, and a denial/measurement beside the object
-                (r27 P2) is not read as the object at all.
+                fail-open) cannot answer for it. A sha governed by a DENIAL ("not `<sha>`")
+                or by a MEASUREMENT preposition ("thirteen commits after `<sha>`", "the
+                reading at `<sha>`") names a DIFFERENT tree, so it is not this claim — which
+                is what keeps the truthful corrections green, and it is read on the WORD,
+                not a character distance, because a distance both admits the aside and
+                refuses the relative clause (r28).
                 """
                 _tail = _norm[_phrase.end() : _clause_end]
-                for _m in _PHRASE_OBJECT.finditer(_tail):
-                    _tok = _m.group(1).lower()
+                for _m in _SHA_LIKE_RE.finditer(_tail):
+                    _tok = _m.group(0).lower()
                     if _TRUE_TREE.startswith(_tok) or _tok.startswith(_TRUE_TREE):
                         continue
                     if "785bb2b59".startswith(_tok) or _tok.startswith("785bb2b59"):
+                        continue
+                    _lead = _tail[max(0, _m.start() - 44) : _m.start()]
+                    if _NOT_THE_PHRASES_OBJECT.search(_lead):
                         continue
                     return True
                 return False
@@ -8668,12 +8686,23 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # (#11191 review r27, P1 — MEASURED fail-open on the pin itself). Tier 3 of the referent
     # cascade reads the WHOLE SENTENCE, so a TRUE tree named in an earlier clause answered
     # for the phrase and the phrase's own clause could then name ANY tree as the pre-#9548
-    # tree. All four shapes below were ACCEPTED at `198ed21b8c`; the contract's referent row
-    # ("any tree other than `047c91f7a` as that referent is the defect … naming a THIRD tree
-    # is the same defect (A1)") and `origin/main`'s predicate both refuse them.
-    # `_third_sha_in_clause` is the guard the arming-sha branch already applies; the fix
-    # applies it to the true-tree branch. Mutation-tested: deleting that guard REDDENS this
-    # block (verified at `198ed21b8c` before the fix).
+    # tree. All four shapes below were ACCEPTED at `198ed21b8c`. The contract's referent row
+    # is the rule they violate: "any tree other than `047c91f7a` as that referent is the
+    # defect … naming a THIRD tree is the same defect (A1)".
+    # ⛔ `origin/main` ACCEPTS them TOO (it has no third-sha guard at all) — this narrowing is
+    # a deliberate departure FROM main, not an agreement with it. The file's standing
+    # false-RED criterion is "`origin/main` accepts it", so an overstated claim here invites a
+    # future revert of a guard that is right (#11191 review r28, P3 — the earlier wording said
+    # main "also refuses them", which is false and was corrected in only one of the two
+    # places it appeared).
+    # The guard is `_third_sha_in_clause`'s DENIAL VOCABULARY applied to the phrase's own
+    # predication (`_third_sha_is_phrases_object`, r28): the arming-sha branch keeps its
+    # clause-wide test, the true-tree branch reads the object, and neither is the other's
+    # spelling. Mutation-tested at the head that carries BOTH the guard and this block
+    # (`9e7080ac76` + the r28 fix): deleting the guard reddens this block, and emptying the
+    # measurement cues reddens the `_phrases_object_relative` block (#11191 review r28, P3 —
+    # the earlier provenance "verified at `198ed21b8c` before the fix" is impossible: that
+    # head has neither the guard nor this block).
     for _true_referent_third in (
         "`047c91f7a` is not it; the tree immediately before #9548 is `c5cbcbb4f`.",
         "Measured at `047c91f7a`. The tree immediately before #9548 is `c5cbcbb4f`.",
@@ -8717,6 +8746,55 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             "the phrase names the TRUE tree and only DENIES or MEASURES another one beside "
             "it — refusing this is the false-RED class #11187 names verbatim, and it keyed "
             "the verdict on word order (#11191 review r27, P2)"
+        )
+    # ⛔ …AND THE GUARD IS THE PHRASE'S OWN PREDICATION, NOT A CHARACTER DISTANCE
+    # (#11191 review r28, P2 ×2 — MEASURED at `9e7080ac76`, both directions). The r27 fix
+    # read the object as "a sha within 40 characters of a copula", which is a DISTANCE
+    # WINDOW, not a scope, and it failed in both directions at the head that introduced it:
+    #   • FAIL-OPEN — one aside longer than the window put a THIRD tree back on the §A8
+    #     cell with the pin GREEN (measured ACCEPTED at `9e7080ac76`):
+    #       "Measured at `047c91f7a`. The tree immediately before #9548 is, as the doc's
+    #        own §A8 row still has it, `c5cbcbb4f`."
+    #   • FALSE RED — a relative clause AFTER a true object was read as a SECOND object,
+    #     so a truthful measurement was REFUSED while its attributive twin stayed GREEN,
+    #     the same word-order key the r27 fix claims to close (measured at `9e7080ac76`):
+    #       "`047c91f7a` is the tree immediately before #9548, which is thirteen commits
+    #        after `c5cbcbb4f`."                            -> REFUSED (must accept)
+    #       "`047c91f7a` is the tree immediately before #9548, thirteen commits after
+    #        `c5cbcbb4f`."                                  -> ACCEPTED
+    # The rule is therefore LEXICAL and distance-free: a non-true sha is the phrase's own
+    # object unless the word governing it DENIES it or MEASURES another tree from it — the
+    # denial vocabulary is `_third_sha_in_clause`'s own, not a second one.
+    for _phrases_object_third in (
+        "Measured at `047c91f7a`. The tree immediately before #9548 is, as the doc's own "
+        "§A8 row still has it, `c5cbcbb4f`.",
+        "Measured at `047c91f7a`. The tree immediately before #9548 is, per the row, "
+        "`c5cbcbb4f`.",
+        "Measured at `047c91f7a`. The tree immediately before #9548 is `c5cbcbb4f`.",
+        "Measured at `047c91f7a`. The tree immediately before #9548 is `c5cbcbb4f`, not "
+        "`047c91f7a`.",
+    ):
+        assert _refuses_before_9548(_phrases_object_third), (
+            f"ACCEPTED: {_phrases_object_third!r}\n"
+            "a THIRD tree is the phrase's own copula OBJECT and the pin goes GREEN on the "
+            "real §A8 cell (#11191 review r28, P2 — the r27 guard was a 40-char window, "
+            "so one aside of 41+ characters walked around it)"
+        )
+    # …and the FALSE-RED direction of the same rule: a TRUE object followed by a relative
+    # clause must stay green in every spelling — the clause only MEASURES or DENIES another
+    # tree, so it is the truthful correction, not the claim.
+    for _phrases_object_relative in (
+        "`047c91f7a` is the tree immediately before #9548, which is thirteen commits after "
+        "`c5cbcbb4f`.",
+        "`047c91f7a` is the tree immediately before #9548, which is not `c5cbcbb4f`.",
+        "The tree immediately before #9548 is `047c91f7a`, which is thirteen commits after "
+        "`c5cbcbb4f`.",
+    ):
+        assert not _refuses_before_9548(_phrases_object_relative), (
+            f"REFUSED: {_phrases_object_relative!r}\n"
+            "the phrase's object is the TRUE tree and the relative clause only MEASURES or "
+            "DENIES another one — refusing this is the false-RED class #11187 names "
+            "verbatim (#11191 review r28, P2)"
         )
     # …and the TRUE copula, including the arming commit or an aside between the copula and
     # its object, must stay green in every spelling.
