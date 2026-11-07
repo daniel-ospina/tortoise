@@ -43,7 +43,7 @@ readout is blind to the vector index, which lives in a separate module). A publi
 puts non-index structure at **41 %**. **The range is 17–44 % and it is unmeasured; it is not an input to
 anything here.**
 
-Anything in this document that IS ours carries its pin inline. **⚠️ PROVENANCE of the four EXTERNAL figures this document leans on** — the 41 % non-index structure; the **0.0015 nDCG@10** spread at 381,559 vectors; the **0-of-10** filtered-ANN result and its 0.975/0.847 relax-order recall; and the **8–23 nDCG@10** Postgres-FTS-vs-BM25 gap — each is a **third-party published measurement, not ours and not reproduced here**. They are cited by RESULT; their specific citations are **owed before this document is quoted as measurement evidence**, and the fix is to attach them, not to drop the claims. Anything else here that reads as measured is ours and carries its pin.
+**⚠️ PROVENANCE — the EXTERNAL figures this document leans on.** Each of the following is a **third-party published measurement, not ours and not reproduced here**: the **41 %** non-index structure; the **0.0015 nDCG@10** spread at 381,559 vectors; the **0-of-10** filtered-ANN result and its **0.975/0.847** relax-order recall; the **8–23 nDCG@10** Postgres-FTS-vs-BM25 gap; the cache studies behind §7's policy table (**62.4 %** naive-pinning miss vs **60.2 %** LRU, and 1-/2-hop closure prefetch raising hit ratio); and the **4.9–5.9×** rebuild-peak range. They are cited by RESULT — their specific citations are **owed before this document is quoted as measurement evidence**, and the fix is to attach them, not to drop the claims. **Anything that reads as *our* measurement names its pin inline**, and a figure with neither a citation nor a pin is not evidence yet.
 
 ---
 
@@ -197,7 +197,7 @@ as authority**; the record schema carries **no column** for them and its `chk_po
 table comment restates the carve-out). ⚠️ **The one narrowed exception, stated so this section does not
 overstate the carve-out:** `baseline_source` / `baseline_alpha` / `baseline_beta` **are** columns —
 PRIMARY when `baseline_source = 'set-by-author'`, because an author-set prior is a non-reconstructible
-input rather than a derived value (the `#7955` correction to §17.5; `STORAGE-ARCHITECTURE.md:2048` says
+input rather than a derived value (the `#7955` correction to §17.5; `STORAGE-ARCHITECTURE.md:2051` says
 the carve-out is **not** reopened by it). That ruling stands and nothing here reverses it.
 
 **Which is why the retention unit must be a CLOSED component (§7):** a closed subgraph has no missing
