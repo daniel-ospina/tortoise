@@ -142,8 +142,11 @@ their membership is not evidence the literal was seen — exactly the distinctio
 `sdk::_journal_event_raw_write` bullet below draws. The same blind class is spelled
 `params={…, "embedding": …}` in `tortoise.projection.entities::_event_plain_merge`
 (`unresolved_write` off its own `set_embedding_clause(` call) and in the `gated`-by-CALL
-`projection.entities::_upsert_*` writers; a reader must not take two as the complete set — the
-SHAPE, not the instance list, is what this paragraph names. The authority for SHAPES is
+`projection.entities::_upsert_point_props`, `_upsert_subject`, `_upsert_object` and
+`_upsert_document` — the fifth of that family, `_upsert_event`, holds NO literal: it computes the
+vector and hands it to `_event_plain_merge`, which builds the dict — and a reader must not take two
+as the complete set — the SHAPE, not the instance list, is what this paragraph names. The authority
+for SHAPES is
 `tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which holds both the shapes neither pass can
 spell AND the SCOPES the walk never enters: a count written
 here re-stales with every shape added, so this paragraph names forms and instances and does not
