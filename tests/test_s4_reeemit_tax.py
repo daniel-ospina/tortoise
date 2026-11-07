@@ -1608,3 +1608,54 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
         "the narrowing caveat must name both counts")
     assert "the 35 operators" in caveats, (
         "the emitted population caveat must name the 35 never-offered operators")
+
+
+#: The phrases the direction retraction removed from this PR's prose. They are
+#: banned as a CLASS — the README copy, the index row, the emitted caveats and
+#: the tool docstring are four copies of the same sentence, and each round of
+#: this review found a copy the pins could not see (#11385 review P3).
+_REFUTED_DIRECTION_PHRASES = (
+    "cannot do better on that channel",
+    "cannot do better on this channel",
+    "production maximum",
+    "production MAXIMUM",
+    "no room to add",
+    "than it will usually find in production",
+    "all 266 items offered",
+)
+
+
+def test_the_tool_docstring_and_the_readme_paraphrase_carry_the_floor_direction():
+    """The LAST two unguarded copies of the corrected direction sentence.
+
+    Round 19 fixed the README bullet and the index row and left two copies
+    outside every pin's reach (#11385 review P3):
+
+    1. `tools/s4_reeemit_tax.py`'s `search_from_s2` docstring states the
+       direction in its own words (``… that channel cannot emit FEWER than this
+       block did``). No test read a docstring, so re-introducing
+       ``cannot do better on that channel`` there — the exact ambiguity the
+       retraction exists to remove — would have stayed green.
+    2. `README.md`'s closing paraphrase (``So production cannot emit LESS of the
+       two channels this section names than the delta arm did``) is the same
+       comparison stated once more, outside the banned-phrase block.
+
+    A ban list over one document is a pin on one document, not on the claim —
+    so this asserts the floor DIRECTION in each copy and the refuted framings in
+    none of them. Non-vacuity: on the pre-fix tool docstring the banned list is
+    clean but the direction sentence is asserted separately, so editing either
+    copy's direction reds this test."""
+    flat_doc = " ".join((tool.search_from_s2.__doc__ or "").split())
+    assert flat_doc, "search_from_s2 lost its docstring — re-point this pin"
+    assert "cannot emit FEWER than this block did" in flat_doc, (
+        "the tool docstring must state the floor direction, not a ceiling")
+    for _phrase in _REFUTED_DIRECTION_PHRASES:
+        assert _phrase not in flat_doc, (
+            f"a refuted framing is back in tools/s4_reeemit_tax.py: {_phrase!r}")
+
+    flat_readme = " ".join((_EVID / "README.md").read_text().split())
+    assert ("So production cannot emit LESS of the two channels this section "
+            "names than" in flat_readme), (
+        "the README's closing paraphrase must keep the LESS direction")
+    assert "cannot emit MORE of the two channels" not in flat_readme, (
+        "the paraphrase was flipped to a ceiling")
