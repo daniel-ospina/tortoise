@@ -6794,13 +6794,12 @@ def _record_health() -> dict:
 #
 # This endpoint is that request, and its answer is deliberately impossible to
 # produce from cached state: it increments a counter FOR THIS REQUEST and
-# reports the age of the last request that ENTERED this handler (stamped when
-# the handler runs, not when the response is delivered — the prober treats a
-# response that never arrives as DOWN, so the two are the same event for it).
-# If the loop cannot run, this
-# handler never resumes, so no answer exists to be mistaken for health — the
-# prober's own timeout is the signal (`.github/workflows/availability-watchdog.yml`
-# probes it with a 5 s per-request bound, #10892).
+# reports the age of the PREVIOUS one, stamped when the handler ENTRY runs (not
+# on delivery — a request that ran the loop and never delivered still counts).
+# If the loop cannot run, this handler never resumes, so no answer exists to be
+# mistaken for health — the prober's own timeout is the signal
+# (`.github/workflows/availability-watchdog.yml` probes it with a 5 s per-request
+# bound, #10892).
 #
 # ⚠️ THE STALE ANSWER THIS PREVENTS IS THE WHOLE INCIDENT. `/health` and
 # `9090 /healthz` both answer from values written by something else (a
@@ -6824,7 +6823,7 @@ _LIVENESS_SERVED_COUNT = 0
 #: ``time.monotonic()`` stamped when this process last STARTED a ``/liveness``
 #: handler, or None before the first one — "no sample" must be distinguishable
 #: from "a fast one". Deliberately stamped on ENTRY, not on delivery (see the
-#: handler's ``_served_age_ms`` note): a request this process served but never
+#: handler's ``last_served_age_ms`` note): a request this process served but never
 #: delivered still ran the loop, which is the thing being evidenced.
 _LIVENESS_LAST_SERVED_AT: float | None = None
 

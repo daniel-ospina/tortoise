@@ -1689,13 +1689,12 @@ Two halves close that, and neither is a health *reading*:
 
 1. **`GET /liveness`** (`hosted_api.liveness`) — the handler yields to the loop
    once, then increments a per-process counter **for this request** and reports
-   the age of the last request that ENTERED this handler (stamped when the
-   handler runs, not when the response is delivered — see `hosted_api.liveness`).
-   If the loop cannot run, the coroutine
-   never resumes, so there is no answer to mistake for health. By construction it
-   does no I/O of its own (one loop yield, one counter increment — no DB and no
-   network); with the loop blocked, `/health` and `/liveness` both
-   answer **nothing** inside a 5 s client budget
+   the age of the PREVIOUS one, stamped on handler entry (not on delivery, so a
+   request that ran the loop and never delivered still counts). If the loop
+   cannot run, the coroutine never resumes, so there is no answer to mistake for
+   health. By construction it does no I/O of its own (one loop yield, one
+   counter increment — no DB and no network); with the loop blocked, `/health`
+   and `/liveness` both answer **nothing** inside a 5 s client budget
    (`tests/test_10892_served_liveness.py`, which pins that shape and the
    "handler must not become a state read" regression).
 2. **The prober that fails on absence** — `.github/workflows/availability-watchdog.yml`
