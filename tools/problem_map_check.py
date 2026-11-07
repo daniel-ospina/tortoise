@@ -28,9 +28,13 @@ What it re-measures, offline, from the tree in front of it:
      satisfies `exists()` and pins nothing), and a pin that is a test module
      contains a `def test_`. A pin whose file survives but whose assertions were
      deleted pins nothing, which is the failure mode the pin column exists for.
-  5. **Summary counts** — the numbers in §2 equal the rows that follow. A summary
-     that drifts from its own table is the same defect class as the missing
-     `content_hash` this map's Pattern 1 names.
+  5. **Summary counts** — §2's four `| STATUS | n |` rows, its `Total tracked`
+     row, its five per-workstream `**N of M fixed**` cells, and the frontmatter's
+     `**N fixed and N open**` headline all equal the rows below. A summary that
+     drifts from its own table is the same defect class as the missing
+     `content_hash` this map's Pattern 1 names. §8's and §10's prose counts are
+     NOT read — `check_workstreams`'s docstring and §9 state that residual rather
+     than implying coverage.
   6. **Registration** — the page is listed in `docs/00_index.md`, so it is
      reachable rather than merely committed — **and the index entry's own
      headline counts match §2's**, because the index is what most readers see and
@@ -116,13 +120,24 @@ INDEX_REL = "docs/00_index.md"
 #: code rather than parsed out of the document: a row that vanished from the
 #: table must be reported, and a set derived from the table itself could never
 #: report its own shrinking.
-TRACKED: tuple[int, ...] = (
-    2813, 2795, 2814, 2788, 2742,                      # WS-A — declared ≠ stored
-    2786, 2783, 2767, 2727,                            # WS-B — canonical ≠ consistent
-    2766, 2787, 2818, 2781,                            # WS-B — promised ≠ expressible
-    2792, 2729, 2782, 2817, 2730, 2684,                # WS-C — fixed vs flexible
-    2725, 2696, 2728, 2726,                            # WS-D — venture pack delivery
-    2749, 2748, 2734,                                  # WS-E — repo / CI hygiene
+#:
+#: Keyed by workstream as well as flattened, because §2 prints a per-workstream
+#: "**N of M fixed**" line for each of the five — and a count nothing reads is a
+#: count that rots (§8's own lesson). The grouping is the issue's, not this
+#: tool's: `#2786`, `#2783`, `#2767`, `#2727` (canonical ≠ consistent) and `#2766`,
+#: `#2787`, `#2818`, `#2781` (promised ≠ expressible) are BOTH WS-B, which is why
+#: WS-B is eight rows in the map's table and two patterns there.
+WORKSTREAMS: dict[str, tuple[int, ...]] = {
+    "WS-A": (2813, 2795, 2814, 2788, 2742),                      # declared ≠ stored
+    "WS-B": (2786, 2783, 2767, 2727,                             # canonical ≠ consistent
+             2766, 2787, 2818, 2781),                            # promised ≠ expressible
+    "WS-C": (2792, 2729, 2782, 2817, 2730, 2684),                # fixed vs flexible
+    "WS-D": (2725, 2696, 2728, 2726),                            # venture pack delivery
+    "WS-E": (2749, 2748, 2734),                                  # repo / CI hygiene
+}
+
+TRACKED: tuple[int, ...] = tuple(
+    issue for issues in WORKSTREAMS.values() for issue in issues
 )
 
 STATUSES: tuple[str, ...] = ("VERIFIED-FIXED", "OPEN", "UNKNOWN")
@@ -144,9 +159,15 @@ _SUMMARY_SECTION = "## 2."
 #: The TOTAL row. It is a fourth count and nothing read it, so a document could
 #: state "Total tracked 30" over a 26-row table and this tool still said CLEAN —
 #: found by review on the version that already guarded the other three counts, so
-#: the rule is: EVERY count the document prints is compared, or it is not a count.
+#: the rule is: every count the document prints in MACHINE-READABLE form is
+#: compared, or it is not a count. (§8's and §10's counts are prose; they are
+#: disclosed as a residual in `check_workstreams` and in §9, not claimed here.)
 _TOTAL = re.compile(r"^\|\s*\*\*Total tracked\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|",
                     re.MULTILINE)
+#: §2's per-workstream "**N of M fixed**" cell, in table order (WS-A…WS-E).
+_WS_COUNT = re.compile(r"\*\*(\d+) of (\d+) (?:rows )?fixed\*\*")
+#: The frontmatter's headline: "**21 fixed and 5 open**".
+_HEADLINE = re.compile(r"\*\*(\d+) fixed and (\d+) open\*\*")
 
 #: A test function, INDENTED OR NOT: most of this repo's tests are methods on a
 #: class, so a bare `^def test_` anchor would call 12 of this map's own pins
@@ -556,6 +577,68 @@ def check_summary(text: str, rows: list[Row]) -> list[str]:
     return errors
 
 
+def check_workstreams(text: str, rows: list[Row]) -> list[str]:
+    """§2's per-workstream "**N of M fixed**" lines and the frontmatter headline.
+
+    WHY THIS EXISTS (found by fresh review at the post-merge head, reproduced): the
+    summary check above compared only the four `| STATUS | n |` rows and the
+    total, so the document could print `**7 of 8 rows fixed**` over a WS-B table
+    that no longer had 7 fixed rows — and the four numbers the guard DID compare
+    could be edited to match, leaving §2 contradicting its own tables in three
+    places on a CLEAN `docs`-job run. Flip `#2783` to OPEN, set
+    `| VERIFIED-FIXED |` 21→20 and `| OPEN |` 5→6, and the pre-fix guard returned
+    NO errors. The lesson in `_TOTAL`'s comment is the rule: every count the
+    document prints in machine-readable form is compared, or it is not a count.
+
+    A workstream's rows come from `WORKSTREAMS`, not from the document's own
+    tables — same reason as `TRACKED`: a set parsed out of the artifact cannot
+    report its own shrink.
+
+    RESIDUAL, stated rather than implied: §8's prose ("Five rows, and four of them
+    are defects") prints counts in a form this check does not read, and §10's
+    census prose likewise. §9 lists both.
+    """
+    errors: list[str] = []
+    section = _section(text, _SUMMARY_SECTION)
+    declared = [(int(n), int(m)) for n, m in _WS_COUNT.findall(section)]
+    if len(declared) != len(WORKSTREAMS):
+        errors.append(
+            f"summary declares {len(declared)} workstream count(s); the taxonomy "
+            f"has {len(WORKSTREAMS)} ({', '.join(WORKSTREAMS)})"
+        )
+        return errors
+    by_issue = {r.issue: r for r in rows}
+    for (name, issues), (fixed, size) in zip(
+        WORKSTREAMS.items(), declared, strict=True
+    ):
+        present = [by_issue[i] for i in issues if i in by_issue]
+        actual_size = len(present)
+        actual_fixed = sum(1 for r in present if r.status == "VERIFIED-FIXED")
+        if size != actual_size:
+            errors.append(
+                f"summary says {size} {name} row(s); the taxonomy tracks "
+                f"{actual_size} ({', '.join(str(i) for i in issues)})"
+            )
+        elif fixed != actual_fixed:
+            errors.append(
+                f"summary says {fixed} of {size} {name} row(s) fixed; the table "
+                f"has {actual_fixed} VERIFIED-FIXED"
+            )
+    headline = _HEADLINE.search(text)
+    if headline is None:
+        errors.append("the page carries no `**N fixed and N open**` headline")
+    else:
+        want_fixed = sum(1 for r in rows if r.status == "VERIFIED-FIXED")
+        want_open = sum(1 for r in rows if r.status == "OPEN")
+        if (int(headline.group(1)), int(headline.group(2))) != (want_fixed, want_open):
+            errors.append(
+                f"the headline says {headline.group(1)} fixed and "
+                f"{headline.group(2)} open; the tables contain {want_fixed} "
+                f"fixed and {want_open} open"
+            )
+    return errors
+
+
 #: The index row's headline counts. The phrasing is asserted, not guessed: a
 #: rewrite that drops it is reported (see `check_registration`).
 _INDEX_COUNTS = re.compile(
@@ -722,6 +805,7 @@ def run(repo: Path, doc: Path) -> Report:
     report.errors.extend(check_pins(repo, rows, report))
     report.errors.extend(check_anchors(repo, rows, report))
     report.errors.extend(check_summary(text, rows))
+    report.errors.extend(check_workstreams(text, rows))
     report.errors.extend(check_registration(repo, doc, text, report))
     return report
 

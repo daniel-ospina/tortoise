@@ -344,6 +344,42 @@ def test_a_summary_count_that_disagrees_with_the_table_is_drift(tmp_path):
     assert any("summary says 25" in e for e in errors), errors
 
 
+def test_a_workstream_count_that_disagrees_with_its_rows_is_drift(tmp_path):
+    """Fails when §2's "**N of M fixed**" line drifts from that workstream's rows.
+
+    Reachable, and reproduced by fresh review at the post-merge head: the guard
+    compared only the four `| STATUS | n |` rows and the total, so a row could move
+    to OPEN while §2 still printed `**7 of 8 rows fixed**` — and, because the
+    status counts were edited to match the moved row, the old guard returned NO
+    errors while §2 contradicted its own WS-B table. §2 states a count per
+    workstream, so every one of those counts is compared (see
+    `check_workstreams`'s docstring for the full reproduction).
+    """
+    copy = _doc_copy(tmp_path)
+    text = copy.read_text(encoding="utf-8")
+    mutated = text.replace("**7 of 8 rows fixed**", "**8 of 8 rows fixed**", 1)
+    assert mutated != text, "fixture no longer finds WS-B's count"
+    copy.write_text(mutated, encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("WS-B" in e and "8 of 8" in e for e in errors), errors
+
+
+def test_the_frontmatter_headline_must_agree_with_the_tables(tmp_path):
+    """Fails when the page's own "**21 fixed and 5 open**" headline goes stale.
+
+    Reachable: that sentence is the one most readers quote (it is the abstract of
+    the whole page), and it was not compared to anything before this control — a
+    row moving in §3–§7 left it stating the opposite of the table below it.
+    """
+    copy = _doc_copy(tmp_path)
+    text = copy.read_text(encoding="utf-8")
+    mutated = text.replace("**21 fixed and 5 open**", "**22 fixed and 4 open**", 1)
+    assert mutated != text, "fixture no longer finds the headline"
+    copy.write_text(mutated, encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("headline says 22 fixed and 4 open" in e for e in errors), errors
+
+
 def test_a_decoy_summary_ROW_outside_section_2_cannot_satisfy_the_check(tmp_path):
     """Fails if §2's counts are read from ANYWHERE instead of §2's own body.
 

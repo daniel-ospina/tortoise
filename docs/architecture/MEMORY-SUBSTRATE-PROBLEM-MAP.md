@@ -52,7 +52,8 @@ both:
    itself. A test module is preferred, because a symbol can survive a fix being
    reverted out from under it.
 
-**Issue closure is not evidence, and this map has four rows where the tracker's state and the row's status disagree:**
+**Issue closure is not evidence, and this map has four rows where the tracker's
+state (or its closure reason) and the row's status disagree:**
 
 | What the tracker said | What the tree said | Row |
 |---|---|---|
@@ -348,9 +349,12 @@ The checker re-measures, offline and without network access:
    then unmeasured. A **directory** at a pin path is the third case and stays
    DRIFT (the case above): it pins nothing, and the guard CAN tell — calling that
    unreadable would excuse a row that fails no assertion.
-5. **Summary counts** — the numbers in §2 equal the rows that follow. A summary
-   that drifts from its own table is the same defect class as the missing
-   `content_hash` this map's Pattern 1 names.
+5. **Summary counts** — §2's four `| STATUS | n |` rows, its `Total tracked`
+   row, its five per-workstream `**N of M fixed**` cells, and the frontmatter's
+   `**N fixed and N open**` headline all equal the rows below. A summary that
+   drifts from its own table is the same defect class as the missing
+   `content_hash` this map's Pattern 1 names. §8's prose counts and §10's census
+   prose are NOT read — see the residuals below.
 6. **Registration** — this page is listed in `docs/00_index.md`, so it is
    reachable rather than merely committed — **and that entry's own
    `**N fixed · N open · N unknown**` headline must equal §2's**, read from the
@@ -392,6 +396,15 @@ rounding:**
   exists to stop. Pinned by a real corrupted object in
   `test_a_corrupt_object_store_reads_as_no_answer_not_as_drift`, so a reword is
   caught by that control rather than by a reader.
+- **The prose counts (§8, §10).** §8 says "Five rows, and four of them are
+  defects" and §10 states its census in words. Both are counts the guard does not
+  read: they are prose, their clauses do not partition the same population
+  (§8's second clause needs to know which row is an epic — the tracker half this
+  guard refuses to read), and a guard that parsed those sentences would be a
+  spelling trap rather than a check. §2's machine-readable counts — the four
+  status rows, the total, the five per-workstream cells — ARE compared
+  (`check_workstreams`), so the split is stated here rather than left for a
+  reader to discover.
 - **The `#2730`-class error.** A row can be VERIFIED-FIXED with a docs-only
   anchor and a prose pin (that is what this page shipped first, at #2730). The
   guard passed it. Only a reviewer reading the anchor *as a fix* catches it, which
@@ -421,11 +434,13 @@ rounding:**
   `docs/plans/2026-09-10-ws-b-pack-property-declaration.md`,
   `docs/plans/2026-09-10-ws-c-numeric-normalization.md`.
 - Tracker reads: `gh issue view <n>` for each of the 26 on 2026-11-06. Four are
-  not what their state suggests, and those are exactly the four where state and
-  status disagree: two closed NOT_PLANNED (**#2787** with one indicator landed,
-  **#2748** fixed in effect), one closed COMPLETED with the mechanism unbuilt
-  (**#2730**), and one **OPEN** whose fix outran it (**#2728** — both halves
-  landed in `08a6b0288` on 2026-10-18 and are pinned in the tree) — the four
-  cases §1 exists to keep honest. `#2782` and `#2684` are OPEN in both places and
-  are therefore NOT in that census: their state is right, it is just silent
-  about how much landed, which §1's paragraph after the table records.
+  not what their state (or its closure reason) suggests, and those are exactly the
+  four where that reading and the row's status disagree: two closed NOT_PLANNED
+  (**#2787** with one indicator landed, **#2748** fixed in effect — its STATE says
+  closed, its *reason* says abandoned, and the file it named is lint-clean), one
+  closed COMPLETED with the mechanism unbuilt (**#2730**), and one **OPEN** whose
+  fix outran it (**#2728** — both halves landed in `08a6b0288` on 2026-10-18 and
+  are pinned in the tree) — the four cases §1 exists to keep honest. `#2782` and
+  `#2684` are OPEN in both places and are therefore NOT in that census: their
+  state is right, it is just silent about how much landed, which §1's paragraph
+  after the table records.
