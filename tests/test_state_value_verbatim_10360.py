@@ -1863,9 +1863,9 @@ _RESIDUAL_NEGATED_OPEN = (
 #: re-measures in both spellings.
 #:
 #: ⛔ AND EACH FORM IS A FIXED-WIDTH LOOKBEHIND SITTING IMMEDIATELY IN FRONT OF THE
-#: VERB, which is what keeps the EMPHATIC negations RED: `not only fails open` and
-#: `never merely fails open` ASSERT the predicate, and the four chars in front of
-#: the verb there are `nly `/`rely `, not `not `, so they are still read. That
+#: VERB, which is what keeps the EMPHATIC negations RED: `not only fails open`
+#: ASSERTS the predicate, and the four chars in front of the verb there are `nly `,
+#: not `not `, so it is still read. That
 #: narrowness is pinned rather than asserted — `the ADJACENCY half not only fails
 #: open, it leaks.` is in `_RESIDUAL_REOPENING_MUTATIONS` and goes GREEN the moment
 #: the veto is widened into a WINDOW scan (the trade round 2 `P1` and round 13 had
