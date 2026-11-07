@@ -4509,8 +4509,14 @@ def _doc_section(text: str, start: str, end: str) -> str:
 #    which is not what an earlier draft said."
 #   "outside the method body, the walk reports a nested `def`'s …"
 # Requiring the negation to sit within two words of a COVERAGE verb closes every
-# one of them. Window measured: 0, 1 and 2 all close 13/13 inverse rows and keep
-# the real doc a HIT; 3 re-opens "are not missed by the walk".
+# one of them. Window measured at THIS head over all 27 `must_red` rows: 0, 1 and
+# 2 all leave the must_red set fully RED (0/27 leak) and keep the real doc a HIT;
+# **3 opens 2 of 27**, starting with "are not missed by the walk". ⚠️ Window 0 is
+# not free either, one set over: it wrongly REDS the three out-of-termset hedge
+# rows in `declared_open`. So 1 and 2 are the clean windows — 0 and 3 each cost a
+# set, in opposite directions. (An earlier draft cited "13/13 inverse rows"; the
+# row set has since grown to 27 and the denominator no longer re-derived —
+# #11437 review, P3.)
 # ⛔ COST, taken deliberately: window 2 makes "…are never TOUCHED by the walk"
 # RED, because `touched` is not in the coverage list — a false block bought for
 # that false pass, which is the trade this predicate always takes.
@@ -4538,8 +4544,9 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 85 candidate sentences
-# (every row, plus every sentence of the real §3) there is no case where the
+# one of the same four verbs AFTER the negation, so on all 80 candidate sentences
+# (the 50 rows across the four sets, plus the 30 sentences of the real §3 under
+# this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from
 # `_residual_sentences` changes no verdict. It stays because it is the INDEPENDENT
 # check of the "the sentence must carry coverage vocabulary" fact: if a later
@@ -4873,7 +4880,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
     tree, outside the `if declared is None` branch — measured, deleting §3's
     residual clause reds both that test and this one. This test still earns its
     keep: the doc pin's ability to FAIL is what the mutations at the end of THIS
-    TEST pin (not at the end of the file — seven unrelated tests follow it), and
+    TEST pin (not at the end of the file — eight unrelated tests follow it), and
     a row set that names the measured defeats is what keeps the helper's declared
     surface honest. The sets cover every shape four review rounds have measured,
     plus the residuals deliberately left open in both directions.
@@ -4926,6 +4933,18 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
         # listed four literal phrases instead of the CLASS `_AFFIRMED` now is
         # (#11437 review, round 2, P1): a negation governing a reverser reads as
         # the inverse, whichever reverser word it picks.
+        # ⚠️ WHAT IS MEASURED TODAY, because the paragraph above is a history and
+        # not the current mechanism (#11437 review, P3). Of these four rows, THREE
+        # red through `_NEGATION_GOVERNS` and not through this class at all:
+        # `not excluded`, `not out of scope` and `not omitted from` all return None
+        # from the governance test (the em-dash or `from` puts the coverage verb
+        # outside the 0-2 word window), so they red with the class present OR
+        # absent. Only `does not fail to report` depends on it. Branch ablation
+        # across the whole must_red set: `outside` and `fail` each carry exactly
+        # one row; `exempt`, `excluded`, `omitted`, `left` and `out of scope` are
+        # INERT today. The class is RETAINED deliberately, on the same footing as
+        # `_COVERAGE` above: it is the belt for a loosened governance window, and
+        # an AND-side marker cannot cause a false PASS.
         "inverse: not excluded — the walk does report them":
             "a nested `def`'s decorators and parameter defaults are not excluded "
             "— the walk does report them",
@@ -5233,7 +5252,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
     # passing, asserting that an unmutated document does, and no other test in the
     # file can see it — so "the fix is unpinned and a one-line refactor reinstates
     # the defect" is exactly the class this file exists to refuse (see
-    # `test_the_doc_section_refuses_a_renamed_or_ambiguous_boundary`, whose own
+    # `test_the_doc_slice_requires_a_UNIQUE_LINE_ANCHORED_H2`, whose own
     # docstring records the same shape being reverted with the file staying green).
     source = Path(__file__).read_text(encoding="utf-8")
     owner = next(
