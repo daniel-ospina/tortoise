@@ -403,26 +403,40 @@ gh issue view 11237 --json state,closedAt                # OPEN — the Object�
 gh pr view 11105 --json state,mergeCommit,mergedAt        # MERGED 11:18:49Z, mergeCommit 24d2dbcb
 gh pr view 10738 --json state,mergeCommit,mergedAt        # MERGED 16:14:21Z, mergeCommit fd6558c5
 git log -1 --format=%B 316a572ce2 | grep '^Closes #10999' # arm 2's keyword, in the COMMIT message
+# arm 1's OWN discriminator — an auto-detected keyword vs a PR linked BY HAND. `closedByPullRequestsReferences`
+# carries MANUALLY-linked closing references too: `userLinkedOnly` and its inverse `excludeUserLinked` both
+# default to `false`, and `addCloseIssueReferences` is the mutation that creates the manual kind. So a
+# NON-EMPTY field on its own does NOT prove a body/title keyword — a hand close carrying a linked PR reads
+# the same. `gh issue view` has no flag for that filter, so this is the GraphQL read that separates them:
+for n in 11001 10997 10684 10698; do                    # arm 1's four rows; `[]` = auto-detected, not linked
+  gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,userLinkedOnly:true){nodes{number}}}}}" \
+    --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
+done
 # How an issue was actually CLOSED — THREE arms, and the PRIMARY field is closedByPullRequestsReferences,
 # NOT commit_id alone. Read it first: `gh issue view <n> --json state,closedByPullRequestsReferences`.
-#   1. NON-EMPTY => closed by that PR's body/title keyword. ⛔ Its `commit_id` is NOT fixed: it reads
+#   1. NON-EMPTY => closed by that PR's keyword (either auto-detected from its body/title, which is what
+#      the four rows below are — `userLinkedOnly` printed `[]` for all four when measured — or a MANUAL
+#      closing link, which the read above rules out). ⛔ Its `commit_id` is NOT fixed: it reads
 #      NULL for #11001 ([11213]) and #10997 ([11212]), and that PR's own merge sha for #10684 ([11105])
 #      and #10698 ([10738]) — the same shape, both outcomes. A non-null sha here does NOT demote it to
 #      arm 2, which is exactly why the field above is read FIRST and commit_id cannot classify alone.
 #   2. empty + commit_id = SHA => the keyword rode the COMMIT message and no PR body/title named it
 #      (#10999 -> 316a572ce2, whose message carries `Closes #10999`)
-#   3. empty + commit_id = null => a MANUAL close (#11021: [] and null)
+#   3. empty + commit_id = null => a close NOT attributable to any PR (#11021: [] and null). ⚠️ "manual" is
+#      a partial label — a bot or a `not_planned` close reads the same [] + null — so the loop below prints
+#      the closed event's `actor` beside the sha: #11021's is a human (daniel-ospina), one second after
+#      #11211 merged, which is what makes the word a checked fact rather than an assumption.
 # ⛔ So `commit_id: null` ALONE is NOT "manual" — arm 1 reads null in two of its four examples. And an
 #   empty closingIssuesReferences is not evidence either: that PR-body field stays empty in arms 2 and 3.
 # The matrix above is this loop's OUTPUT, not prose — arm 1's four named issues, plus one arm 2 and
-# one arm 3. Every issue AND every PR the arms name is read here, and so is arm 2's commit message —
-# the third kind of fact, neither an issue nor a PR — so no row, and no equality a row rests on, is
-# asserted without a command:
+# one arm 3. Every issue AND every PR the arms name is read here, and so are the two facts that are
+# neither an issue nor a PR — arm 2's commit message, and arm 1's user-linked filter — so no row, and no
+# equality a row rests on, is asserted without a command:
 for n in 11001 10997 10684 10698 10999 11021; do
   echo "#$n"
   gh issue view $n --json state,closedByPullRequestsReferences --jq '[.closedByPullRequestsReferences[].number]'
   gh api "repos/daniel-ospina/tortoise/issues/$n/timeline?per_page=100" --paginate \
-    --jq '.[] | select(.event=="closed") | {created_at, commit_id}'
+    --jq '.[] | select(.event=="closed") | {created_at, commit_id, actor: .actor.login}'
 done
                                                           # ⛔ --paginate is MANDATORY: without it gh
                                                           # returns only the FIRST 100 events, and the
