@@ -1,5 +1,5 @@
 ---
-title: "#1789 — the S4 re-emit tax, measured: −95.3 % output tokens on real geometry"
+title: "#1789 — the S4 re-emit tax, measured: −93.8 % output tokens on real geometry"
 type: evidence
 domain: extraction
 doc_status: final
@@ -14,11 +14,11 @@ aboutObjects: "#1789, PR #8041, #4917, #2408, plan docs/plans/2026-08-27-1789-s4
 **Measured on:** 2026-11-07, `feat/1789-s4-reeemit-tax-measurement` (base
 `origin/main` @ `23d227c53`), model **requested** `deepseek-v4-flash` via the
 direct DeepSeek adapter, 7 real recorded sessions, **2 recorded runs, both
-produced by the committed instrument**: `ab-20261107T020837Z` (primary) and
-`ab-20261107T021100Z` (re-run, same code, same inputs). The filenames are each
+produced by the committed instrument**: `ab-20261107T023958Z` (primary) and
+`ab-20261107T024226Z` (re-run, same code, same inputs). The filenames are each
 run's START time; `measured_at` inside is its measured end. The model is not
 deterministic even at `temperature=0.0`, which is why two runs are recorded and
-the spread (`−95.3 %` / `−94.2 %`) is stated rather than hidden.
+the spread (`−93.78 %` / `−93.96 %`) is stated rather than hidden.
 
 **What was already true:** the delta contract (PR #8041) shipped and is
 default-ON (`_s4_delta_enabled()` = `env_flag("TORTOISE_S4_DELTA", True)`;
@@ -34,16 +34,15 @@ Task 10 (fresh 50-question E2E) was never run, so the delta contract's
 
 ## Verdict
 
-| target (issue) | measured | verdict |
+| issue target | measured | verdict |
 |---|---|---|
-| **S4 output size per chunk drops ≥ 40 %** | **−95.3 %** token-weighted (31 775 → 1 497 output tokens over 7 sessions); median **−96.8 %**, worst session **−90.6 %**, best **−98.0 %** | **MET**, 2.4× the threshold; every one of the 7 sessions clears 40 % on its own |
-| truncation rate | `truncated=False` on **14/14** arm calls, `attempts=1` — neither contract truncated on this geometry | unchanged (no regression) |
+| **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 787 → 2 038 output tokens over 7 sessions); median **−96.9 %**, worst session **−85.16 %**, best **−98.3 %** | **MET**, 2.3× the threshold; each of the 7 sessions clears 40 % on its own |
+| truncation rate → near 0 | `truncated=False` on **14/14** arm calls, `attempts=1` | ⚠️ **NOT EVIDENCED.** The largest output either arm produced is 7 814 tokens against a 16 000-token cap (`_S2_S4_MAX_TOKENS`), so this geometry cannot truncate and a null here is an artefact of the harness, not a measurement of the truncation rate. That target needs the eval lane's geometry. |
 | accuracy ≥ 0.826 / chunk@20 ≥ 0.738 | **not measured here** — the eval lane's gates | see *What this does not measure* |
 
-Re-run (`ab-20261107T021100Z`): 33 180 → 1 914 tokens, **−94.23 %**, median
-−97.23 %, worst −84.71 %. The two runs differ by 1.1 points, so the point
-estimate is soft and the DIRECTION is not: the worst session in either run is
-−84.7 %, still above twice the ticket's threshold.
+Re-run (`ab-20261107T024226Z`): 33 912 → 2 047 tokens, **−93.96 %**, median
+−96.87 %, worst −85.19 %. The two runs differ by 0.18 points, and the worst
+session in either run is −85.16 %, so the effect is not carried by outliers.
 
 ## The method — one variable
 
@@ -61,94 +60,111 @@ same cap — `run_s4` threads `delta` and nothing else (pinned by
 `test_both_arms_get_identical_inputs`). The number is the provider's own
 `usage.completion_tokens`, read from `stats["cost"]["completion_tokens"]`, the
 **per-call SUM** — so an escalated retry or a parse-retry re-prompt is counted
-rather than overwritten. An arm whose provider reported no usage for any of its
-calls is recorded as **unmeasured** (`null`), never as 0, and so is an arm whose
-recovery accumulator cannot be shown to be complete.
+rather than overwritten. An arm is recorded as **unmeasured** (`null`) — never
+as 0 — when the provider reported no usage for any call (rejected count, absent
+usage block, or a deadline-aborted call), or when the recovery accumulator cannot
+be shown to be complete.
 
 **Inputs are real, not synthetic.** The sessions come from the recorded
 write-path eval receipts (`tests/eval/write_path/receipts/7947-arms-2026-10-18/`):
 real S1 stories and real S2 embed lists (29–49 items per session across
 entities/events/points/operators; the recorded S2 output those sessions cost is
-**3 263–5 453 tokens, median 4 187**, per `inputs[].s2_reference`).
+**3 263–5 453 tokens, median 4 187**, per `inputs[].s2_reference`). ⚠️ The `id`
+values in the reconstructed search block are **synthetic** (`s2-ent-0`, …) — the
+receipts record no graph ids — so an output field that COPIES an id can only be
+an echo of the instrument's own alias, and is discounted below.
 
 **Nothing is lost by construction.** The delta arm's omissions are preserved by
-the E4 union: `merged_items` is 270 vs an S2 base of 266 — the delta added 4
-gaps and dropped none of the 266 S2 items (the legacy arm merged 275).
+the E4 union: `merged_items` is 272 vs an S2 base of 266 — the delta added 6
+gaps and dropped none of the 266 S2 items (the legacy arm merged 278).
 
 ## What the delta arm stopped paying for
 
-Summed over the 7 sessions (`composition` in the artifact, primary run):
+Summed over the 7 sessions (`composition`, primary run):
 
 | channel | legacy | delta | reading |
 |---|---|---|---|
-| `verbatim_reemissions` — items re-typed **unchanged** (the tax) | **200** | **0** | 200 items were pure typing cost; nothing about them was new |
-| `corrected_by_s4` — S2 items S4 re-emitted at all | 265 | 0 | legacy re-touched every S2 item it saw; delta touched none |
-| of which a field actually changed (`corrected_items`) | **64** | **0** | see the residual — this is the channel the design exists for |
-| `added_by_s4` — the gap channel (`added_items`) | 9 | 4 | see the residual |
-| `s4_items` emitted | 274 | 4 | 270 fewer items per 7 sessions |
+| `verbatim_reemissions` — items re-typed **unchanged** (the tax) | **201** | **0** | pure typing cost; nothing about them was new |
+| `corrected_by_s4` — S2 items S4 re-emitted at all | 266 | 0 | legacy re-touched every S2 item it saw; delta touched none |
+| of which a field changed (census: `corrected_by_s4 − verbatim` = 65) | **65** | **0** | see the residual — the pairs are in the artifact |
+| `added_by_s4` — the gap channel (`added_items`) | 12 | 6 | see the residual |
+| `s4_items` emitted | 278 | 6 | 272 fewer items per 7 sessions |
 
-(Re-run: legacy 201 verbatim / 266 corrected / 16 added / 64 corrected items;
-delta 0 / 0 / 5.) The census count (265) and the recorded `corrected_items` (64)
-sit one item apart from `265 − 200 = 65`: the census helper compares whole
-parsed dicts, while the item snapshot compares the listed correction-relevant
-fields. Neither number is a claim about value — see the residual.
+(Re-run: legacy 201 verbatim / 266 collisions / 9 added; delta 0 / 0 / 6.)
 
-## ⚠️ The residual this measurement exposes (do not read the −95 % as a free win)
+The artifact records **64 correction pairs** against the census's 65, and — this
+is the point of recording both numbers — **no list reached the 40-item cap in
+either run** (`cap_hit: false` on every row; the largest list is 17). Each item
+dict carries `count` (census), `candidates` (what the classification mask could
+enumerate), `recorded`, `cap`, `cap_hit`, `cap_dropped` and `unclassified`, so a
+CAP drop and a MASK deficit (the two independent reasons a list can come up
+short) are never conflated: here `cap_dropped` is 0 everywhere and
+`unclassified` is 0 on six rows and 1 on one — the census counting a change in a
+field outside `_CORRECTION_FIELDS`.
 
-**BOTH value channels thinned, and the corrections channel went to zero.**
+## ⚠️ The residual, partitioned from the artifact (do not read −94 % as a free win)
 
-- **Corrections.** The legacy arm re-emitted 265 S2 items, of which 200 were pure
-  re-emits, so 65 carried a change by the census mask (`_verbatim_reemissions`
-  ignores `source_ref`/`confidence`/`quote`/`search_keys`/`source_turn_id`, so
-  those are real corrections, not noise fields); the item-level snapshot records
-  **64** of them with a changed field, keeping both sides. The delta arm emitted
-  **0 colliding items in 14 calls**: the corrections channel was never used once.
-  The plan's own research is why that matters — the corrections/retraction
-  channel is the stated reason NOT to ship a pure ADD-only contract, and accuracy
-  is exactly what this document does not measure.
-- **Gaps.** legacy `added_by_s4` 9 (primary) / 16 (re-run) vs delta 4 / 5, and the
+The plan's Task 10 Step 5 asks for the corrections partition: content-changing /
+kind-lifecycle-only / re-emission-noise. **The artifact carries the pairs, so it
+can be answered without another paid run, and the answer is in the data:**
+
+| bucket | primary | re-run |
+|---|---|---|
+| `content` / `name` / kind changed (**a rewritten claim**) | **0** | **0** |
+| `lifecycle` only | 62 | 62 |
+| `slots` only | 1 | 1 |
+| `supersedes` only | 1 | 1 |
+
+Every lifecycle change is the **same transition**: `created`/`changed` →
+`unchanged` (61 + 1). In other words the legacy arm's entire correction channel
+is *"this entity/point already exists in the graph — mark it unchanged"*, i.e.
+de-duplication bookkeeping, **not** a rewrite of any claim: **zero** corrections
+changed an item's `content` or `name` in either arm (the one `slots`-only
+correction does change a slot's KIND — `core:code` → `dev:code` — which is a
+re-type, not a rewritten claim), and the single `supersedes` change is the only
+one that copied an id — from the instrument's own synthetic alias, so it is an
+artefact by construction.
+
+So, stated with its numbers:
+
+- **Corrections.** Up to **65 corrections per 7 sessions** are no longer made
+  under delta (the delta arm had **0 collisions in its own 7 calls**), of which
+  62 are lifecycle de-duplications, 1 a `slots` change and 1 the synthetic-id
+  echo; the 65th is the census's extra, unclassified by the mask. No claim text
+  was ever corrected by either arm, so the accuracy risk from this channel is
+  *narrower than the issue assumed*: what disappears is the `created → unchanged`
+  signal, which is reconstructible from the graph at write time rather than from
+  S4's opinion.
+- **Gaps.** legacy `added_by_s4` 12 (primary) / 9 (re-run) vs delta 6 / 6, and the
   delta arm emitted **no new tax-surface item** in 5 of 7 sessions in both runs.
   The narrower statement matters: `s4_delta_empty` — production's predicate over
-  EVERY emitted section, not just the four tax sections — is **False on all 7
-  delta rows in both runs**, because those arms still carried a non-tax section
-  (graph-search bookkeeping). "Emitted no item" and "emitted nothing" are
-  different claims, and only the first is true here.
+  EVERY emitted section, not the four tax sections — is **False on all 7 delta
+  rows in both runs**, i.e. those arms still carried *some* section. **Which**
+  section is not recorded in this artifact, so "graph-search bookkeeping" would
+  be a guess and is not claimed here.
 
-Two readings fit both channels and this instrument cannot separate them:
+Two readings fit the gap channel, and nothing in this artifact separates them:
 
-1. the legacy arm's extra items and its 64 corrections are artefacts of it
-   re-typing 266 items — a paraphrase lands as a new identity, a re-statement as
-   a "correction" — i.e. they are the tax's own noise; or
-2. the delta contract suppressed genuine gap-finding and correction, i.e. up to
-   16 gaps (9 in the primary run, 16 in the re-run) and 64 corrections per 7
+1. the legacy arm's extra items are artefacts of it re-typing 266 items — a
+   paraphrase lands as a new identity — so they are the tax's own noise; or
+2. the delta contract suppressed genuine gap-finding, i.e. up to 12 gaps per 7
    sessions are now missed.
 
-Deciding between them is **Task 10 Step 5** of the plan (partition each
-correction into content-changing / kind-lifecycle-only / re-emission-noise).
-That partition needs the ITEMS, which is why the artifact carries them: every
-row records `added_items` (the gaps — section, merge key, content, kind,
-lifecycle, `supersedes`) **and `corrected_items`** — the correction PAIRS, each
-with `changed_fields`, `s2_before` and `s4_after`, because a correction reuses
-the S2 merge key and any "items not in S2" filter would drop the entire channel
-the partition is about. The follow-up can therefore be done **from this
-artifact**, without a second paid run.
+Separating those needs the gap items classified (the artifact records each one's
+content and kind, so it is a reading task, not another measurement).
 
 ## What this does **not** measure
 
 - **Accuracy / `chunk_evidence@20`** — the eval lane's gates (#1789 target 3).
-  A cheaper S4 that corrects less could hold accuracy or could not; only the eval
-  can answer that, and the corrections channel above is the reason to ask.
+- **The truncation rate** — this geometry cannot truncate (see the verdict table).
 - **Model compliance in the wild** — one call per arm per session, not a
   production run. Non-compliance is *observable* per row
-  (`verbatim_reemissions`, `corrected_by_s4`, `s4_delta_reemit_suspect`), so a
-  model that ignored the contract would show up in the artifact rather than being
-  assumed away.
+  (`verbatim_reemissions`, `corrected_by_s4`, `s4_delta_reemit_suspect`).
 - **Which model actually served the calls** — the artifact records the model id
-  REQUESTED. (The adapter logs a substitution warning when the provider pins a
-  dated id; that warning is logged, not persisted here.)
-- **The S3 live-graph read** — the search block is reconstructed from the
-  session's own S2 list (what production S4 sees after S2 is written), not a live
-  graph query. Both arms see the same block, so the comparison holds.
+  REQUESTED; the adapter logs a substitution warning rather than persisting it.
+- **The S3 live-graph read** — the search block is reconstructed (with synthetic
+  ids) from the session's own S2 list; both arms see the same block, so the
+  comparison holds, but id-copying output is not real.
 
 ## Reproduce
 
@@ -156,21 +172,22 @@ artifact**, without a second paid run.
 # zero-cost, no network — the input-side geometry + the vacuity pin
 uv run python tools/s4_reeemit_tax.py dry-run
 
-# the measurement (needs DEEPSEEK_API_KEY; ~4 min and a few cents for 7 sessions)
+# the measurement (needs DEEPSEEK_API_KEY; ~2.4 min and a few cents for 7 sessions)
 DEEPSEEK_API_KEY=… uv run python tools/s4_reeemit_tax.py run \
     --out docs/evidence/1789-s4-reeemit-tax/ab-$(date -u +%Y%m%dT%H%M%SZ).json
 ```
 
-Artifacts: `ab-20261107T020837Z.json` (primary — per-arm rows, the added and
-corrected items, composition totals, and the per-arm `s4_delta_empty` /
-`s4_delta_reemit_suspect` flags derived with production's own predicates) and
-`ab-20261107T021100Z.json` (the re-run).
+Artifacts: `ab-20261107T023958Z.json` (primary — per-arm rows, the added and
+corrected items with the cap/census accounting above, composition totals, and the
+per-arm `s4_delta_empty` / `s4_delta_reemit_suspect` flags derived with
+production's own predicates) and `ab-20261107T024226Z.json` (the re-run).
 
-Instrument tests: `tests/test_s4_reeemit_tax.py` (23 tests, offline, fake
-model) — they pin the ways a number like this goes wrong silently: a vacuous A/B
-(both arms rendering the same prompt), the two arms receiving different inputs, a
-mis-attributed cost (a per-call total rather than the final call, and `null`
-rather than 0 when the provider reports nothing or the accumulator is provably
-incomplete), a "measured zero" pretending to be a measurement, a corrections
-channel that an items-not-in-S2 filter silently drops, and `s4_delta_empty`
-diverging from production's predicate.
+Instrument tests: `tests/test_s4_reeemit_tax.py` (24 tests, offline, fake model)
+— they pin the ways a number like this goes wrong silently: a vacuous A/B, the
+two arms receiving different inputs, a mis-attributed cost (a per-call total
+rather than the final call; `null` rather than 0 when the provider reports
+nothing, when any of the three "counted nowhere" counters fires, or when the
+recovery accumulator is provably incomplete), a "measured zero" pretending to be
+a measurement, a cap and a mask deficit conflated into one flag, a corrections
+channel an items-not-in-S2 filter drops, and `s4_delta_empty` diverging from
+production's predicate.

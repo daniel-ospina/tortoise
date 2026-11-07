@@ -198,15 +198,23 @@ def test_arm_out_tokens_falls_back_to_recovery_when_cost_is_absent():
 
 
 def test_a_rejected_token_count_makes_the_arm_unmeasured():
-    """A multi-call arm whose second call's count was rejected (or was killed by
-    the deadline — billed, counted nowhere) leaves `calls_without_tokens > 0`.
-    The remaining sum is NOT the total: reading it as one under-counts in the
-    direction that flatters the delta arm."""
-    stats = {"cost": {"calls": 2, "completion_tokens": 5000,
-                      "calls_without_tokens": 1}}
-    tokens, basis = tool.arm_out_tokens(stats)
-    assert tokens is None
-    assert "no token usage for 1 of 2 call(s)" in basis
+    """`_accumulate_call_cost` and `_complete` raise THREE disjoint counters for
+    a billed call whose completion count is not in `cost["completion_tokens"]`:
+    `calls_without_tokens` (usage present, count rejected), `calls_without_usage`
+    (no usage block at all — a different branch, the counter one to the left),
+    and `deadline_aborts` (killed by the wall clock, counted nowhere). Reading
+    only the first was the bug this pins shut for all three."""
+    for stats, needle in (
+        ({"cost": {"calls": 2, "completion_tokens": 5000,
+                   "calls_without_tokens": 1}}, "1 of 2 call(s)"),
+        ({"cost": {"calls": 2, "completion_tokens": 5000,
+                   "calls_without_usage": 1}}, "1 of 2 call(s)"),
+        ({"cost": {"calls": 2, "completion_tokens": 5000},
+          "deadline_aborts": 1}, "1 of 2 call(s)"),
+    ):
+        tokens, basis = tool.arm_out_tokens(stats)
+        assert tokens is None
+        assert needle in basis
 
 
 def test_s4_delta_empty_uses_productions_own_predicate(tmp_path):
@@ -244,25 +252,45 @@ def test_both_arms_get_identical_inputs(tmp_path):
 def test_the_gap_items_ride_the_artifact(tmp_path):
     """The counts alone cannot support the follow-up the report points at
     (Task 10 Step 5 partitions the CORRECTIONS into content-changing /
-    kind-lifecycle-only / re-emission-noise) — that needs the items."""
+    kind-lifecycle-only / re-emission-noise) — that needs the items, and each
+    capped list carries the TRUE count so `len()` is never mistaken for it."""
     sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
     gap = {"entities": [{"name": "Relay queue", "kind": "core:WorkItem"}],
            "events": [], "points": [], "operators": []}
     row = tool.run_arm(_FakeModel(gap), sess, "delta")
     assert row["added_by_s4"] == 1
-    assert row["added_items"] == [{
-        "section": "entities", "key": "enti:entity | relay queue | workitem",
-        "content": "Relay queue", "kind": "core:WorkItem",
-        "lifecycle": None, "supersedes": None}]
+    assert row["added_items"] == {
+        "count": 1, "candidates": 1, "recorded": 1, "cap": tool._ITEM_CAP,
+        "cap_hit": False, "cap_dropped": 0, "unclassified": 0,
+        "items": [{"section": "entities", "key": "enti:entity | relay queue | workitem",
+                   "content": "Relay queue", "kind": "core:WorkItem",
+                   "lifecycle": None, "supersedes": None}]}
+
+
+def test_the_cap_and_the_mask_deficit_are_separable():
+    """The two ways a list can come up short must not be conflated: a CAP drop
+    (the corpus exceeded the cap) and a MASK deficit (the census counts with a
+    different basis). Deriving both from the census count reports a cap hit that
+    never happened — the exact defect the earlier version shipped."""
+    capped = tool._capped(([{"i": n} for n in range(40)], 45), 45)
+    assert capped["cap_hit"] is True and capped["cap_dropped"] == 5
+    assert capped["unclassified"] == 0
+    mask = tool._capped(([{"i": n} for n in range(3)], 3), 45)
+    assert mask["cap_hit"] is False and mask["cap_dropped"] == 0
+    assert mask["unclassified"] == 42
+    assert mask["count"] == 45 and mask["recorded"] == 3
 
 
 def test_the_CORRECTION_pairs_ride_the_artifact(tmp_path):
     """⚠️ The defect this pins: a correction REUSES the S2 merge key (points and
-    events merge on content), so any "items not in S2" filter drops the entire
-    corrections channel — including the 65 corrections the residual argument is
-    about. The artifact must carry BOTH sides of the pair so Task 10 Step 5 can
-    classify it offline: a lifecycle-only change, a changed content (a new
-    identity), and a pure verbatim re-emit (which is the tax, not a correction)."""
+    events merge on CONTENT), so any "items not in S2" filter drops the entire
+    corrections channel. The artifact must carry BOTH sides of the pair so Task
+    10 Step 5 can classify it offline. Composed here: a lifecycle-only change
+    (a pair) and a pure verbatim re-emit (the tax — which must NOT be a pair).
+    A CONTENT change is deliberately not composed: for points/events content IS
+    the merge key, so it can never be a correction pair — it lands in
+    `added_items` as a new identity, which is exactly the ambiguity the evidence
+    document flags rather than hides."""
     sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
     # same key, changed lifecycle -> a CORRECTION
     life = {"entities": [{"name": "Halcyon archive", "kind": "core:WorkItem",
@@ -272,7 +300,7 @@ def test_the_CORRECTION_pairs_ride_the_artifact(tmp_path):
     assert row["added_by_s4"] == 0            # nothing new appended
     assert row["corrected_by_s4"] == 1
     assert row["verbatim_reemissions"] == 0   # not a pure re-emit
-    (corr,) = row["corrected_items"]
+    (corr,) = row["corrected_items"]["items"]
     assert corr["section"] == "entities"
     assert corr["changed_fields"] == ["lifecycle"]
     assert corr["s2_before"] == {"lifecycle": "created"}
@@ -282,7 +310,7 @@ def test_the_CORRECTION_pairs_ride_the_artifact(tmp_path):
         {"name": "Halcyon archive", "kind": "core:WorkItem",
          "lifecycle": "created", "note": "stalled"}]}), sess, "delta")
     assert verbatim["verbatim_reemissions"] == 1
-    assert verbatim["corrected_items"] == []
+    assert verbatim["corrected_items"]["items"] == []
 
 
 def test_an_incomplete_recovery_sum_is_unmeasured_not_partial():

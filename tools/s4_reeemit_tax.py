@@ -148,9 +148,17 @@ def search_from_s2(s2: dict) -> dict:
 
     Production runs S4 *after* S2's items reach the graph, so S4's search
     results are the S2 items themselves. Handing both arms the same
-    reconstructed block keeps the A/B single-variable (an empty block would
-    be the "degraded search" condition the plan excludes from compliance
-    reads, and it would change both arms' behaviour).
+    reconstructed block keeps the A/B single-variable (an empty block would be
+    the "degraded search" condition the plan excludes from compliance reads,
+    and it would change both arms' behaviour).
+
+    ⛔ THE IDS ARE SYNTHETIC (`s2-ent-0`, `s2-pt-1`, …): the receipts record no
+    graph ids. Production would offer real node ids (or none), so any output
+    field that COPIES an id — `supersedes` is the one S4 uses — can only be an
+    artefact of this alias here, and is counted as a correction by any mask that
+    looks at that field. The artifact therefore cannot tell a real supersession
+    from an echo of the instrument's own alias; a reader must discount those
+    rows, and the evidence document does.
     """
     return {
         "entities": [
@@ -201,16 +209,25 @@ def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
     """
     cost_acc = stats.get("cost") or {}
     cost = int(cost_acc.get("completion_tokens") or 0)
-    # ⛔ A MULTI-CALL arm whose provider count was rejected (or a call killed by
-    # the deadline — billed, counted nowhere) has `calls_without_tokens > 0`:
-    # the remaining sum is NOT the arm's total, and presenting it as one
-    # under-counts in the direction that flatters the delta arm. Report the arm
-    # as unmeasured instead of silently reading a partial sum as a total.
-    if int(cost_acc.get("calls_without_tokens") or 0) > 0:
+    # ⛔ A partial sum must never be presented as the arm's total. THREE DISJOINT
+    # counters each mean "a billed call whose completion count is NOT in
+    # `cost["completion_tokens"]`", and reading only the first one was the bug:
+    #   * `calls_without_tokens` — usage present, the count was rejected;
+    #   * `calls_without_usage`  — the response carried NO usage block at all
+    #     (`_accumulate_call_cost`'s sibling branch — the counter one to the left);
+    #   * `deadline_aborts`      — killed by the wall clock after the provider had
+    #     already been asked: billed, counted nowhere.
+    # A usage block carrying `prompt_tokens` but no `completion_tokens` fires
+    # none of them, so the recovery cross-check below also refuses a sum it
+    # cannot show is complete.
+    dropped = (int(cost_acc.get("calls_without_tokens") or 0)
+               + int(cost_acc.get("calls_without_usage") or 0)
+               + int(stats.get("deadline_aborts") or 0))
+    if dropped > 0:
         return None, (
-            "unmeasured (provider reported no token usage for "
-            f"{cost_acc['calls_without_tokens']} of "
-            f"{cost_acc.get('calls') or '?'} call(s))")
+            "unmeasured (no token count for "
+            f"{dropped} of {cost_acc.get('calls') or '?'} call(s) — rejected, "
+            "usage-less or deadline-aborted)")
     if cost > 0:
         return cost, "stats.cost.completion_tokens"
     rec = stats.get("recovery") or {}
@@ -308,17 +325,24 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
         # cannot support the follow-up it points at, and neither can a list of
         # the additions alone (a correction is by definition the same key, so it
         # is the one thing an "items not in S2" filter drops).
-        "added_items": _added_items(sess["s2"], s4),
-        "corrected_items": _corrected_items(sess["s2"], s4),
+        "added_items": _capped(_added_items(sess["s2"], s4),
+                               comp["added_by_s4"]),
+        "corrected_items": _capped(_corrected_items(sess["s2"], s4),
+                                   max(0, comp["corrected_by_s4"]
+                                       - comp["verbatim_reemissions"])),
         "elapsed_s": round(time.monotonic() - started, 2),
     })
     return row
 
 
-#: The fields whose change distinguishes a CORRECTION from a verbatim re-emit
-#: (the same mask `_verbatim_reemissions` uses: optional/noise fields —
-#: source_ref / confidence / quote / search_keys / source_turn_id — are
-#: ignored, so a reordered or field-pruned copy is still a re-emission).
+#: The fields compared to classify a same-key re-emission as a CORRECTION.
+#: ⛔ NOT the same mask as the census `_verbatim_reemissions` helper, which
+#: compares EVERY non-optional field with a normalised fold. These 8 are the
+#: fields whose change carries meaning for the plan's Task 10 Step 5, so the two
+#: quantities diverge in BOTH directions: a change confined to `note` is a
+#: correction to the census and invisible here, while a case/whitespace-only
+#: difference is verbatim to the census and a correction here. The evidence
+#: document states the divergence rather than papering over it.
 _CORRECTION_FIELDS = ("content", "name", "kind", "pointKind", "eventKind",
                       "lifecycle", "supersedes", "slots")
 
@@ -327,32 +351,72 @@ def _field_snapshot(item: dict) -> dict:
     return {f: item.get(f) for f in _CORRECTION_FIELDS if f in item}
 
 
-def _added_items(s2: dict, s4: dict, *, max_items: int = 40,
-                 clip: int = 160) -> list[dict]:
-    """Items this arm emitted that the S2 base did not contain — the GAP channel."""
+#: Per-channel cap on the items recorded in the artifact. The artifact is
+#: evidence, not a data store; but a silent cap would make `len(list)` read as
+#: the channel count, so every capped list carries an explicit truncation flag
+#: and `count` (the TRUE number, taken from the census, not from the list).
+_ITEM_CAP = 40
+
+
+def _capped(built: tuple[list[dict], int], census_total: int) -> dict:
+    """A capped list plus the truth about BOTH numbers, so a reader can never
+    mistake the recorded length for the channel count.
+
+    Two INDEPENDENT deficits can shrink the recorded list, and they must not be
+    conflated (the first version of this function derived both from the census
+    count, which reported a cap that never happened):
+
+      * the CAP — `candidates` (what this mask could enumerate) exceeded
+        `_ITEM_CAP`, so `cap_dropped` items were cut;
+      * the MASK — the census (`added_by_s4` / `corrected_by_s4 −
+        verbatim_reemissions`) counts with a different basis (every non-optional
+        field) than `_CORRECTION_FIELDS`, so `unclassified` candidates are ones
+        the census sees and this mask does not.
+    """
+    items, candidates = built
+    return {
+        "count": int(census_total),      # the census number, never len(items)
+        "candidates": int(candidates),   # what this mask could enumerate
+        "recorded": len(items),
+        "cap": _ITEM_CAP,
+        "cap_hit": candidates > _ITEM_CAP,
+        "cap_dropped": max(0, candidates - len(items)),
+        "unclassified": max(0, int(census_total) - candidates),
+        "items": items,
+    }
+
+
+def _added_items(s2: dict, s4: dict, *, max_items: int = _ITEM_CAP,
+                 clip: int = 160) -> tuple[list[dict], int]:
+    """(capped list, candidate count) for the GAP channel: items this arm
+    emitted that the S2 base did not contain. The candidate count is returned
+    so the cap and the mask divergence stay separable."""
     s2_keys = {x._merge_key(s, i)
                for s in _TAX_SECTIONS for i in (s2.get(s) or [])
                if isinstance(i, dict)}
     out: list[dict] = []
+    candidates = 0
     for s in _TAX_SECTIONS:
         for i in (s4 or {}).get(s) or []:
             if not isinstance(i, dict) or x._merge_key(s, i) in s2_keys:
                 continue
-            out.append(_item_record(s, i, clip))
-            if len(out) >= max_items:
-                return out
-    return out
+            candidates += 1
+            if len(out) < max_items:
+                out.append(_item_record(s, i, clip))
+    return out, candidates
 
 
-def _corrected_items(s2: dict, s4: dict, *, max_items: int = 40,
-                     clip: int = 160) -> list[dict]:
-    """The CORRECTION channel: same merge key as an S2 item, with at least one
-    correction-relevant field changed (≠ a verbatim re-emission), recorded as
-    BOTH sides so the Task 10 Step 5 partition can classify it offline."""
+def _corrected_items(s2: dict, s4: dict, *, max_items: int = _ITEM_CAP,
+                     clip: int = 160) -> tuple[list[dict], int]:
+    """(capped list, candidate count) for the CORRECTION channel: same merge key
+    as an S2 item, with at least one correction-relevant field changed (≠ a
+    verbatim re-emission), recorded as BOTH sides so the Task 10 Step 5
+    partition can classify it offline."""
     s2_by_key = {x._merge_key(s, i): (s, i)
                  for s in _TAX_SECTIONS for i in (s2.get(s) or [])
                  if isinstance(i, dict)}
     out: list[dict] = []
+    candidates = 0
     for s in _TAX_SECTIONS:
         for i in (s4 or {}).get(s) or []:
             if not isinstance(i, dict):
@@ -366,15 +430,15 @@ def _corrected_items(s2: dict, s4: dict, *, max_items: int = 40,
                              if before.get(f) != after.get(f))
             if not changed:
                 continue                      # a verbatim re-emission — the tax
-            out.append({**_item_record(s, i, clip),
-                        "changed_fields": changed,
-                        "s2_before": {f: str(before.get(f))[:clip]
-                                      for f in changed},
-                        "s4_after": {f: str(after.get(f))[:clip]
-                                     for f in changed}})
-            if len(out) >= max_items:
-                return out
-    return out
+            candidates += 1
+            if len(out) < max_items:
+                out.append({**_item_record(s, i, clip),
+                            "changed_fields": changed,
+                            "s2_before": {f: str(before.get(f))[:clip]
+                                          for f in changed},
+                            "s4_after": {f: str(after.get(f))[:clip]
+                                         for f in changed}})
+    return out, candidates
 
 
 def _item_record(section: str, item: dict, clip: int) -> dict:
@@ -454,7 +518,9 @@ def compare(pairs: list[dict]) -> dict:
             "delta_verbatim_reemissions": dl.get("verbatim_reemissions"),
             "delta_added_by_s4": dl.get("added_by_s4"),
             "delta_corrected_by_s4": dl.get("corrected_by_s4"),
-            "delta_corrected_items": len(dl.get("corrected_items") or []),
+            # the CENSUS count, never len() of a capped list
+            "delta_corrected_items": (dl.get("corrected_items") or {}).get(
+                "count"),
             "legacy_error": lg.get("error"),
             "delta_error": dl.get("error"),
         })
