@@ -4520,10 +4520,16 @@ _NEGATION = re.compile(r"\b(?:not|never|outside)\b")
 # ("This walk does not visit …") went RED where the merged predicate was green
 # (#11437 review, P2). Measured: 5 present-tense rewordings 1->0 under `ed?`.
 # ⛔ `es` is in the alternation for the same reason, one inflection further out:
-# without it `(?:s|ed)?` matched `visit`/`visits` but NOT `reaches` (a third-
-# person `-es` verb naming a vocabulary word this list declares), so the honest
-# "the walk never reaches a nested def's decorators and parameter defaults"
-# red while its `visits` twin passed (#11437 review, P3). Measured both ways.
+# without it `(?:s|ed)?` matched `visit`/`visits`/`reach`/`reports` but NOT
+# `reaches` — `reach` is the one verb here whose third person is `-ches`, and the
+# alternation then carries no match for it. Measured on the row that isolates it
+# (`"it never reaches a nested `def`'s decorators and parameter defaults"`, no
+# `walk` to fall back on): `False` under `(?:s|ed)?`, `True` under
+# `(?:s|es|ed)?`, i.e. an honest statement of the claim was a false RED
+# (#11437 review, round 2, P2). ⚠️ A phrasing that also says `the walk …` is NOT
+# the evidence: `walk` is itself a coverage word, so that sentence matches under
+# either spelling — citing it as proof of `es` was a measurement that does not
+# reproduce (#11437 review, P3), corrected to the row above.
 _COVERAGE = re.compile(r"\b(?:walk|visit|reach|report)(?:s|es|ed)?\b")
 # The negation must GOVERN a coverage verb: within two words of one.
 _NEGATION_GOVERNS = re.compile(
@@ -4937,8 +4943,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
         "honest, past tense: are never reached":
             "nested def decorators and defaults are never reached by the walk",
         # `reach` is the one verb whose third person is `-ches`, so the coverage
-        # alternation needs the `e?` — `(?:s|ed)?` left `reaches` unmatched and
-        # turned this honest row into a false RED (#11437 review, round 2, P2).
+        # alternation needs the `es` branch — `(?:s|ed)?` leaves `reaches`
+        # unmatched and turns this honest row (which names no other coverage word
+        # to fall back on) into a false RED (#11437 review, round 2, P2).
         "honest, third person of `reach`":
             "it never reaches a nested `def`'s decorators and parameter defaults",
         "honest, third person of `report`":
