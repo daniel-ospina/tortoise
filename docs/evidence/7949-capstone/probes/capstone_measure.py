@@ -346,17 +346,20 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # what the run MEASURES through it, is pinned here and READ BACK like every other
 # switch (the ``arm:`` rule, applied to the door).
 #
-# ⛔ The set below is CLOSED over the modules the capture path DERIVES from —
-# ``extractor_v2.py`` (the renderer) plus the three modules it reaches one call
-# down (``referentiality`` for the S2.2 mention arm, ``value_gate`` and
-# ``s2_decision_seam`` for the seam decisions) — and that claim is checkable
+# ⛔ The set below is CLOSED over the SIX modules the capture path DERIVES from —
+# ``extractor_v2.py`` (the renderer), the three it reaches one call down
+# (``referentiality`` for the S2.2 mention arm, ``value_gate`` and
+# ``s2_decision_seam`` for the seam decisions), and the two the door reaches
+# through the SDK (``context_enrich`` via ``capture_session(enrich_fn=…)``,
+# ``model_adapters`` via ``_extract_session_v2``) — and that claim is checkable
 # rather than rhetorical:
 # every ``TORTOISE_*`` those modules read is accounted for, either as an arm
 # seam in ``SEAM_LEDGER`` (``TORTOISE_VET``, ``TORTOISE_CLASSIFY_LATER``,
 # ``TORTOISE_S4_DELTA``), or as a pin below, or as an INPUT rather than a setting
 # (``TORTOISE_DB_URI`` the graph it writes, ``TORTOISE_API_URL`` a backend label).
-# The count is NOT restated here on purpose: `tests/test_7949_c2_door.py` derives
-# it from the code every run and refuses an unclassified read.
+# The list itself is ``path_modules`` in `tests/test_7949_c2_door.py`, which
+# derives the reads from the code every run and refuses an unclassified one; a
+# module named HERE and not THERE is a module the closure does not see.
 #
 # ⚠️ The claim is scoped to what it can enforce. The same call chain also reads
 # INFRASTRUCTURE variables (record DSN, packs dir, embedding gates, store
