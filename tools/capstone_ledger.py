@@ -81,7 +81,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -151,10 +150,15 @@ def load_ledger(path: Path) -> dict[str, Any]:
             # a verdict across rows. They must be flattened BEFORE the duplicate
             # scan, or the anchor's tag has no constructor and the file is reported
             # as "not parseable YAML" — blaming the parser for our own check.
-            if isinstance(node, yaml.MappingNode):
-                self.flatten_mapping(node)
             seen: set[Any] = set()
             for key_node, _ in node.value:
+                # `<<` is the merge tag: `SafeConstructor.construct_mapping` flattens
+                # it itself, and flattening HERE would prepend the anchor's pairs so
+                # every OVERRIDE looked like a duplicate — refusing the only form of
+                # merge keys anyone uses. Skip it; the anchors are checked on their
+                # own node.
+                if key_node.tag == "tag:yaml.org,2002:merge":
+                    continue
                 key = self.construct_object(key_node, deep=deep)
                 if key in seen:
                     raise InvalidLedger(
@@ -179,64 +183,17 @@ def load_ledger(path: Path) -> dict[str, Any]:
     return data
 
 
-#: Where a `cmd:` entry is allowed to START. The first token must be a program
-#: that RUNS something, because the attack a token scan cannot see is a sentence
-#: that merely MENTIONS a file in the tree: measured, `cmd:verified manually by
-#: reading pyproject.toml` satisfied `verified` and emptied the whole uncovered
-#: list, as did `cmd:NOT RUN - see tools/capstone_ledger.py`. Requiring the
-#: command SHAPE (runner first) is what separates a command from a claim.
-#: Adding a runner is a one-line change; that is deliberate — the alternative is
-#: guessing at prose.
-RUNNERS: Final[frozenset[str]] = frozenset(
-    {
-        "uv",
-        "python",
-        "python3",
-        "pytest",
-        "node",
-        "npm",
-        "npx",
-        "bun",
-        "deno",
-        "bash",
-        "sh",
-        "make",
-        "docker",
-    }
-)
-
-#: A leading `NAME=value` shell assignment, or a `cd … &&` hop, is how a lane
-#: ACTUALLY records a command (AGENTS.md's Testing section spells both:
-#: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest …`, `cd <worktree> && uv run pytest …`).
-#: Refusing those would force a lane to rewrite its evidence into a form it did
-#: not run — the opposite of the record's purpose.
-_ASSIGNMENT_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
-
-def _command_body(command: str) -> tuple[str, str | None]:
-    """Return the segment to grade, or a refusal reason.
-
-    Handles the shapes a real record uses: a command wrapped in backticks, leading
-    `NAME=value` assignments, and a `cd … && …` chain. The segment graded is the
-    LAST one, because that is the one that runs the artifact.
-    """
-    text = command.strip()
-    if len(text) >= 2 and text.startswith("`") and text.endswith("`"):
-        text = text[1:-1].strip()
-    tokens: list[str] = []
-    for segment in (part.strip() for part in text.split("&&")):
-        try:
-            seg_tokens = shlex.split(segment)
-        except ValueError:
-            return "", f"`cmd:` evidence is not a parseable command: {command!r}"
-        while seg_tokens and _ASSIGNMENT_RE.match(seg_tokens[0]):
-            seg_tokens.pop(0)
-        if len(seg_tokens) < 2:
-            continue  # a `cd <dir>` hop or a bare assignment: not the real command
-        tokens = seg_tokens
-    if not tokens:
-        return "", f"`cmd:` evidence must be a COMMAND, not a word: {command!r}"
-    return " ".join(tokens), None
+#: A `cmd:` entry may carry ANY command text. It is a RECORD of what was run, not
+#: a proof: the validator never executes it, so no shape heuristic can establish
+#: that it ran, and every heuristic this tool has tried to grade it with has been
+#: defeated by one more shell form (a quoted prose argument, an `&& echo PASS`
+#: tail, a `python` in front of a sentence, a merge-key anchor ...). The
+#: resolution is not a better heuristic — it is to stop claiming the arm proves
+#: anything: **`cmd:` evidence does not satisfy `verified`.** A verified row must
+#: hold at least one artifact IN THE TREE. `cmd:` entries stay in the record
+#: because they are useful to a reader, and they are checked only for being a
+#: recorded command rather than an empty string.
+_CMD_MIN_TOKENS: Final[int] = 2
 
 
 def _commit_state(sha: str) -> str:
@@ -288,74 +245,35 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     `.` are all REFUSED, because `Path.exists()` accepted every one of them and
     a reviewer measured each returning a clean exit on a `verified` row.
 
-    The `cmd:` arm gets the same treatment, for the same reason: accepting any
-    non-empty string meant `cmd:done` — or a sentence explaining that the work
-    was done — satisfied the strongest verdict in the vocabulary, so one word
-    defeated the whole record. A command entry must now have the SHAPE of a
-    command (a runner first, after any `NAME=value` prefix, backticks or `cd … &&`)
-    and NAME an artifact of this tree (a path, a pytest node-id, or an in-tree glob).
+    `cmd:` evidence is a different matter, and the difference is now a DECISION
+    rather than a shape test: it records what was run, and this tool cannot know
+    that it ran (it never executes it), so **it does not satisfy `verified`**. A
+    verified row must hold at least one artifact that is IN THE TREE. Every shape
+    heuristic tried here — a runner-first token, an existing-file token, backtick
+    and `NAME=value` prefixes — was defeated by one more shell form in review
+    (a quoted prose argument, an `&& echo PASS` tail, `python` in front of a
+    sentence), which is the signal that the arm should prove less, not parse more.
 
-    ⛔ WHAT THIS DOES NOT PROVE, stated because the module would otherwise read as
-    stronger than it is: a `cmd:` entry is validated for SHAPE and for the
-    existence of the artifact it names — the command is **not executed**, so the
-    tool cannot know that it ran or that it produced the cited result. Likewise a
-    path entry proves the artifact is IN the tree, not that it supports the row
-    citing it (22 rows citing one trace file would validate). The division is the
-    rest of the artifact's: the runner records a verdict and stands behind it; the
-    tool refuses a record that is malformed, ambiguous, or cites what it does not
-    hold. `verified` therefore means "an artifact in this tree is named as its
-    evidence", not "the evidence was audited".
+    ⛔ WHAT THIS DOES NOT PROVE: a held artifact proves the file is IN the tree,
+    not that it supports the row citing it (22 rows citing one trace would
+    validate). `verified` therefore means "an artifact in this tree is named as
+    its evidence", not "the evidence was audited". The runner records a verdict
+    and stands behind it; the tool refuses a record that is malformed, ambiguous,
+    or cites what it does not hold.
     """
     root = repo_root.resolve()
     if entry.startswith(_CMD_PREFIX):
+        # Well-formedness only — see `_CMD_MIN_TOKENS`: this arm confers nothing.
         command = entry[len(_CMD_PREFIX) :].strip()
         if not command:
             return False, "`cmd:` evidence names no command"
-        body, refusal = _command_body(command)
-        if refusal is not None:
-            return False, refusal
         try:
-            tokens = shlex.split(body)
-        except ValueError:  # pragma: no cover - _command_body already parsed it
+            tokens = shlex.split(command)
+        except ValueError:
             return False, f"`cmd:` evidence is not a parseable command: {command!r}"
-        runner = Path(tokens[0]).name
-        if runner not in RUNNERS:
-            # This is the arm that kills prose. A token scan alone does not: both
-            # `cmd:verified manually by reading pyproject.toml` and
-            # `cmd:NOT RUN - see tools/capstone_ledger.py` name a file that exists,
-            # and both satisfied `verified` — one of them saying the work was NOT
-            # done. The command SHAPE is the discriminator.
-            return False, (
-                "`cmd:` evidence must START with a program that runs something "
-                f"({sorted(RUNNERS)}), got {tokens[0]!r} in {command!r}"
-            )
-        for token in tokens[1:]:
-            if token.startswith("-"):
-                continue
-            # A pytest node-id names the file MORE precisely than a bare path, so
-            # `tests/x.py::TestY::test_z` has to count as naming `tests/x.py`
-            # (refusing it is a false block on the most precise citation shape).
-            candidate_text = token.split("::", 1)[0]
-            if not candidate_text:
-                continue
-            candidate = Path(candidate_text)
-            resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
-            if resolved.is_file() and resolved.is_relative_to(root):
-                return True, ""
-            if any(wildcard in candidate_text for wildcard in "*?["):
-                if candidate.is_absolute():
-                    # `Path.glob` raises NotImplementedError on a non-relative
-                    # pattern, so an absolute wildcard crashed the validator with a
-                    # traceback instead of refusing with a named defect.
-                    continue
-                for match in root.glob(candidate_text):
-                    if match.resolve().is_file() and match.resolve().is_relative_to(root):
-                        return True, ""
-        return False, (
-            f"`cmd:` evidence names no artifact of this tree: {command!r} — a command "
-            "entry must name the script or test file it ran (a bare path, a pytest "
-            "node-id, or a glob inside the tree), so prose cannot stand in for held evidence"
-        )
+        if len(tokens) < _CMD_MIN_TOKENS:
+            return False, f"`cmd:` evidence must be a COMMAND, not a word: {command!r}"
+        return True, ""
     candidate = Path(entry)
     resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
     if not resolved.is_relative_to(root):
@@ -478,9 +396,22 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         evidence = [str(e).strip() for e in evidence if str(e).strip()]
 
         if verdict == CLEAN_VERDICT:
+            held = [e for e in evidence if not e.startswith(_CMD_PREFIX)]
+            commands = [e for e in evidence if e.startswith(_CMD_PREFIX)]
             if not evidence:
                 problems.append(f"{where} is `verified` with no evidence cited")
-            for entry in evidence:
+            elif not held:
+                # The whole anti-forgery rule in one line: a `cmd:` entry is
+                # descriptive, so it cannot carry the only verdict that counts.
+                problems.append(
+                    f"{where} is `verified` but cites no artifact IN THE TREE — "
+                    "a `cmd:` entry records what was run, it does not prove it"
+                )
+            for entry in held:
+                ok, why = _evidence_is_real(entry, repo_root)
+                if not ok:
+                    problems.append(f"{where}: {why}")
+            for entry in commands:
                 ok, why = _evidence_is_real(entry, repo_root)
                 if not ok:
                     problems.append(f"{where}: {why}")

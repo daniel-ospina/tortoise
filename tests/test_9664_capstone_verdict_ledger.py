@@ -339,60 +339,51 @@ def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "prose",
-    [
-        "cmd:done",
-        "cmd:I verified this by hand, screenshots are in the issue",
-        "cmd:uv run pytest",
-        "cmd:cat /etc/hostname",
-        # Cycle-2 attack: prose that MENTIONS a real file used to pass a token
-        # scan, including prose that says the work was NOT done.
-        "cmd:verified manually by reading pyproject.toml",
-        "cmd:NOT RUN - see tools/capstone_ledger.py for the intended command",
-        "cmd:we did not run this; the suite lives in tests/test_9664_capstone_verdict_ledger.py",
-    ],
-)
-def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
-    """`cmd:` used to accept ANY non-empty string, so `cmd:done` satisfied `verified`.
-
-    One word — or a sentence explaining that the work was done — defeated the
-    strongest verdict in the vocabulary and turned the uncovered list empty.
-    A command entry must name the script or test file it ran.
-    """
-    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[prose])]))
-    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    # Two arms name the same defect: a one-word entry is not a command at all,
-    # a sentence-shaped one simply names no file. Both are refusals.
-    assert "`cmd:` evidence" in proc.stderr
-
-
-@pytest.mark.parametrize(
     "command",
     [
-        "cmd:uv run python tools/test_lane.py run -- x -q",
-        # The most precise citation shape must not be a false block.
-        "cmd:uv run python -m pytest tests/test_9664_capstone_verdict_ledger.py::TestX::test_y -q",
-        "cmd:uv run pytest tests/test_9664_capstone_*.py",
+        "cmd:done",
+        "cmd:verified manually by reading pyproject.toml",
+        "cmd:NOT RUN - see tools/capstone_ledger.py for the intended command",
+        "cmd:bash -c 'verified manually by reading pyproject.toml'",
+        "cmd:NOT RUN && uv run pytest tests/test_9664_capstone_verdict_ledger.py",
     ],
 )
-def test_a_cmd_entry_that_names_a_real_artifact_is_accepted(tmp_path, command):
+def test_a_cmd_entry_cannot_alone_satisfy_verified(tmp_path, command):
+    """A `cmd:` entry is a RECORD, not a proof — so it cannot carry `verified`.
+
+    Four review rounds each defeated a shape heuristic with one more shell form
+    (a quoted prose argument, an `&& echo PASS` tail, `python` in front of a
+    sentence, a merge-key anchor). The resolution is to stop claiming the arm
+    proves anything: `verified` needs an artifact the tree HOLDS.
+    """
     proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[command])]))
-    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
-
-
-@pytest.mark.parametrize("runnerless", ["cmd:npm", "cmd:verified", "cmd:look at tools/x.py"])
-def test_a_cmd_entry_must_start_with_a_runner(tmp_path, runnerless):
-    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[runnerless])]))
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "cites no artifact IN THE TREE" in proc.stderr
 
 
-def test_a_cmd_entry_that_names_a_real_script_is_accepted(tmp_path):
-    """The rule must not be so tight that the committed ledger's own rows fail."""
+def test_a_cmd_entry_is_accepted_alongside_a_held_artifact(tmp_path):
+    """The record may keep the command it ran; the HELD artifact is what counts."""
     proc = _run_cli(
         tmp_path,
-        _ledger([_row("A", evidence=["cmd:uv run python tools/test_lane.py run -- x -q"])]),
+        _ledger(
+            [
+                _row(
+                    "A",
+                    evidence=[
+                        REAL_EVIDENCE,
+                        "cmd:bash -c 'verified manually by reading pyproject.toml'",
+                    ],
+                )
+            ]
+        ),
     )
     assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+
+
+def test_an_empty_or_unparseable_cmd_entry_is_still_invalid(tmp_path):
+    for bad in ["cmd:", "cmd:   ", "cmd:'unbalanced"]:
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, bad])]))
+        assert proc.returncode == cl.EXIT_INVALID, (bad, proc.stdout + proc.stderr)
 
 
 @pytest.mark.parametrize("escape", ["/etc/hostname", "..", ".", "docs"])
@@ -504,30 +495,16 @@ def test_a_ledger_without_criteria_expected_is_invalid(tmp_path):
     assert "criteria_expected" in proc.stderr
 
 
-@pytest.mark.parametrize(
-    "as_recorded",
-    [
-        # The shapes AGENTS.md's own Testing section hands a lane. Refusing them
-        # forces a lane to rewrite evidence into a form it did not run.
-        "cmd:`uv run pytest tests/test_9664_capstone_verdict_ledger.py`",
-        "cmd:TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
-        "cmd:TORTOISE_DB_URI='docker://:f@localhost:6379/g' uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
-        "cmd:cd .worktrees/x && uv run pytest tests/test_9664_capstone_verdict_ledger.py -q",
-    ],
-)
-def test_a_command_as_a_lane_actually_records_it_is_accepted(tmp_path, as_recorded):
-    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[as_recorded])]))
-    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
-
-
 def test_an_absolute_wildcard_is_refused_not_crashed(tmp_path):
     """`Path.glob` raises NotImplementedError on a non-relative pattern, so this
     used to be a traceback instead of a named defect."""
     absolute = str(REPO_ROOT / "tests" / "test_9664_capstone_*.py")
-    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[f"cmd:uv run pytest {absolute} -q"])]))
-    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
-    assert "Traceback" not in proc.stderr
-    assert "names no artifact" in proc.stderr
+    # As a `cmd:` entry it confers nothing; as a PATH entry it must resolve, and a
+    # wildcard cannot, which is the refusal rather than the old traceback.
+    for entry in (f"cmd:uv run pytest {absolute} -q", absolute):
+        proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[entry])]))
+        assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+        assert "Traceback" not in proc.stderr
 
 
 def test_merge_keys_are_flattened_not_reported_as_unparseable(tmp_path):
@@ -537,7 +514,7 @@ def test_merge_keys_are_flattened_not_reported_as_unparseable(tmp_path):
     ledger.write_text(
         "version: 1\n"
         "issue: 9664\n"
-        "criteria_expected: 1\n"
+        "criteria_expected: 2\n"
         "measured_at: {ref: origin/main, sha: " + SHA + ", date: 2026-11-07}\n"
         "criteria:\n"
         "  - &base\n"
@@ -556,7 +533,10 @@ def test_merge_keys_are_flattened_not_reported_as_unparseable(tmp_path):
         cwd=str(REPO_ROOT),
         check=False,
     )
-    assert "not parseable YAML" not in proc.stderr, proc.stderr
+    assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
+    rows = cl.validate(cl.load_ledger(ledger))
+    assert [r["id"] for r in rows] == ["A", "B"]
+    assert rows[1]["verdict"] == "verified"  # inherited from the anchor
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────
