@@ -725,6 +725,12 @@ _NARRATIVE_LATEST_Q = (
     "where the author of 'The Silent Patient' is discussing her latest thriller "
     "novel?")
 
+#: sha256 of the sorted `qid=<shape>` lines for all 133 census rows under
+#: origin/main's guard (measured on the PR's parent commit). The off-switch must
+#: reproduce it exactly — a 55-row count alone cannot prove that.
+_PRE_FIX_CENSUS_SHAPE_DIGEST = (
+    "e770cf24a8eca8d5c6dd56769349d7fda59b2be44f01197cf243f9eb6b28b6aa")
+
 #: the census rows whose `latest` IS an ordering instruction — derived from the
 #: census, never transcribed, so the pin cannot drift from the artifact
 _RECENCY_ORDERING_INSTRUCTION_QIDS = {
@@ -872,6 +878,18 @@ def test_recency_narrative_latest_off_switch_restores_the_pre_fix_path(
         "the off-switch does not reproduce the pre-#8775 measurement: "
         f"{len(fired)}/55")
 
+    # …and not just the COUNT: every one of the 133 census rows must classify
+    # exactly as origin/main did. The digest was measured on the PR's parent
+    # commit over `qid=<shape>` lines; a deliberate shape change elsewhere must
+    # re-measure it, exactly like #8055's text digest, rather than silently move
+    # what the off-switch is claimed to restore.
+    lines = sorted(f"{r['qid']}={classify_question(r['question'])}"
+                   for r in _CENSUS["rows"])
+    digest = hashlib.sha256("\n".join(lines).encode()).hexdigest()
+    assert digest == _PRE_FIX_CENSUS_SHAPE_DIGEST, (
+        "the off-switch no longer reproduces origin/main's routing over the "
+        f"census: {digest}")
+
     # the ordering-instruction rows do not depend on the switch at all
     rows = {r["qid"]: r for r in _CENSUS["rows"]}
     for qid in sorted(_RECENCY_ORDERING_INSTRUCTION_QIDS):
@@ -893,6 +911,58 @@ def test_recency_guard_flag_defaults_on_and_is_tristate(monkeypatch):
         assert classify_question(_NARRATIVE_LATEST_Q) is None, raw
     monkeypatch.setenv(RECENCY_NARRATIVE_LATEST_ENV, "1")
     assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL
+
+
+def test_recency_latest_heading_an_interval_anchor_still_rejects():
+    """#8775 review round 1: the exemption is for an adjective in an anchor's
+    narrative EXTENSION, not for one that SELECTS the anchor's referent.
+
+    "How many days passed between my latest exam and my graduation?" IS an
+    interval question — and firing it is wrong, because the arm must then
+    resolve WHICH exam and cannot: the name leg is an OR-union, so "my latest
+    exam" matches any object containing "exam" and the block pairs the wrong
+    exam with the graduation. Main abstains; so does this. Only the anchor's
+    LEADING noun phrase triggers this, which is why the narrative row
+    (``latest`` ~30 tokens into anchor b) is unaffected.
+    """
+    for q in [
+        "How many days passed between my latest exam and my graduation?",
+        "How many days passed between the latest concert and my birthday?",
+        "How many days passed between latest and my birthday?",
+        "How many days had passed since my latest review when I moved house?",
+        # the same select-then-resolve form on the since arm
+        "How many weeks had passed since the latest book launch when I moved?",
+    ]:
+        assert classify_question(q) is None, q
+    # …and the narrative form still fires, so the rule is not "any anchor"
+    assert classify_question(
+        "How many days passed between the day I saw the latest Marvel film "
+        "and my birthday?") is AssemblyShape.INTERVAL
+
+
+def test_recency_residual_guard_site_takes_ownership_from_the_question():
+    """#8775 review round 1 (P1): the anchor-stripped residual must NOT decide
+    interval ownership for itself.
+
+    ``_date_lookup_surface`` guards the residual, whose LEADING calendar anchor
+    has been blanked to a single space. The interval templates are ``^``-anchored,
+    so blanking manufactures ownership of the residual where the QUESTION owns
+    nothing — the recency veto was lifted and a day lookup fired for an elapsed-
+    interval question that main abstained on (a pool-REPLACING block scoped to the
+    wrong day). Ownership is a property of the question; the predicate now takes
+    it as an explicit argument.
+    """
+    q = ("last Saturday how many days had passed since I bought the couch "
+         "when I sold my latest lamp?")
+    # the residual really does look interval-shaped — that is the trap
+    from tortoise.assembly import _strip_anchor_spans, find_anchor_spans
+    spans = find_anchor_spans(q)
+    assert spans, "the trap needs a leading calendar anchor"
+    residual = _strip_anchor_spans(q, spans)
+    assert _RE_INTERVAL_SINCE.match(residual), residual
+    assert _recency_vetoes(residual, owns=None) is True
+    # …and the question does not own it, so the day-lookup surface must reject
+    assert classify_question(q) is None, q
 
 
 def test_census_duration_state_coverage():

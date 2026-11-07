@@ -618,10 +618,12 @@ _RE_OR_CHAIN = re.compile(r"\sor\s.+?\sor\s", re.IGNORECASE | re.DOTALL)
 # 'A', 'B', and 'C'"). The colon is the strong signal: the two head forms
 # carry no " or " at all, so _RE_ORDERING cannot see them.
 # The "earliest to latest" head form is deliberately NOT an alternative here:
-# a question containing it never reaches this pattern — with a bounded window
-# the class-plural branch above claims it, without one the R13 guard's
-# ORDERING-BOUND arm (``_RE_RECENCY_LATEST_BOUND``, #8775) rejects it — so the
-# alternative would be dead code contradicting that guard.
+# a question containing it never reaches this pattern. The class-plural HEAD
+# (what/which "is the order of …") claims its windowed spelling, and every
+# OTHER spelling — windowed or not — is rejected by the R13 guard's
+# ORDERING-BOUND arm (``_RE_RECENCY_LATEST_BOUND``, #8775), which is checked
+# ahead of ``_RE_RECENCY_LATEST`` so even an interval-owned question keeps
+# rejecting. So the alternative would be dead code contradicting that guard.
 _RE_ORDERING_LIST = re.compile(
     r"^\s*(?:which|who|what)\b[^?:]*?"
     r"(?:\border\b|\bsequence\b|\bfirst\s+to\s+last\b)"
@@ -792,6 +794,16 @@ _RE_WH_LOOKUP = re.compile(r"\b(?:what|which|who|whom|whose|where|when)\b",
                            re.IGNORECASE)
 
 
+#: The recency-selecting `latest` at the START of an interval anchor's own
+#: noun phrase ("my latest exam", "the latest concert", bare "latest"). That
+#: is a REFERENT the arms must resolve, not narrative text — #8775 leaves
+#: main's reject in place for it (see ``_latest_selects_an_interval_anchor``).
+_RE_LATEST_ANCHOR_HEAD = re.compile(
+    r"^\W*(?:(?:the|a|an|my|our|your|their|his|her|its|this|that|these|those)"
+    r"\W+)?latest\b",
+    re.IGNORECASE)
+
+
 def recency_narrative_latest_enabled() -> bool:
     """Is #8775's narrowed recency guard armed? (default ON).
 
@@ -802,32 +814,57 @@ def recency_narrative_latest_enabled() -> bool:
     return env_flag(RECENCY_NARRATIVE_LATEST_ENV, True)
 
 
-def _interval_template_owns(question: str) -> bool:
-    """Does one of the three interval templates match ``question`` cleanly?
+def _interval_template_owns(question: str):
+    """The interval template that matches ``question`` cleanly, or ``None``.
 
-    Each template CAPTURES its own two anchors (named groups a/b), so the
-    shape never re-reads the anchors' text: an attributive adjective inside an
-    anchor's narrative extension is not an instruction any arm has to obey.
+    Each template CAPTURES its own two anchors (named groups a/b). Returns the
+    MATCH (not a bool) so the recency predicate can look at the captured anchor
+    text: #8775's exemption is about an adjective in an anchor's narrative
+    EXTENSION, never about one that SELECTS the anchor's referent.
     """
-    return bool(_RE_INTERVAL_SINCE.match(question)
-                or _RE_INTERVAL_BETWEEN.match(question)
-                or _RE_INTERVAL_BETWEEN_LEAD.match(question))
+    return (_RE_INTERVAL_SINCE.match(question)
+            or _RE_INTERVAL_BETWEEN.match(question)
+            or _RE_INTERVAL_BETWEEN_LEAD.match(question))
 
 
-def _recency_vetoes(question: str) -> bool:
+def _latest_selects_an_interval_anchor(match) -> bool:
+    """Does a captured interval anchor BEGIN with the recency-selecting `latest`?
+
+    "How many days passed between **my latest exam** and my graduation?" is an
+    interval question whose anchor is *selected* by recency: the arms then have
+    to resolve WHICH exam, and they cannot (the name-FTS leg is an OR-union, so
+    it matches any object containing "exam"). That is main's reject, and it
+    still applies — the #8775 exemption covers only `latest` sitting in an
+    anchor's narrative extension ("…where the author is discussing her latest
+    thriller novel"), never one heading the anchor's own noun phrase.
+    """
+    if match is None:
+        return False
+    for anchor in (match.groupdict().get("a"), match.groupdict().get("b")):
+        if anchor and _RE_LATEST_ANCHOR_HEAD.match(anchor):
+            return True
+    return False
+
+
+def _recency_vetoes(question: str, *, owns=...) -> bool:
     """R13 recency guard — #2165, narrowed by #8775.
 
     * ``most recent`` / ``the last one`` / bare `latest` as an ORDERING BOUND
       (``_RE_RECENCY``) ALWAYS veto — main's reject, unchanged;
     * any OTHER bare `latest` vetoes too, UNLESS an interval template owns the
-      question (#8775): there both anchors are already resolved by the
-      template, so a narrative "her latest thriller novel" inside one anchor
-      is not an ordering instruction the arms must read.
+      question AND the `latest` is not SELECTING one of that template's own
+      anchors (#8775). In that case both anchors are the template's capture and
+      the adjective sits in an anchor's narrative extension, which no arm
+      re-reads;
     * off-switch off -> main's bare-token guard is the whole predicate.
 
     ONE predicate for both guard sites (the anchor-stripped residual in
     ``_date_lookup_surface`` and the blanket block in ``classify_question``),
     so the two cannot drift apart the way the #8487 duplicated resolver did.
+    ⛔ ``owns`` is passed EXPLICITLY by the residual site: interval ownership is
+    a property of the QUESTION, and the residual has its leading calendar anchor
+    blanked, so re-deriving it there MANUFACTURES ownership ("last Saturday how
+    many days had passed since …") and would fire a day lookup main abstained on.
     """
     if not recency_narrative_latest_enabled():
         return bool(_RE_RECENCY_BARE.search(question))
@@ -835,9 +872,10 @@ def _recency_vetoes(question: str) -> bool:
         return True
     if not _RE_RECENCY_LATEST.search(question):
         return False
-    # #8775: a narrative/attributive `latest` cannot change what the interval
-    # arms read — their anchors are the template's own capture.
-    return not _interval_template_owns(question)
+    owner = _interval_template_owns(question) if owns is ... else owns
+    if owner is None or not owner:
+        return True
+    return _latest_selects_an_interval_anchor(owner)
 
 
 def _strip_anchor_spans(question: str, spans) -> str:
@@ -909,7 +947,13 @@ def _date_lookup_surface(question: str, residual: str, spans) -> bool:
         or _relative_match(residual) is not None
         or _RE_AGO_RESIDUAL.search(residual)
         or _RE_DURATION.search(residual)
-        or _RE_FREQUENCY.search(residual) or _recency_vetoes(residual)
+        or _RE_FREQUENCY.search(residual)
+        # ⛔ #8775 review: ownership is a property of the QUESTION. Re-deriving
+        # it from `residual` (whose leading calendar anchor is blanked) makes a
+        # non-interval question OWN the interval template, lifting the recency
+        # veto and firing a day lookup main abstained on. The question is
+        # interval-free here (it returned above), so this is main's semantics.
+        or _recency_vetoes(residual, owns=_interval_template_owns(question))
         or _RE_ADVICE.search(residual) or _RE_OR_CHAIN.search(residual))
 # duration-state (#2654): "how long had I been <state> when <event>?" — the
 # past-elapsed-state form that needs a state's ENTRY date and the question's
