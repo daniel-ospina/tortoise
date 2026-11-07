@@ -1314,7 +1314,7 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:11740-11743, :11744, :12148-12162) — so an acceptance test of "a non-empty dict"
+    {}}`` (:12799-12803, and the two result blocks at :13246-13252 / :13256-13260) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
@@ -1322,19 +1322,19 @@ def _pass_ran(block: dict) -> bool | None:
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
     pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:12779`` and
     ``edus = _edus_from_conversation(...)`` follows at ``:12782``, whose
-    ``if not edus:`` early return (``:11728``) emits literally ``"vet": {"enabled":
+    ``if not edus:`` early return (``:12783``) emits literally ``"vet": {"enabled":
     vet_enabled, "s2": {}, "union": {}}`` (``:12803``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:11834``) and ``if vet_enabled and complete_list:``
-    (``:11973``). So a session whose conversation produced no list emits
+    embed_list:`` (``:12893``) and ``if vet_enabled and complete_list:``
+    (``:13032``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:12658-12661``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:11693`, its own early-return
-    block, its ``if classify_later and …`` gates around ``if items:``, its own
+    is different code (``classify_later`` at `:12748`, its own early-return
+    block at ``:12799-12802``, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
     pass's lines templated over the other's name.

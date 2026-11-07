@@ -5094,12 +5094,32 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
                 f"{doc_name} does not cite the `if items:` gate at {gate} — the "
                 f"classify passes are gated on the collector's list being "
                 f"non-empty, which is the whole of S2.3's conditionality")
+        # ⛔ THE FAIL-OPEN PAIR IS SCOPED TO ITS LIVE SENTENCE (#11262 review, P1).
+        # A whole-document `in text` check is satisfied by ANY mention of the
+        # number — including a §10.x history entry — so re-pointing the HISTORY
+        # entry made this leg green while §11.3's live sentence still cited
+        # `:11862`/`:12009`, a review comment and a prose line rather than the
+        # two `except` arms. Measured at the head that fix landed on: `:12921`
+        # and `:13068` occurred ONLY in §10.8's "New value", and `:11862`/
+        # `:12009` ONLY in the live sentence — the pin was green over exactly the
+        # claim it exists to guard. The sentence is located by its own words, so
+        # it still binds the CLAIM and not a line number.
+        live = [ln for ln in text.splitlines()
+                if "a witness and not a loophole" in ln]
+        assert len(live) == 1, (
+            f"{doc_name}: §11.3's 'a witness and not a loophole' sentence now "
+            f"occurs {len(live)} time(s) — this pin scopes the fail-open cites "
+            "to that ONE sentence, so re-word the pin's phrase rather than "
+            "letting it bind the easier of two matches")
         for fail_open in fail_opens:
-            assert f"`{fail_open}`" in text, (
-                f"{doc_name} does not cite the fail-open `except` at {fail_open} — "
-                "the idle witness is only distinguishable from a CRASHED pass "
-                "because this `except` writes a marker, so a cite landing on any "
-                "other line is an argument from code that never runs")
+            assert f"`{fail_open}`" in live[0], (
+                f"{doc_name}: §11.3's live sentence does not cite the fail-open "
+                f"`except` at {fail_open} — the idle witness is only "
+                "distinguishable from a CRASHED pass because this `except` "
+                "writes a marker, so a cite landing on any other line is an "
+                "argument from code that never runs. A §10.x history entry "
+                "citing the number does NOT satisfy this: the sentence the "
+                "argument rests on must carry it")
 
 
 def test_the_pre_registration_cites_the_turn_writer_by_symbol_not_by_line():

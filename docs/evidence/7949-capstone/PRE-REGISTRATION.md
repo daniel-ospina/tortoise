@@ -1079,14 +1079,32 @@ place a machine reads it.
 - **Original value (as §10.7 left it):** `_collect_classify_items` at
   `tortoise/extractor_v2.py:10193`, its extent `:10193-10215`, the two `if items:` gates at
   `:10736`/`:10868`, and the two fail-open `except` arms at `:10749`/`:11973`.
-- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
-  `:12921`/`:13068`.
+- **New value:** the same symbols at `:10397`, `:10397-10419`, `:11849`/`:11998` and
+  `:11862`/`:12009`.
 - **Why:** `#10997` inserts **36** lines into `extractor_v2.py` above every one of them — the
   hold/population comment in `execute_embed`, the drain's reclaim sweep before it reads
   `pending()`, and the committed-vs-attempted census on the return. The symbols are unchanged.
   Each number was verified by CONTENT at this head (the `def`, the `return items` that ends it,
   the two `if items:` gates, the two `except` arms), never by adding an offset — the failure this
   section has already recorded twice.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
+### 10.9 — the §11 cite block re-pointed after `#11205`/`#11264`/`#11361`'s insert (2026-11-07, `#11262`)
+
+- **Original value (as §10.8 left it):** `_collect_classify_items` at
+  `tortoise/extractor_v2.py:10397`, its extent `:10397-10419`, the two `if items:` gates at
+  `:11849`/`:11998`, and the two fail-open `except` arms at `:11862`/`:12009`.
+- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
+  `:12921`/`:13068`.
+- **Why:** three merges — `#11205` (S5 Job 1's entity↔entity channel), `#11264` (`#11021`'s
+  mention-only rule) and `#11361` (`#10999`'s relation census) — together insert **1055** lines
+  into `extractor_v2.py` above every one of them. The symbols are unchanged. Each number was
+  verified by CONTENT at this head (the `def`, the `return items` that ends it, the two
+  `if items:` gates, the two `except` arms), never by adding an offset: `11098 - 10397 = 701` and
+  `12908 - 11849 = 1059`, so no single offset reaches all of them, which is precisely why this
+  block is re-cut by content.
 - **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
@@ -1147,7 +1165,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:11862`, `classify(S2) failed` / `:12009`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:12921`, `classify(S2) failed` / `:13068`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
