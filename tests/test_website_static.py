@@ -4015,6 +4015,21 @@ class TestSiteIconAndSocialPreviewContract:
     # The two hosts this site is served from. Declared once because every page's
     # preview URL is checked against it — see the og:image assertions.
     SITE_ORIGINS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
+    # The encoded-size floor a link-preview card must clear. MEASURED, not guessed:
+    # a FLAT 1200x630 JPEG at maximum quality is 22,016 B (`sips -s formatOptions
+    # best`), so the first cut's 20 KB floor passed the very image it was written to
+    # reject. The authored card is 94,066 B, so 40 KB sits 1.82x above a flat one and
+    # 2.35x below the real card. `test_the_content_guards_reject_a_blank_image` holds
+    # this floor ABOVE that measurement, so lowering it to 20 KB again is red.
+    CARD_MIN_BYTES = 40_000
+    # What a flat 1200x630 JPEG measures — the image CARD_MIN_BYTES exists to reject.
+    # Recorded as a number so the relationship is ASSERTED (`FLAT_CARD_BYTES <
+    # CARD_MIN_BYTES`) rather than left implicit in a comment.
+    FLAT_CARD_BYTES = 22_016
+    # A decoded icon must hold at least this many distinct colours...
+    ICON_MIN_COLOURS = 8
+    # ...and no single colour may cover more than this fraction of its canvas.
+    ICON_MAX_DOMINANT = 0.95
 
     # --- format readers -------------------------------------------------
 
@@ -4098,6 +4113,72 @@ class TestSiteIconAndSocialPreviewContract:
                     px = palette[px[0]]
                 counts[px] = counts.get(px, 0) + 1
         return counts
+
+    @staticmethod
+    def _flat_png(size: int = 256,
+                  rgba: tuple[int, int, int, int] = (0x06, 0x0B, 0x14, 0xFF)) -> bytes:
+        """A one-colour 8-bit RGBA PNG — the degenerate icon, built here.
+
+        ⛔ WHY A SYNTHETIC IMAGE IS IN THIS FILE. The pixel floor below is worth
+        something only if it REJECTS, and the file it was written for
+        (`/blog/og-image.png`, the deleted two-colour placeholder) is gone. This is
+        that shape rebuilt in memory, so the guard's FAILURE path runs on every CI
+        run instead of surviving as a spot check recorded in a PR body.
+        """
+        ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)  # 8-bit RGBA
+        raw = (b"\x00" + bytes(rgba) * size) * size      # filter byte + one pixel/column
+
+        def chunk(kind: bytes, body: bytes) -> bytes:
+            return (struct.pack(">I", len(body)) + kind + body
+                    + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+    @classmethod
+    def _icon_mark_violations(cls, name: str, data: bytes) -> list[str]:
+        """Every reason a decoded icon is not a mark; empty means it carries art.
+
+        Split out of the guard so the SAME predicate can be run against a blank
+        fixture (see `test_the_content_guards_reject_a_blank_image`). A check whose
+        failure path is never executed cannot be told apart from a no-op.
+        """
+        counts = cls._png_palette(data)
+        pixels = sum(counts.values())
+        problems: list[str] = []
+        if len(counts) < cls.ICON_MIN_COLOURS:
+            problems.append(
+                f"website/{name} holds {len(counts)} distinct colour(s) over "
+                f"{pixels} pixels — that is a flat rectangle, not a mark; every size "
+                "assertion would pass on it")
+        dominant = max(counts.values()) / pixels
+        if dominant >= cls.ICON_MAX_DOMINANT:
+            problems.append(
+                f"website/{name} is {dominant:.1%} a single colour — a mark needs to "
+                "carry something the background does not")
+        return problems
+
+    @classmethod
+    def _og_asset_path(cls, image: str) -> Path:
+        """The file a declared `og:image` URL resolves to in the served tree.
+
+        The QUERY is stripped before the URL becomes a path: `…/og-tortoise.jpg?v=2`
+        is a legitimate cache-bust that changes no file, and a guard that keeps it
+        reports "not in the served tree" about a page that is correct. The ORIGIN is
+        deliberately dropped rather than matched here — the same tree is served from
+        two hosts, and that is a separate assertion (`SITE_ORIGINS`).
+        """
+        return cls.WEB / urlsplit(image).path.lstrip("/")
+
+    @classmethod
+    def _card_floor_violation(cls, page: str, path: Path, data: bytes) -> str | None:
+        """Why an encoded card is too small to BE a card — None when it clears."""
+        if len(data) >= cls.CARD_MIN_BYTES:
+            return None
+        return (f"{page}'s card {path.name} is only {len(data)} bytes — a 1200x630 "
+                f"JPEG that small is near-uniform (a flat rectangle of one colour "
+                f"measures {cls.FLAT_CARD_BYTES // 1000} KB), and a link preview of "
+                "it is an empty block rather than a card")
 
     @staticmethod
     def _jpeg_size(data: bytes) -> tuple[int, int]:
@@ -4283,15 +4364,8 @@ class TestSiteIconAndSocialPreviewContract:
         # The floor is low on purpose (a two-colour logo would still pass at 8); what
         # it rejects is the degenerate case, not art the next person might choose.
         for name in (self.ICON_PNG, self.ICON_APPLE):
-            counts = self._png_palette((self.WEB / name).read_bytes())
-            assert len(counts) >= 8, (
-                f"website/{name} holds {len(counts)} distinct colour(s) over "
-                f"{sum(counts.values())} pixels — that is a flat rectangle, not a mark; "
-                "every size assertion would pass on it")
-            dominant = max(counts.values()) / sum(counts.values())
-            assert dominant < 0.95, (
-                f"website/{name} is {dominant:.1%} a single colour — a mark needs to "
-                "carry something the background does not")
+            problems = self._icon_mark_violations(name, (self.WEB / name).read_bytes())
+            assert not problems, "\n".join(problems)
 
     def test_the_wordmark_is_never_used_as_an_icon(self):
         """`/logo.png` is a 400x244 wordmark — a tab renders it as a squashed bar."""
@@ -4480,8 +4554,7 @@ class TestSiteIconAndSocialPreviewContract:
             # A cache-busting query is legitimate and does not change which file is
             # served, so it is stripped before the URL becomes a path — otherwise a
             # `?v=2` on a correct tag reports "not in the served tree".
-            image_path = urlsplit(image).path
-            path = self.WEB / image_path.lstrip("/")
+            path = self._og_asset_path(image)
             assert path.is_file(), (
                 f"{page.name} points og:image at {image}, which is not in the served "
                 f"tree (looked for {path}) — the scraper fetches a 404 and shows no card")
@@ -4522,11 +4595,60 @@ class TestSiteIconAndSocialPreviewContract:
             # would drag a wheel into the fast lane. If a future card is legitimately
             # simple and lands under this line, LOOK AT IT, then lower the bound and
             # write down what you saw. PNG icons get a real pixel check below.
-            assert len(raw) >= 40000, (
-                f"{page.name}'s card {path.name} is only {len(raw)} bytes — a "
-                "1200x630 JPEG that small is near-uniform (a flat rectangle of one "
-                "colour measures 22 KB), and a link preview of it is an empty block "
-                "rather than a card")
+            floor = self._card_floor_violation(page.name, path, raw)
+            assert floor is None, floor
+
+    def test_the_content_guards_reject_a_blank_image_and_keep_their_measured_floors(self):
+        """NON-VACUITY: each content guard must FAIL on the image it was written for.
+
+        Every floor in this class was argued from measurements taken outside CI, and
+        a guard's failure path is exactly what a PR body forgets. Asserted here: the
+        decoder reads real pixels, a blank image really reds BOTH floors, and the
+        card floor really sits above the flat JPEG that defeated its first value.
+
+        ⛔ The two card numbers are a PAIR, on purpose. #11318's first card floor was
+        20 KB while a flat 1200x630 JPEG at maximum quality measures 22,016 B — so
+        the check passed the exact image it existed to reject. Raising the floor
+        without re-measuring the flat case repeats the mistake; this pin makes that
+        red instead of green.
+        """
+        blank = self._flat_png()
+        counts = self._png_palette(blank)
+        assert sum(counts.values()) == 256 * 256, (
+            "the decoder did not count every pixel of a 256x256 PNG, so a dominant-colour "
+            "ratio computed from it is meaningless")
+        assert len(counts) == 1, f"a flat PNG decoded to {len(counts)} colours, not 1"
+
+        problems = self._icon_mark_violations(self.ICON_PNG, blank)
+        assert len(problems) == 2, (
+            "a blank icon must trip BOTH content floors (distinct colours and dominant "
+            f"colour); it tripped {len(problems)}: {problems}")
+
+        assert self.FLAT_CARD_BYTES < self.CARD_MIN_BYTES, (
+            f"the card floor ({self.CARD_MIN_BYTES} B) is not above the flat 1200x630 "
+            f"JPEG it exists to reject ({self.FLAT_CARD_BYTES} B), so a flat card passes")
+        flat_card = b"\xff\xd8" + b"\x00" * (self.FLAT_CARD_BYTES - 2)
+        assert self._card_floor_violation("page.html", Path("card.jpg"), flat_card), (
+            "a card the size of a measured flat JPEG cleared the floor")
+        # ...and the card that ships is what clears it, so the floor is not just
+        # "always red" and not "any file at all".
+        shipped = (self.WEB / "assets" / "og-tortoise.jpg").read_bytes()
+        assert self._card_floor_violation("page.html", Path("og-tortoise.jpg"),
+                                          shipped) is None, (
+            f"the shipped card ({len(shipped)} B) no longer clears the floor — look at "
+            "it, then re-measure before touching CARD_MIN_BYTES")
+
+        # The VALUE readers accept honest markup. A reordered attribute and a
+        # cache-busting query are identical to a browser and to every scraper; the
+        # source-order regexes they replaced called both broken (#11318 review 2).
+        tag = ('<head><meta content="https://tortoise.premiselabs.co/assets/'
+               'og-tortoise.jpg?v=2" property="og:image">')
+        image = self._og(tag, "image")
+        assert image is not None and image.endswith("og-tortoise.jpg?v=2"), (
+            f"a reordered og:image tag read as {image!r} — that is the false red the "
+            "parser replaced the regex for")
+        assert self._og_asset_path(image).is_file(), (
+            "a legitimate `?v=2` cache-bust on a correct og:image resolves to no file")
 
     def test_the_shared_preview_is_the_agreed_size(self):
         """1200x630 is the size the scrapers crop to; the shared image must be it."""
