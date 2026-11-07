@@ -1208,19 +1208,16 @@ def parity_difference(cache_props: Mapping[str, Any],
       ``explained_missing: [...]``, because the caller supplied the arguments and
       so knows which direction it asked. The two need different repairs
       (on either ANCHOR a destructive clear — a full ``record-restore``'s
-      whole-graph wipe
-      (refused PRE-WIPE on a production server graph name, #2944's L2 guard), or
-      a graph-side ``REMOVE n.story_arc`` no instrument ships today; ⚠️ a
-      ``:Point`` copy has a NON-destructive one:
+      whole-graph wipe (refused PRE-WIPE on a production server graph name,
+      #2944's L2 guard), or a graph-side ``REMOVE n.story_arc`` no instrument
+      ships today; ⚠️ a ``:Point`` copy has a NON-destructive one:
       ``update_point(<id>, story_arc=None)`` clears the property and keeps the
       node (measured; ``record_reconcile``'s module docstring states the door);
-      ``#10017``'s
-      purge clears only TURN-SHAPED legacy episodic ``:Point`` copies (turn
-      shape = ``is_episodic`` + ``pointKind='event'`` + a ``<sid>_t<digits>`` id,
-      per ``tools/turn_parity_census.py``) — any other episodic ``:Point``
-      refuses its sweep
-      rather than being cleared — vs nothing at
-      all), and
+      ``#10017``'s purge clears only TURN-SHAPED legacy episodic ``:Point``
+      copies (turn shape = ``is_episodic`` + ``pointKind='event'`` + a
+      ``<sid>_t<digits>`` id, per ``tools/turn_parity_census.py``) — any other
+      episodic ``:Point`` refuses its sweep rather than being cleared — vs
+      nothing at all), and
       ``record_reconcile`` is where that distinction is made (``graph_only``
       versus a record-side omission), not here.
 
