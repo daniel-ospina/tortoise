@@ -335,6 +335,10 @@ PROD_PROBE_URLS="${PROD_PROBE_URLS-$DEFAULT_PROBE_URL $AUTH_PROBE_URL $LIVENESS_
 # as "served by Cloudflare Pages", which was true for the auth surface and FALSE
 # for the liveness one: its DOWN page sent the on-call to check a Pages deploy
 # while the Fly machine was the thing not answering.
+# ⛔ EVERY machine-backed production target MUST be listed here. The exclusion is
+# exactly one surface — the Pages-served auth probe — and nothing else. A
+# machine-backed target left out regresses to the Pages prose (see
+# `is_machine_backed_url`).
 FLY_MACHINE_PROBE_URLS="${FLY_MACHINE_PROBE_URLS-$DEFAULT_PROBE_URL $LIVENESS_PROBE_URL}"
 # Which production URLs may arm the restart leg. The auth surface is PRODUCTION
 # for alerting and incident identity, but it is served by Cloudflare Pages: a 503
@@ -894,9 +898,16 @@ is_restartable_url() { # <url>
 # Is a Fly MACHINE the thing that answers this URL? Distinct from
 # `is_restartable_url` (#10892 review round 3): the incident body's remediation
 # prose must not offer a machine restart where none can exist, NOR describe a
-# machine-backed surface as a static/Pages deploy. Membership, fail closed — an
-# unlisted URL is "not machine-backed", which makes its body MORE cautious
-# (never claims a machine it cannot prove).
+# machine-backed surface as a static/Pages deploy. Membership, fail closed.
+# ⛔ THE FAIL-CLOSED DIRECTION IS NOT THE SAFE ONE — read it before extending a
+# set. An unlisted URL falls into the body's `else` arm, which POSITIVELY asserts
+# "This surface has **no Fly machine** behind it (it is served by Cloudflare
+# Pages)". So an unlisted URL does not claim less; it asserts the ABSENCE of a
+# machine, which it cannot prove either. The default below is correct only
+# because it lists every machine-backed production target, so adding a
+# machine-backed target to `PROD_PROBE_URLS` without adding it HERE silently
+# sends on-call to a Pages deploy during a machine outage (#10892 review round
+# 4). `docs/infra-runbook.md` §7.2 names this set for exactly that reason.
 is_machine_backed_url() { # <url>
   local u p
   u="${1%/}"

@@ -1737,7 +1737,13 @@ Operator check, one line, from anywhere:
 
 ```bash
 curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
-# {"status":"ok","served":<N>,"last_served_age_ms":<ms|null>}   # N must GROW
+# {"status":"ok","served":<N>,"last_served_age_ms":<ms|null>}
+# <N> counts requests THIS PROCESS has served, so it must be a NEW number for
+# this process. It is NOT monotonic across a restart: the counter resets to 1 on
+# a redeploy/machine restart, and that reset is itself the evidence of a restart
+# (`tortoise/hosted_api.py`: "a restart starting again at 1 is itself the
+# evidence of a restart"). A SMALLER N right after a deploy is healthy, not a
+# replayed/cached body. `<ms|null>` is null until the process has served two.
 ```
 
 ### 6.5 Cost reference (what "one machine warm" actually costs)
@@ -2438,11 +2444,20 @@ machinery (§7, §7.7). Two consequences:
    `is_prod` set would make every production run a silent drill (no PROD page),
    and nothing in the live path would tell you — the drill is where you notice.
 2. **Widening the production set must not let a drill arm self-heal.** The set
-   (`PROD_PROBE_URLS`) and the restartable set (`RESTARTABLE_PROBE_URLS`) are
-   separate; only exact members of the production set are PROD, and only exact
-   members of the restartable set may restart. An unrecognised URL stays a
+   (`PROD_PROBE_URLS`), the restartable set (`RESTARTABLE_PROBE_URLS`) and the
+   machine-backed set (`FLY_MACHINE_PROBE_URLS`) are three SEPARATE sets; only
+   exact members of the production set are PROD, and only exact members of the
+   restartable set may restart. An unrecognised URL stays a
    DRILL with self-heal disarmed — never add a flag, never loosen this to a
    prefix/wildcard match, and never let a drill URL appear in either set.
+   ⛔ **`FLY_MACHINE_PROBE_URLS` must be kept in step with `PROD_PROBE_URLS`.**
+   It decides whether an incident body says "served by Cloudflare Pages" or
+   "served by the same Fly machine". The ONLY production target it may omit is
+   the auth probe (`/auth/start`, served by Pages); every other production
+   target is machine-backed and must be listed. Omitting one does not degrade to
+   a cautious message — the body then positively claims there is no Fly machine
+   and sends on-call to check a Pages deploy during a machine outage, which is
+   the #10892 misdirection itself.
 
 **All three targets are probed on every run**, drills included: the auth and
 liveness steps always use their production URLs and are hard-disarmed from the

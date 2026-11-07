@@ -270,11 +270,20 @@ def test_a_blocked_loop_cannot_serve_either_endpoint(monkeypatch):
         "the loop was blocked and /liveness still answered "
         f"{liveness_outcome.status_code} in {liveness_elapsed:.2f}s — its answer "
         "must be impossible to produce without the loop running it")
-    assert isinstance(health_outcome, str) and isinstance(liveness_outcome, str), (
-        "expected NO answer from either endpoint while the loop is held; got "
-        f"health={health_outcome!r} liveness={liveness_outcome!r}. If one of "
-        "these is a 504, the run is still valid but the block was short — say "
-        "so rather than loosening the assertion")
+    # The two assertions above accept either no answer at all (the probe's own
+    # bound expired) or a 5xx (the outermost WaitBound fired first) — BOTH are
+    # "no usable answer inside the client's bound", and which one arrives depends
+    # on the machine's timing, not on the implementation. So the evidence that
+    # the loop was genuinely HELD is not the ANSWER's shape, it is the TIME: a
+    # probe that returned in a few ms never met the block at all. Asserting that
+    # directly is deterministic where asserting "both timed out" was not (#10892
+    # review round 4: those two branches used to forbid the 504 the messages
+    # above call valid).
+    assert max(health_elapsed, liveness_elapsed) >= PROBE_BUDGET_S / 2, (
+        f"both probes returned far below their {PROBE_BUDGET_S:.0f}s bound "
+        f"(health {health_elapsed:.2f}s, liveness {liveness_elapsed:.2f}s) while "
+        f"the loop was held for {BLOCK_S:.0f}s — they never met the block, so "
+        "this run observed nothing and cannot testify")
 
     # …and the service is genuinely serving again afterwards: the two probes
     # above observed a REAL block, not a dead process (which would make the
