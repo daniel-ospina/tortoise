@@ -2950,13 +2950,17 @@ def _names_the_ledger_empties(ledger: Path, gh_present: set[str]) -> set[str]:
     with tempfile.TemporaryDirectory(prefix="ledger-effect-") as tmp:
         empty = Path(tmp) / "empty-ledger.txt"
         empty.write_text("# no entries\n")
-        a0, u0, live0, _ = module.payload_partition(
+        a0, _u0, _live0, _ = module.payload_partition(
             blocks, gh_present, ledger_override=empty
         )
         assigned, _, _, _ = module.payload_partition(
             blocks, gh_present, ledger_override=ledger
         )
-    return (a0 | u0 | live0) - assigned
+    # ⛔ `a0` ALONE, matching the gate's own `unmitigated`. Unioning the no-secrets
+    # sample would subtract `-z`-guarded names the ledger never emptied, i.e. model an
+    # app state the ledger does not require — the same over-wide subtraction the gate
+    # had to stop doing (#11332 round 10, P2).
+    return a0 - assigned
 
 
 class TestTheMitigationLedger:
@@ -4124,6 +4128,94 @@ class TestTheMitigationLedger:
             "the entry is being reported as unhonoured rather than as a false record — "
             "that is a different defect and the exit-2 class"
         )
+
+    def test_a_CONDITIONAL_workflow_name_is_not_explained_away_by_an_unrelated_entry(self):
+        """#11332 round 10 (P2) — `unmitigated` is the ALL-PRESENT sample, not a union.
+
+        The `workflow` arm reads `if name not in assigned and name in unmitigated:` →
+        "the ledger emptied it", which suppresses the `STALE DECLARATION` that would
+        otherwise refuse the deploy. That sentence is only true of a name the payload
+        WOULD have carried, so `unmitigated` must be the empty-ledger ALL-PRESENT
+        sample. Unioning the other two samples made it true of names the ledger never
+        touched — `u0` is the NO-SECRETS world, so it holds every `[ -z "$X" ]`-guarded
+        assignment by construction — and the measured effect was that writing ONE true
+        entry silenced an unrelated `STALE DECLARATION`: `rc=1` on an empty ledger,
+        `rc=0` the moment an entry for a different name existed.
+
+        ⛔ The fix must not narrow the set so far that the LEGITIMATE case breaks — a
+        `workflow` name composed from a ledgered input, which really is "the ledger
+        emptied it". That direction is already pinned against the SHIPPED payload by
+        `test_a_ledgered_CONJUNCTION_member_models_the_app_the_gate_asks_for` (it
+        asserts `BACKUP_SWEEP_ENABLED` is emptied and the deploy is green), so it is not
+        re-modelled here: a fixture composition that reads `${{ secrets.X }}` directly
+        is NOT equivalent to the shipped one, which reads the shell `$X` the ledger
+        blanks, and a fixture that reproduced the wrong shape would prove nothing.
+        """
+
+        def subject(*, conditional: bool) -> tuple[Path, Path]:
+            payload = (
+                "name: Deploy Hosted API\n"
+                "jobs:\n"
+                "  deploy:\n"
+                "    steps:\n"
+                "      - name: Set all app secrets on Fly.io\n"
+                "        run: |\n"
+                '          ARGS=(FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}")\n'
+                '          ARGS+=(GIT_SHA="${GITHUB_SHA}")\n'
+                '          [ -n "${{ secrets.OPT_SECRET }}" ] && ARGS+=(OPT_SECRET="${{ secrets.OPT_SECRET }}")\n'
+            )
+            extra = ""
+            if conditional:
+                # u0-only: assigned when the secret is ABSENT, never in a0.
+                payload += '          [ -z "${{ secrets.SENTRY_DSN }}" ] && ARGS+=(GATED_FLAG="on")\n'
+                extra += "GATED_FLAG             workflow\n"
+            payload += f"{_LEDGER_FILTER}" + '          flyctl secrets set --stage "${ARGS[@]}"\n'
+            tag = str(int(conditional))
+            # `SENTRY_DSN` is declared by the shared fixture manifest, so it is only
+            # declared by the fixture that actually READS it — otherwise its absence
+            # from the other payload is a real stale declaration and that run would be
+            # red for a reason unrelated to this test.
+            base = _LEDGER_MANIFEST
+            if not conditional:
+                base = "".join(
+                    line
+                    for line in _LEDGER_MANIFEST.splitlines(keepends=True)
+                    if not line.startswith("SENTRY_DSN")
+                )
+            return (
+                _fixture(f"conditional-workflow-{tag}.yml", payload),
+                _fixture(f"conditional-manifest-{tag}.txt", base + extra),
+            )
+
+        def drive(workflow: Path, manifest: Path, ledger_text: str) -> subprocess.CompletedProcess[str]:
+            return _run(
+                _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], "conditional-secrets.json"),
+                manifest=manifest,
+                workflow=workflow,
+                present={"FASTAPI_INTERNAL_KEY", "SENTRY_DSN", "OPT_SECRET"},
+                extra_env={
+                    "FLY_MITIGATION_LEDGER": str(
+                        _ledger(ledger_text, "conditional-ledger.txt")
+                    ),
+                    "FLY_MITIGATION_TODAY": "2026-11-07",
+                },
+            )
+
+        # (1) A `-z`-guarded declaration is stale intent in the ordinary world, and an
+        # entry for an UNRELATED name must not change that verdict. The control arm is
+        # what stops the second assertion being a tautology.
+        wf, mf = subject(conditional=True)
+        control = drive(wf, mf, "# empty\n")
+        assert control.returncode == 1, control.stdout + control.stderr
+        assert "STALE DECLARATION — 'GATED_FLAG'" in control.stdout, control.stdout
+
+        unrelated = drive(wf, mf, _entry("OPT_SECRET"))
+        assert "STALE DECLARATION — 'GATED_FLAG'" in unrelated.stdout, (
+            "a ledger entry for an unrelated name silenced this name's STALE "
+            "DECLARATION — `unmitigated` is unioning the no-secrets sample again, so a "
+            "`-z` guard is being reported as 'the ledger emptied it'. " + unrelated.stdout
+        )
+        assert "LEDGER-EMPTIED" not in unrelated.stdout, unrelated.stdout
 
     def test_the_belt_is_SILENT_on_a_run_it_blocks(self):
         """The belt must not announce a CREATE on a run it then refuses.

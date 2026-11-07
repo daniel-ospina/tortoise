@@ -155,7 +155,6 @@ may-never-run step at exit 0. The deploy workflow provisions it with
 
 from __future__ import annotations
 
-import contextlib
 import datetime as dt
 import json
 import os
@@ -978,25 +977,6 @@ def fly_toml_env_keys(text: str) -> set[str]:
     return set(fly_toml_env_assignments(text))
 
 
-@contextlib.contextmanager
-def _ledger_path_override(path: Path):
-    """Point the payload harness at `path` for the duration of the block.
-
-    `_capture_payload` seeds the ledger seam from `ledger_path()`, which reads the
-    environment — so this is how the gate executes the SAME payload against a second
-    ledger without a second code path.
-    """
-    saved = os.environ.get("FLY_MITIGATION_LEDGER")
-    os.environ["FLY_MITIGATION_LEDGER"] = str(path)
-    try:
-        yield
-    finally:
-        if saved is None:
-            os.environ.pop("FLY_MITIGATION_LEDGER", None)
-        else:
-            os.environ["FLY_MITIGATION_LEDGER"] = saved
-
-
 def resolve_app(toml_path: Path) -> str:
     app = os.environ.get("FLY_APP")
     if app:
@@ -1076,10 +1056,26 @@ def main() -> int:
             with tempfile.TemporaryDirectory(prefix="fly-secret-empty-ledger-") as tmp:
                 empty = Path(tmp) / "empty-ledger.txt"
                 empty.write_text("# no entries\n")
-                a0, u0, live0, _ = payload_partition(
+                a0, _u0, _live0, _ = payload_partition(
                     blocks, gh_present, ledger_override=empty
                 )
-            unmitigated = frozenset(a0 | u0 | live0)
+            # ⛔ `a0` ALONE — the ALL-PRESENT sample — never `a0 | u0 | live0`.
+            # The arm this feeds is "the ledger emptied it", which is only ever true
+            # of a name the payload WOULD have carried in the ordinary world. Unioning
+            # the other two samples makes it true of names the ledger never touched:
+            # `u0` is the NO-SECRETS world, so it holds every `[ -z "$X" ]`-guarded
+            # assignment by construction, and `live0` is the run sample. A
+            # `workflow`-declared name assigned only under a `-z` guard is therefore
+            # in `unmitigated` while being absent from `a0` — and its `STALE
+            # DECLARATION` (exit 1) then turns into an explained-away `LEDGER-EMPTIED`
+            # the moment ANY unrelated entry exists, which is exit 0 when it was the
+            # only violation. Measured on a fixture with `ENV_GATED_FLAG workflow`
+            # assigned under `[ -z "${{ secrets.SENTRY_DSN }}" ]`: an empty ledger
+            # reports the stale declaration; a ledger naming unrelated `OPT_SECRET`
+            # reports `rc=0` and the declaration is gone with a false explanation
+            # (#11332 round 10, P2). The composed case this arm exists for
+            # (`BACKUP_SWEEP_ENABLED`) is in `a0`, so nothing legitimate is lost.
+            unmitigated = frozenset(a0)
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             _err(
                 "cannot determine secret provenance: the payload could not be "
