@@ -179,11 +179,15 @@ opened its own connection and committed it would commit the projection ALONE,
 which is the dual write §3 forbids.
 
 **THE FAILURE PATH DISPOSES OF WHAT THE SEAM OPENED.** A connection the seam
-opened and could not use is CLOSED before `RecordWriteError` is raised: the
+opened and could not use is disposed of before `RecordWriteError` is raised: the
 caller never receives that handle, so it has nothing to roll back and no way to
 close it, and the raising traceback would otherwise keep the handle (its aborted
 server-side transaction and backend slot) alive for as long as the exception is
-held. An INJECTED connection is never touched — it is the caller's, and its
+held. ⛔ Since #9558 "disposed of" means RELEASED: the connection
+`_default_connect` hands out is a `_PooledConnection` whose `close()` rolls back
+an unfinished transaction and returns the handle to the idle set, so an aborted
+projection cannot be inherited by the next record and no backend slot is lost.
+An INJECTED connection is never touched — it is the caller's, and its
 transaction stays open and unrolled-back on failure.
 """
 from __future__ import annotations
@@ -193,6 +197,7 @@ import contextvars
 import hashlib
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -215,6 +220,7 @@ __all__ = [
     "RECORD_DSN_ENV",
     "RECORD_GRAPH_ENV",
     "RECORD_ORG_ENV",
+    "RECORD_POOL_MAX_CONNECTIONS",
     "RECORD_SINGLE_TENANT_ENV",
     "RecordConnectError",
     "RecordWrite",
@@ -936,7 +942,29 @@ def _default_connect(dsn: str) -> Any:
     deliberately NOT touched: the transaction boundary belongs to the caller,
     and turning autocommit on here would commit each statement of a projection
     that §3 requires to be atomic with the journal append.
+
+    ⛔ IT MAY RETURN A REUSED CONNECTION (#9558 / R10). The live door calls the
+    seam once per journal record, and each call used to pay a full TCP connect
+    and auth handshake — measured at 18.93 ms per record with `connect()` once
+    per record. Pooling lives HERE, behind the one function whose job is "give me
+    a connection", rather than at a call site, for one reason: it changes the
+    cost of a connection and NOTHING about who owns one. `RecordWriter.write`
+    still neither commits nor rolls back, `RecordWrite.connection` is still the
+    handle its caller commits, and §2.0's unarmed path still opens nothing.
+
+    The handle returned is a :class:`_PooledConnection` whose ``close()``
+    RETURNS it to the pool instead of closing it — that is the whole contract
+    change, and it is invisible to every caller that closes the handle it was
+    given, which is what this module's two disposal sites already do.
+
+    A connection is reused only when it is provably still attached to a live
+    server (see :func:`_connection_is_reusable`), and a burst larger than the
+    idle set opens new connections rather than queueing: a write is never
+    delayed or refused because the pool is busy.
     """
+    reused = _take_idle_connection(dsn)
+    if reused is not None:
+        return _pooled_connection(reused, dsn)
     try:
         import psycopg2
     except ImportError as exc:  # pragma: no cover - exercised by install lanes
@@ -951,8 +979,232 @@ def _default_connect(dsn: str) -> Any:
     # the per-record connect this constant exists to cap (#9231 review P2).
     if "connect_timeout" in parse_qs(urlsplit(dsn).query):
         # The operator bounded it already; do not replace their number.
-        return psycopg2.connect(dsn)
-    return psycopg2.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SECONDS)
+        raw = psycopg2.connect(dsn)
+    else:
+        raw = psycopg2.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SECONDS)
+    return _pooled_connection(raw, dsn)
+
+
+#: How many IDLE connections the pool keeps per DSN (#9558 / R10).
+#:
+#: Two, because the record write path is one record per call and its natural
+#: concurrency is "a few capture threads", not a pool of workers: the second slot
+#: covers one thread committing while another acquires, and anything beyond it is
+#: a burst the process should not pay to keep alive. ⛔ This is an UPPER bound on
+#: IDLENESS, never on connections — a cache miss opens a fresh connection and a
+#: write is never delayed or refused for want of a pooled one, so a burst is
+#: slower (it connects) instead of failing.
+RECORD_POOL_MAX_CONNECTIONS = 2
+
+#: Idle connections, keyed by the SHA-256 of their DSN (never the DSN itself: the
+#: pool is not a new place for a credential to sit in memory).
+_IDLE_CONNECTIONS: dict[str, list[Any]] = {}
+_IDLE_CONNECTIONS_LOCK = threading.Lock()
+
+
+def _pool_key(dsn: str) -> str:
+    """The pool bucket for `dsn` — a full digest, so no two DSNs can collide."""
+    return hashlib.sha256(dsn.encode("utf-8")).hexdigest()
+
+
+def _transaction_statuses() -> tuple[int, int]:
+    """`(IDLE, UNKNOWN)` — psycopg2's transaction-status constants, lazily.
+
+    ONE function for both constants for the same reason this module has one
+    driver hook: two lazy imports of the same module are two places to lose the
+    laziness, and a test that must model a connection without the driver
+    installed has one name to patch instead of two.
+
+    Imported inside the caller rather than at module scope, per this module's
+    standing rule: importing the seam must not require a driver.
+    """
+    from psycopg2 import extensions
+
+    return (
+        extensions.TRANSACTION_STATUS_IDLE,
+        extensions.TRANSACTION_STATUS_UNKNOWN,
+    )
+
+
+def _connection_is_reusable(conn: Any) -> bool:
+    """Is this idle handle still attached to a live server connection?
+
+    Two questions, both cheap and both LOCAL: `closed` (psycopg2 noticed) and
+    `transaction_status == UNKNOWN` (psycopg2 has not, but the protocol says the
+    link is gone). Neither touches the network — see :func:`_park_connection` for
+    why the pool does not poke the server on every acquire.
+
+    A handle that cannot even report its status — or a process where the driver
+    cannot be imported — is NOT reusable, which fails towards the old
+    close-per-record behaviour rather than towards reusing something unverified.
+    """
+    if conn is None or conn.closed:
+        return False
+    try:
+        _idle, unknown = _transaction_statuses()
+        return conn.info.transaction_status != unknown
+    except Exception:
+        return False
+
+
+def _take_idle_connection(dsn: str) -> Any | None:
+    """An idle connection for `dsn`, or None when there is nothing to reuse.
+
+    A handle the server no longer backs is DISCARDED here rather than returned,
+    so one record pays for a server restart and the next acquire connects fresh.
+    """
+    key = _pool_key(dsn)
+    with _IDLE_CONNECTIONS_LOCK:
+        idle = _IDLE_CONNECTIONS.get(key)
+        while idle:
+            candidate = idle.pop()
+            if _connection_is_reusable(candidate):
+                return candidate
+            with contextlib.suppress(Exception):
+                candidate.close()
+    return None
+
+
+def _pooled_connection(raw: Any, dsn: str) -> _PooledConnection:
+    """Wrap `raw` so its `close()` RETURNS it to the pool instead of closing it."""
+    return _PooledConnection(raw, _pool_key(dsn))
+
+
+class _PooledConnection:
+    """A connection borrowed from the pool; ``close()`` gives it back (#9558).
+
+    WHY A WRAPPER AND NOT A CALL-SITE CHANGE. The WRITE half's two dispose sites
+    — :meth:`RecordWriter.write`'s failure path and :func:`write_live_record`'s
+    ``finally`` — both already do the right thing (close what you opened, exactly
+    once, on every path), and so does every READ caller of
+    :func:`_default_connect`: that hook is not the writer's alone
+    (`record_serve.open_record` uses it too, and its own disposal sites close the
+    handle the same way). Making each of them pool-aware instead would have meant
+    a second release mechanism beside the one every caller already uses, and a
+    caller that closed the handle itself would
+    have leaked a pool slot with no error. Here there is exactly one contract:
+    **closing the handle returns it.** A double close is a no-op.
+
+    WHAT IT IS NOT. It is not a connection: only the DB-API surface this tree
+    uses is forwarded explicitly (``cursor``/``commit``/``rollback``/``close``/
+    ``closed``), and everything else — ``info``, ``autocommit``, … — goes through
+    ``__getattr__``/``__setattr__`` to the real handle, so a caller that reads or
+    sets session state still reaches the server. ``isinstance`` against
+    ``psycopg2.extensions.connection`` is the one thing it does NOT satisfy, and
+    nothing in this tree does that.
+
+    ⚠️ The transaction is the caller's, exactly as before: ``commit()`` forwards.
+    What the pool adds is a ROLLBACK on release for a handle that is not IDLE, so
+    an aborted projection cannot be inherited by the next record.
+    """
+
+    def __init__(self, raw: Any, key: str) -> None:
+        object.__setattr__(self, "_raw", raw)
+        object.__setattr__(self, "_key", key)
+        object.__setattr__(self, "_returned", False)
+
+    # — the DB-API surface the record path uses —
+    def cursor(self) -> Any:
+        return self._raw.cursor()
+
+    def commit(self) -> None:
+        self._raw.commit()
+
+    def rollback(self) -> None:
+        self._raw.rollback()
+
+    def close(self) -> None:
+        """Return the handle to the pool. Idempotent, and never raises."""
+        if self._returned:
+            return
+        object.__setattr__(self, "_returned", True)
+        _park_connection(self._key, self._raw)
+
+    @property
+    def closed(self) -> Any:
+        """Logically closed once returned, exactly like a closed connection."""
+        return True if self._returned else self._raw.closed
+
+    # — everything else is the real handle's —
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_raw"), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # `autocommit` and friends must reach the server, not vanish onto the
+        # wrapper. Only this class's own state is underscore-prefixed.
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(object.__getattribute__(self, "_raw"), name, value)
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        state = "returned" if self._returned else "borrowed"
+        return f"<PooledConnection {state} {self._raw!r}>"
+
+
+def _park_connection(key: str, conn: Any) -> None:
+    """Return `conn` to the pool, or close it. **Never raises** — every path.
+
+    A release failure must not mask a write failure that is already being
+    reported by the caller (the same reason the previous ``close()`` was wrapped
+    in `contextlib.suppress`).
+
+    TWO THINGS IT DOES ON PURPOSE:
+
+    * it DISCARDS a handle the server no longer backs (`closed`, or
+      `TRANSACTION_STATUS_UNKNOWN`), so a restart cannot poison the pool;
+    * it ROLLS BACK an unfinished or aborted transaction before parking the
+      handle. A failed projection leaves the transaction aborted, and handing
+      that to the next record would fail it for the previous record's reason. On
+      the happy path ``commit()`` already left the connection IDLE, so this is a
+      status check and **no round trip** — reuse costs nothing extra.
+
+    ⚠️ It does NOT poke the server. A health ``SELECT 1`` per acquire would cost a
+    round trip on every record, and the failure it would prevent is already
+    bounded: a handle whose server vanished mid-idle is detected at RELEASE
+    (status UNKNOWN) and dropped, so at most one record per dead handle is
+    refused (``write_failed``, healed by replay — the record's repair story) and
+    the breaker is NOT tripped, because the record is reachable; only that one
+    handle was not.
+    """
+    try:
+        if conn is None or conn.closed:
+            return
+        if not _connection_is_reusable(conn):
+            with contextlib.suppress(Exception):
+                conn.close()
+            return
+        idle_status, _unknown = _transaction_statuses()
+        if conn.info.transaction_status != idle_status:
+            # Aborted (a failed plan) or still open (a caller that did not
+            # commit): either way the next writer must not inherit it.
+            conn.rollback()
+        with _IDLE_CONNECTIONS_LOCK:
+            idle = _IDLE_CONNECTIONS.setdefault(key, [])
+            if len(idle) < RECORD_POOL_MAX_CONNECTIONS:
+                idle.append(conn)
+                return
+        conn.close()
+    except Exception:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _release_pooled_connections() -> None:
+    """Close every idle connection. Never raises.
+
+    The shutdown verb and the test suite's isolation seam: an idle handle
+    outlives the record it wrote, exactly like any pool's, so a process that
+    wants the sockets gone (or a test that must not inherit one) says so here
+    rather than assuming garbage collection will.
+    """
+    with _IDLE_CONNECTIONS_LOCK:
+        idle_lists = list(_IDLE_CONNECTIONS.values())
+        _IDLE_CONNECTIONS.clear()
+    for idle in idle_lists:
+        for conn in idle:
+            with contextlib.suppress(Exception):
+                conn.close()
 
 
 @dataclass
@@ -1672,21 +1924,50 @@ def write_live_record(record: Mapping[str, Any], *,
 
     The transaction is THIS write's own (the journal append was a file append,
     so there is nothing to span): the seam opens the connection, this commits
-    it, and it is closed on every path.
+    it, and it is disposed of on every path — and since #9558 the dispose is a
+    RELEASE back to the pool's idle set rather than a close, because
+    `_default_connect` may hand out a `_PooledConnection`.
 
-    Cost, measured at #9188's head: an armed record costs ~one connection +
-    commit and ~4 ms of plan materialization (the fold re-reads the record
-    migrations to build its column map — `table_columns()` is deliberately
-    uncached, so a migration edit can never be read stale). That is a
-    DELIBERATE residual: one record, one transaction, no batching, because a
-    batch seam's ordering across three independent doors is a throughput
-    question with no measurement behind it yet. The UNHEALTHY case is bounded
-    too, in two places that answer different questions: opening the connection
-    is capped by :data:`CONNECT_TIMEOUT_SECONDS` (~10 s), and a connect that
-    FAILS trips :data:`LIVE_WRITE_BREAKER_SECONDS` so the REST of the capture
-    is refused locally (counted ``circuit_open``) instead of paying that
-    timeout once per record — N records used to cost N × 10 s inside one
-    ``capture_session`` call, which is a wedged capture, not a degraded one.
+    Cost, measured at #9188's head: an armed record cost ~one connection +
+    commit and ~4 ms of plan materialization (the fold re-read the record
+    migrations to build its column map for every record — `table_columns()` was
+    deliberately uncached, so a migration edit could never be read stale).
+    ⛔ BOTH HALVES ARE NOW PAID ONCE RATHER THAN PER RECORD (#9558 / R10), and
+    the measurement is in `docs/evidence/9558-record-write-cost/`:
+
+    * the CONNECTION is REUSED across records (`_default_connect` returns an idle
+      handle when it has one — the door's own contract is untouched: it still
+      commits and disposes of the handle exactly once), and
+    * the COLUMN MAP is cached on the migration files' own fingerprint
+      (`record_projection.table_columns`), so a schema edit still invalidates it
+      and an unchanged schema costs a stat pass instead of a read+regex-parse.
+
+    Measured through THIS door against a real Postgres 16 carrying the record
+    migrations, 60 records after 5 warmup, ONE instrument run four times against
+    each tree: **51.7–53.1 → 243.6–260.8 records/s**, per-record mean
+    **18.8–19.3 → 3.83–4.10 ms**, `connect()` per record **1.00 → 0.00**, and
+    the SERVER logged **66 → 2**
+    authorized connections for the same 65 writes in every run (a count no
+    client-side change could move). What remains is one transaction boundary per
+    record, which is
+    DELIBERATE: one record, one transaction, no batching, because a batch seam's
+    ordering across three independent doors is a throughput question with no
+    measurement behind it yet — and the connection is now reused, so batching is
+    no longer the cheapest available win. The UNHEALTHY case is bounded too, in
+    two places that answer different questions: opening the connection is capped
+    by :data:`CONNECT_TIMEOUT_SECONDS` (~10 s), and a connect that FAILS trips
+    :data:`LIVE_WRITE_BREAKER_SECONDS` so the REST of the capture is refused
+    locally (counted ``circuit_open``) instead of paying that timeout once per
+    record — N records used to cost N × 10 s inside one ``capture_session`` call,
+    which is a wedged capture, not a degraded one.
+
+    ⚠️ RESIDUAL, stated rather than implied: a connection parked in the pool
+    whose server went away is not noticed until it is used, so a server restart
+    costs at most ONE ``write_failed`` record per dead handle (healed by replay —
+    the record's own repair story) instead of zero. The handle is DISCARDED at
+    release (see `_park_connection`), so the cost does not recur; a health query
+    per acquire would remove it entirely at the price of a round trip on every
+    record, which is not worth it for a FOLLOW-tier perf item.
 
     ``seq`` is the record's OWN journal position — what `EventLog.append`
     returned (#9190). It is a fact of the journal, never an allocator: the replay
@@ -1823,5 +2104,12 @@ def write_live_record(record: Mapping[str, Any], *,
             # Close AFTER the commit so an armed deployment does not leak one
             # backend slot per journal record; a close failure must not mask a
             # write failure that is already being reported above.
+            #
+            # ⛔ A CLOSE IS A RELEASE (#9558 / R10). `_default_connect` hands out
+            # a `_PooledConnection`, whose `close()` returns the handle to the
+            # idle set instead of to the kernel — so this line is unchanged, and
+            # what it MEANS (exactly one dispose per opened handle, on every
+            # path) is unchanged too. That is why the pool lives in the hook and
+            # not here: no call site had to learn about it.
             with contextlib.suppress(Exception):
                 connection.close()

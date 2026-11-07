@@ -638,8 +638,18 @@ def open_record(record_dsn: str | None = None) -> Any:
             f"is NOT established") from e
     try:
         cur = conn.cursor()
-        cur.execute("SET statement_timeout = %s",
-                    (int(RECORD_STATEMENT_TIMEOUT_MS),))
+        # ⛔ TRANSACTION-LOCAL, because the handle is now POOLED (#9558).
+        # `_default_connect` may return a handle an earlier call returned, and a
+        # session-level `SET` would then outlive this read: the next borrower of
+        # that connection would inherit this read path's 15 s statement timeout
+        # (and, on the write door, a bound chosen for reads). `set_config(...,
+        # true)` scope it to THIS transaction — which is the whole read, since
+        # psycopg2's first statement opens one — and `_park_connection`'s
+        # rollback on release then cannot leave it behind. `SET LOCAL` would do
+        # the same; `set_config` is used because it takes a bind parameter, which
+        # `SET` does not.
+        cur.execute("SELECT set_config('statement_timeout', %s, true)",
+                    (str(int(RECORD_STATEMENT_TIMEOUT_MS)),))
         cur.close()
         return conn
     except Exception as e:

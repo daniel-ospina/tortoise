@@ -146,6 +146,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -1532,6 +1533,101 @@ def _read_migrations(migrations_dir: Path | None = None) -> str:
     )
 
 
+#: How many distinct migration fingerprints the parsed-schema cache holds.
+#:
+#: Bounded because the process is long-lived and a test suite builds dozens of
+#: temporary migration trees; on overflow the whole cache is dropped rather than
+#: evicted one entry at a time, because a production process holds exactly ONE
+#: entry and an eviction policy would be a second thing to get right for a
+#: population that never grows (#9558).
+_SCHEMA_CACHE_LIMIT = 8
+
+#: `{(base, fingerprint): {"sql": str | None, "parsed": {name: result}}}` —
+#: at most one entry per DISTINCT migration tree (#9558 / R10).
+_SCHEMA_CACHE: dict[tuple[str, tuple], dict[str, Any]] = {}
+_SCHEMA_CACHE_LOCK = threading.Lock()
+
+
+def _release_schema_cache() -> None:
+    """Drop the parsed-schema cache. The refresh the S6 pin needs (#9558).
+
+    The cache is invalidated by the migration FILES themselves (see
+    :func:`_schema_entry`), so nothing in production needs this: it exists so a
+    long-lived process that must PROVE a fresh read — and the test that asserts
+    a schema edit is seen — has a verb instead of a `del` on a private dict.
+    """
+    with _SCHEMA_CACHE_LOCK:
+        _SCHEMA_CACHE.clear()
+
+
+def _migrations_fingerprint(base: Path) -> tuple:
+    """A cheap identity for the migration FILES a schema parse would consume.
+
+    `(name, mtime_ns, size, inode)` per record migration, in `RECORD_MIGRATIONS`
+    order. This is what makes the cache below safe to keep: the parse is reused
+    only while every file it was built from is, as far as the filesystem can
+    cheaply say, the file that is there now.
+
+    WHY IT IS SUFFICIENT — and exactly how far it reaches. The surface this
+    reader can be invalidated BY is the CONTENT of the files it parses: the
+    reader walks `RECORD_MIGRATIONS`, so a migration file OUTSIDE that tuple is
+    invisible to it with or without a cache (it is a code constant, and a
+    process that has not been redeployed does not read a new name at all — a
+    boundary this cache neither creates nor widens). Within that tuple: a changed
+    file moves `mtime_ns`/`size`, a file replaced by `git checkout`/`cp`/`mv`/an
+    editor's write-and-rename changes `mtime_ns`, `size` or `inode`, and a
+    DISAPPEARED file is recorded as absent — so the map can never be rebuilt from
+    a file that is no longer the schema. The one shape it cannot see is an
+    in-place rewrite that preserves size AND restores `mtime_ns` to the
+    nanosecond, a deliberate act nothing in this tree performs; and even then the
+    parse served is a parse of that SAME file's previous content, never of a
+    different file. `tests/test_9558_record_write_cost.py` reds it if the
+    fingerprint stops changing on an edit, an edit-of-an-edit, or a removal.
+    """
+    entries: list[tuple] = []
+    for name in RECORD_MIGRATIONS:
+        try:
+            info = (base / name).stat()
+        except OSError:
+            # Absent is a fact worth fingerprinting: `table_columns` raises on a
+            # missing schema and must re-raise on every call, never serve a
+            # cached "complete" map after a file disappears.
+            entries.append((name, None))
+            continue
+        entries.append((name, info.st_mtime_ns, info.st_size, info.st_ino))
+    return tuple(entries)
+
+
+def _schema_entry(migrations_dir: Path | None) -> dict[str, Any]:
+    """The cache entry for `migrations_dir`'s CURRENT contents (#9558).
+
+    One stat pass (:func:`_migrations_fingerprint`) replaces "read and
+    regex-parse fifteen migration files" — measured at ~1.6 ms per call against
+    a warm page cache, which the live record door paid ONCE PER JOURNAL RECORD
+    (`replay_plan` calls :func:`table_columns` and :func:`refused_props_names`
+    for every record).
+    """
+    base = migrations_dir or _migrations_dir()
+    key = (str(base), _migrations_fingerprint(base))
+    with _SCHEMA_CACHE_LOCK:
+        entry = _SCHEMA_CACHE.get(key)
+        if entry is None:
+            if len(_SCHEMA_CACHE) >= _SCHEMA_CACHE_LIMIT:
+                _SCHEMA_CACHE.clear()
+            entry = {"base": base, "sql": None, "parsed": {}}
+            _SCHEMA_CACHE[key] = entry
+        return entry
+
+
+def _entry_sql(entry: dict[str, Any]) -> str:
+    """The concatenated migration SQL for `entry`, read at most once per file set."""
+    sql = entry["sql"]
+    if sql is None:
+        sql = _read_migrations(entry["base"])
+        entry["sql"] = sql
+    return sql
+
+
 def _parse_record_tables(sql: str) -> dict[str, frozenset[str]]:
     tables: dict[str, frozenset[str]] = {}
     for name, body in _TABLE_RE.findall(sql):
@@ -1664,14 +1760,20 @@ _ALTER_COLUMN_TYPE_RE = re.compile(
 #: 5.8 ms — a ~200x regression on the SYNCHRONOUS capture path, which §17 forbids
 #: the seam from adding.
 #:
-#: ⛔ `table_columns()` IS NOT CACHED AT ALL, and this one is BOUNDED rather than
-#: exempt (#9548 review). `supabase/migrations` is applied by a workflow separate
-#: from the app deploy, so a long-lived process could otherwise keep answering a
-#: map it parsed before a migration landed: a NEW `jsonb` column would re-open the
-#: 22P02 row drops, and a `jsonb→text` NARROWING would JSON-quote strings bound to
-#: a now-`text` column with no error and no counter. A TTL bounds that window to
-#: :data:`_JSONB_CACHE_TTL_SECONDS` instead of to the process's lifetime, at a
-#: clock read per parameter rather than a file parse.
+#: ⛔ TWO CACHES, TWO INVALIDATION COSTS, CHOSEN BY CALL FREQUENCY (#9558).
+#: `table_columns()` / `refused_props_names()` are read ONCE PER RECORD by
+#: `replay_plan`, so they are keyed on the migration files' own fingerprint
+#: (:func:`_schema_entry`) — exact invalidation, no window, at the price of one
+#: `stat` pass per call, which a per-record read can afford. This map is read
+#: ONCE PER STRING PARAMETER, where even that `stat` pass would be a regression,
+#: so it is BOUNDED by a TTL instead: a migration landing while the process runs
+#: is seen within :data:`_JSONB_CACHE_TTL_SECONDS` at the cost of a clock read.
+#: The invariant both keep is the one that matters (`supabase/migrations` is
+#: applied by a workflow separate from the app deploy, so a long-lived process
+#: must never keep answering a map it parsed before a migration landed): a NEW
+#: `jsonb` column would re-open the 22P02 row drops, and a `jsonb→text`
+#: NARROWING would JSON-quote strings bound to a now-`text` column with no error
+#: and no counter.
 #:
 #: ⛔ NOT A `ContextVar` PER PLAN BUILD, which would have no window at all: this
 #: module is FORBIDDEN an ambient carrier — `tests/test_record_projection.py::
@@ -1865,9 +1967,14 @@ def column_types(migrations_dir: Path | None = None) -> dict[str, dict[str, str]
     vocabulary are documented at :func:`_declared_types_for_dir` and
     :data:`_DECLARED_TYPE_ALTERNATION`.
 
-    Like `table_columns()` this is UNCACHED and it is not a hot path: it is a
-    contract read, not a per-parameter decision (that one is `jsonb_columns`,
-    bounded by `_JSONB_CACHE_TTL_SECONDS`).
+    ⛔ NOT CACHED, and that is a CALL-FREQUENCY decision rather than an oversight
+    (#9558): this is a contract read a pin performs, not a per-record read. The
+    two readers `replay_plan` drives once per record — `table_columns()` and
+    `refused_props_names()` — ARE cached on the migration files' fingerprint
+    (:func:`_schema_entry`); the map that runs once per string PARAMETER
+    (`jsonb_columns`) is TTL-bounded by `_JSONB_CACHE_TTL_SECONDS`. Caching this
+    one would buy nothing measured and add a third invalidation rule to keep
+    correct.
     """
     return _declared_types_for_dir(migrations_dir or _migrations_dir())
 
@@ -1919,8 +2026,29 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     A `CREATE TABLE` is the base; a FORWARD `ALTER TABLE … ADD COLUMN` is
     unioned over it, because append-only history means a landed table can only
     gain a column that way (#2782, the same rule as `refused_props_names`).
+
+    CACHED, AND INVALIDATED BY THE FILES THEMSELVES (#9558 / R10). This used to
+    be deliberately uncached "so a migration edit can never be read stale" —
+    correct about the risk, wrong about the price: the live record door calls it
+    once per journal record, so every record re-read and re-regex-parsed all
+    fifteen migration files (`record_writer` priced it at "~4 ms of plan
+    materialization"). The cache keeps the correctness property and drops the
+    price by keying on each migration file's `(mtime_ns, size, inode)`
+    (:func:`_migrations_fingerprint`), so an edit, an addition or a removal is a
+    cache MISS — the S6 surface's requirement that a cached column map cannot
+    diverge from the live schema silently. Refreshing costs one stat pass (tens
+    of microseconds) instead of a read+parse (~1.6 ms).
+
+    ⚠️ The returned dict is a fresh copy on every call, exactly as before: a
+    caller that edits the map it was handed mutates its own copy, never the
+    process's. The VALUES are `frozenset`s and are shared — they are immutable,
+    so sharing one cannot be observed.
     """
-    sql = _read_migrations(migrations_dir)
+    entry = _schema_entry(migrations_dir)
+    cached = entry["parsed"].get("table_columns")
+    if cached is not None:
+        return dict(cached)
+    sql = _entry_sql(entry)
     tables = _parse_record_tables(sql)
     for table, added in _parse_added_columns(sql).items():
         if table in tables:
@@ -1934,7 +2062,8 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
             f"{PACKAGED_MIGRATIONS} (installed package — a wheel ships the "
             "record's migrations there)."
         )
-    return tables
+    entry["parsed"]["table_columns"] = tables
+    return dict(tables)
 
 
 #: `WHEN '<label>' THEN '<key property>'` — the pairs of `node_identity`'s
@@ -1990,8 +2119,18 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
     the projection-owned caches. The record must not store them as authority,
     and the projection drops them **by name** rather than relying on the CHECK
     to catch it later.
+
+    Cached on the same fingerprint as :func:`table_columns`, for the same reason
+    and with the same invalidation (#9558 / R10): `replay_plan` calls this next
+    to `table_columns` for every journal record, so an uncached parse here is
+    the other half of the per-record migration read. The copy-on-return rule is
+    the same too.
     """
-    sql = _read_migrations(migrations_dir)
+    entry = _schema_entry(migrations_dir)
+    cached = entry["parsed"].get("refused_props_names")
+    if cached is not None:
+        return dict(cached)
+    sql = _entry_sql(entry)
     out: dict[str, frozenset[str]] = {}
     # Bound each table to ITS OWN `CREATE TABLE … );` body (`_TABLE_RE`, the
     # same regex `table_columns` uses). Splitting on the CREATE headers alone
@@ -2014,7 +2153,8 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
             continue
         extra = frozenset(n.strip().strip("'") for n in arr.split(",") if n.strip())
         out[table] = out[table] | extra
-    return out
+    entry["parsed"]["refused_props_names"] = out
+    return dict(out)
 
 
 def snake(prop: str) -> str:
