@@ -414,10 +414,49 @@ def test_run_arm_records_a_failure_instead_of_raising(tmp_path):
     assert "401 Unauthorized" in row["error"]
 
 
+def test_a_failed_arm_keeps_the_SPEND_it_incurred(tmp_path, monkeypatch):
+    """⛔ `_complete` accumulates cost on its SUCCESS return, BEFORE
+    `_complete_parsed` parses. So an arm that emitted 16k tokens and then failed
+    to parse HAS a populated accumulator — and hard-coding `out_tokens: None` on
+    the error path threw that away. The arm it threw away is the expensive one (a
+    truncating / unparseable arm), so the discarded spend biased the delta toward
+    the arm that never fails, i.e. it flattered the very number this instrument
+    exists to publish (#11385 review P3).
+
+    A GENUINELY tokenless failure must still be `None` (never a 0 that reads as
+    "emitted nothing") — `test_a_failed_arm_is_unmeasured_never_a_zero`.
+
+    Driven through a stubbed `run_s4` that fills the accumulator the way
+    `_complete` does and THEN raises, because a fake model never reaches the real
+    `_complete` and so would leave `stats["cost"]` empty — measuring the fake
+    instead of the error path.
+    """
+    def _spends_then_fails(model, *a, **kw):
+        kw["stats"].setdefault("cost", {}).update(
+            {"calls": 1, "completion_tokens": 16384})
+        raise ValueError("no JSON object found in response")
+
+    monkeypatch.setattr(tool.x, "run_s4", _spends_then_fails)
+    sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
+    row = tool.run_arm(object(), sess, "legacy")
+
+    assert "no JSON object" in row["error"]
+    assert row["out_tokens"] == 16384, "the spend is data even when the arm fails"
+    assert row["basis"] == "stats.cost.completion_tokens"
+
+
 def test_search_block_is_reconstructed_from_the_s2_list(tmp_path):
-    """Both arms must see the SAME search results, and they must be the S2
-    items (what production S4 sees after S2 reaches the graph) — not an empty
-    block, which is the degraded-search condition."""
+    """Both arms must see the SAME search results — that is what keeps the A/B
+    single-variable.
+
+    ⛔ The reconstruction is NOT production geometry and an earlier revision of
+    this docstring (and of the tool's module docstring) said it was.
+    `extract_session_v2` runs S3 (`search_graph`) BEFORE S4 and writes the
+    session's items only afterwards (`execute_embed`), so production S4 reads
+    bounded PREVIOUS-graph hits. Relabelling the session's own list as
+    already-present is the maximally gap-SUPPRESSING input for a delta contract,
+    which is why the artifact reports `s4_items` / `added_by_s4` beside the token
+    number instead of leaving the saving to be read alone (#11385 review P1)."""
     sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
     search = tool.search_from_s2(sess["s2"])
     assert search["entities"][0]["name"] == "Halcyon archive"

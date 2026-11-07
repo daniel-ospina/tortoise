@@ -164,7 +164,18 @@ content and kind, so it is a reading task, not another measurement).
   REQUESTED; the adapter logs a substitution warning rather than persisting it.
 - **The S3 live-graph read** — the search block is reconstructed (with synthetic
   ids) from the session's own S2 list; both arms see the same block, so the
-  comparison holds, but id-copying output is not real.
+  comparison holds, but id-copying output is not real. ⛔ **And it is not what
+  production S4 sees.** `extract_session_v2` runs S3 (`search_graph`) *before*
+  S4 and writes the session's items only afterwards (`execute_embed`), so
+  production S4 reads **previous-graph** hits — bounded at `max_queries=15` ×
+  `limit=3`, with the capture's own turn echoes dropped. Relabelling the
+  session's own list as "already in the graph" supplies the input under which a
+  delta contract has the *least* to emit, so the delta arm's `added_by_s4` /
+  `s4_items` read as a **floor**, and "the contract suppressed gap-finding" is a
+  live alternative explanation this instrument cannot separate from "the input
+  left it nothing to find". Both arms see the same block, so the A/B stays
+  single-variable — but the magnitude is the contract's effect **under a
+  gap-suppressing input**, not production's effect.
 
 ## Reproduce
 

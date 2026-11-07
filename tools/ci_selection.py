@@ -2456,6 +2456,23 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_journal_growth_guard_runs_on_a_tool_or_probe_change.
              "tools/journal_growth.py",
              "docs/evidence/5612-journal-growth/probes/",
+             # #11385 (review P1): the S4 re-emit tax's instrument
+             # (`tools/s4_reeemit_tax.py`) owns `tests/test_s4_reeemit_tax.py`,
+             # registered `core`, and the shape is the same one directly above:
+             # `tools/` and `docs/` are flat NON_PYTHON_PREFIXES entries and
+             # neither path matches a SOURCE_PATTERNS row, so before these
+             # entries a tool-only diff came back with `changed == []`, took the
+             # docs-only early return, and the pins (a vacuous A/B, a PARTIAL
+             # cost total published as a total, a corrections channel an
+             # items-not-in-S2 filter silently drops) never ran on the file they
+             # guard — the #1349/#3332/#3616 silent-drop class. The BUNDLE path
+             # is here for a different reason than #5612's probe: the suite
+             # re-derives the two committed `ab-*.json` artifacts' headline
+             # figures, so an artifact-only edit must select the pins that read
+             # it. Pinned by
+             # tests/test_ci_selection.py::test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change.
+             "tools/s4_reeemit_tax.py",
+             "docs/evidence/1789-s4-reeemit-tax/",
              # ⛔ NO `docs/evidence/7949-capstone/probes/` ROW. #9080 did add
              # one, and it was DEAD: `"docs/evidence/7949-capstone/"` above is
              # the whole bundle prefix and matching is `path.startswith()`, so
