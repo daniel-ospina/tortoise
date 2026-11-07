@@ -1415,7 +1415,8 @@ def test_a_mistyped_section_never_displaces_a_valid_list_from_the_other_side():
     # edge while the SAME value beside a usable list kept it. The section is now
     # judged by the same candidate rule, so the endpoint 'A'/'B' — which this
     # emission never produced — is what drops it (still 1, still counted), and
-    # the ARRIVAL no longer decides. Asserted for both arrivals below.
+    # the ARRIVAL no longer decides. THIS body asserts the section arrival only;
+    # both arrivals are asserted in §12 below.
     assert v2.execute_embed(copy.deepcopy(merged4), {},
                             session_id="s-e")["stats"]["relations_dropped"] == 1
 
@@ -1755,8 +1756,14 @@ def test_a_mapping_section_is_judged_entry_by_entry():
 
 
 def test_an_empty_mapping_section_loses_nothing():
-    """`{}` carries no relation, so it loses none — the row that used to report
-    `dropped 0` as a section and `dropped 1` beside a list."""
+    """`{}` carries no relation, so it loses none — and it is still NAMED.
+
+    ⚠️ This row is NOT the discriminating half of the fix: the section arrival
+    already reported `0 kept / 0 dropped` before #11333 (only the BESIDE arrival
+    reported 1 dropped), so every assertion here passes on the pre-fix tree. The
+    discriminating row is `test_the_census_does_not_depend_on_the_arrival`'s
+    `empty mapping` case, which measures both arrivals.
+    """
     result = _as_section({})
     assert result["relations"] == []
     assert result["stats"]["relations_dropped"] == 0
@@ -1799,3 +1806,35 @@ def test_an_unverified_semantics_shorter_than_the_cap_loses_its_control_char(
     assert "a b" in kept, kept
     warnings = [w for w in result["warnings"] if "semantics" in w]
     assert any("control characters replaced" in w for w in warnings), warnings
+
+
+def test_a_list_of_mappings_reaches_both_arrivals_intact():
+    """#11333 review P3 — the residual the docstring's "one rule" claim hid.
+
+    A LIST of mapping items is 2 relations judged entry by entry. As the whole
+    section it was 2 kept; beside a usable list the union keyed every mapping
+    item under `("relation", "", "", "")` and silently kept only the first
+    (`relations_dropped == 0`) — the same arrival-dependent, UNCOUNTED loss this
+    issue is about, one shape further out. `_merge_key` now keys a non-triple
+    mapping by its content, so both arrivals carry both relations.
+    """
+    value = [{"a": copy.deepcopy(_TWO_RELATIONS["a"])},
+             {"b": copy.deepcopy(_TWO_RELATIONS["b"])}]
+    assert _value_counts(_as_section(value)) == (2, 0)
+    assert _value_counts(_beside(value), carried_elsewhere=1) == (2, 0)
+
+
+def test_an_unverified_field_loses_a_C1_or_unicode_line_boundary(monkeypatch):
+    """The bound guards against a value that RE-PARSES into several properties, so
+    the line-boundary points count too: C1 NEL (U+0085) and the Unicode LINE /
+    PARAGRAPH separators (U+2028/U+2029) split a value under `splitlines()`
+    exactly as LF does, while a C0-only regex leaves them in the record.
+    """
+    monkeypatch.setattr(v2, "_declared_relation_predicates", lambda: None)
+    for bad in ("a\x85b", "a\u2028b", "a\u2029b", "a\x7fb"):
+        result = _as_section([{"src": "Retry Storm", "dst": "Deadline Rule",
+                               "predicate": bad}])
+        kept = result["relations"][0]["predicate"]
+        assert not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F
+                       or ord(c) in (0x2028, 0x2029) for c in kept), (bad, repr(kept))
+        assert kept == "a b", (bad, repr(kept))

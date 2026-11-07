@@ -3664,6 +3664,17 @@ def _merge_key(section: str, item: dict) -> tuple:
         # here merged two DIFFERENT edges before S5 ever saw them and the loss
         # was reported as `relations_dropped == 0`. The PREDICATE is folded —
         # `IMPL`/`impl` is one verb, and S5 records the DECLARED spelling.
+        #
+        # ⛔ #11333: a mapping that carries NONE of the three fields is a
+        # MAPPING OF RELATIONS, not a triple — keying it like one made every such
+        # item collide on `("relation", "", "", "")`, so two mapping items in one
+        # section collapsed to the first with `relations_dropped == 0` (an
+        # arrival-dependent, uncounted loss: judged entry by entry as the whole
+        # section, one blob beside a usable list). Key it by its CONTENT instead;
+        # S5's own candidate rule is what judges it.
+        if not ({"src", "dst", "predicate"} & set(item)):
+            return ("relation-mapping",
+                    json.dumps(item, sort_keys=True, default=str))
         return ("relation", str(item.get("src") or "").strip(),
                 str(item.get("dst") or "").strip(),
                 _norm(item.get("predicate")))
@@ -4001,9 +4012,12 @@ def _norm(s: str) -> str:
 _UNVERIFIED_TEXT_CAP = 64
 
 #: The characters the cap above must keep out, in addition to bounding length.
-#: C0 (incl. NUL/TAB/LF/CR) and DEL — the bytes that turn one edge property into
-#: several when the write leg (#11237) re-parses it.
-_UNVERIFIED_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+#: C0 (incl. NUL/TAB/LF/CR), DEL and C1 (NEL, etc.), plus the two Unicode LINE /
+#: PARAGRAPH separators — the bytes/points that turn one edge property into
+#: several when the write leg (#11237) re-parses it (a `splitlines()`-based
+#: re-parse treats U+0085/U+2028/U+2029 as line boundaries exactly as it treats
+#: LF).
+_UNVERIFIED_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
 
 def _bounded_unverified(value: object) -> tuple[str, str | None]:
@@ -9054,6 +9068,8 @@ def _relation_candidates(value, _depth: int = 0) -> list:
 
     The rule:
 
+    * ``None`` is ABSENT — zero candidates (the section value's own absent case is
+      handled by the caller before this function runs).
     * a mapping carrying ANY of ``src``/``dst``/``predicate`` is **ONE**
       candidate — the realistic mistype (the model emitting the triple where a
       list of triples was asked for). It is RECOVERED, then validated exactly
@@ -9061,12 +9077,14 @@ def _relation_candidates(value, _depth: int = 0) -> list:
       emission produced, so nothing is minted here.
     * a mapping WITHOUT them is a mapping OF relations, judged entry by entry
       (``{"a": {…}, "b": {…}}`` is two relations, not one lost blob); an EMPTY
-      mapping loses nothing.
-    * a sequence is its items, with one level of embedded-mapping expansion —
-      the union's isolate path and a nested mapping both land on the same list.
-    * anything else (``""``, ``0``, a bare string, a non-dict entry) is ONE
-      malformed candidate, so the caller's own diagnostics count it exactly
-      once, as before.
+      mapping loses nothing. Nesting recurses until a triple or a non-mapping is
+      reached, so this arm is recursive, not one-level.
+    * a sequence is its items, and a mapping ITEM is expanded by the mapping arm
+      above — the union's isolate path and a nested mapping both land on the same
+      list.
+    * anything else that is not ``None`` (``""``, ``0``, a bare string, a
+      non-dict entry) is ONE malformed candidate, so the caller's own
+      diagnostics count it exactly once, as before.
 
     Every candidate that is not a relation mapping is returned AS IS; the
     caller's item loop names and counts it. This function never drops.
@@ -9122,16 +9140,24 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     # the realistic mistype (the triple where a list was asked for) was KEPT
     # beside a usable list and DROPPED as the whole section.
     candidates = _relation_candidates(raw)
-    if not isinstance(raw, (list, tuple)):
+    if not isinstance(raw, list):
         # Still a SHAPE error and still named (the model is told what it
         # emitted), but no longer an automatic loss: the candidates below are
         # validated exactly as list items are, so an edge is recovered when the
-        # value carries one and counted as lost only when it does not.
-        if candidates:
+        # value carries one and counted as lost only when it does not. A TUPLE
+        # is named too — it is not a list to the schema, and the pre-#11333 arm
+        # was the only diagnostic for it.
+        recovered = sum(1 for _c in candidates if isinstance(_c, dict))
+        if recovered:
             warnings.append(
                 f"relations section is {type(raw).__name__}, not a list — "
-                f"recovered as {len(candidates)} relation candidate(s), judged "
-                "exactly as list items")
+                f"recovered {recovered} relation candidate(s), judged exactly "
+                "as list items")
+        elif candidates:
+            warnings.append(
+                f"relations section is {type(raw).__name__}, not a list — "
+                f"{len(candidates)} candidate(s) carrying no relation mapping, "
+                "judged exactly as list items")
         else:
             warnings.append(
                 f"relations section is {type(raw).__name__}, not a list — "
