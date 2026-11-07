@@ -26,18 +26,35 @@ only three runners that carry `ubuntu-latest` are saturated.
 WHY IT IS A RESIDUE, NOT A DESIGN
 ---------------------------------
 `agent-infra/scripts/ci_runner_gate.sh` owns this label: it attaches
-`FALLBACK_LABEL` to the self-hosted pool while GitHub-hosted is unhealthy and
-strips it otherwise. Two measured facts make the current state residue rather
-than intent:
+`FALLBACK_LABEL` to the self-hosted pool while GitHub-hosted capacity is
+insufficient, and strips it otherwise. That sentence is a statement about which
+arm the gate has run — NOT a claim that GitHub-hosted is unhealthy; what was
+measured is that not enough x64-labelled capacity was ALLOCATED, and nothing
+here measures hosted's health. Two measured facts make the state this lane found
+residue rather than intent:
 
-  * the gate's log stops at 2026-11-01T16:42Z (6 days stale at measurement) and
-    its state file still reads `mode=github` — "strip the label" — while three
-    runners still carry it;
+  * the gate's scheduled pass last ran 2026-11-01T16:42Z — its log's last line
+    still reports `runners=12` — and its state file still reads `mode=github`
+    ("strip the label");
   * its own header names this exact failure at `:926`: "a capped disarm would
     strand `ubuntu-latest` on the runners outside the arm".
 
-So the gate cannot currently reconcile, and the topology it left behind is the
-bad one.
+A LIVE `ci_runner_gate.sh --status` read at 2026-11-07T17:09Z returns
+`mode=local ... runners=21 online_idle=4 online_busy=16 offline=1`, so the
+recorded STATE is stale rather than the CAPABILITY — which is exactly why this
+tool decides from the measured pool and never from the log.
+
+⛔ THE x64-ONLY DESIRED TOPOLOGY IS NOT A REVERSAL OF A RECORDED DECISION. A
+reviewer read `:931`'s "ARCH IS DELIBERATELY NOT A FILTER HERE" as forbidding the
+ARM64 strip; the gate's own write path falsifies that. `labels_for` (`:975`)
+derives each runner's body from ITS OWN host and omits `ubuntu-latest` whenever
+the pass is `off`, for EVERY managed runner — arch never enters the disarm —
+and `:882`/`:508` state it directly: "in mode=github the pool is stripped by
+design". The `:931` block bounds the ENGAGE pass's cap (`arm_ids`, which runners
+a fallback arm may touch), not whether an ARM64 runner may carry the label at
+all. `docs/ops/ci-runner-x64.md` records the scope the #2327 decision left open:
+"What changes is only *which architecture* may serve the fallback — which the
+decision never specified".
 
 THE INVARIANT (what this tool asserts, and can restore)
 ------------------------------------------------------
@@ -84,8 +101,16 @@ USAGE
     uv run python tools/ci_runner_topology.py census [--json]
     uv run python tools/ci_runner_topology.py check            # exit 1 on a violation
     uv run python tools/ci_runner_topology.py apply --dry-run  # what would change
-    uv run python tools/ci_runner_topology.py apply            # reconcile to the desired topology
+    uv run python tools/ci_runner_topology.py apply            # ENGAGE (default): the desired topology
+    uv run python tools/ci_runner_topology.py apply --disengage # strip the fallback everywhere
     uv run python tools/ci_runner_topology.py check --queued-floor-seconds 1800
+
+`apply` ENGAGES by default. The strip direction is `--disengage`, stated
+explicitly, because a verb whose DEFAULT silently performs the destructive
+direction is how a pool ends up with no runner answering a label every queued
+job asks for. `apply --from-fixture` is refuse-without-`--dry-run`: a fixture
+carries runner ids from another census (the measured one carries this repo's real
+ids 1-21), so writing from it relabels runners nobody asked it to touch.
 
 `apply` needs `administration: write` on the token — `GITHUB_TOKEN` inside
 Actions does NOT have it, so the reconcile is operator/hub-run (the same token
@@ -122,7 +147,19 @@ HOST_LABEL_ARM64 = "ARM64"
 POOL_LABEL_X64 = "self-hosted-x64"
 POOL_LABEL_ARM64 = "self-hosted-arm64"
 
-#: Labels GitHub itself owns on a self-hosted runner; `apply` never rewrites them.
+#: The API's own `type` value for a label GitHub stamps at registration (and which a
+#: write may therefore not include). The read-only/custom split is taken from THIS,
+#: never inferred from a name list.
+LABEL_TYPE_READ_ONLY = "read-only"
+
+#: The platform label of the pool this tool governs. A runner on another platform is not a
+#: member of the Linux self-hosted pool the fallback label belongs to.
+PLATFORM_LINUX = "Linux"
+
+#: The FALLBACK for a payload that carries no `type` at all (a fixture, a hand-trimmed
+#: read). A name list is a per-platform guess — it names labels a runner may not carry
+#: (`Windows` on Linux) and misses custom read-only ones — so it is consulted only when
+#: the payload itself cannot answer.
 GITHUB_OWNED = frozenset({"self-hosted", "Linux", "macOS", "Windows", "X64", "ARM64", "ARM"})
 
 VIOLATION_FALLBACK_ON_NON_X64 = "FALLBACK_ON_NON_X64"
@@ -142,6 +179,12 @@ class Runner:
     status: str
     busy: bool
     labels: frozenset[str]
+    read_only: frozenset[str] = frozenset()
+
+    @property
+    def custom_labels(self) -> frozenset[str]:
+        """The labels a write may carry: everything GitHub does not stamp at registration."""
+        return self.labels - self.read_only
 
     @property
     def host(self) -> str | None:
@@ -176,9 +219,13 @@ class Plan:
     """The label sets `apply` would write, keyed by runner name."""
 
     changes: dict[str, tuple[int, list[str], list[str]]] = field(default_factory=dict)
+    unclassified: dict[str, str] = field(default_factory=dict)
 
     def add(self, runner: Runner, desired: Sequence[str]) -> None:
-        before = sorted(runner.labels)
+        # Both sides are the CUSTOM set, because that is the only set a write can change.
+        # Comparing the FULL set instead turns a read-only label (`Linux`) into a diff no
+        # write can ever close — reported as a change forever, on every run.
+        before = sorted(runner.custom_labels)
         after = sorted(set(desired))
         if before != after:
             self.changes[runner.name] = (runner.id, before, after)
@@ -188,13 +235,27 @@ class Plan:
 
 
 def parse_runner(payload: Mapping[str, Any]) -> Runner:
-    """Build a Runner from one element of `.runners` (or a test fixture)."""
+    """Build a Runner from one element of `.runners` (or a test fixture).
+
+    The read-only/custom split comes from the API's own `label["type"]`. `GITHUB_OWNED` is
+    only the fallback for a payload that carries no `type`, so a hand-written fixture still
+    parses — but a real read never has to guess.
+    """
+    labels: set[str] = set()
+    read_only: set[str] = set()
+    for label in payload.get("labels", []):
+        name = str(label["name"])
+        labels.add(name)
+        kind = label.get("type")
+        if kind == LABEL_TYPE_READ_ONLY or (kind is None and name in GITHUB_OWNED):
+            read_only.add(name)
     return Runner(
         id=int(payload["id"]),
         name=str(payload["name"]),
         status=str(payload.get("status", "unknown")),
         busy=bool(payload.get("busy", False)),
-        labels=frozenset(str(label["name"]) for label in payload.get("labels", [])),
+        labels=frozenset(labels),
+        read_only=frozenset(read_only),
     )
 
 
@@ -276,34 +337,73 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
 
 
 def desired_label_set(runner: Runner, *, engage: bool) -> list[str]:
-    """The label set this runner SHOULD carry, under the x64-only invariant.
+    """The CUSTOM label set this runner SHOULD carry, under the x64-only invariant.
 
-    Preserves every label the tool does not own (a human's or another tool's), so
-    `apply` is a reconcile and not a rewrite. GitHub-owned labels are recomputed
-    from the host, because the pool marker must match the host it is stamped on
-    (`ci_runner_gate.sh`: "the marker is the ARCHITECTURE the runner IS ... the
-    `ARM64` / `X64` label GitHub stamps from the host at registration").
+    Only labels a write may carry: GitHub's read-only ones (`self-hosted`, the platform,
+    the arch) are not in the result, because sending them back is a 422 AND because this
+    tool does not decide what a host IS — `ci_runner_gate.sh:labels_for` puts it plainly
+    ("the architecture is not an opinion the caller supplies: it is the `ARM64` / `X64`
+    label GitHub stamps from the host at registration"). Inventing `Linux` for a macOS
+    runner made the plan's `after` unreachable for it — a diff no write could close.
+
+    Preserves every CUSTOM label the tool does not own (a human's or another tool's), so
+    `apply` is a reconcile and not a rewrite. The pool marker is derived from the host,
+    because a marker that contradicts the host is how an ARM64 box came to advertise an
+    x86_64 image.
+
+    ⛔ An UNCLASSIFIABLE runner (neither `X64` nor `ARM64`) keeps its custom set UNCHANGED:
+    `labels_for` refuses such a runner ("an unclassifiable runner is a named failure the
+    caller counts, never a guess"), and a guess here would strip `ubuntu-latest` off a box
+    nobody measured. `plan` reports it as unclassified instead.
     """
     host = runner.host
-    marker = POOL_LABEL_X64 if host == HOST_LABEL_X64 else POOL_LABEL_ARM64 if host == HOST_LABEL_ARM64 else None
-    out = {label for label in runner.labels if label not in GITHUB_OWNED and label != FALLBACK_LABEL}
-    out.update({"self-hosted", "Linux"})
-    if host:
-        out.add(host)
-    if marker:
-        out.add(marker)
-    # ⛔ x64 ONLY. An ARM64 runner never carries the hosted x86_64 fallback: that
-    # is the whole point of this file, and it is what #10912's "preferred" remedy
-    # asks for. Widening this to `if engage` alone would re-open #6897.
+    if unmanaged_reason(runner) is not None:
+        # Not a member of this pool (another platform) or unclassifiable: its custom set is
+        # left byte-identical. Both gates are the gate script's own (`managed_ids` / `labels_for`).
+        return sorted(runner.custom_labels)
+    marker = POOL_LABEL_X64 if host == HOST_LABEL_X64 else POOL_LABEL_ARM64
+    out = {label for label in runner.custom_labels if label != FALLBACK_LABEL}
+    out.add(marker)
+    # ⛔ x64 ONLY. An ARM64 runner never carries the hosted x86_64 fallback: that is the
+    # whole point of this file, and it is the same disarm `ci_runner_gate.sh` performs on
+    # `off` for every managed runner (`:882` — "in mode=github the pool is stripped by
+    # design"). Widening this to `if engage` alone would re-open #6897.
     if engage and host == HOST_LABEL_X64:
         out.add(FALLBACK_LABEL)
     return sorted(out)
+
+
+def unmanaged_reason(runner: Runner) -> str | None:
+    """Why this runner is NOT ours to relabel, or None when it is a pool member we reconcile.
+
+    Both gates are taken from `ci_runner_gate.sh`'s own write path rather than invented here:
+    `managed_ids` selects only runners carrying a pool marker ("A runner carrying neither marker
+    is not ours to relabel, and leaving it untouched is the conservative reading"), and
+    `labels_for` refuses a runner whose host arch it cannot classify. A runner excluded by either
+    gate is REPORTED and left byte-identical — never rewritten on a guess, and never a diff the
+    plan can never close.
+    """
+    if PLATFORM_LINUX not in runner.labels:
+        return (
+            "is not a Linux runner, so it is not a member of the Linux self-hosted pool this label "
+            "belongs to — left untouched (`ci_runner_gate.sh:managed_ids`)"
+        )
+    if runner.host is None:
+        return (
+            "carries neither X64 nor ARM64, so its pool marker cannot be derived — left untouched; "
+            "an unclassifiable runner is a named failure, never a guess (`ci_runner_gate.sh:labels_for`)"
+        )
+    return None
 
 
 def plan(runners: Sequence[Runner], *, engage: bool) -> Plan:
     """The reconcile. Idempotent: an already-correct pool yields an empty Plan."""
     result = Plan()
     for runner in sorted(runners, key=lambda r: r.name):
+        why = unmanaged_reason(runner)
+        if why is not None:
+            result.unclassified[runner.name] = why
+            continue
         result.add(runner, desired_label_set(runner, engage=engage))
     return result
 
@@ -313,7 +413,7 @@ def check(
     *,
     queued_oldest_seconds: int | None = None,
     queued_floor_seconds: int = 1800,
-    engage: bool = False,
+    engage: bool = True,
 ) -> dict[str, Any]:
     """The verdict. `ok` is False ONLY for a named violation — never for "idle pool".
 
@@ -340,6 +440,7 @@ def check(
             "queued_floor_seconds": queued_floor_seconds,
             "starvation_suspected": False,
             "planned_changes": {},
+            "unclassified": {},
             "engage": engage,
         }
     found = violations(runners)
@@ -361,6 +462,7 @@ def check(
         "planned_changes": {
             name: {"before": before, "after": after} for name, (_id, before, after) in pending.changes.items()
         },
+        "unclassified": dict(pending.unclassified),
         "engage": engage,
     }
 
@@ -427,13 +529,12 @@ def apply_plan(pending: Plan, *, dry_run: bool, repo: str = REPO) -> list[dict[s
     for name, (runner_id, before, after) in sorted(pending.changes.items()):
         record = {"runner": name, "id": runner_id, "before": before, "after": after, "applied": False}
         if not dry_run:
-            # ⛔ The PUT body may carry CUSTOM labels only. `self-hosted`, `Linux`,
-            # `X64`/`ARM64` are stamped by GitHub at registration and are READ-ONLY:
-            # sending them back is a 422 ("Cannot set labels that duplicate existing
-            # read-only labels: Linux, X64, self-hosted") that leaves the runner
-            # untouched — which is why the plan above is stated over the FULL set
-            # (it must compare the host labels too) while the write is filtered.
-            # Same split as `ci_runner_gate.sh`'s own write path.
+            # ⛔ The PUT body may carry CUSTOM labels only; `after` already is. The
+            # `GITHUB_OWNED` filter is a SECOND net for a payload whose labels carried no
+            # `type` (a fixture), not the classification itself.
+            # `self-hosted`, `Linux`, `X64`/`ARM64` are stamped by GitHub at registration and are
+            # READ-ONLY: sending them back is a 422 ("Cannot set labels that duplicate existing
+            # read-only labels: Linux, X64, self-hosted") that leaves the runner untouched.
             body = json.dumps({"labels": [label for label in after if label not in GITHUB_OWNED]})
             proc = subprocess.run(
                 ["gh", "api", "-X", "PUT", f"repos/{repo}/actions/runners/{runner_id}/labels", "--input", "-"],
@@ -483,11 +584,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--repo", default=REPO)
     parser.add_argument("--json", action="store_true", help="machine-readable output")
-    parser.add_argument("--engage", action="store_true", help="desired topology attaches the fallback to x64")
+    direction = parser.add_mutually_exclusive_group()
+    direction.add_argument(
+        "--engage",
+        action="store_true",
+        help="desired topology ATTACHES the fallback to the x64 pool (the DEFAULT for apply)",
+    )
+    direction.add_argument(
+        "--disengage",
+        action="store_true",
+        help="desired topology STRIPS the fallback from every managed runner — explicit, never the default",
+    )
     parser.add_argument("--dry-run", action="store_true", help="apply: print the changes, write nothing")
     parser.add_argument("--queued-floor-seconds", type=int, default=1800)
     parser.add_argument("--from-fixture", type=Path, help="read a runners JSON payload instead of the API")
     args = parser.parse_args(argv)
+
+    # ⛔ THE DESTRUCTIVE DIRECTION IS NEVER THE DEFAULT. A bare `apply` used to perform the
+    # strip-and-attach-nowhere state: a verb named "apply" that quietly removed the only
+    # runners answering `ubuntu-latest` is a footgun whose output looks like success. Engage
+    # is the direction #10912 needs (the pool is the capacity), so it is the default; the
+    # strip is `--disengage`.
+    engage = not args.disengage
+
+    # ⛔ A FIXTURE'S IDS ARE NOT THIS REPO'S RUNNERS. The measured fixture carries the real
+    # production ids 1-21, so `apply --from-fixture` without `--dry-run` would PUT label sets
+    # onto whichever runners happen to hold those ids — relabelling boxes nobody asked it to
+    # touch. Refuse rather than write.
+    if args.verb == "apply" and args.from_fixture and not args.dry_run:
+        print(
+            "refusing: `apply --from-fixture` requires `--dry-run` — a fixture carries runner ids "
+            "from another census (the measured one carries this repo's real ids), so a write "
+            "from it would relabel runners nobody asked it to touch.",
+            file=sys.stderr,
+        )
+        return 2
 
     if args.from_fixture:
         runners = parse_runners(json.loads(args.from_fixture.read_text()))
@@ -505,7 +636,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         runners,
         queued_oldest_seconds=oldest,
         queued_floor_seconds=args.queued_floor_seconds,
-        engage=args.engage,
+        engage=engage,
     )
 
     if args.verb == "check":
@@ -515,9 +646,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_human(report)
         return 0 if report["ok"] else 1
 
-    pending = plan(runners, engage=args.engage)
+    pending = plan(runners, engage=engage)
     records = apply_plan(pending, dry_run=args.dry_run, repo=args.repo)
-    payload = {"ok": report["ok"], "dry_run": args.dry_run, "engage": args.engage, "changes": records}
+
+    # ⛔ A 200 ON THE PUT IS NOT THE POOL'S STATE. `rc == 0` says the API accepted a body; it
+    # cannot say the label took, that `ci_runner_gate.sh` has not already reversed it, or that
+    # the pool now serves anyone. So RE-READ after the write and report the POST verdict — the
+    # pre-state verdict is the one thing that is certainly stale once we have written.
+    post: dict[str, Any] | None = None
+    ok = report["ok"]
+    if not args.dry_run:
+        # Every write took, AND the pool reads back clean. The PRE-state verdict is deliberately
+        # not part of this: after a successful reconcile the pre-state is exactly what is no
+        # longer true.
+        ok = all(rec["applied"] for rec in records)
+        try:
+            post = check(
+                fetch_runners(args.repo),
+                queued_oldest_seconds=fetch_oldest_queued_seconds(args.repo),
+                engage=engage,
+            )
+        except SystemExit as exc:
+            print(
+                f"WARNING: labels were written but the read-back failed ({exc}) — the post state is "
+                f"UNVERIFIED, and this run must not be reported as a verified reconcile.",
+                file=sys.stderr,
+            )
+            post = None
+        # A WRITE WE COULD NOT READ BACK IS NOT A SUCCESS: fail closed, the same direction
+        # `ci_runner_gate.sh` fails when its enumeration is unreadable.
+        ok = ok and post is not None and post["ok"]
+
+    payload = {
+        "ok": ok,
+        "ok_before": report["ok"],
+        "dry_run": args.dry_run,
+        "engage": engage,
+        "changes": records,
+        "unclassified": dict(pending.unclassified),
+        "post": post,
+    }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -527,9 +695,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  {rec['runner']}: {rec['before']} -> {rec['after']}  [{state}]")
         if not records:
             print("  (already at the desired topology — idempotent, nothing to do)")
-    if any(not rec["applied"] for rec in records) and not args.dry_run:
-        return 1
-    return 0
+        for name, why in sorted(pending.unclassified.items()):
+            print(f"  ⚠️  {name}: left untouched — {why}")
+        if post is not None:
+            hosts = post["census"]["by_host"]
+            x64_serving = hosts.get(HOST_LABEL_X64, {}).get("serving_fallback", 0)
+            others_serving = sum(
+                b.get("serving_fallback", 0) for host, b in hosts.items() if host != HOST_LABEL_X64
+            )
+            print(
+                f"post-state verdict: {post['verdict']} "
+                f"(x64 serving={x64_serving}, non-x64 serving={others_serving} — read back after the write)"
+            )
+    return 0 if args.dry_run or ok else 1
 
 
 if __name__ == "__main__":
