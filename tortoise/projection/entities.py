@@ -2036,7 +2036,9 @@ class _EntityHandlers:
         # emitted the key on this event (`api.add_document` takes no such
         # parameter), and the destructive removal of what DOES exist has no
         # shipped instrument ON A PRODUCTION SERVER GRAPH — a full restore's
-        # whole-graph wipe clears it where the L2 name rule admits the target
+        # whole-graph wipe clears it where the L2 name rule admits the target AND the
+        # record still holds the text for that session (else the graph copy is the
+        # ONLY copy and a wipe destroys it — §17.2's per-row bound, `#11325`)
         # (`test_`/`tortoise_test`-prefixed, or an embedded `path=` DB) and is refused
         # pre-wipe on a production name (`org_<org_id>`, its child, a legacy `team_…`),
         # and a graph-side `REMOVE n.story_arc` is issued by nobody;

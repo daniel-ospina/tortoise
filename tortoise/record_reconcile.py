@@ -143,7 +143,13 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   CLEAR: the graph-side removal of the column itself (``REMOVE n.story_arc``) or
   ``record-restore`` / ``rebuild_from_record``, which wipe the graph first
   (``_wipe_all_nodes``, unconditional and whole-graph) and therefore clear a
-  legacy copy too — ⚠️ on a SERVER graph that restore is refused PRE-WIPE unless
+  legacy copy too — ⚠️ but ONLY where the record still holds the text for that
+  session: key it on the RECORD's row (``public.{source,event}.story_arc`` or
+  ``public.session_narrative.narrative``), never on how the prose arrived,
+  because on the pre-``#9555`` population (raw-Cypher write, never journalled;
+  ``session_narrative`` TEXT columns measured NULL) the graph copy is the ONLY
+  copy and a wipe DESTROYS it (see the per-row bound below, `#11325`) — and on a
+  SERVER graph that restore is refused PRE-WIPE unless
   the graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
   → the projection's ``_assert_test_graph``, #2944), and no production name does
   (``org_<org_id>``, its ``org_<org_id>_<gid>`` child and a legacy
@@ -190,7 +196,7 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   ``e.story_arc=$arc`` was NEVER journalled, and whose ``session_narrative`` TEXT
   columns measured NULL on every live capture (``hosted_api``'s 2b,
   ``#9567``/D7) — the graph copy is the ONLY copy, so NO clear may be applied
-  there: the destructive-clear routes below are for the first population. ⛔ Not
+  there: the destructive-clear routes above are for the first population. ⛔ Not
   "no IN-PLACE repair": a targeted ``REMOVE`` is in place, and so is a targeted
   clear — what is missing on those two ANCHORS is a route that KEEPS the value. ⚠️ No shipped
   instrument performs that removal for THIS class: ``#10017``'s purge
