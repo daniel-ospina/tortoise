@@ -5834,32 +5834,41 @@ def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
 
     The round-55 test above pins `* - x` + `   2. -` + the marker. It constructs NOTHING with a line
     BETWEEN the bare-marker line and the wide-gap marker, and that neighbour is where this gate
-    moves BOTH columns the wrong way against `193bbfd9a2` — the #11186 squash that is now `main`:
+    moves BOTH columns the wrong way against `origin/main` (`a022f03ce4`, #11330 — a descendant of
+    the #11186 squash `193bbfd9a2`):
 
-        F1  `* - x` + `<br />` + `   2. -` + `  2.     Closes #100`
+        F1  `* - x` + an interposed line (`<br />`, `<span>`, `Notes`, `x`) + `   2. -` + marker
                 renderer `<pre><code>` -> CODE
                 `193bbfd9a2` / `origin/main`: `[]` in all four arms, `claims()` `[]`
                 THIS HEAD: `[100]` in all four arms, `claims()` `[100]` — a CLASS-A false PASS in
                 arm 1 (`strict`) of `issue_process_lint`, i.e. the gate this module feeds.
-                `<span>` in place of `<br />` measures identically.
+                `<span>` in place of `<br />` measures identically — AND SO DO THE PLAIN PROSE
+                LINES `Notes` and `x`, which is the round-59 review's correction to a first draft
+                that named only the type-7 kind. Both are pinned below.
         F2  `Notes` + `2. -` + `<br />` + `     - x` + `  2.     Closes #100`
                 renderer ONE `<p>` -> PROSE
                 `origin/main`: `[100]` in the two LENIENT arms, `[]` in both `strict` arms
-                THIS HEAD: `[]` in all four arms — a LOST close.
+                THIS HEAD: `[]` in all four arms — a LOST close. `claims()` is `[100]` at THIS HEAD
+                as well (the gate loses nothing on F2); the loss is on the module's LENIENT DEFAULT
+                path, which is what the F2 pin below states.
 
-    ⛔ THE EXPECTATIONS BELOW ARE THE MEASURED HEAD ANSWER, AND THREE OF THEM ARE THE WRONG ONE.
+    ⛔ THE EXPECTATIONS BELOW ARE THE MEASURED HEAD ANSWER, AND MOST OF THEM ARE THE WRONG ONE.
     This is a DECLARATION, not a correctness assertion: the module's own convention
     (`⚠️ DECLARED RESIDUAL`, and `⚠️ DECLARED REGRESSION` at `_leaves_no_paragraph`) is that a known
     gap is PINNED so it cannot move silently. Both rows are filed, not fixed — #11369 owns the
-    state fact ("which item held the open paragraph"), #11349 the prose-path half, and three
+    state fact ("which item held the open paragraph"); #11349 is ADJACENT (a lenient-arm false
+    CREDIT on a `>`-interrupt shape, the opposite direction from F2's lost close); and three
     candidate terms were built and measured and each trades a family.
 
     The assertions ride on the fixture and not only on the pin, which is what makes them
     non-vacuous: `keyword_types` proves each body really is the rendered shape being claimed (a
     fixture that drifts reddens here rather than pinning a mutation), and the CONTROLS at the end
-    are this PR's own two fixes, which must NOT move when this family is fixed. Deleting the
-    interposed `<br />` line reproduces the neighbouring test's body and answers `[]` in every arm,
-    so the intervening line is demonstrably the discriminator — the family the suite never built.
+    are this PR's own fixes, which must NOT move when this family is fixed — `credit` is a fix
+    against `origin/main`, while `blank` is a control that `origin/main` and this head already
+    AGREE on (`Y Y Y Y` on both), i.e. it catches a fix that breaks a case that never was broken.
+    Deleting the interposed line reproduces the neighbouring test's body and answers `[]` in every
+    arm, so the intervening line is demonstrably the discriminator — the family the suite never
+    built.
     """
     cl = _load_module()
     md = MarkdownIt("commonmark")
@@ -5877,8 +5886,13 @@ def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
     from tools import issue_process_lint as ipl
 
     # F1 — DECLARED-WRONG. The renderer puts the keyword in `<pre><code>` and `main` blanks it.
+    # ⛔ `Notes` and `x` are in this loop because the first draft of this declaration named only the
+    # TYPE-7 kind, and the round-59 review measured that a plain prose line reaches the same
+    # `container is None` arm and produces the same CLASS-A false PASS. They are not a subset.
     for body in ("* - x\n<br />\n   2. -\n  2.     Closes #100\n",
-                 "* - x\n<span>\n   2. -\n  2.     Closes #100\n"):
+                 "* - x\n<span>\n   2. -\n  2.     Closes #100\n",
+                 "* - x\nNotes\n   2. -\n  2.     Closes #100\n",
+                 "* - x\nx\n   2. -\n  2.     Closes #100\n"):
         assert keyword_types(body) == {"code_block"}, body
         assert answers(body) == [True, True, True, True], body   # DECLARED: should be [] x 4
         assert ipl.claims(body)["closing"] == [100], body        # DECLARED: the arm-1 false PASS
@@ -5892,8 +5906,14 @@ def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
     f2 = "Notes\n2. -\n<br />\n     - x\n  2.     Closes #100\n"
     assert keyword_types(f2) == {"inline"}, f2
     assert answers(f2) == [False, False, False, False], f2       # DECLARED: lenient should be True
+    # …and the GATE's F2 answer is pinned too, because it is the opposite of the row above: on this
+    # body `claims()` is `[100]` at THIS HEAD, so the strict arm loses nothing and a fix that changed
+    # the gate's answer here would move F2 without reddening anything else.
+    assert ipl.claims(f2)["closing"] == [100], f2                # DECLARED: the lenient loss is not a gate loss
 
-    # CONTROLS — this PR's own two fixes. A fix for F1/F2 that moves either is not a fix.
+    # CONTROLS — this PR's own fixes. A fix for F1/F2 that moves either is not a fix.
+    # `credit` is a fix against `origin/main` (`[]` there, `[100]` here). `blank` is NOT a change vs
+    # `origin/main` — both answer `Y Y Y Y` — so it is a regression control, not a fix.
     credit = "Notes\n2. -\n  2.     Closes #100\n"
     assert keyword_types(credit) == {"inline"}, credit
     assert answers(credit) == [True, True, True, True], credit

@@ -1377,11 +1377,18 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     # column), and then `lazy_marker` can decide un-overridden — filed rather than attempted here,
     # because every guard in `_is_lazy_marker` is measured and pinned.
     # ⚠️ DECLARED REGRESSION — F1/F2, and deliberately NOT "at parity with `origin/main`" (round-57
-    # and round-58 reviews, P1 + P2; re-measured at `e870d7437` for this declaration). The grids the
-    # sentence below names do not compose a TYPE-7 LINE (`<br />`, `<span>`) BETWEEN a bare-marker
-    # line and the wide-gap marker, and one such line moves BOTH columns the wrong way against
-    # `193bbfd9a2` — the #11186 squash that is now `main`, which gets both RIGHT because it runs the
-    # content ladder at the TOP of this function, exactly where the early return below pre-empts it:
+    # and round-58 reviews, P1 + P2; re-measured at `e870d7437` and again at `446e0f107e` for this
+    # declaration). The grids the sentence below names compose NEITHER a TYPE-7 LINE (`<br />`,
+    # `<span>`) NOR a PLAIN PROSE LINE (`Notes`, `x`) between a bare-marker line and the wide-gap
+    # marker, and EITHER KIND moves both columns the wrong way against `origin/main` — which is
+    # `a022f03ce4` (#11330), a descendant of the #11186 squash `193bbfd9a2`, and which gets both
+    # RIGHT because it runs the content ladder at the TOP of this function, exactly where the early
+    # return below pre-empts it. ⛔ BOTH KINDS ARE MEASURED, and the round-59 review was right to
+    # refuse the narrower wording: the prose member is NOT a subset of the type-7 one.
+    #     `* - x` + `Notes` (or `x`) + `   2. -` + `  2.     Closes #100`
+    #         renderer `<pre><code>` -> CODE
+    #         `origin/main` `[]` in all four arms, `claims()` `[]`
+    #         THIS HEAD `[100]` in all four arms, `claims()` `[100]` — CLASS A, identical to F1
     #     `* - x` + `<br />` + `   2. -` + `  2.     Closes #100`
     #         renderer `<pre><code>Closes #100` -> CODE
     #         `193bbfd9a2` and `origin/main` `[]` in all four arms, `claims()` `[]`
@@ -1394,24 +1401,35 @@ def _leaves_no_paragraph(rest: str, rest_indent: int,
     #         renderer ONE `<p>` -> PROSE
     #         `origin/main` `[100]` in the two LENIENT arms, `[]` in both `strict` arms
     #         THIS HEAD `[]` in all four arms — a LOST close (P2). At parity with the BRANCH POINT
-    #         `80c912244`: a `main` fix this branch does not carry, not a blank invented here.
-    # (The round-58 record's F2 row read `n n Y Y` at this head; re-measured it is `n n n n` in all
-    # four arms. The DIRECTION — a lenient-arm close `main` credits and this head drops — is what
-    # the declaration records, and it reproduces.)
+    #         `e3108f2bc9` (the parent of this branch's first commit `c733aaf548`; `80c912244` is an
+    #         older main commit NOT on that path, and happens to measure the same): a `main` fix this
+    #         branch does not carry, not a blank invented here.
+    # ⛔ F2's PREDICATE, stated because this row cost a round: `issue_process_lint.claims()` is `[100]`
+    # at THIS HEAD on this body too — the gate loses NOTHING here. The loss is on the module's LENIENT
+    # DEFAULT path (what `closes_landing` itself reports), where head `n` and `origin/main` `Y`.
+    # (The round-58 record's F2 row read `n n Y Y` at this head, and that was CORRECT — it measured
+    # `'#100' in strip_code(body, **arm)`, i.e. raw text RETENTION. Re-measured here it is `n n n n`,
+    # and that is also correct — for `100 in parse_closing_refs(strip_code(body, **arm))`, i.e. whether
+    # a claim is CREDITED. Two predicates, one body; this row records the second because crediting is
+    # what the module is for. Neither measurement was wrong, so no correction is owed.)
     # ⛔ WHY THIS IS DECLARED AND NOT FIXED HERE: three candidate terms were built and measured and
     # EVERY ONE trades a family (#11369) — the `deep_col` column fix buys F1 with 1 lenient + 2
     # strict lost closes and still cannot separate `   2. -` at col 3 from `  1.` at col 2; gating
     # the pop record on `dropped_paragraph_item` buys F1 with a close lost in ALL FOUR arms
-    # (`- x` + `Notes` + `   2. -` + `   2. -` + the marker, which `head` AND `origin/main` both
-    # credit); and the tip commit `e870d7437` is the REVERT of a third. The discriminator is the
-    # missing state fact "which item held the open paragraph", not a column — that is #11369's root,
-    # and #11349 owns the prose-path half. `tests/test_closes_landing.py::
+    # (`- x` + `Notes` + `   2. -` + `   2. -` + the marker: `head` credits it `Y Y Y Y` and
+    # `origin/main` BLANKS it `n n n n`, and the renderer says PROSE — so `head` is right here and
+    # that candidate would move `head` ONTO `main`'s wrong answer); and the tip commit `e870d7437`
+    # is the REVERT of a third. The discriminator is the
+    # missing state fact "which item held the open paragraph", not a column — that is #11369's root.
+    # #11349 is ADJACENT, not this half: it owns a LENIENT-arm false CREDIT on a `>`-interrupt shape,
+    # which is the opposite direction from F2's lost close. `tests/test_closes_landing.py::
     # test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION` pins both rows, so a
     # fix reddens a named test instead of silently moving the family.
     # On the two composed grids this gate is clean (0 new fail-opens, 0 new lost closes vs
     # `origin/main`, all four arms) — those grids compose NEITHER a leaf-shaped lazy marker's content
-    # NOR a type-7 line between a bare-marker line and the wide-gap marker, which is why the claim
-    # must name its grid and must never be stated bare.
+    # NOR an interposed line between a bare-marker line and the wide-gap marker of EITHER kind
+    # (type-7 HTML or plain prose), which is why the claim must name its grid and must never be
+    # stated bare.
     if lazy_marker and (container is None or not body.strip()):
         return False
     # ⛔ §4.4 COMES BEFORE THE LEAF TESTS, NOT AFTER THEM (round 50 — the ordering half of the
