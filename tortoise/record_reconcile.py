@@ -667,8 +667,10 @@ def reconcile_record_and_cache(
     there and §9.1/D1 forbids it only in the graph — so a legacy cache node
     that still carries the prose reads as a ``graph_only`` occurrence (one
     property the projection declines to write), NOT as a ``field_mismatches``
-    against a record that is correct. The repair for that occurrence is a
-    DESTRUCTIVE CLEAR on either ANCHOR — a full ``record-restore`` (whose wipe is
+    against a record that is correct. The repair for that occurrence on either
+    ANCHOR is a DESTRUCTIVE CLEAR **only where the record still HOLDS the text**
+    (⚠️ where neither home holds it the graph copy is the only one — see the
+    module docstring's (5)) — a full ``record-restore`` (whose wipe is
     whole-graph, so
     it clears the copy too; measured by
     `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3) — ⚠️ but
@@ -847,8 +849,9 @@ def log_result(result: RecordReconcileResult,
         # record-owned: the §9.1/D1 pair the narrowing DECLINES (the record
         # holds it, its repair is the IN-PLACE reconciler #11070 — ⛔ not a
         # re-projection, whose write is additive —) and the not-projectable
-        # column (the record holds it and the graph must NOT — its repair is a
-        # destructive clear: a full restore's wipe — refused pre-wipe on a
+        # column (the record holds the text on the rows where it survives and the
+        # graph must NOT — its repair there is a destructive clear: a full
+        # restore's wipe — refused pre-wipe on a
         # production SERVER graph name, #2944 L2 — or a graph-side
         # REMOVE n.story_arc that no instrument ships today; ⚠️ on a `:Point` the
         # clear is `update_point(<id>, story_arc=None)`, which keeps the node and
