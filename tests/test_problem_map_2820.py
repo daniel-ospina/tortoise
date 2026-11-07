@@ -22,6 +22,7 @@ is dual-registered).
 """
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -1131,3 +1132,40 @@ def test_every_status_token_is_in_the_vocabulary(status):
     """The vocabulary is closed and complete — a token outside it is a typo."""
     assert status in pmc.STATUSES
     assert len(pmc.STATUSES) == 3
+
+
+def test_the_shipped_guard_refuses_with_the_STATE_ERROR_code_not_drift() -> None:
+    """Fails if the #5128 refusal exits 1 — this tool's DRIFT code.
+
+    Reachable: the Apple CLT `python3` (3.9.6) that #5128 was filed from. With
+    `raise SystemExit(<message>)` CPython exits **1**, so `--check` on an old
+    interpreter reads as *the document and the tree disagree* about a document
+    it never opened — a wrong repair ("fix the map") issued on the code that
+    means drift. An old interpreter is the same class as a missing document or a
+    shallow clone: this checkout cannot answer the question, so the run must
+    report the STATE ERROR (2). `tests/test_entry_point_python_guard.py` accepts
+    either shape, so no corpus gate can see this collision.
+    """
+    source = (REPO / "tools" / "problem_map_check.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    guards = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and "version_info" in ast.unparse(node.test)
+    ]
+    assert len(guards) == 1, f"expected exactly one interpreter guard, found {len(guards)}"
+    guard = guards[0]
+    exits = [
+        node
+        for node in ast.walk(guard)
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+    ]
+    assert len(exits) == 1, f"the guard must raise exactly once, found {len(exits)}"
+    code = exits[0].exc.args[0]
+    assert isinstance(code, ast.Constant) and code.value == 2, (
+        "the interpreter guard must exit 2 (state error) — exiting 1 collides "
+        "with this tool's DRIFT code; got "
+        f"{ast.unparse(exits[0].exc) if exits else 'nothing'}"
+    )

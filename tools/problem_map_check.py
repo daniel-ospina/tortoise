@@ -81,14 +81,25 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# The #5128 interpreter guard MUST precede every other import: a module-level
+# 3.12-only import raises ImportError on an older interpreter BEFORE a later
+# guard could run, and the refusal then looks like a broken tool rather than a
+# floor. Print-then-`SystemExit(int)` is the shape the #5128 census's detector
+# accepts (`tests/test_entry_point_python_guard.py`), and the code is **2**, not
+# 1: this tool's `1` means DRIFT, so `raise SystemExit(<message>)` (which CPython
+# exits 1 with) would report *the document and the tree disagree* about a
+# document that was never read — a wrong instruction, not merely a wrong label.
+# An old interpreter is the same class as a missing document or a shallow clone:
+# this checkout cannot answer the question, so it is a state error. Mirrors
+# `tools/substrate_map_check.py` and `tools/test_design_map_check.py`.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/problem_map_check.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/problem_map_check.py`"
+        f"`uv run python tools/problem_map_check.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(2)
 
 import argparse
 import json

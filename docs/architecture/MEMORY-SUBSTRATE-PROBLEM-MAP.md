@@ -52,7 +52,7 @@ both:
    itself. A test module is preferred, because a symbol can survive a fix being
    reverted out from under it.
 
-**Issue closure is not evidence, and this map has four rows that prove it:**
+**Issue closure is not evidence, and this map has five rows that prove it:**
 
 | What the tracker said | What the tree said | Row |
 |---|---|---|
@@ -60,6 +60,7 @@ both:
 | CLOSED **NOT_PLANNED** (consolidated) | ONE of its two indicators landed under the root issue; the other did not | **#2787** |
 | **OPEN, never closed** (no closure event at all) | the *representation* half shipped while the issue sat open — the tracker is right and the work is half done | **#2782** — the mirror case: closure is not a verdict in either direction |
 | CLOSED **COMPLETED** | the mechanism is unbuilt and the pin asserts the brief's wording, not the behaviour — the strongest instance on this page | **#2730** |
+| **OPEN**, never closed | both halves shipped — `08a6b0288` (2026-10-18) added the Settings home and the per-graph modal, pinned in the tree — so the TRACKER is the stale half: the issue never closed over a finished job | **#2728** |
 
 So: a closure can lag a fix, and a fix can lag a closure. The anchor+pin pair is
 what this map trusts. Tracker state is **not** a column in the row tables — it is
@@ -410,9 +411,11 @@ rounding:**
   `docs/plans/2026-09-10-write-contract-five-doors.md`,
   `docs/plans/2026-09-10-ws-b-pack-property-declaration.md`,
   `docs/plans/2026-09-10-ws-c-numeric-normalization.md`.
-- Tracker reads: `gh issue view <n>` for each of the 26 on 2026-11-06. Four are
+- Tracker reads: `gh issue view <n>` for each of the 26 on 2026-11-06. Five are
   not what their state suggests: two closed NOT_PLANNED (**#2787** with one
   indicator landed, **#2748** fixed in effect), one **never closed at all**
-  (**#2782**, open since 2026-09-10 with half its work shipped), and one closed
-  COMPLETED with the mechanism unbuilt (**#2730**) — the four cases §1 exists to
+  (**#2782**, open since 2026-09-10 with half its work shipped), one **OPEN**
+  whose fix outran it (**#2728**, both halves landed in `08a6b0288` on
+  2026-10-18 and pinned in the tree, with the issue still open), and one closed
+  COMPLETED with the mechanism unbuilt (**#2730**) — the five cases §1 exists to
   keep honest.
