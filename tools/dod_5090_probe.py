@@ -2321,7 +2321,12 @@ def _sdk_methods_on_vector_leg(
                 and isinstance(node.ctx, ast.Load)
                 and node.id not in (shadowed or ())):
             return node.id
-        if isinstance(node, ast.Attribute) and node.attr in entrant:
+        # ⛔ `ctx` applies to an Attribute too (#11389 review, P3): `self._pool = v`,
+        # `self._pool += v`, `self._pool: T = v` and `del self._pool` are BINDINGS,
+        # and publishing one is the same spurious caveat the bare-Name guard
+        # prevents.
+        if (isinstance(node, ast.Attribute) and node.attr in entrant
+                and isinstance(node.ctx, ast.Load)):
             receiver = node.value
             # `self`, and the in-module receivers that stand for it (#11389
             # review, P3): `super()` and `type(self)`. A genuinely FOREIGN

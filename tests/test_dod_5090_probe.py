@@ -3207,7 +3207,13 @@ def _byref_sdk_source() -> str:
         "        _safe(_review_pool)\n"
         "        return [x for _review_pool in (1, 2)]\n"
         "    def binds_it_in_a_COMPREHENSION_only(self, rows):\n"
-        "        return [x for _review_pool in rows]\n")
+        "        return [x for _review_pool in rows]\n"
+        "    def assigns_the_attr(self, v):\n"
+        "        self._review_pool = v\n"
+        "    def augments_the_attr(self, v):\n"
+        "        self._review_pool += v\n"
+        "    def deletes_the_attr(self):\n"
+        "        del self._review_pool\n")
 
 
 def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
@@ -3302,7 +3308,9 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                       "shadows_via_IMPORT",
                       # A comprehension TARGET is a binding, not a mention: it
                       # read as a reach once the scope skip went in (#11389).
-                      "binds_it_in_a_COMPREHENSION_only"):
+                      "binds_it_in_a_COMPREHENSION_only",
+                      # An attribute BINDING is not a mention either.
+                      "assigns_the_attr", "augments_the_attr", "deletes_the_attr"):
         assert shadowing not in declared, (
             f"a local shadowing an entrant's name was declared as a reach: "
             f"{shadowing} in {declared}")
@@ -3483,9 +3491,6 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
         assert "nested `def`'s decorators and parameter defaults" in text, (
             "the doc claims the declaration is total; the walk does not visit a "
             "nested def's defaults/decorators, and the doc must say so")
-        assert "no such shape exists" in text or "no such body mention exists" in text, (
-            "the scan declares no by-reference bound, and the census doc does "
-            "not say so — the two describe different instruments")
     else:
         assert ("no such shape exists" not in text
                 and "no such body mention exists" not in text), (
