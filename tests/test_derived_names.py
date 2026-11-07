@@ -717,20 +717,6 @@ _FROM_ANY_IMPORT = re.compile(
     r"(?:\((?P<paren>[^)]*)\)|(?P<bare>[^\n\\]*))",
     re.MULTILINE | re.DOTALL)
 
-#: `X = <anything>.FalkorDB` — the STATIC ASSIGNMENT ALIAS shape. This is a
-#: CHEAP GATE, not the resolver: it decides only whether the `ast.parse` in
-#: `_raw_client_call_positions` is worth paying for on this file, and the AST
-#: decides what the alias actually is (#11217 review round-14 P1). Reading it as
-#: the resolver would repeat the regex-spelling game the arm keeps losing.
-#:
-#: `[^=\n]*` spans a plain assignment without crossing a line; the `\\`+newline
-#: the caller normalises into spaces is what lets a CONTINUATION between the `=`
-#: and the class reach the parse. It runs on the MASKED source, so a `FalkorDB`
-#: mentioned only in a comment or a docstring cannot open the gate.
-_ASSIGNMENT_ALIAS_HINT = re.compile(
-    r"^[ \t]*[A-Za-z_]\w*[ \t]*(?::[^=\n]+)?=[^=\n]*\bFalkorDB\b",
-    re.MULTILINE)
-
 
 def _raw_client_call_positions(source: str) -> list[int]:
     """Offsets of every raw-client CONSTRUCTION CALL in `source`.
@@ -854,6 +840,8 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # by TWO SPACES, which is length-preserving, so nothing downstream (offsets)
     # moves; the loop reads only the match's GROUPS. Zero site-count change over
     # the corpus (measured, both populations).
+    # ⛔ Static binding aliases are resolved by the FAIL-CLOSED SECOND PASS at the
+    # end of this function, by MENTION rather than by spelling — see it for why.
     normalised = masked.replace("\\\n", "  ")
     for m in _FROM_ANY_IMPORT.finditer(normalised):
         group = m.group("paren") if m.group("paren") is not None else m.group("bare")
@@ -862,52 +850,10 @@ def _raw_client_call_positions(source: str) -> list[int]:
             if not bits or bits[0] != "FalkorDB":
                 continue
             names.add(bits[2] if len(bits) >= 3 and bits[1] == "as" else "FalkorDB")
-    # ⛔ A STATIC ASSIGNMENT ALIAS is the same blindness one statement over
-    # (#11217 review round-14 P1). Every branch above reads an `import`
-    # STATEMENT, so `C = tortoise.FalkorDB` resolved no name, `C(` was never a
-    # site, and an unowned, un-journaled bulk DETACH in that file read CLEAN
-    # (measured: `sites=[]`). The mention test does not rescue it — the raw
-    # `FalkorDB` mention opens the file, and the only name in `names` is the
-    # conventional one the CALL does not use. The spelling is in this tree
-    # (`tests/test_uri_username_consumed_3081.py:71`, `REAL_FALKORDB =
-    # falkordb.FalkorDB`), which is why it is closed rather than disclosed: a
-    # lane that hoists a client alias to module scope for tidiness would switch
-    # the arm off for every site in its file.
-    #
-    # RHS FINAL COMPONENT, not a module whitelist: `falkordb.FalkorDB`,
-    # `tortoise.FalkorDB` and a bare `FalkorDB` are the same class arriving by
-    # three routes, and `FakeFalkorDB` / `FalkorDBStub` stay excluded because
-    # the comparison is on the whole final component. This only ever EXTENDS
-    # `names`, so it cannot narrow the gate.
-    #
-    # ⛔ The `ast.parse` is behind a regex CHEAP GATE on purpose: the census
-    # walks the whole judged corpus, and parsing every file to look for a shape
-    # one file has would pay the cost everywhere. `[^=\n]*` spans a plain
-    # assignment; the `\\\n`-normalised copy is what lets a CONTINUATION between
-    # the `=` and the class (`C = \\\n tortoise.FalkorDB`) reach the parse at all
-    # — without it the gate would open on a spelling it then failed to resolve.
-    if _ASSIGNMENT_ALIAS_HINT.search(normalised):
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            # An unparseable file is not this arm's business; the site scan
-            # above is regex-based and still reports its DETACH blocks.
-            tree = None
-        if tree is not None:
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Assign):
-                    targets, value = node.targets, node.value
-                elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                    targets, value = [node.target], node.value
-                else:
-                    continue
-                tail = (value.attr if isinstance(value, ast.Attribute)
-                        else value.id if isinstance(value, ast.Name) else None)
-                if tail != "FalkorDB":
-                    continue
-                for target in targets:
-                    if isinstance(target, ast.Name):
-                        names.add(target.id)
+    # ⛔ A STATIC BINDING ALIAS is the same blindness one statement over, and it is
+    # resolved by the FAIL-CLOSED SECOND PASS at the end of this function (by
+    # MENTION, not by spelling). Nothing here — every branch above reads an
+    # `import` STATEMENT, so `C = tortoise.FalkorDB` resolved no name.
     gated = bool(names)
     names.add("FalkorDB")
     # Nothing resolved a name and the file may not touch falkordb at all —
@@ -948,20 +894,124 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # `falkordb`, so this alternative is the ONLY thing between it and `[]`.
     if not gated and not re.search(r"\b(?:falkordb|FalkorDB)\b", source):
         return []
-    pattern = "|".join(re.escape(n) for n in sorted(names))
-    # ⛔ The SITE scan reads the SAME continuation-normalised copy as the import
-    # loop (#11217 review round-14 P1). It ran on `masked`, so the two halves of
-    # this function disagreed about what a joined line is: the HEAD commit
-    # exists because `from tortoise import \\⏎ FalkorDB as C` read CLEAN, and
-    # the IDENTICAL joining on the construction side
-    # (`c = FalkorDB \\⏎ (host="h")`, which `compile()`s) still read CLEAN —
-    # `\s*` stops at the backslash, so the family was shut at the import and
-    # open at the call (measured: `sites=[]`). `\\`+newline becomes TWO SPACES,
-    # which is length-preserving, so every offset reported here is still the
-    # offset in `source` and `_enclosing_block_span` keeps resolving the same
-    # block.
-    return [m.start()
-            for m in re.finditer(rf"(?<![\w])(?:{pattern})\s*\(", normalised)]
+
+    def _sites(candidate_names):
+        # ⛔ The SITE scan reads the SAME continuation-normalised copy as the
+        # import loop (#11217 review round-14 P1). It ran on `masked`, so the two
+        # halves of this function disagreed about what a joined line is: the HEAD
+        # commit exists because `from tortoise import \\⏎ FalkorDB as C` read
+        # CLEAN, and the IDENTICAL joining on the construction side
+        # (`c = FalkorDB \\⏎ (host="h")`, which `compile()`s) still read CLEAN —
+        # `\s*` stops at the backslash, so the family was shut at the import and
+        # open at the call (measured: `sites=[]`). `\\`+newline becomes TWO
+        # SPACES, which is length-preserving, so every offset reported here is
+        # still the offset in `source` and `_enclosing_block_span` keeps
+        # resolving the same block.
+        pattern = "|".join(re.escape(n) for n in sorted(candidate_names))
+        return [m.start()
+                for m in re.finditer(rf"(?<![\w])(?:{pattern})\s*\(", normalised)]
+
+    found = _sites(names)
+    if found:
+        return found
+    # ⛔ FAIL-CLOSED SECOND PASS — resolve a STATIC BINDING ALIAS, and resolve it
+    # by MENTION rather than by spelling (#11217 review round-14 P1).
+    #
+    # The import parsers above read STATEMENTS, so a name this file binds itself
+    # — `C = tortoise.FalkorDB` — resolved nothing, `C(` was never a site, and an
+    # unowned, un-journaled bulk DETACH in that file read CLEAN (measured:
+    # `sites=[]`). The spelling is in this tree
+    # (`tests/test_uri_username_consumed_3081.py:71`, `REAL_FALKORDB =
+    # falkordb.FalkorDB`).
+    #
+    # A round of enumerating the SPELLING (`=`, then `: T =`, then a chained
+    # `=`, then `if/else`, then `cast(…)`, then the walrus) is the regress this
+    # arm keeps losing, so the rule is TOTAL instead: a binding whose VALUE
+    # MENTIONS `FalkorDB` anywhere in its subtree aliases the class. That closes
+    # chained assignment, multi-target, parenthesised, conditional, `cast(…)`, an
+    # annotated target and an attribute target in ONE rule, and it closes the
+    # next spelling before anyone writes it. It can only EXTEND the name set, so
+    # it cannot narrow the gate.
+    #
+    # The population it costs is tiny BY CONSTRUCTION, which is why no cheap
+    # regex gate is needed: the pass runs only for a file that (a) resolved no
+    # site, (b) bulk-DETACHes, and (c) writes `FalkorDB` in CODE (`masked`, so a
+    # comment or docstring naming it cannot open it). Any file the pass could
+    # help is in that set, so it cannot under-reach; measured at this head, it
+    # costs 0 additional `ast.parse` calls over the judged corpus.
+    if "DETACH DELETE" not in source or "FalkorDB" not in masked:
+        return found
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        # An unparseable file is not this arm's business.
+        return found
+
+    def _mentions(node, wanted):
+        return any(
+            (isinstance(n, ast.Name) and n.id in wanted)
+            or (isinstance(n, ast.Attribute) and n.attr in wanted)
+            for n in ast.walk(node))
+
+    def _dotted(node):
+        """`a.b.c` for a dotted target, else None. A TUPLE/LIST target is
+        unpacked rather than dropped: `C, D = tortoise.FalkorDB, 1` binds `C`
+        to the class and would otherwise be the next spelling reading CLEAN
+        (measured)."""
+        if isinstance(node, (ast.Tuple, ast.List)):
+            out = set()
+            for element in node.elts:
+                nested = _dotted(element)
+                if nested:
+                    out |= nested
+            return out or None
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return None
+        return {".".join([node.id, *reversed(parts)])}
+
+    def _bindings(wanted):
+        """Targets bound to an expression that REFERENCES one of `wanted`.
+
+        Every binding FORM, not every spelling of one: plain, annotated,
+        chained (`C = D = …`), tuple/list unpacking, and the walrus. `wanted`
+        starts as the class itself and grows to the resolved aliases on each
+        pass, which is what lets `C = D` after `D = falkordb.FalkorDB` resolve.
+        """
+        out = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) \
+                    and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if not _mentions(value, wanted):
+                continue
+            for target in targets:
+                names_here = _dotted(target)
+                if names_here:
+                    out |= names_here
+        return out
+
+    # Bounded closure: each pass adds the aliases observable from the names the
+    # previous pass knew. Four is generous (a chain of four hoists) and finite,
+    # so a pathological file cannot spin here. Only ever EXTENDS `names`.
+    wanted = {"FalkorDB"}
+    for _ in range(4):
+        aliases = _bindings(wanted) - names
+        if not aliases:
+            break
+        names |= aliases
+        wanted |= aliases
+        found = _sites(names)
+        if found:
+            break
+    return found
 
 
 def _raw_detach_violations(root=None):
@@ -2419,7 +2469,7 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         # for the wrong reason.
         "call site, BACKSLASH-joined": (
             "from falkordb import FalkorDB\n", "FalkorDB \\\n        "),
-        # ⛔ A STATIC ASSIGNMENT ALIAS (#11217 review round-14 P1). Every parser
+        # ⛔ A STATIC BINDING ALIAS (#11217 review round-14 P1). Every parser
         # above reads an `import` STATEMENT, so `C = tortoise.FalkorDB` resolved
         # no name, `C(` was never a site, and the whole file read CLEAN
         # (measured: `sites=[]`). The mention test does not rescue it — the raw
@@ -2428,12 +2478,36 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         # (`tests/test_uri_username_consumed_3081.py:71`,
         # `REAL_FALKORDB = falkordb.FalkorDB`), which is why it is closed rather
         # than disclosed.
+        #
+        # ⛔ THE SEVEN CASES BELOW PIN ONE RULE, NOT SEVEN SPELLINGS, and that is
+        # the point of listing them: the first version of this fix enumerated the
+        # `=` shape and was blind to a chained `=`, to tuple unpacking, to the
+        # walrus, to `cast(…)`, to a conditional RHS and to an ATTRIBUTE target —
+        # each measured `sites=[]` while its own author believed the family
+        # closed. The rule is now "a binding whose VALUE mentions `FalkorDB`
+        # anywhere in its subtree aliases the class", which is what makes all
+        # seven one case-shape. Do not delete a spelling from this list as
+        # redundant: the list is the evidence that the rule was not narrowed
+        # back to the shape its author happened to think of.
         "static ASSIGNMENT alias": (
             "import tortoise\nC = tortoise.FalkorDB\n", "C"),
         "static ASSIGNMENT alias, ANNOTATED": (
             "import tortoise\nC: object = tortoise.FalkorDB\n", "C"),
         "static ASSIGNMENT alias, BACKSLASH-joined": (
             "import tortoise\nC = \\\n    tortoise.FalkorDB\n", "C"),
+        "static ASSIGNMENT alias, CHAINED": (
+            "import tortoise\nC = D = tortoise.FalkorDB\n", "C"),
+        "static ASSIGNMENT alias, TUPLE-unpacked": (
+            "import tortoise\nC, D = tortoise.FalkorDB, None\n", "C"),
+        "static ASSIGNMENT alias, WALRUS": (
+            "import tortoise\nif (C := tortoise.FalkorDB):\n    pass\n", "C"),
+        "static ASSIGNMENT alias, wrapped in a CALL": (
+            "import tortoise\nC = cast(tortoise.FalkorDB)\n", "C"),
+        "static ASSIGNMENT alias, CONDITIONAL RHS": (
+            "import tortoise\nx = 1\nC = tortoise.FalkorDB if x else None\n", "C"),
+        "static ASSIGNMENT alias, ATTRIBUTE target": (
+            "import falkordb\nholder = type('H', (), {})()\n"
+            "holder.c = falkordb.FalkorDB\n", "holder.c"),
     }
     site = tmp_path / "test_spelling.py"
     for label, (header, construct) in spellings.items():
