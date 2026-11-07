@@ -4475,7 +4475,41 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: parent), and the tree the defect falsely calls it.
     _TRUE_TREE = "047c91f7a"
     _FALSE_TREE = "ff6379eb2"
-    _PHRASE_RE = r"\bbefore\s+#9548"
+    #: ⛔ THE ANCHOR IS THE CLAIM, NOT THE PREPOSITION (#11191 review r19, P2 —
+    #: MEASURED fail-open, six spellings). `before\s+#9548` was the r17 widening of
+    #: `immediately before` and closed exactly one paraphrase — so the SAME false claim
+    #: written one word further out still passed, which is the r17 finding reproduced at
+    #: the next turn of the same screw:
+    #:   "The pre-#9548 tree `ff6379eb2`, at 5 lines, is the one the row states."  -> ACCEPTED
+    #:   "The tree before the #9548 arming is `ff6379eb2`."                       -> ACCEPTED
+    #:   "The tree prior to #9548 is `ff6379eb2`."                                -> ACCEPTED
+    #:   "`ff6379eb2` is the tree that #9548 replaced."                           -> ACCEPTED
+    #:   "The tree #9548 replaced was `ff6379eb2`."                               -> ACCEPTED
+    #:   "At `ff6379eb2`, just ahead of #9548, the census reads 5."               -> ACCEPTED
+    #: The set below is CLOSED on purpose and bounded by the language, not by taste: the
+    #: English spellings of "the tree #9548 was armed on top of" are `before` / `prior to`
+    #: / `ahead of` / `pre-` (the four prepositional spellings), plus the two verbal
+    #: frames in which #9548 is the SUBJECT that replaced it. Anything outside that set is
+    #: a different claim, not a paraphrase of this one — a widening that admits, say,
+    #: "ancestor of #9548" would refuse the TRUE ancestry relation this file pins as
+    #: green elsewhere.
+    #: ⛔ …AND IT IS ONE GROUP, NOT A TOP-LEVEL ALTERNATION. `_PHRASE_RE` is
+    #: CONCATENATED into `_INVERTED_FALSE`, `_INVERTED_TRUE` and `_FALSE_SHA_ADJACENT`, and
+    #: `|` binds looser than concatenation — so an unwrapped alternation attaches the
+    #: copula/sha suffix to its LAST branch only, leaving every earlier spelling without
+    #: the arms built on it. Measured with the first cut of this widening: the pre-existing
+    #: control "…→ 5 lines at `ff6379eb2`, which is what \"immediately before #9548\" means."
+    #: went GREEN, i.e. the widening SILENTLY WEAKENED three arms while adding one.
+    _PHRASE_RE = (
+        r"(?:"
+        r"\b(?:before|prior\s+to|ahead\s+of)\s+(?:the\s+)?#9548\b"
+        r"|\bpre[-\s]?#9548\b"
+        # `\b` CANNOT PRECEDE `#` (it is a non-word character), so the verbal frames use
+        # a lookbehind: measured, `\b#9548` matched nothing and both `#9548 replaced`
+        # controls stayed ACCEPTED while the alternative looked present.
+        r"|(?<!\w)#9548\s+(?:replaced|superseded)\b"
+        r")"
+    )
     #: A figure spelled in WORDS. Hoisted here so every arm that asks "is a figure stated"
     #: asks it the same way — the earlier-clause guard below missed "three lines" while the
     #: no-referent arm already refused it (#11191 review r4, P2 — measured).
@@ -4837,6 +4871,31 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         r"(?:false|wrong|mistaken|incorrect)\b"
         r"(?!\s+(?:about|on|in|for|at|as\s+to|regarding|with\s+respect\s+to|"
         r"concerning|as\s+regards|in\s+respect\s+of)\b)",
+        re.I,
+    )
+    #: ⛔ A REFUTATION OF THE INVERTED PREDICATION IS A REFUTATION IN EITHER WORD ORDER
+    #: (#11191 review r19, P2 — MEASURED false RED, both orders carry the SAME proposition).
+    #: `_REFUTED_AFTER` is anchored at the PHRASE, so it reads "…is the tree before #9548 is
+    #: false" — the phrase-first spelling — and nothing else. The equally natural order puts
+    #: the sha last, and it was REFUSED while its twin was a pinned control:
+    #:   "The claim that `ff6379eb2` is the tree before #9548 is false; the true tree is
+    #:    `047c91f7a`."                                        -> accept (pinned at :7284)
+    #:   "The claim that the tree before #9548 is `ff6379eb2` is false; the true tree is
+    #:    `047c91f7a`."                                        -> REFUSED
+    #:   "The statement that the tree before #9548 was `ff6379eb2` was wrong; it is
+    #:    `047c91f7a`."                                        -> REFUSED
+    #: The contract's row is "_REFUTED_AFTER / _REFUTED_NEXT_CLAUSE (closed subjects)" — the
+    #: closed SUBJECT is honoured there and here, but the order was not. The subject set is
+    #: the same closed one (`claim|statement|assertion|reading|sentence|attribution`) and it
+    #: must be bound to the phrase by `that`, so a refutation of something else in the
+    #: sentence cannot be borrowed: "the census reading is wrong" names no phrase.
+    _REFUTED_INVERTED = re.compile(
+        r"\b(?:claim|statement|assertion|reading|sentence|attribution)\b"
+        r"[^.;\u2014\u2013]{0,20}?\bthat\b[^.;\u2014\u2013]{0,20}?"
+        + _PHRASE_RE
+        + r"\s*(?:is|was|means|denotes)\b[^.;\u2014\u2013]{0,40}?"
+        + re.escape(_FALSE_TREE)
+        + r"\s*(?:is|was)\s+(?:false|wrong|mistaken|incorrect|untrue|not\s+true)\b",
         re.I,
     )
     #: The COMPLEMENT names the false sha as NOT the tree — "the tree before #9548 is
@@ -5242,7 +5301,14 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #: the sentence means the assertion is reported, not made.
     _CORRECTION_CUE = re.compile(
         r"\b(?:(?:is|was|now)\s+)?(?:corrected|retired|refuted|retracted|superseded)"
-        r"\b|\bno\s+longer\b|\bis\s+(?:false|wrong|untrue)\b",
+        # ⛔ …AND THE REFUTATION SET IS THE SAME ONE TWICE: `_REFUTED_AFTER` admits
+        # `false|wrong|mistaken|incorrect`, this cue admitted `false|wrong|untrue` behind
+        # `is` ONLY — so the past-tense spelling `was wrong` was not a cue at all, the
+        # co-reference veto fired first, and `_REFUTED_INVERTED` was never reached
+        # (#11191 review r19, P2 — MEASURED: "The statement that the tree before #9548 was
+        # `ff6379eb2` was wrong" stayed REFUSED after the arm was added). One set, both
+        # tenses, so the two arms cannot disagree about what a refutation is.
+        r"\b|\bno\s+longer\b|\b(?:is|was)\s+(?:false|wrong|mistaken|incorrect|untrue)\b",
         re.I,
     )
     #: A correction that RETIRES the attribution — "§A8 no longer calls `ff6379eb2` the
@@ -5654,6 +5720,8 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             if _REFUTED_AFTER.match(norm, phrase.start()):
                 return True
             if _REFUTED_NEXT_CLAUSE.match(norm[clause_end:]):
+                return True
+            if _REFUTED_INVERTED.search(norm):
                 return True
             # ⛔ …AND THE SAME REFUTATION WHEN IT IS SPELLED `IS NOT TRUE` (#11191 review
             # r11, P1 — MEASURED false RED, and a regression against `origin/main`). The
@@ -6352,7 +6420,9 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             "pass"
         )
     _row_measured = _census_count_at(_REPO_ROOT, _TRUE_TREE, paths)
-    #: A figure stated AT `_TRUE_TREE` — either order, within 12 non-word characters.
+    #: A figure stated AT `_TRUE_TREE` — either order, within `\D{0,40}` (see the window
+    #: note below; this line said "12" for six rounds after the window was widened, the
+    #: stale-bound class the PR body records as fixed for the CONTRACT but not for the code).
     #: ⛔ A DIGIT RUN IS NOT A STATED FIGURE (#11191 review round 2, P1 — measured): the
     #: doc's own house-style DATE beside the tree was read as a census reading
     #: (`047c91f7a` (2026-10-23) -> figures=['2026']), and the leading digits of a SECOND
@@ -6375,11 +6445,37 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         re.I,
     )
 
+    #: ⛔ A HOUSE-STYLE DATE IS NOT A FIGURE, IN EITHER POLARITY — and the tail-only
+    #: exclusion below only ever covered ONE of them (#11191 review r19, P2 — MEASURED false
+    #: RED, and a REGRESSION against `abd6270dda` on the same document). `(?!-\d{2}-\d{2})`
+    #: fires on the YEAR, because the year is the run that a `-MM-DD` tail follows; the DAY
+    #: is the run with a `-MM-` HEAD, so it survived:
+    #:   _figures_at_true_tree("see 2026-10-23 and `047c91f7a`")             -> {23}
+    #:   _figures_at_true_tree("`047c91f7a` (2026-10-23)")                   -> set()
+    #: The live §A8 row sits 59 non-word characters from its date, i.e. outside the 40-char
+    #: window, so it is green TODAY by 19 characters of prose rather than by the exclusion.
+    #: Take the remedy this guard's own failure message prescribes — DELETE the false-dating
+    #: clause — and the date moves inside the window and the suite REDS on a figure the cell
+    #: never stated (`the cell states [10, 23]`):
+    #:   head, on the shortened cell: 1 failed
+    #:   `abd6270dda`, on the SAME document: 4 passed
+    #: which is the false-RED class this file names as "the way a pin gets deleted". So the
+    #: date span is blanked (LENGTH-PRESERVING, so the window still measures the author's
+    #: prose distance) before any figure is read, and the direction it is written in cannot
+    #: matter.
+    _DATE_SPAN = re.compile(r"\d{4}-\d{2}-\d{2}")
+
     def _figures_at_true_tree(text: str) -> set[int]:
-        """EVERY figure `text` states at `_TRUE_TREE` — a SET, not one occurrence."""
+        """EVERY figure `text` states at `_TRUE_TREE` — a SET, not one occurrence.
+
+        A `YYYY-MM-DD` span is blanked first (`_DATE_SPAN`): its day is not a census
+        reading, and the exclusion below is tail-only, so it caught the year and let the
+        day through whenever the date sat BEFORE the tree.
+        """
+        scanned = _DATE_SPAN.sub(lambda _m: " " * len(_m.group(0)), text)
         return {
             int(_hit.group(1) or _hit.group(2))
-            for _hit in _FIGURE_NEAR_TRUE_TREE.finditer(text)
+            for _hit in _FIGURE_NEAR_TRUE_TREE.finditer(scanned)
         }
 
     # ⛔ CONTROLS FOR THE FIGURE REGEX ITSELF (#11191 review r3, P1 — MEASURED). The §A8
@@ -6395,6 +6491,36 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the figure regex reads the leading digits of a SECOND sha as a stated figure "
         "— reverting the hex-tail exclusion leaves the suite green "
         "(#11191 review r3, P1)"
+    )
+    # ⛔ …AND THE DATE EXCLUSION IS POLARITY-BLIND (#11191 review r19, P2 — MEASURED
+    # false RED, and a REGRESSION against `abd6270dda` on the SAME document). The tail
+    # guard `(?!-\d{2}-\d{2})` fires on the YEAR — the run a `-MM-DD` tail follows — so the
+    # DAY, whose head is `-MM-`, survived whenever the date sat BEFORE the tree:
+    #   _figures_at_true_tree(f"see 2026-10-23 and `{_TRUE_TREE}`")   -> {23}
+    # The live §A8 row is green only because its date sits 59 characters from the tree,
+    # outside the 40-character window; take the remedy this gate's own message prescribes
+    # (delete the false-dating clause) and the date moves inside it and the suite reds on a
+    # figure the cell never stated (`the cell states [10, 23]`) — while `abd6270dda` stays
+    # GREEN on the same document. Both polarities are pinned, so reverting `_DATE_SPAN`
+    # reds HERE instead of on a lane's honest edit.
+    _date_adjacent = (
+        f"see 2026-10-23 and `{_TRUE_TREE}`",
+        f"the #9601 merge, 2026-10-23), and **NOT** the tree (that is `{_TRUE_TREE}`",
+        f"`{_TRUE_TREE}` (2026-10-23)",
+    )
+    _date_figures = {s: _figures_at_true_tree(s) for s in _date_adjacent}
+    _date_as_figure = {s: f for s, f in _date_figures.items() if f}
+    assert not _date_as_figure, (
+        "a house-style DATE beside the tree is read as a census reading — the day of a "
+        "`YYYY-MM-DD` span is not a figure in either polarity, and reading it reds a "
+        "truthful cell that merely shortens its prose (#11191 review r19, P2):\n  "
+        + "\n  ".join(f"{f} <- {s}" for s, f in _date_as_figure.items())
+    )
+    # …and the blanking must not blind the arm to a REAL figure standing beside a date.
+    assert _figures_at_true_tree(f"2026-10-23: 10 lines at `{_TRUE_TREE}`") == {10}, (
+        "`_DATE_SPAN` blanked more than the date span — a genuine figure written beside "
+        "the date is no longer read, which would let the A4 defect (two different figures "
+        "at the same tree) merge green again (#11191 review r19)"
     )
 
     def _figure_gate(text: str) -> bool:
@@ -6814,6 +6940,38 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the arm refuses a REFUTATION of the false claim — quoting a claim in order to "
         "call it false is the correction, and the referent rule reads the quotation as "
         "the defect (#11191 review, P2):\n  " + "\n  ".join(_refuted_reds)
+    )
+    # ⛔ …IN BOTH WORD ORDERS (#11191 review r19, P2 — MEASURED false RED). The block above
+    # pins the phrase-FIRST spelling only, and `_REFUTED_AFTER` is anchored at the phrase,
+    # so the equally natural spelling — the false sha LAST, with the phrase inside the
+    # quoted claim — was REFUSED while its twin was green:
+    #   "The claim that `ff6379eb2` is the tree before #9548 is false; …"     -> accept
+    #   "The claim that the tree before #9548 is `ff6379eb2` is false; …"     -> REFUSED
+    # The two carry the SAME proposition, and the contract's row is about closed SUBJECTS,
+    # not about word order. `_REFUTED_INVERTED` reads the second, and the pair is asserted
+    # together so a fix cannot close one direction and open the other.
+    _refutation_orders = (
+        "The claim that `ff6379eb2` is the tree before #9548 is false; the true tree is `047c91f7a`.",
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the true tree is `047c91f7a`.",
+        "The statement that the tree before #9548 was `ff6379eb2` was wrong; it is `047c91f7a`.",
+    )
+    _refutation_order_reds = [
+        s for s in _refutation_orders if _refuses_before_9548(s)
+    ]
+    assert not _refutation_order_reds, (
+        "a REFUTATION of the false claim is refused in one of its two word orders — the "
+        "verdict is then keyed on word order rather than on the proposition, which is the "
+        "false-RED class this pin exists to avoid (#11191 review r19, P2):\n  "
+        + "\n  ".join(_refutation_order_reds)
+    )
+    # …and the closed SUBJECT still binds to the phrase through `that`, so a refutation of
+    # something else in the sentence is not borrowed: without `_REFUTED_INVERTED`'s
+    # `that`-binding this shape would be exempted by `reading`.
+    assert _refuses_before_9548(
+        "The census reading is wrong and the tree before #9548 is `ff6379eb2`."
+    ), (
+        "the inverted refutation arm is a blank cheque: a `reading … wrong` anywhere in "
+        "the sentence exempts a bare equivalence it does not quote (#11191 review r19)"
     )
     # ⛔ …AND A REFUTATION WITH AN OBJECT REFUTES SOMETHING ELSE (#11191 review r4, P1 —
     # measured ACCEPTED at `46c01c324e8`): "wrong ON THE CENSUS COUNT" corrects the
@@ -7989,6 +8147,69 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     assert not _refuses_before_9548("Re-read the census note before #9548."), (
         "the widened spelled-figure grammar reds a sentence that states no figure at "
         "all — the false-RED direction of the F4 fix (#11191 review, F4)"
+    )
+    # ⛔ THE ANCHOR IS THE CLAIM, NOT THE PREPOSITION (#11191 review r19, P2 — MEASURED
+    # fail-open, six spellings, all ACCEPTED at the head that added them). `_PHRASE_RE` was
+    # widened from `immediately before #9548` to `before\s+#9548` in r17 and closed exactly
+    # ONE paraphrase — so the SAME false claim written one word further out walked past,
+    # which is the r17 finding reproduced at the next turn of the same screw. Every string
+    # below is the pinned defect in a different English spelling of the SAME phrase: the
+    # tree #9548 was armed on top of.
+    _paraphrased_anchor = (
+        "The pre-#9548 tree `ff6379eb2`, at 5 lines, is the one the row states.",
+        "The tree before the #9548 arming is `ff6379eb2`.",
+        "The tree prior to #9548 is `ff6379eb2`.",
+        "`ff6379eb2` is the tree that #9548 replaced.",
+        "The tree #9548 replaced was `ff6379eb2`.",
+        "At `ff6379eb2`, just ahead of #9548, the census reads 5.",
+    )
+    _paraphrase_passed = [s for s in _paraphrased_anchor if not _refuses_before_9548(s)]
+    assert not _paraphrase_passed, (
+        "a paraphrase of the anchor phrase carries the false equivalence past the pin — "
+        "the guard's subject is the CLAIM, and a verdict keyed on one spelling of it is "
+        "the pattern every round in this predicate has had to close. With the anchor "
+        "restored to `\\bbefore\\s+#9548` these six are ACCEPTED, so this arm is the one "
+        "that decides them (#11191 review r19, P2):\n  " + "\n  ".join(_paraphrase_passed)
+    )
+    # …and the widening must not buy that with the FALSE-RED class this file names as the
+    # way a pin gets deleted: each truthful spelling of the same phrase stays GREEN.
+    _paraphrased_anchor_truthful = (
+        "The pre-#9548 tree is `047c91f7a`, where the same path set returns 10 lines.",
+        "The tree #9548 replaced is `047c91f7a`.",
+        "Prior to #9548 the census at `047c91f7a` returns 10 lines.",
+        "`ff6379eb2` is an ancestor of the tree before #9548, `047c91f7a`.",
+    )
+    _paraphrase_reds = [
+        s for s in _paraphrased_anchor_truthful if _refuses_before_9548(s)
+    ]
+    assert not _paraphrase_reds, (
+        "the widened anchor refuses a TRUTHFUL spelling of the same phrase — the false "
+        "RED direction of the r19 widening, and the class that gets a guard deleted "
+        "(#11191 review r19):\n  " + "\n  ".join(_paraphrase_reds)
+    )
+    # …and the arm that decides them is named, not merely "the suite": the verbal frame
+    # `#9548 replaced was <sha>` is reached by `_INVERTED_FALSE`, and the pre-posed frame
+    # `at <sha>, just ahead of #9548` by the referent rule. If either arm is deleted the
+    # matching control above reds, so this pair is a discrimination test rather than two
+    # independent assertions.
+    assert _INVERTED_FALSE.search(
+        "The tree #9548 replaced was `ff6379eb2`."
+    ), (
+        "the verbal-frame spelling is not decided by `_INVERTED_FALSE`, so the control "
+        "above proves nothing about which arm reads it (#11191 review r19)"
+    )
+    # ⛔ AND THE ANCHOR IS ONE NON-CAPTURING GROUP. `_PHRASE_RE` is CONCATENATED into
+    # `_INVERTED_FALSE`, `_INVERTED_TRUE` and `_FALSE_SHA_ADJACENT`, and `|` binds looser
+    # than concatenation — so a top-level alternation attaches the copula/sha suffix to its
+    # LAST branch only, leaving every earlier spelling without the arms built on it.
+    # MEASURED with the first cut of this widening: this file's own pre-existing control
+    # `…→ 5 lines at `ff6379eb2`, which is what "immediately before #9548" means.` went
+    # GREEN, i.e. the widening SILENTLY WEAKENED three arms while adding one.
+    assert re.match(r"\(\?:", _PHRASE_RE), (
+        "`_PHRASE_RE` is no longer a single group, so every pattern that CONCATENATES it "
+        "(`_INVERTED_FALSE`, `_INVERTED_TRUE`, `_FALSE_SHA_ADJACENT`) silently drops the "
+        "suffix for all but the last alternative — a fail-open introduced by an edit that "
+        "looks like it only adds spellings (#11191 review r19)"
     )
     # ⛔ …BUT THE EARLIER-CLAUSE FIGURE GUARD IS WITHDRAWN IN THIS COMMIT, on a MEASURED
     # basis rather than a preference: it cannot separate the alibi from the truth, and
