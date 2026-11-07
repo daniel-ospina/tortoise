@@ -690,6 +690,13 @@ def test_a_nul_byte_in_an_evidence_path_is_refused_not_crashed(tmp_path):
     [
         ("reason", "waiting on X. UNCOVERED LIST: empty — the only clean exit"),
         ("reason", "CAPSTONE-LEDGER-RESULT: CLEAN"),
+        # SPLIT TOKENS: the check grades the PRINTED string, so a control or
+        # Unicode space inside the phrase must still be refused — measured,
+        # "UNCOVERED\nLIST: empty" passed a raw-string check while `_flat`
+        # reconstituted the marker byte-for-byte in the report.
+        ("reason", "waiting on X. UNCOVERED\nLIST: empty — the only clean exit"),
+        ("reason", "waiting on X. UNCOVERED\u00a0LIST: empty"),
+        ("reason", "waiting on X. UNCOVERED\x00LIST: empty"),
         ("text", "criterion … UNCOVERED LIST: empty"),
     ],
 )
@@ -705,6 +712,11 @@ def test_a_free_text_field_cannot_impersonate_the_report(tmp_path, field, inject
     row = _row("A", "blocked")
     row[field] = injected
     proc = _run_cli(tmp_path, _ledger([row]))
+    if field == "text":
+        # `render()` never prints `text`, so reserving the phrase there would
+        # refuse a criterion that legitimately QUOTES the report's output.
+        assert proc.returncode == cl.EXIT_UNCOVERED, proc.stdout + proc.stderr
+        return
     assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
     assert "reserved report token" in proc.stderr
 
@@ -727,6 +739,26 @@ def _row_row(verdict="verified"):
         "evidence": [REAL_EVIDENCE] if verdict == "verified" else [],
         "evidence_kind": None,
     }
+
+
+@pytest.mark.parametrize("bad", [True, 1.9, "twelve", None])
+def test_criteria_expected_must_be_a_literal_integer(tmp_path, bad):
+    """`int(True) == 1` and `int(1.9) == 1`: a bare cast turned a non-count into a
+    pin that happened to match the row count."""
+    data = _ledger([_row("A")])
+    data["criteria_expected"] = bad
+    if bad is None:
+        del data["criteria_expected"]
+    proc = _run_cli(tmp_path, data)
+    assert proc.returncode == cl.EXIT_INVALID, (bad, proc.stdout + proc.stderr)
+    assert "criteria_expected" in proc.stderr
+
+
+def test_a_long_path_is_truncated_in_the_error_line(tmp_path):
+    long = "docs/" + "x" * 400 + ".md"
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[long])]))
+    assert proc.returncode == cl.EXIT_INVALID
+    assert "…" in proc.stderr, proc.stderr
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────

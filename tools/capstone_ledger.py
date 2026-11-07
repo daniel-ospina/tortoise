@@ -295,13 +295,13 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     except (ValueError, OSError) as exc:
         # `Path.resolve()` raises ValueError on an embedded NUL byte: a traceback,
         # not the named refusal `validate()` promises every defect will be.
-        return False, f"evidence path cannot be resolved ({exc}): {entry!r}"
+        return False, f"evidence path cannot be resolved ({exc}): {_short(entry)}"
     if not resolved.is_relative_to(root):
         return False, f"evidence path escapes the tree (`{entry}` resolves outside it)"
     try:
         is_file = resolved.is_file()
     except OSError as exc:  # ENAMETOOLONG and friends: a named refusal, not a traceback
-        return False, f"evidence path cannot be inspected ({exc}): {entry!r}"
+        return False, f"evidence path cannot be inspected ({exc}): {_short(entry)}"
     if not is_file:
         return False, f"evidence path is not a file in the tree: {entry}"
     if not _is_tracked(resolved, root):
@@ -313,6 +313,11 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
             f"evidence path is not TRACKED by git, so a reader's clone does not have it: {entry}"
         )
     return True, ""
+
+
+def _short(text: str, limit: int = 120) -> str:
+    """Cap an entry quoted into an error line (a 5 KB path is not a message)."""
+    return repr(text if len(text) <= limit else text[:limit] + "…")
 
 
 def _is_tracked(resolved: Path, root: Path) -> bool:
@@ -426,10 +431,17 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         )
     declared_count: int | None = None
     if declared is not None:
-        try:
-            declared_count = int(declared)
-        except (TypeError, ValueError):
+        if isinstance(declared, (bool, float)):
+            # `int(True) == 1` and `int(1.9) == 1`, so a bare `int()` casts a
+            # non-count into a pin that happens to match.
             problems.append(f"`criteria_expected` must be an integer, got {declared!r}")
+        elif isinstance(declared, str) and not declared.strip().isdigit():
+            problems.append(f"`criteria_expected` must be an integer, got {declared!r}")
+        else:
+            try:
+                declared_count = int(declared)
+            except (TypeError, ValueError):
+                problems.append(f"`criteria_expected` must be an integer, got {declared!r}")
     if (
         declared_count is not None
         and isinstance(raw_rows, list)
@@ -471,15 +483,20 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
             )
         if not str(raw.get("text") or "").strip():
             problems.append(f"{where} has no verbatim `text` — the criterion must be quoted")
-        for field in ("text", "reason"):
-            value = str(raw.get(field) or "")
-            for reserved in _RESERVED_IN_PROSE:
-                if reserved in value:
-                    problems.append(
-                        f"{where} `{field}` contains the reserved report token "
-                        f"{reserved!r} — these fields are printed, so a free-text "
-                        "claim must not be able to impersonate the report's own lines"
-                    )
+        # ⛔ GRADE THE STRING THAT IS PRINTED, NOT THE RAW ONE. `render` prints
+        # `_flat(reason)`, so a raw-string check is defeated by putting ANY
+        # whitespace character where the phrase has a space: measured,
+        # "UNCOVERED\nLIST: empty" passed the raw check and `_flat` reconstituted
+        # "UNCOVERED LIST: empty" byte-for-byte in the report — the exact forgery the
+        # check exists to refuse, one character away.
+        printed_reason = _flat(str(raw.get("reason") or ""))
+        for reserved in _RESERVED_IN_PROSE:
+            if _flat(reserved) in printed_reason:
+                problems.append(
+                    f"{where} `reason` contains the reserved report token "
+                    f"{reserved!r} — `render()` prints this field, so a free-text "
+                    "claim must not be able to impersonate the report's own lines"
+                )
 
         verdict = str(raw.get("verdict") or "").strip()
         if verdict not in VERDICTS:
