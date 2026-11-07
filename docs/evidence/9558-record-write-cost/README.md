@@ -391,9 +391,9 @@ substrate preamble on first use, seeds a tenant, and asserts every write is
 
 ## Falsifiers — what must make each claim red
 
-The mechanism half is pinned in `tests/test_9558_record_write_cost.py` (20
-tests: 7 for the schema cache, 8 for the pool, and 5 for the wrapper/park/
-read-door contracts the first two review cycles added). 16 of the 20 carry an
+The mechanism half is pinned in `tests/test_9558_record_write_cost.py` (25
+tests: 7 for the schema cache, 13 for the pool, and 5 for the wrapper/park/
+read-door contracts the review cycles added). 21 of the 25 carry an
 explicit `FALSIFIER:` block naming the mutation that reds them; the four that do
 not (`test_the_refused_props_map_also_reacts_to_an_edit`,
 `test_a_removed_migration_is_seen_and_restores_the_error`,
@@ -402,9 +402,10 @@ not (`test_the_refused_props_map_also_reacts_to_an_edit`,
 them. ⛔ They are not mutation-proof by nature — dropping `str(base)` from
 `_schema_entry`'s key reds the two-trees pin, and sharing the refused-props parse
 across fingerprints reds the refused-props pin — so the honest statement is "no
-falsifier was recorded for these four", not "no mutation exists". **Eight were OBSERVED RED** by breaking the
-source, running only the named test, and restoring the file byte-identically
-(`/tmp/prove_falsifiers.py`, one pass):
+falsifier was recorded for these four", not "no mutation exists". **Nine were
+OBSERVED RED** by breaking the source, running only the named test, and restoring
+the file byte-identically (`/tmp/prove_falsifiers.py`, one pass; the ninth — the
+parked-handle bound — is from review cycle 4):
 
 | Mutation applied | Test that must notice | Observed |
 |---|---|---|
@@ -412,10 +413,11 @@ source, running only the named test, and restoring the file byte-identically
 | drop the `table_columns` parse short-circuit | `test_the_column_map_is_parsed_once_for_an_unchanged_schema` | **RED** |
 | identify a migration by inode only (mtime+size ignored) | `test_an_edited_migration_is_seen_immediately` | **RED** |
 | accept a handle whose server went away | `test_a_broken_handle_is_discarded_not_reused` | **RED** |
-| park without rolling back | `test_an_aborted_transaction_is_rolled_back_before_the_handle_is_parked` | **RED** |
+| fix the transaction at RELEASE (the previous behaviour) | `test_a_parked_transaction_is_reset_at_reuse_not_at_release` | **RED** |
 | park unconditionally (no idle bound) | `test_the_idle_set_is_bounded_and_overflow_is_closed` | **RED** |
 | drop the double-close guard | `test_a_double_close_returns_one_handle_once` | **RED** |
 | commit inside the hook on the reuse branch | `test_a_borrowed_handle_reports_the_same_outcome_to_its_caller` | **RED** |
+| drop the `options` parked-handle bound from `_default_connect` | `test_every_connection_carries_the_parked_handle_bound` | **RED** |
 
 ⚠️ Two mutations were tried first and reported **STILL-GREEN**. ONE was a
 defect in the mutant; the other was reporting a REAL gap in the pin (per bullet) —

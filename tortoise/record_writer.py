@@ -302,6 +302,37 @@ RECORD_SINGLE_TENANT_ENV = "TORTOISE_RECORD_SINGLE_TENANT"
 #: silently replaced by this one.
 CONNECT_TIMEOUT_SECONDS = 10
 
+#: How long a POOLED handle may sit **idle in transaction** before the SERVER ends
+#: it, in seconds (#9558 review cycle 4, P1). ``0`` — the server default — is
+#: unbounded, and pooling turns that into a lock leak: the READ door parks a
+#: handle INTRANS **on purpose** (``open_record`` issues its transaction-local
+#: ``set_config`` and never commits), so before this bound a parked handle held
+#: an ``AccessShareLock`` on the record tables until the SAME DSN was borrowed
+#: again *in that process* — which may be never.
+#:
+#: Measured on PostgreSQL 16: a session parked exactly that way reports
+#: ``state = idle in transaction`` with relation ``AccessShareLock``s, and a
+#: concurrent ``ALTER TABLE`` on the same table fails with a lock timeout (it
+#: does not block plain DML). Record migrations are actively edited (#9881 added
+#: an ``ALTER TABLE public.point``), so a worker that served one read and then
+#: went quiet could hang the next migration. Nothing else bounds it:
+#: ``idle_in_transaction_session_timeout`` was set **nowhere** in the tree, and
+#: ``open_record``'s ``statement_timeout`` is transaction-local and bounds
+#: STATEMENTS, not idling.
+#:
+#: 60 s — not seconds, not infinity. It rides the ``options`` STARTUP packet, so
+#: it costs **no round trip** and therefore does not undo the change it escorts.
+#: The WRITE door parks IDLE, so this bound never fires on the path the pool
+#: exists for; it only reclaims a READ-door handle, and a read borrow issues its
+#: statements back to back. A handle the server ends is handled by the path that
+#: already exists — the borrow-time reset raises, the handle is discarded, the
+#: caller gets a fresh connect (see ``_take_idle_connection``) — so expiring one
+#: costs a reconnect, never a surfaced error. A DSN that sets its own
+#: ``idle_in_transaction_session_timeout`` WINS, for the same reason
+#: :data:`CONNECT_TIMEOUT_SECONDS` defers to a ``connect_timeout`` the operator
+#: named.
+IDLE_IN_TRANSACTION_TIMEOUT_SECONDS = 60
+
 #: How long the LIVE door stops trying after a connect to the record FAILED, in
 #: seconds. :data:`CONNECT_TIMEOUT_SECONDS` bounds ONE connect; it does not bound
 #: a CAPTURE, and the door is called once per journal record on the caller's
@@ -990,11 +1021,23 @@ def _default_connect(dsn: str) -> Any:
     # (needs no percent-encoding, passes `_DSN_SCHEMES`) would otherwise take
     # the "already bounded" branch and restore libpq's wait-forever default on
     # the per-record connect this constant exists to cap (#9231 review P2).
+    connect_kwargs: dict[str, Any] = {}
     if "connect_timeout" in parse_qs(urlsplit(dsn).query):
         # The operator bounded it already; do not replace their number.
-        raw = psycopg2.connect(dsn)
+        pass
     else:
-        raw = psycopg2.connect(dsn, connect_timeout=CONNECT_TIMEOUT_SECONDS)
+        connect_kwargs["connect_timeout"] = CONNECT_TIMEOUT_SECONDS
+    # ⛔ EVERY connect carries the parked-handle bound (#9558 review cycle 4,
+    # P1), because the handle it opens can be PARKED later and the bound has to
+    # be on the session, not on the call that happened to create it. `options`
+    # is a STARTUP parameter, so this adds no round trip and cannot be lost on
+    # reuse. An operator's own value wins, same rule as `connect_timeout`.
+    if "idle_in_transaction_session_timeout" not in dsn:
+        connect_kwargs["options"] = (
+            "-c idle_in_transaction_session_timeout="
+            f"{IDLE_IN_TRANSACTION_TIMEOUT_SECONDS * 1000}"
+        )
+    raw = psycopg2.connect(dsn, **connect_kwargs)
     return _pooled_connection(raw, dsn)
 
 
@@ -1159,8 +1202,12 @@ class _PooledConnection:
     nothing in this tree does that.
 
     ⚠️ The transaction is the caller's, exactly as before: ``commit()`` forwards.
-    What the pool adds is a ROLLBACK on release for a handle that is not IDLE, so
-    an aborted projection cannot be inherited by the next record.
+    What the pool adds is a reset of a handle that is not IDLE, charged to the
+    next BORROW rather than to release — so an aborted projection still cannot be
+    inherited by the next record, but the round trip happens where the caller is
+    about to issue statements anyway (#9558 review cycle 4, P1). ⛔ It is NOT a
+    rollback on release: that put a server round trip on the release of every
+    read borrow, after the rows were fetched and before the answer was returned.
     """
 
     def __init__(self, raw: Any, key: str) -> None:
@@ -1283,6 +1330,21 @@ def _park_connection(key: str, conn: Any) -> None:
     old close-per-record path paid (**12.5–13.9 ms**, the connection half of the
     BEFORE record's 18.9–20.1 ms — not the whole record, per
     `docs/evidence/9558-record-write-cost/`).
+
+    ⚠️ WHAT A PARKED HANDLE STILL HOLDS — the price of not resetting here, and
+    it is not zero. The READ door parks INTRANS on purpose, and an INTRANS handle
+    holds an ``AccessShareLock`` on the tables the read touched until its
+    transaction ends (measured on PostgreSQL 16: such a session blocks
+    ``ALTER TABLE``/``DROP``/``VACUUM FULL``/``CLUSTER``/``TRUNCATE`` on those
+    tables, though not plain DML). The resolution is SERVER-side and needs no
+    round trip: every connection this module opens carries
+    :data:`IDLE_IN_TRANSACTION_TIMEOUT_SECONDS` in its STARTUP ``options``, so a
+    parked transaction cannot outlive that bound. A handle the server ends this
+    way is handled by the ordinary path — the borrow-time reset raises, the
+    handle is discarded, the caller gets a fresh connect — so the bound costs an
+    occasional reconnect, never a surfaced error. (An INERROR handle is the
+    cheaper case: an aborted transaction releases its locks at the error, so the
+    WRITE door's dirty park holds no lock at all.)
 
     ⚠️ It also NORMALISES `autocommit` back to False. The wrapper forwards session
     state on purpose (`__setattr__`), so a caller may legitimately set it — but a
@@ -1421,8 +1483,12 @@ class RecordWriter:
             is still open, uncommitted and NOT rolled back — rolling back is the
             caller's act, because only the caller knows what else is in that
             transaction. When the seam opened the connection itself it CLOSES it
-            before raising (closing aborts the transaction), because the caller
-            never receives that handle: there is nothing it could roll back.
+            before raising, because the caller never receives that handle: there
+            is nothing it could roll back. ⚠️ ``close()`` on a pooled handle PARKS
+            it rather than aborting it — a handle parked with an unfinished
+            transaction is reset by the next BORROW, and the lock that leaves
+            behind is bounded server-side by
+            :data:`IDLE_IN_TRANSACTION_TIMEOUT_SECONDS`.
 
         NOT ARMED ⇒ returns ``RecordWrite(NOT_ARMED)`` and touches nothing: no
         connection, no statements, no fold materialization, no exception. It is
@@ -1473,8 +1539,14 @@ class RecordWriter:
             # A connection the SEAM opened is disposed of here: the caller never
             # receives it, so nobody else can close it, and the traceback below
             # would otherwise keep `target` (its aborted transaction, its backend
-            # slot) alive as long as the exception is held. Closing aborts the
-            # transaction, which is the only outcome left once it is invisible.
+            # slot) alive as long as the exception is held. ⛔ ``close()`` on a
+            # pooled handle does NOT abort the transaction: it PARKS the handle
+            # as it stands, and the reset is charged to the next BORROW (that
+            # placement is deliberate — a release rollback is a round trip on
+            # every read borrow; see `_park_connection`). What bounds the parked
+            # transaction, and with it the AccessShareLock an INTRANS handle would
+            # otherwise hold indefinitely, is
+            # IDLE_IN_TRANSACTION_TIMEOUT_SECONDS on the server side.
             # An INJECTED connection is never touched — it is the caller's.
             if opened is not None:
                 # A close failure must not mask the cause — the write failure is

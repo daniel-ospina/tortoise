@@ -440,10 +440,11 @@ def _fake_driver(monkeypatch) -> dict[str, list[Any]]:
     Returns `{"handles": [...], "dsns": [...]}` — one entry per connect.
     """
     psycopg2 = pytest.importorskip("psycopg2", reason="the pool needs its driver")
-    made = {"handles": [], "dsns": []}
+    made = {"handles": [], "dsns": [], "kwargs": []}
 
-    def connect(dsn: str, **_kwargs: Any) -> Any:
+    def connect(dsn: str, **kwargs: Any) -> Any:
         made["dsns"].append(dsn)
+        made["kwargs"].append(kwargs)
         handle = FakeStatusConnection()
         made["handles"].append(handle)
         return handle
@@ -642,6 +643,112 @@ def test_a_handle_that_dies_while_idle_is_discarded_at_borrow():
     assert dead.closed == 1, (
         "the dead handle was neither handed out nor CLOSED — its socket and "
         "backend slot leak")
+
+
+def test_a_dead_candidate_is_skipped_and_a_live_one_in_the_bucket_is_used():
+    """The borrow must RETRY past a dead candidate, not give up on the bucket.
+
+    `_take_idle_connection` pops candidates in a `while True` loop because the
+    first one it pops may be a corpse. Without the loop a single dead handle in
+    front of a live one turns every borrow into a fresh connect — the pool would
+    silently stop pooling after one server restart, which is exactly when it is
+    worth having.
+
+    ⛔ THIS IS THE PIN THE #9558 CYCLE-4 REVIEW FOUND MISSING: collapsing the
+    loop to a single `pop()` left the whole suite green (measured), so nothing
+    would have caught that regression.
+
+    FALSIFIER: make the loop body take ONE candidate and return it without
+    retrying, and this reds.
+    """
+    dead = FakeStatusConnection(status=2)      # INTRANS: the read door's shape
+    dead.rollback = lambda: (_ for _ in ()).throw(      # type: ignore[assignment]
+        RuntimeError("server closed the connection unexpectedly"))
+    live = FakeStatusConnection(status=2)      # also INTRANS, but alive
+    # Park the LIVE one first: `_take_idle_connection` pops LIFO, so the corpse
+    # must be the LAST parked to be the FIRST candidate the borrow pops.
+    rw._park_connection(_DSN_KEY, live)
+    rw._park_connection(_DSN_KEY, dead)
+    assert rw._take_idle_connection(_DSN) is live, (
+        "the borrow gave up on the bucket instead of retrying past the dead "
+        "candidate — one corpse in front of a live handle permanently disables "
+        "pooling for that DSN")
+    assert live.rollbacks == 1, (
+        "the live candidate was handed out without its parked transaction "
+        "being reset")
+    assert dead.closed == 1, "the dead candidate was not discarded"
+
+
+def test_a_discarded_candidate_is_replaced_by_a_fresh_connect(monkeypatch):
+    """A dead idle handle must cost a RECONNECT, never a surfaced error.
+
+    The read door parks INTRANS, so `_reset_parked_transaction` is that handle's
+    first wire touch; when it raises the caller must still get a working
+    connection — `_default_connect` falls through to `psycopg2.connect`. This
+    pins the half the cycle-4 review found untested: the previous pin stopped at
+    `_take_idle_connection(...) is None` and never asserted a connect followed.
+
+    FALSIFIER: make `_default_connect` return None when `_take_idle_connection`
+    yields nothing after a discard, and this reds.
+    """
+    made = _fake_driver(monkeypatch)
+    dead = FakeStatusConnection(status=2)
+    dead.rollback = lambda: (_ for _ in ()).throw(      # type: ignore[assignment]
+        RuntimeError("server closed the connection unexpectedly"))
+    rw._park_connection(_DSN_KEY, dead)
+    fresh = rw._default_connect(_DSN)
+    assert len(made["dsns"]) == 1, (
+        f"{len(made['dsns'])} connects — a discarded candidate must be "
+        "replaced by exactly one fresh connect")
+    assert fresh is not dead, "the discarded handle was handed back to the caller"
+    assert dead.closed == 1, "the discarded handle's socket leaked"
+
+
+def test_every_connection_carries_the_parked_handle_bound(monkeypatch):
+    """A parked INTRANS handle must not hold its locks indefinitely (P1).
+
+    The read door parks a handle INTRANS on purpose, and an INTRANS handle holds
+    an `AccessShareLock` on the tables it read until its transaction ends —
+    measured on PostgreSQL 16, such a session blocks `ALTER TABLE`, `DROP`,
+    `VACUUM FULL` and `CLUSTER` on those tables. Record migrations ARE actively
+    edited, so an otherwise-quiet worker could hang the next migration.
+
+    Nothing else bounds it: `idle_in_transaction_session_timeout` is set nowhere
+    in the tree and the server default is 0 (disabled), and `open_record`'s
+    `statement_timeout` is transaction-local and bounds STATEMENTS, not idling.
+    The bound therefore ships in the STARTUP `options` packet, which costs no
+    round trip — the fix must not undo the change it escorts.
+
+    FALSIFIER: drop the `options` kwarg from `_default_connect` and this reds.
+    """
+    made = _fake_driver(monkeypatch)
+    rw._default_connect(_DSN)
+    options = made["kwargs"][0].get("options", "")
+    assert "idle_in_transaction_session_timeout" in options, (
+        f"the connection carries no idle-in-transaction bound (options={options!r}) "
+        "— a parked INTRANS handle would hold an AccessShareLock until the same "
+        "DSN is borrowed again, which may be never")
+    assert f"={rw.IDLE_IN_TRANSACTION_TIMEOUT_SECONDS * 1000}" in options, (
+        "the bound on the wire does not come from "
+        "IDLE_IN_TRANSACTION_TIMEOUT_SECONDS")
+
+
+def test_an_operator_idle_timeout_is_not_replaced(monkeypatch):
+    """A DSN that names its own bound WINS — same rule as `connect_timeout`.
+
+    Silently replacing an operator's explicit number is the defect the
+    `connect_timeout` branch already guards against (#9231 review P2); the new
+    bound must not reintroduce it.
+
+    FALSIFIER: drop the `not in dsn` guard and this reds.
+    """
+    made = _fake_driver(monkeypatch)
+    rw._default_connect(
+        "postgresql://record@127.0.0.1/db"
+        "?idle_in_transaction_session_timeout=900000")
+    assert "options" not in made["kwargs"][0], (
+        "the pool overrode an idle-in-transaction bound the operator named "
+        f"(kwargs={made['kwargs'][0]!r})")
 
 
 def test_the_idle_set_is_bounded_and_overflow_is_closed():
