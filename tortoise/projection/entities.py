@@ -2049,9 +2049,14 @@ class _EntityHandlers:
         # `update_entity(…, story_arc=None)` is REFUSED here as server-managed
         # (the `:Point` half DOES have an in-place clear,
         # `update_point(<id>, story_arc=None)` — #11325, and only on the rows where
-        # the record still holds the text: `public.session_narrative.narrative`, or
-        # the point's own `props` tail — where neither carries it the node's copy is
-        # the ONLY one and that clear deletes the prose); `#10017`'s purge is
+        # the record still holds the text: `public.session_narrative.narrative` —
+        # ⛔ NOT the point's own `props` tail, which the clear's OWN record write
+        # consumes (`point` has no `story_arc` column, so the projection tails the
+        # key and the patch merges RIGHT-HAND, `props = props || '{"story_arc":
+        # null}'`, OVERWRITING the prose) — where the narrative row does not carry it
+        # the node's copy is
+        # the only one no SHIPPED route can put back on a production graph, and that
+        # clear deletes the prose); `#10017`'s purge is
         # the legacy turn `:Point` population and never matches a `:Source`
         # (`#11325`).
         #

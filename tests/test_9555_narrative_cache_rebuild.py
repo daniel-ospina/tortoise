@@ -501,8 +501,12 @@ def test_the_point_clear_removes_the_prose_and_keeps_the_node():
     no route that RESTORES the value, and that on a `:Point` a targeted CLEAR
     does ship: `update_point(<id>, story_arc=None)` removes the property and
     KEEPS the node — ⛔ and ONLY where the record still holds the text for the
-    session (`public.session_narrative.narrative`, or the point's own `props`
-    tail); where neither carries it the node's copy is the only one, so that clear
+    session (`public.session_narrative.narrative`; NOT the point's own `props`
+    tail — the clear's OWN record write overwrites it with a stored null, pinned
+    by `test_the_point_props_tail_is_not_a_record_home_for_the_prose` below);
+    where the narrative row does not carry it the node's copy is the only one no
+    shipped route can put back on a production graph, so
+    that clear
     deletes the prose. That is load-bearing operator guidance — it is the difference
     between "clear the stale copy" and "wipe the graph" — and it was asserted as
     measured at six prose sites while nothing in the suite exercised the door.
@@ -579,6 +583,69 @@ def test_the_point_clear_removes_the_prose_and_keeps_the_node():
             "which is `#10429`'s)")
     finally:
         sdk.close()
+
+
+def test_the_point_props_tail_is_not_a_record_home_for_the_prose():
+    """#11325 review cycle 3 — the clear CONSUMES the tail it is licensed by.
+
+    The per-row test licensed a `:Point` clear "where the record still HOLDS the
+    text" and counted the point's OWN `props` tail as one of the two homes. That
+    second home is consumed by the very clear it licenses, so on a row whose only
+    record home is the tail the "safe" clear destroys the last copy the record's
+    KEYED VIEW holds:
+
+      (1) `update_point(<id>, story_arc=None)` journals `PointRevised` carrying
+          `story_arc: None` — the `None` is what makes the clear work at all;
+      (2) `_split_properties("point", …)` finds no `story_arc` column on
+          `public.point` and the name is not refused for `point`, so it lands in
+          the tail — with NO null filter;
+      (3) `_patch_statement` writes the tail as a RIGHT-HAND merge
+          (`props = props || $n::jsonb`), so `{"story_arc": null}` OVERWRITES the
+          prose that tail held.
+
+    So the operator guidance names `public.session_narrative.narrative` and
+    nothing else (§17.2, §9.1(a), `record_reconcile`, `record_serve`, the epic's
+    cache-projection section and the changelog's cycle-3 stamp). ⛔ This is the
+    pin that keeps those docs honest rather than restating them: a null filter
+    added for `point` (making the tail survive) or a left-hand merge would make
+    the tail a home again, and this test reds until the guidance says so.
+    """
+    import tortoise.record_projection as rp
+
+    columns = rp.table_columns()
+    refused = rp.refused_props_names()
+    assert "story_arc" not in columns["point"], (
+        "`public.point` now HAS a `story_arc` column — the tail argument below no "
+        "longer holds, so re-derive the §17.2 guidance before removing this pin"
+    )
+    col_values, tail = rp._split_properties(
+        "point", {"id": "pt-tail-home", "story_arc": None},
+        columns=columns, refused=refused,
+    )
+    assert "story_arc" not in col_values, col_values
+    assert "story_arc" in tail and tail["story_arc"] is None, (
+        "a cleared `story_arc` no longer reaches the point's props tail — this "
+        "pin's premise moved (a null filter was added?), so the §17.2 per-row "
+        f"test may need the tail back as a home. Got tail={tail!r}"
+    )
+
+    stmt = rp._patch_statement(
+        "org", "graph", rp.Node("point", "Point", "id"), "pt-tail-home",
+        col_values, tail,
+    )
+    assert "props = props ||" in stmt.sql, (
+        "the point patch is no longer a RIGHT-HAND props merge, so a stored prose "
+        "tail would SURVIVE the clear and the tail would be a legitimate home "
+        f"again — re-derive the §17.2 guidance. SQL: {stmt.sql!r}"
+    )
+    # …AND the null actually REACHES that merge: the right-handed form alone is not
+    # enough, because a null-stripping serializer would emit `props || '{}'` and
+    # leave the stored prose standing while the SQL above still reads right-handed.
+    assert json.loads(stmt.params[1]) == {"story_arc": None}, (
+        "the cleared `story_arc` no longer reaches the right-hand merge's parameter "
+        "(a null-stripping serializer?), so the stored prose would SURVIVE the "
+        f"clear and the tail would be a home again. Got {stmt.params!r}"
+    )
 
 
 # ── door 2: the RECORD → CACHE restore (#10394) ─────────────────────────────

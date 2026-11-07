@@ -175,11 +175,20 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   and ``update_point``'s ``SET n += $props`` REMOVES a property set to ``None``;
   the journal records the ``None``, and the same live door is bound by the MCP
   tool ``tortoise_update_point``) — ⚠️ **and ONLY on the rows where the record still
-  HOLDS the text** (``public.session_narrative.narrative`` for the session, or the
-  point's own ``props`` tail): where neither carries it the point's copy is the ONLY
-  one, and NO clear may be applied to it — on a production name the ``rebuild_all``
-  that would put it back is REFUSED PRE-WIPE, so the clear there deletes the prose
-  rather than repairing the cache. ⚠️ **Its durability is FOLD-DEPENDENT, and the
+  HOLDS the text** (``public.session_narrative.narrative`` for the session — ⛔ NOT
+  the point's own ``props`` tail): where the narrative row does not carry it the
+  point's copy is the only one NO SHIPPED route can put back on a production graph
+  (the record's KEYED view does not hold it), and NO clear may be applied to it — on a production
+  name the ``rebuild_all`` that would put it back is REFUSED PRE-WIPE, so the clear
+  there deletes the prose rather than repairing the cache. ⛔ **The tail is excluded
+  because the clear's OWN record write consumes it**: ``story_arc`` is no
+  ``public.point`` column, so ``record_projection._split_properties`` sends the key
+  to the tail (it has no null filter) and the record patch is a RIGHT-HAND merge
+  (``props = props || $n::jsonb``) — so ``{"story_arc": null}`` OVERWRITES the prose
+  that tail held, and a row whose only record home is the tail loses the last copy
+  the record's KEYED VIEW holds to the very clear that counting it licensed (the
+  append-only ``journal_event`` payload still carries the pre-clear prose — see the
+  rebuild bound below, whose reach is what decides whether it can be put back). ⚠️ **Its durability is FOLD-DEPENDENT, and the
   bound is the JOURNAL one**: ``_revise_point``'s SET list is a closed set that
   names no ``story_arc`` clause, and the creation fold's open-set passthrough
   (``_persist_extra_props``, which ``_revise_point`` never calls) skips a ``None``
@@ -718,7 +727,8 @@ def reconcile_record_and_cache(
     resurrecting them), not the clearing of this class. Never a destructive one
     for the ``:Point`` half — it has the non-destructive route named above, on the
     rows where the record still holds the text (where it does not, that clear
-    destroys the only copy and is not a repair at all).
+    leaves no copy a shipped route can put back on a production graph, and is not a
+    repair at all).
     Nothing here performs either. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a

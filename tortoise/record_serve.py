@@ -1216,9 +1216,14 @@ def parity_difference(cache_props: Mapping[str, Any],
       carries must NOT be restored at all — copy that prose out first, because the
       wipe destroys the only copy (§17.2, `#11325`); ⚠️ a ``:Point``
       copy has a NON-destructive one, **on the same per-row test** — only where the
-      record still HOLDS the text for that session (the point's own ``props`` tail,
-      or ``public.session_narrative.narrative``); where neither carries it the
-      node's copy is the ONLY one and the clear deletes it, because the
+      record still HOLDS the text for that session
+      (``public.session_narrative.narrative`` — ⛔ NOT the point's own ``props``
+      tail, which the clear's OWN record write consumes: ``point`` has no
+      ``story_arc`` column, so the projection tails the key and the patch merges
+      RIGHT-HAND, ``props = props || $n::jsonb``, so a null OVERWRITES the prose);
+      where the narrative row does not carry it the
+      node's copy is the only one no SHIPPED route can put back on a production
+      graph (the record's KEYED view does not hold it), and the clear deletes it, because the
       ``rebuild_all`` that would put it back is refused PRE-WIPE on a production
       name:
       ``update_point(<id>, story_arc=None)`` clears the property and keeps the
