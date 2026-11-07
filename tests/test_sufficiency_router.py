@@ -18,8 +18,9 @@ These tests pin the decision at the point where it is made:
 * the router takes **no query class** — pinned structurally, so the classifier
   §12.4 rejects cannot be reintroduced without reddening a test;
 * the write-back carries its **span**, never promotes a class, never carries the
-  raw payload, and **dedupes by identity** (the attribution loop, without which
-  the escalation is a permanent tax).
+  raw payload, and **dedupes by identity** — within one call only, which is why
+  the caller hands the plan what the cheap tier already holds (the attribution
+  loop; without the across-call half the escalation is a permanent tax).
 
 MUTATION PROOF — the guard each test exists to hold, and the edit that turns it
 RED:
@@ -1085,6 +1086,43 @@ def test_the_same_verified_finding_writes_back_once_within_ONE_CALL() -> None:
     assert len(again.units) == 1
     assert len(both.units) == 1
     assert both.units[0].unit_key == first.units[0].unit_key
+
+
+def test_no_loop_claim_in_the_module_docstring_credits_the_within_call_half() -> None:
+    """The loop's credit belongs to the STORE, and the module's prose kept not saying so.
+
+    This claim re-staled three times (cycle 6 on `WritebackPlan`'s summary line,
+    cycle 7 in this file, cycle 11 in the module's DECIDED section): the fix
+    landed in the code while an older sentence went on crediting ``dedupes by
+    identity`` for making the escalation an investment — and that within-call
+    dedupe is precisely the half §12.5b says *"is not enough"*, so the reader
+    got the belief that produced the duplicate this PR exists to stop.
+
+    The pin is SEMANTIC, not a sentence: every paragraph of the module docstring
+    that mentions the attribution loop must either scope the dedupe to one call
+    or name ``already_written``. Mutant: restore the pre-#11428 bullet ("written
+    back twice is ONE unit. That is what makes the escalation an investment …
+    its absence is … 'no attribution loop'") → RED here, and green everywhere
+    else in this file, because it asserts prose and nothing else.
+    """
+    import re
+
+    from tortoise import sufficiency_router
+
+    paragraphs = [
+        " ".join(block.split())
+        for block in re.split(r"\n\s*\n", sufficiency_router.__doc__ or "")
+        if "attribution loop" in block.casefold()
+    ]
+    assert paragraphs, "the module docstring no longer mentions the loop at all"
+    unscoped = [
+        p for p in paragraphs
+        if "already_written" not in p and "within one call" not in p.casefold()
+    ]
+    assert not unscoped, (
+        "the module docstring credits the loop without naming the across-call "
+        "half (the store the caller hands in):\n" + "\n".join(unscoped)
+    )
 
 
 def test_two_classes_for_one_identity_are_refused_not_settled_by_order() -> None:

@@ -128,9 +128,12 @@ A summary unit written back to the cheap tier:
   router learning to fetch from the wrong tier"* — a different defect; the
   class sense is §12.4's.)
 * **dedupes by identity** — the key is content-addressed over (span, normalised
-  claim), so the SAME verified finding written back twice is ONE unit. That is
-  what makes the escalation an investment rather than a repeating tax; its
-  absence is the published *"no attribution loop"* failure (§12.7).
+  claim), so the SAME verified finding written back twice WITHIN ONE CALL is ONE
+  unit. That is the half that is not enough: ACROSS calls the caller hands the
+  plan the units the cheap tier ALREADY holds (``already_written``), and the
+  repeat is reported (``already_persisted``) instead of re-minted. *That* is what
+  makes the escalation an investment rather than a repeating tax; its absence is
+  the published *"no attribution loop"* failure (§12.7).
 
 WHAT THIS MODULE DELIBERATELY IS NOT
 ====================================
@@ -1431,10 +1434,13 @@ def unit_key(span: SourceSpan, claim: str) -> str:
     """Content-addressed identity for a summary unit.
 
     Over ``(span, normalised claim)`` so that the SAME verified finding written
-    back twice is ONE unit. This is the attribution loop's whole mechanism: the
-    second escalation of the same question must not pay for a duplicate, or
-    §12.8 item 4's "escalation is a permanent tax rather than an investment"
-    is exactly what we ship.
+    back twice is ONE unit. This is the IDENTITY half of the attribution loop,
+    and only the identity half: the key is what a repeat is recognised BY, and
+    nothing is recognised across calls until the caller hands the stored units
+    in (``already_written``, the other half — see ``plan_writeback``). Without
+    that, the second escalation of the same question pays again for the
+    duplicate, and §12.8 item 4's "escalation is a permanent tax rather than an
+    investment" is exactly what we ship.
     """
     if not isinstance(span, SourceSpan):
         raise TypeError("unit_key needs a SourceSpan — a unit without an address is unattributable")
