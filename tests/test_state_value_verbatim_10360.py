@@ -1845,6 +1845,15 @@ _RESIDUAL_ANCHORED_OPENNESS = (
     # variants are carried below. A Python lookbehind must be fixed-width, so a
     # different adverb means another form — do NOT read the run as exhaustive
     # (#11258 review round 3 `P2`, measured on the word "exact").
+    # ⛔ AND THE COST OF THAT BOUNDEDNESS IS EXECUTABLE, not a sentence here
+    # (#11258 round-20 `P3`, MEASURED): three honest denials with an interpolated
+    # adverb or comma — `has not to date been reopened.`, `has not, in practice,
+    # been reopened.`, `has not yet, in practice, been re-opened.` — are REFUSED,
+    # because a fixed-width lookbehind cannot cross the interpolation. Widening
+    # the run is not the fix (the trades are rounds 2/9/10), so all three live in
+    # `_RESIDUAL_REFUSED_TRUTHFUL` where the suite re-measures them; this note
+    # pointing at prose was the defect the round-19 `fails open` fix had already
+    # closed one arm over.
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
     r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
     r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
@@ -2895,6 +2904,22 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     # `test_the_residual_region_is_scanned_WHERE_a_lane_appends`).
     "the numeric side fails open on an unknown unit",
     "the numeric side still fails open on purpose",
+    # ⛔ THE BOUNDED-LOOKBEHIND OVER-BLOCK, recorded here rather than in the run's
+    # own note (#11258 review round 20 `P3`, MEASURED RED at the append point):
+    # these are honest DENIALS of a reopening — the direction the run exists to
+    # accept — and each is refused because its adverb (or a parenthetical comma)
+    # sits between `not` and `been`, which a FIXED-WIDTH lookbehind cannot cross.
+    # `, in practice, ` is this row's OWN register, not an exotic construction, so
+    # a lane writing an update meets it; the refusal message names this ledger as
+    # the route out, so the entry must exist for that route to be true.
+    # ⛔ DO NOT "FIX" THESE BY WIDENING THE RUN: a variable-width `not … been`
+    # lookbehind is impossible in `re`, and the adverb-list alternative is the
+    # closed-list trade rounds 2/9/10 measured against (a dropped adverb re-opens
+    # the reopening). The over-block is the direction this artifact chooses; it is
+    # paid openly, per entry, at zero slack.
+    "the ADJACENCY half has not to date been reopened.",
+    "the ADJACENCY half has not, in practice, been reopened.",
+    "the ADJACENCY half has not yet, in practice, been re-opened.",
 )
 
 
@@ -3094,13 +3119,14 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         _RESIDUAL_REFUSED_TRUTHFUL), (
         "the over-block ledger has duplicate entries — a duplicate pays for a "
         "dropped cost while the count stays constant")
-    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 12, (
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 15, (
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
         "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (12), i.e. ZERO SLACK: the round-11 entries are the "
-        "`not … closed` cost, round 19 added the two `fails open` costs, and "
-        "slack above them is slack to delete one of those with")
+        "CURRENT LENGTH (15), i.e. ZERO SLACK: the round-11 entries are the "
+        "`not … closed` cost, round 19 added the two `fails open` costs, round 20 "
+        "added the three bounded-lookbehind denials, and slack above them is "
+        "slack to delete one of those with")
     for required in (
             # the unit-token waiver cost — the one a lane actually meets, because
             # the row's surviving gap IS the unit-spelling class
@@ -3127,7 +3153,16 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # ledger, the same defect round 9 closed one entry over. They are also
             # the ONLY entries that pin `_RESIDUAL_FAIL_OPEN`'s anchor requirement.
             "the numeric side fails open on an unknown unit",
-            "the numeric side still fails open on purpose",):
+            "the numeric side still fails open on purpose",
+            # ⛔ AND THE BOUNDED-LOOKBEHIND TRIO (#11258 review round 20 `P3`):
+            # without membership each is substitutable by a duplicate of an entry
+            # above — uniqueness and length survive and the measured class leaves
+            # the ledger, the same defect round 9 closed one entry over. They are
+            # also the ONLY entries that pin the fixed-width limit of the
+            # negation run, so deleting the note that explains it now reds here.
+            "the ADJACENCY half has not to date been reopened.",
+            "the ADJACENCY half has not, in practice, been reopened.",
+            "the ADJACENCY half has not yet, in practice, been re-opened.",):
         assert required in _RESIDUAL_REFUSED_TRUTHFUL, (
             f"the over-block ledger no longer carries {required!r} — that shape's "
             "refusal is the measured price of a specific rule; if it is no longer "
