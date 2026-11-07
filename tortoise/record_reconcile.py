@@ -156,7 +156,7 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   carries must NOT be restored at all — copy that prose out first, because on the
   pre-``#9555`` population (raw-Cypher write, never journalled;
   ``session_narrative`` TEXT columns measured NULL) the graph copy is the ONLY
-  copy and the graph-wide wipe DESTROYS it (see the GRAPH gate below, `#11325`) — and on a
+  copy and the graph-wide wipe DESTROYS it (see (5)'s unit-is-the-GRAPH rule below, `#11325`) — and on a
   SERVER graph that restore is refused PRE-WIPE unless
   the graph name starts ``test_``/``tortoise_test`` (``record_restore._ask_the_wipe_guard``
   → the projection's ``_assert_test_graph``, #2944), and no production name does
