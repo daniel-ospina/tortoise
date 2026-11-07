@@ -131,6 +131,24 @@ surfaces:
   # braces there, and deleting it would red nothing.
   - test_stdlib_shadow_guard.py
   - test_11092_sentry_loop_stall.py
+  # #10892: the served-request liveness surface. Dual-registered for the reason
+  # the hosted_api.py guards above are — `GET /liveness` and its counter live in
+  # `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match that REPLACES
+  # the `core` fallback, so without this row the endpoint's provenance pin
+  # (`test_handler_yields_to_the_loop_and_reads_no_cached_state`) is never
+  # selected on a hosted_api.py-only diff — the exact change class it guards.
+  # The prober half (`.github/workflows/availability-watchdog.yml`,
+  # `.github/scripts/availability-watchdog.sh`) matches no SOURCE_PATTERNS row,
+  # so a `.github`-only diff fails CLOSED to the FULL matrix (measured:
+  # `--changed-files .github/scripts/availability-watchdog.sh` → `full: true`, and
+  # the selector's own unknown-path branch says so out loud). It is NOT a `core`
+  # fall-through — the same false premise `website/functions/_middleware.ts` was
+  # once registered on; see the `website/functions/_middleware.ts` record below.
+  # The `core` row below is
+  # what covers a `tests/`-only diff to this file.
+  # Pinned by
+  # tests/test_ci_selection.py::test_the_github_prober_paths_fail_closed_to_the_full_matrix.
+  - test_10892_served_liveness.py
   # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
   # This file pins the ONBOARDING seed surfaces, and two of them live outside
   # `core`: `_OrgSeedSurface` in `tortoise/hosted_api.py` — an EXACT `api`
@@ -3962,6 +3980,13 @@ surfaces:
   # `_SELF_GUARD_DEBT` so a `sentry.py`-only diff does not run it either.
   - test_11092_sentry_loop_stall.py
   - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
+  # #10892: the OTHER half of the served-liveness pair (the `api` row above is
+  # the first). `core` is what covers a diff touching nothing but THIS test
+  # file; it does NOT cover the prober: `.github/**` matches no SOURCE_PATTERNS
+  # row and fails CLOSED to the FULL matrix — stating otherwise re-asserts the
+  # false fall-through premise this PR's own test refutes, and that pin is
+  # tests/test_ci_selection.py::test_the_github_prober_paths_fail_closed_to_the_full_matrix.
+  - test_10892_served_liveness.py
   - test_context_confinement.py  # #10612: one fresh contextvars.Context per invocation (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
   # #8920 (review P3): production pointers into `tests/` must resolve, and no
@@ -5283,6 +5308,9 @@ surfaces:
   # `test_pack_extraction_slots_v31.py`; after `test_pack_state.py`), every addition
   # applied cleanly, and the rows accumulated 1 → 2 → 3 (above). Do not re-add this row;
   # before hand-registering any file, check it is absent from THIS list.
+  # The CLASS root is **#10032** — a conflict-free replay that appends a `core`
+  # entry the other side already holds, while leaving the YAML valid. This row is
+  # an instance of it, not a second report (#11258).
   - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py

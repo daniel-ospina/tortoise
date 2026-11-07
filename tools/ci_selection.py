@@ -401,6 +401,71 @@ SOURCE_PATTERNS = {
                    # Listing a path is what makes a change to it select this
                    # surface at all — otherwise its guard test never runs.
                    "website/docs.html", "website/faq.html",
+                   # #11318: the SITE ICON SET and the shared link-preview card.
+                   # These are binaries, and `website/` is in NON_PYTHON_PREFIXES,
+                   # so `_keep_changed` dropped every one of them and a binary-only PR took
+                   # the docs-only early return — measured: `select(
+                   # ["website/favicon.png"])` → surfaces=[] and
+                   # `test_website_static.py` was NOT in the selected set, so a PR
+                   # that re-exported the favicon at the wrong size, replaced the
+                   # card with a flat rectangle, or hand-edited the ICO directory
+                   # ran NONE of the byte assertions written to catch exactly that.
+                   # Named as CONCRETE files, not `website/assets/` as a prefix:
+                   # that prefix would also claim every CSS/JS edit in the tree and
+                   # make this surface's blast radius meaningless. Same
+                   # #1349/#3332/#3616 silent-drop class as the entries above.
+                   #
+                   # ALL THREE link-preview cards, because
+                   # `test_the_declared_preview_size_matches_the_file` resolves the
+                   # `og:image` of EVERY page and holds it to its declared type, its
+                   # declared size and the 40 KB content floor — including the two
+                   # campaign pages' cards. Registering only the shared one left the
+                   # other two exactly in the class this paragraph describes:
+                   # measured `select(["website/assets/investors-og.jpg"])` ->
+                   # surfaces=[], so swapping that file for a 2 KB flat rectangle ran
+                   # none of the byte assertions that reject it.
+                   "website/favicon.ico", "website/favicon.png",
+                   "website/apple-touch-icon.png",
+                   "website/assets/og-tortoise.jpg",
+                   "website/assets/investors-og.jpg",
+                   "website/assets/design-partners-intro-og.jpg",
+                   # #11387: the WORDMARK is a WITNESS, not a linked asset — no page
+                   # uses it as an icon (that is precisely what
+                   # `test_the_wordmark_is_never_used_as_an_icon` forbids), so the
+                   # page-derived population above cannot see it. The card/icon guard
+                   # nonetheless OPENS its bytes: it is the real PNG whose IDAT carries
+                   # `FF D9`, the witness that isolates "a measure that hunts the last
+                   # `FF D9` is applied to a PNG" — the SUPERSEDED `rfind` measure read
+                   # it 6,280 B short (29,390 B); the current segment/scan walk reads it
+                   # in full, so the witness pins the PNG branch's IEND end, not that
+                   # older bug — and
+                   # `test_the_content_guards_reject_a_blank_image_and_keep_their_
+                   # measured_floors` asserts on its full length. Measured before this
+                   # entry: `select(["website/logo.png"])` -> `surfaces: []`, so
+                   # re-compressing the wordmark (an unrelated, plausible diff) merged
+                   # green with the guard ABSENT, and then REDed the NEXT diff that
+                   # selected the guard — billing its author for a file they never
+                   # touched. Same #1349/#3332/#3616 silent-drop class as the six
+                   # binaries above, one file over, and the same pair of failures
+                   # (guard never runs on its own subject; a red that arrives after the
+                   # merge) those entries were added to end.
+                   "website/logo.png",
+                   # #11387 review P2: the SECOND witness, and it is a file the guard
+                   # reads rather than a page-linked asset — `test_the_icon_target_guard_
+                   # reads_existence_and_shape` drives `/assets/premiselabs-logo.png`
+                   # (160x98) through the shape rule and requires the "non-square"
+                   # violation, so the test DEPENDS on those bytes. It is invisible to
+                   # both derivations (no page links it as an icon — that is what
+                   # `test_the_wordmark_is_never_used_as_an_icon` forbids — and it
+                   # appears in the guard only as a dict literal, so neither the
+                   # `(self.WEB / "…")` nor the `self.CONSTANT = "…"` shape resolves
+                   # it). Measured before this entry:
+                   # `select(["website/assets/premiselabs-logo.png"])` ->
+                   # `surfaces: []`, so re-exporting the wordmark SQUARE merged green
+                   # with the guard absent and then REDed the next onboarding diff —
+                   # billing its author for a file they never touched, exactly the
+                   # failure the `logo.png` entry above describes.
+                   "website/assets/premiselabs-logo.png",
                    # #3673: the served skill documents and the installer belong to
                    # this surface. The parity contract between
                    # `tortoise/onboarding/SKILL.md` and its served mirror is

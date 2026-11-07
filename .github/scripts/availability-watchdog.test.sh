@@ -486,6 +486,7 @@ reset_case() {
         ESCALATE_SUSTAINED_MINUTES ESCALATE_MIN_RUNS \
         PROBE_HOST_LABEL STUB_PATCH_FAIL \
         PROBE_EXPECT_STATUS PROBE_REQUIRE_HEADER PROD_PROBE_URLS RESTARTABLE_PROBE_URLS \
+        FLY_MACHINE_PROBE_URLS \
         RECOVERY_CONFIRM_PROBES SUSTAINED_MIN_RUNS PROBE_ATTEMPTS \
         MAX_RESTARTS_PER_HOUR STALE_RESET_MINUTES CONTROL_URL 2>/dev/null || true
   export GH_TOKEN="test-token"
@@ -1948,6 +1949,9 @@ PKCE_HEADERS=$'HTTP/2 302\r\nlocation: https://github.com/login/oauth/authorize?
 classify_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; classify_code "$1"' "$WATCHDOG" "$1"; }
 prod_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; if is_production_url "$1"; then printf PROD; else printf DRILL; fi' "$WATCHDOG" "$1"; }
 restartable_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; if is_restartable_url "$1"; then printf YES; else printf NO; fi' "$WATCHDOG" "$1"; }
+# #10892 review round 3 residual (P2): `is_machine_backed_url` is the ONLY thing
+# that tells the two `disarmed:no_machine` targets apart, and nothing pinned it.
+machine_backed_unit() { WATCHDOG_LIB_ONLY=1 bash -c 'source "$0"; if is_machine_backed_url "$1"; then printf YES; else printf NO; fi' "$WATCHDOG" "$1"; }
 
 # ── 93: classify_code — the allow-list is ADDITIVE, not a replacement ──────
 reset_case
@@ -1976,6 +1980,31 @@ assert_eq "$(prod_unit "https://api.premiselabs.co/v1/organizations/")" "PROD" "
 assert_eq "$(restartable_unit "https://api.premiselabs.co/v1/organizations")" "YES" "restart set: the Fly API surface may restart"
 assert_eq "$(restartable_unit "$AUTH_URL")" "NO" "restart set: the Pages auth surface is NEVER restartable"
 assert_eq "$(restartable_unit "https://staging.example.test/v1/organizations")" "NO" "restart set: a drill is not restartable"
+# ── 94a2: the MACHINE-BACKED set — the disarm class does NOT imply no machine ──
+# Both `disarmed:no_machine` targets reach case 88's arm; only ONE of them is a
+# Pages surface. Nothing pinned this discriminator, so dropping
+# `$LIVENESS_PROBE_URL` from the `FLY_MACHINE_PROBE_URLS` default (or reordering
+# the `is_machine_backed_url` branches) silently restored "no Fly machine … check
+# the Pages deploy" for a WEDGED MACHINE with every other assertion green — a
+# false PASS over exactly the misdiagnosis this arm exists to prevent. These
+# lines, plus the end-to-end cases 88b/100/101, are that pin.
+#
+# The URL is read from the SCRIPT (not from the workflow step, which case 99
+# cross-checks against it), so this block does not depend on a variable case 99
+# defines further down.
+LIVENESS_URL_UNDER_TEST="$(sed -n 's|^LIVENESS_PROBE_URL="\(https://[^"]*\)".*|\1|p' "$WATCHDOG" | head -1)"
+assert_not_empty "$LIVENESS_URL_UNDER_TEST" \
+  "machine set: the script's LIVENESS_PROBE_URL is derivable (else every assertion below is vacuous)"
+assert_contains "$(grep '^FLY_MACHINE_PROBE_URLS=' "$WATCHDOG" || true)" 'LIVENESS_PROBE_URL' \
+  "machine set: the DEFAULT set names the liveness URL (dropping it restores the Pages prose for a wedged machine)"
+assert_eq "$(machine_backed_unit "$LIVENESS_URL_UNDER_TEST")" "YES" \
+  "machine set: the served-liveness surface IS the Fly machine (hard-disarmed from the restart leg, not machine-less)"
+assert_eq "$(machine_backed_unit "https://api.premiselabs.co/v1/organizations")" "YES" \
+  "machine set: the primary API surface is machine-backed"
+assert_eq "$(machine_backed_unit "$AUTH_URL")" "NO" \
+  "machine set: the auth surface is NOT machine-backed (its remediation really is a Pages deploy)"
+assert_eq "$(machine_backed_unit "https://staging.example.test/v1/organizations")" "NO" \
+  "machine set: an unrecognised URL is not machine-backed (fail closed — never promise a machine we did not verify)"
 
 # ── 94b: an explicitly EMPTY set is honoured — empty ≠ unset (P3) ──────────
 # `${VAR:-default}` substitutes on unset OR EMPTY, so an operator who sets
@@ -2110,7 +2139,162 @@ assert_eq "$RC" "1" "auth: 503 → exit 1"
 assert_contains "$(created_json)" "PROD DOWN" "auth: 503 → PROD DOWN title"
 assert_eq "$(count_calls 'FLYCTL')" "0" "auth: 503 → flyctl was NEVER called (no Fly machine; no restart)"
 assert_contains "$OUT" "restart decision: disarmed:no_machine" "auth: the run log names the no-machine disarm"
+# …and the run-log WORDING for the non-machine arm, not just the shared decision
+# line. Without this the split could be made unconditional for the machine
+# message and the suite would stay green while the AUTH target's run log claimed
+# a Fly machine — the mirror of the misdirection case 88b pins (found by
+# mutation: replacing the branch with the bare machine-backed `log` left the
+# whole suite green).
+assert_contains "$OUT" "production surface with no Fly machine" "auth: the run log names the Pages surface (the non-machine arm of the split)"
 assert_contains "$(patched_body)" "NO Fly machine" "auth: the incident body explains why nothing was restarted"
+
+# ── 100: a HEALTHY /liveness answer is UP — the arm's ALIVE direction ──────
+# Case 88b proves this arm ALERTS (`000` → PROD DOWN). Nothing proved it does
+# NOT alert when the target is healthy: case 93 pins the allow-list MECHANISM
+# (with `302` as the listed code, and `200` only as an *unlisted* code), but no
+# case ever ran THIS target with a `200`. The two halves were pinned
+# separately, and the JOIN — "the expectation list this step sets matches the
+# code this endpoint returns" — was pinned nowhere, so a knob that stopped
+# matching the endpoint's healthy code would page on a healthy origin with the
+# whole suite green. That is the false-positive direction of #10892, and the
+# mirror of 88b is the only thing that pins it.
+reset_case
+export PROBE_URL="$LIVENESS_URL_UNDER_TEST"
+export PROBE_HOST_LABEL="api.premiselabs.co (served request)"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="200"
+run_watchdog
+assert_eq "$RC" "0" "liveness: 200 → exit 0 (the served request answered)"
+assert_eq "$(created_json)" "{}" "liveness: 200 → NO incident is filed (a healthy origin must never page)"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "0" "liveness: 200 → no issue CREATE at all"
+assert_eq "$(count_calls 'FLYCTL')" "0" "liveness: 200 → flyctl was never called"
+
+# ── 100b: a status line is NOT an answer — the transfer must COMPLETE ──────
+# curl emits `%{http_code}` as soon as the RESPONSE HEADERS arrive. A server
+# that sends `200 OK` and then stalls mid-body therefore reports a HEALTHY code
+# with a non-zero curl exit and a truncated body. Case 100 pins the ALIVE
+# direction and case 88b the absence direction, but both are driven by the code
+# ALONE (`STUB_PROBE_CODES`), so neither could see this shape: a `200` that
+# never finished was graded UP by `classify_code`, i.e. a false PASS on the one
+# property the arm exists to prove — that the request RETURNED. Measured against
+# a real stalling server at review round 6 (P1):
+#     curl -sS -o body -w '%{http_code} %{time_total}' --max-time 3 <url>
+#     → "200 3.002614", exit 28, "10 out of 40 bytes received"
+# The mutant this case is built to red: delete the `rc -ne 0` guard in probe()
+# and the verdict falls back to `classify_code 200` → UP, exit 0, no incident.
+reset_case
+export PROBE_URL="$LIVENESS_URL_UNDER_TEST"
+export PROBE_HOST_LABEL="api.premiselabs.co (served request)"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="200"
+export STUB_PROBE_RC=28                       # headers arrived, the BODY never did
+export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+run_watchdog
+assert_eq "$RC" "1" "liveness: 200 with an INCOMPLETE transfer → exit 1 (not a healthy answer)"
+assert_contains "$(created_json)" "PROD DOWN" \
+  "liveness: 200 + curl_exit=28 → PROD DOWN (the body never arrived, so nothing returned)"
+assert_contains "$(created_json)" "transfer did NOT complete" \
+  "the incident BODY names the real class (an incomplete transfer), not 'HTTP 200 was fine'"
+assert_eq "$(count_calls 'CURL probe')" "3" \
+  "liveness: an incomplete transfer is RETRYABLE, so all 3 attempts ran (no UNEXPECTED short-circuit)"
+
+# The same guard must sit in the SHARED probe, not in the liveness arm: the
+# restartable API target has the identical false-PASS shape, and there a
+# truncated body would equally have read UP.
+reset_case
+export STUB_PROBE_CODES="200"
+export STUB_PROBE_RC=28
+export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+run_watchdog
+assert_eq "$RC" "1" "API target: 200 with an INCOMPLETE transfer → exit 1"
+assert_contains "$(created_json)" "PROD DOWN" \
+  "API target: the shared probe() applies the same rule (no arm-local special case)"
+
+
+# ── 88b: a DOWN on the MACHINE-BACKED liveness target names the MACHINE ────
+# Same arm as case 88 (`disarmed:no_machine`), OPPOSITE remediation: this
+# surface IS the Fly machine. The round-3 fix corrected the incident BODY; the
+# run log still said "production surface with no Fly machine" for this target,
+# and it is the FIRST artifact an operator reads during the outage. Assert all
+# three surfaces the on-call sees: the run log, the body, and the fact that no
+# restart ran despite a usable token.
+reset_case
+export PROBE_URL="$LIVENESS_URL_UNDER_TEST"
+export PROBE_HOST_LABEL="api.premiselabs.co (served request)"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="000"
+export FLY_API_TOKEN="fly-token"     # present on purpose: the token must NOT be enough
+run_watchdog
+assert_eq "$RC" "1" "liveness: 000 → exit 1"
+assert_contains "$(created_json)" "PROD DOWN" "liveness: 000 → PROD DOWN title (it is a PRODUCTION surface, so it pages)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "liveness: 000 → flyctl was NEVER called (the primary API probe owns that machine)"
+assert_contains "$OUT" "restart decision: disarmed:no_machine" "liveness: the disarm class is the shared no_machine arm"
+assert_not_contains "$OUT" "production surface with no Fly machine" \
+  "liveness: the RUN LOG must not claim there is no Fly machine — it IS the machine"
+assert_contains "$OUT" "MACHINE-BACKED production surface" \
+  "liveness: the RUN LOG names the machine-backed surface (the positive arm of the same split)"
+assert_not_contains "$(patched_body)" "NO Fly machine" \
+  "liveness: the incident body must not claim there is no Fly machine"
+assert_contains "$(patched_body)" "machine-backed" \
+  "liveness: the incident body names the machine-backed surface"
+
+# ── 102: the RESTARTABLE API target's DOWN body keeps the RESTART prose ────
+# The contrast case for the DOWN arm of the machine-vs-Pages split (its DEGRADED
+# analogue is 99b). `render_body` asks is_restartable_url BEFORE
+# is_machine_backed_url, and only that ORDER keeps the primary API probe from
+# describing itself as "deliberately DISARMED" and telling the on-call to
+# "cross-check the primary API incident" — on the incident that IS the primary
+# probe's. Nothing pinned that order: measured by mutation at 429fa670,
+# swapping the two branches left the whole harness GREEN (738/0). This pins it
+# from the restartable side, so the swap now reds.
+reset_case
+export STUB_PROBE_CODES="000"
+# An expectation list is REQUIRED for this case to mean anything: `render_body`'s
+# three-way split lives INSIDE `if [ -n "$PROBE_EXPECT_STATUS" ]`, so with the
+# knobs unset the API target never reaches it and the case would be vacuous
+# (measured: without the list, the branch swap below stayed green).
+export PROBE_EXPECT_STATUS="200"
+export FLY_API_TOKEN="fly-token"     # so the run is a real DOWN on the armed target
+run_watchdog
+assert_eq "$RC" "1" "api DOWN: exit 1"
+assert_contains "$(created_json)" "PROD DOWN" "api DOWN: PROD DOWN title"
+assert_not_contains "$(patched_body)" "deliberately DISARMED" \
+  "api DOWN: the restartable target's body must NOT claim its restart leg is disarmed"
+assert_not_contains "$(patched_body)" "served by the **same Fly machine**" \
+  "api DOWN: the machine-backed prose is the OTHER arm's (this target is that machine)"
+
+# ── 101: a DEGRADED on that same target is a DEPLOY, not a Pages fault ─────
+# The round-3 prose split has TWO arms and only the DOWN one was pinned (case
+# 88b). Measured by mutation at head 2cb81b7: deleting the mirroring
+# `elif is_machine_backed_url` branch from the `disarmed:unexpected` arm left
+# the whole suite GREEN — so a `/liveness` 404 (the expected shape between merge
+# and the deploy that carries the route) would silently go back to telling the
+# on-call to "check the Pages deployment and the route" while the Fly machine
+# was the surface, i.e. exactly the wrong-subsystem misdirection this PR exists
+# to end. This is that pin: the run log and the body must say DEPLOY, not Pages.
+reset_case
+export PROBE_URL="$LIVENESS_URL_UNDER_TEST"
+export PROBE_HOST_LABEL="api.premiselabs.co (served request)"
+export PROBE_EXPECT_STATUS="200"
+export STUB_PROBE_CODES="404"
+export FLY_API_TOKEN="fly-token"     # present on purpose: the token must NOT be enough
+run_watchdog
+assert_eq "$RC" "1" "liveness: 404 → exit 1 (the route did not answer as contracted)"
+assert_contains "$(created_json)" "PROD DEGRADED" \
+  "liveness: 404 → PROD DEGRADED (answered-but-wrong, not an outage)"
+assert_eq "$(count_calls 'FLYCTL')" "0" "liveness: 404 → flyctl was NEVER called (a deploy is not a restart)"
+assert_contains "$OUT" "restart decision: disarmed:unexpected" "liveness: the disarm class is the unexpected-answer arm"
+# The remediation prose lives in the incident BODY (the DEGRADED arm writes no
+# separate run-log heal note — the DOWN arm's `disarmed:no_machine` log line is a
+# different site), so the pin is on the body: deleting the machine-backed branch
+# drops it into the `else` arm, which says "a Cloudflare Pages surface with no
+# Fly machine behind it … check the Pages deployment".
+assert_not_contains "$(patched_body)" "Cloudflare Pages surface" \
+  "liveness: the incident body must not describe the machine-backed route as a Pages surface"
+assert_not_contains "$(patched_body)" "check the Pages deployment" \
+  "liveness: the incident body must not send the on-call to a Pages deploy"
+assert_contains "$(patched_body)" "deployed revision" \
+  "liveness: the incident body names the deploy, not a Pages binding"
 
 # ── 89: sustained 60 min + a Fly token is STILL a hard no-restart ──────────
 # The strongest possible case for a restart and it must still not happen.
@@ -2236,7 +2420,7 @@ assert_not_contains "$JOB_ENV" "GH_TOKEN" "GH_TOKEN is NOT job-level (step env o
 # GitHub env precedence is STEP > JOB > WORKFLOW, so refusing PROD_PROBE_URLS on
 # the step is not enough: a job-level value reaches the script just as well and
 # narrows the production set, classifying the auth probe a DRILL ([DRILL]-titled,
-# no page, self-heal disarmed) while the diff looks correct. Found in review — the
+# never restartable, but still paged with a [DRILL] label) while the diff looks correct. Found in review — the
 # step-scoped refusal below passes with a job-level PROD_PROBE_URLS present.
 assert_not_contains "$JOB_ENV" "PROD_PROBE_URLS" \
   "PROD_PROBE_URLS is NOT job-level either (env precedence: job-level reaches the script and silently drills the auth probe)"
@@ -2261,15 +2445,15 @@ assert_contains "$WORKFLOW_CODE" "ESCALATION_CHAT_ID: \${{ secrets.ESCALATION_CH
   "ESCALATION_CHAT_ID is exported to the probe steps (step env)"
 assert_not_contains "$JOB_ENV" "ESCALATION_CHAT_ID" \
   "ESCALATION_CHAT_ID is NOT job-level (step env only — otherwise the override escapes containment)"
-assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATION_CHAT_ID: \${{ secrets.ESCALATION_CHAT_ID }}')" "2" \
-  "ESCALATION_CHAT_ID is set on BOTH probe steps (the API step and the auth step fail independently)"
+assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATION_CHAT_ID: \${{ secrets.ESCALATION_CHAT_ID }}')" "3" \
+  "ESCALATION_CHAT_ID is set on ALL THREE probe steps (the API, auth and served-liveness steps fail independently, so each must be able to page and each must be containable)"
 # #3887 round 5: the KILL SWITCH joins the same containment surface. The runbook
 # documents ESCALATE_ENABLED as an operator control, so it must be wired — an
 # unwired knob is a documented control an operator cannot engage without editing
 # the workflow, and the unset repo variable silently leaves the script default
 # (paging enabled) in place. It comes from the repository VARIABLE (not a secret:
-# it is a switch, not a credential), and it stays STEP-level: the two probes fail
-# independently, so both must carry it, and step placement keeps the knob visible
+# it is a switch, not a credential), and it stays STEP-level: the probe steps fail
+# independently, so every one must carry it, and step placement keeps the knob visible
 # only where it is consumed (a job-level env would also hand it to
 # actions/checkout and the third-party setup-flyctl action). A workflow-level
 # `vars.` placed after `steps:` would escape the JOB_ENV slice — hence the
@@ -2278,8 +2462,8 @@ assert_contains "$WORKFLOW_CODE" "ESCALATE_ENABLED: \${{ vars.ESCALATE_ENABLED }
   "ESCALATE_ENABLED is wired to the probe steps from the repo variable (a documented operator control must be reachable)"
 assert_not_contains "$JOB_ENV" "ESCALATE_ENABLED" \
   "ESCALATE_ENABLED is NOT job-level (step env only — the same containment discipline as ESCALATION_CHAT_ID)"
-assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATE_ENABLED: \${{ vars.ESCALATE_ENABLED }}')" "2" \
-  "ESCALATE_ENABLED is set on BOTH probe steps (wiring only one leaves the other surface unkillable)"
+assert_eq "$(printf '%s' "$WORKFLOW_CODE" | grep -c 'ESCALATE_ENABLED: \${{ vars.ESCALATE_ENABLED }}')" "3" \
+  "ESCALATE_ENABLED is set on ALL THREE probe steps (wiring only one leaves the other surfaces unkillable)"
 
 # ── 96: the workflow drives the auth surface as its OWN step (#3628) ───────
 AUTH_WORKFLOW="$SCRIPT_DIR/../workflows/availability-watchdog.yml"
@@ -2307,7 +2491,8 @@ assert_contains "$AUTH_STEP" "PROBE_HOST_LABEL: $AUTH_HOST" \
   "the auth step's host label matches the host it actually probes (its dedupe key)"
 # …and the script must classify that same URL as PRODUCTION. PROD_PROBE_URLS is
 # built from AUTH_PROBE_URL; if only the workflow moves, the step still runs but
-# is classified a DRILL — [DRILL]-titled, no page, self-heal disarmed — while
+# is classified a DRILL — [DRILL]-titled, never restartable, but still PAGED with
+# a [DRILL] label (it is not silent; see the e2e(l) arm) — while
 # looking correct in the diff. Setting PROD_PROBE_URLS in the step would do the
 # same thing through another route, so it is refused too.
 assert_contains "$(grep '^AUTH_PROBE_URL=' "$WATCHDOG" || true)" "$AUTH_PROBE_URL_STEP" \
@@ -2337,6 +2522,56 @@ assert_eq "$(printf '%s\n' "$AUTH_STEP" | grep -c 'PROBE_HOST_LABEL:')" "1" \
 assert_not_contains "$AUTH_STEP" "FLY_API_TOKEN" "the auth step gets NO Fly token (no restart path)"
 assert_contains "$AUTH_STEP" '!cancelled()' "the auth step runs even when the API probe failed (independent alerting)"
 assert_contains "$AUTH_STEP" "TELEGRAM_BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}" "the auth step can page too"
+
+# ── 99: the workflow drives the SERVED-REQUEST liveness surface (#10892) ───
+# #10892's finding: `api.premiselabs.co` was unusable for ~2 h while BOTH Fly
+# checks read `passing`, because both are liveness-shaped — one is a kernel TCP
+# handshake, the other reads state the loop last wrote from another thread. The
+# missing instrument is a request that must RETURN, bounded by the client's
+# patience. Three things therefore have to move TOGETHER, and each one alone
+# fails silently:
+#   * the step's URL  — without it nothing probes the served path at all;
+#   * script membership in the production set — an unrecognised URL is a DRILL:
+#     a [DRILL]-titled DEGRADED/DOWN incident, self-heal disarmed, and no PROD
+#     incident ever filed. ⛔ It is NOT silent: the DRILL still PAGES, with a
+#     [DRILL] label (e2e(l) pins that) — so a misclassified step is not
+#     inaudible: it reaches on-call labelled as a drill, files no PROD incident
+#     and can never restart. That is harder to diagnose at 3am than a silence,
+#     because something DID page.;
+#   * the 5 s bound — a liveness probe that waits 25 s for an answer is the
+#     status-only probe this issue already had. The bound IS the instrument, so
+#     a later "harmonise the timeouts" tidy-up must red HERE rather than in the
+#     first outage nobody is paged for.
+LIVENESS_STEP="$(sed -n '/Probe the served-request liveness endpoint/,/availability-watchdog.sh/p' "$AUTH_WORKFLOW" | grep -v '^[[:space:]]*#' || true)"
+assert_not_empty "$LIVENESS_STEP" "the served-liveness step exists in the watchdog workflow"
+LIVENESS_PROBE_URL_STEP="$(printf '%s\n' "$LIVENESS_STEP" | sed -n "s|.*PROBE_URL:[[:space:]]*[\"']\{0,1\}\(https://[^ \"']*\)[\"']\{0,1\}.*|\1|p" | head -1)"
+LIVENESS_HOST="$(printf '%s' "$LIVENESS_PROBE_URL_STEP" | sed -n 's|https://\([^/]*\)/.*|\1|p')"
+assert_not_empty "$LIVENESS_PROBE_URL_STEP" "the liveness step's PROBE_URL is derivable (a quoted/folded value must not silently vacate the guards below)"
+assert_contains "$LIVENESS_PROBE_URL_STEP" "/liveness" "the liveness step probes the served-request path, not /health (the endpoint that answered from cached state)"
+# …the script must classify that same URL as PRODUCTION, or the step runs as a
+# DRILL — it still pages (labelled `[DRILL]`) but files no PROD incident and can
+# never restart.
+assert_contains "$(grep '^LIVENESS_PROBE_URL=' "$WATCHDOG" || true)" "$LIVENESS_PROBE_URL_STEP" \
+  "the watchdog script's LIVENESS_PROBE_URL matches the step's probe URL (else the run is silently a DRILL)"
+assert_eq "$(prod_unit "$LIVENESS_PROBE_URL_STEP")" "PROD" \
+  "prod set: the served-liveness URL is PRODUCTION (files a PROD incident and PAGES)"
+# …and NOT restartable: it is the same Fly machine as the primary API probe, and
+# each probe's incident issue is its own restart ledger, so a second arm would
+# let one wedged machine spend MAX_RESTARTS_PER_HOUR twice.
+assert_eq "$(restartable_unit "$LIVENESS_PROBE_URL_STEP")" "NO" \
+  "restart set: the served-liveness probe NEVER restarts (the primary API probe owns that machine — two legs double the velocity cap)"
+assert_contains "$LIVENESS_STEP" "PROBE_TIMEOUT_S: '5'" \
+  "the liveness step keeps its 5 s per-request bound (the latency arm IS the fix; 25 s is the status-only probe it replaces)"
+assert_contains "$LIVENESS_STEP" "PROBE_EXPECT_STATUS: '200'" "the liveness step's healthy answer is 200 and nothing else"
+assert_contains "$LIVENESS_STEP" "HEARTBEAT_EMIT: '0'" \
+  "the liveness step does NOT write the rolling heartbeat (exactly ONE step per job emits, or two writes race the search index into a duplicate issue)"
+assert_contains "$LIVENESS_STEP" '!cancelled()' "the liveness step runs even when another probe failed (independent alerting)"
+assert_not_contains "$LIVENESS_STEP" "FLY_API_TOKEN" "the liveness step gets NO Fly token (no restart path)"
+assert_not_contains "$LIVENESS_STEP" "PROD_PROBE_URLS" "the liveness step does not set the production set (a second route to a silent DRILL)"
+assert_contains "$LIVENESS_STEP" "PROBE_HOST_LABEL: $LIVENESS_HOST" \
+  "the liveness step's host label matches the host it probes (its incident DEDUPE key)"
+assert_eq "$(printf '%s\n' "$LIVENESS_STEP" | grep -c 'PROBE_HOST_LABEL:')" "1" \
+  "the liveness step carries exactly ONE host label (a duplicate line is last-wins and could re-point the dedupe key)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # #3887 — the sustained-incident ESCALATION LEG (leaves GitHub: a thresholded,
