@@ -181,12 +181,12 @@ end with the column half's UPPER end and its upper end with the column half's
 lower end — i.e. **83.2–85.3 %**; if the second reader is 0.79× as dear the column
 half is 2.14–2.25 ms, the connection half **12.7–14.1 ms** and its share
 **85.0–86.9 %**. So the headline is **~83–87 %**, ~84–85 % of the win, the second
-band being a SENSITIVITY on item 7 rather than a second measurement. ⚠️ This lands near the
-ORIGINAL "~80-85 % of the ~15 ms saved", and that is a coincidence of BAND, not
-arithmetic: the original did charge the consult twice, but at 0.27–0.33 ms of stat
-(an uncommitted 0.135–0.166 ms band, with `_migrations_dir()`'s resolution never
-priced at all), which against a ~15 ms win puts the connection half at ~98 % — so
-its own inputs never produced 80–85 % either. What the two-consult model fixes is
+band being a SENSITIVITY on item 7 rather than a second measurement. ⚠️ This lands near a
+retired "~80-85 % of the ~15 ms saved" (first stated at `6ab6848b8b`), and that is a
+coincidence of BAND, not arithmetic: that revision did charge the consult twice, but at
+0.27–0.33 ms of stat (an uncommitted 0.135–0.166 ms band, with `_migrations_dir()`'s
+resolution never priced at all), which against a ~15 ms win puts the connection half at
+~98 % — so its own inputs never produced 80–85 % either. What the two-consult model fixes is
 the SHAPE (both cached readers charged, at committed prices); the magnitude here
 follows from the committed medians, and the intervening one-consult ~92 % is the
 anomaly in this history.
@@ -218,8 +218,10 @@ ONE pass, **0.160–0.169 ms**, and **leaves the resolution half in place**, so 
 must not be read as removing the whole residual; it is filed rather than hidden in
 "the work the record is for".
 
-⛔ **Five earlier revisions of this bullet, and why each was wrong.** It said
-"~80-85 % of the ~15 ms saved" — the ORIGINAL. Its own inputs do not yield it
+⛔ **Earlier revisions of this bullet, and why each was wrong.** (Deliberately no COUNT
+of them: a count over an open history is stale by construction — the same hazard the
+seam sentence above names, and this one has already been wrong twice.) `6ab6848b8b`
+said "~80-85 % of the ~15 ms saved". Its own inputs do not yield it
 (two 0.135–0.166 ms passes against a ~15 ms win is ~98 %), and it charged the
 consult twice at a band no committed file carries while leaving resolution
 unpriced; the band this bullet now reports agrees with it by coincidence, not
@@ -229,15 +231,15 @@ falsified by its own text, `git show
 6ab6848b8b:docs/evidence/9558-record-write-cost/README.md` reading "~80-85 % of the
 ~15 ms saved" (a share OF the win) and charging two fingerprints in the same
 bullet. It also said "~92-94 %" (94 % only falls out of the
-superseded ~0.9–1.0 ms column-half estimate the same bullet replaced). It said
-"~91.6–92.7 %" — **the revision immediately before this one**, which charged ONE
+superseded ~0.9–1.0 ms column-half estimate the same bullet replaced). `860e85c91c`
+said "~91.6–92.7 %" — the revision before `72df8168b2` — which charged ONE
 column consult while the per-record path pays TWO (both cached readers, above), so
 the column half is 2.386–2.512 ms under the artifact's convention (2.14–2.25 ms if
 the second reader is 0.79× as dear, item 7) and the connection share 83.2–86.9 %,
 not 1.193–1.256 ms and 92 %. It said "≈0.9–1.0 ms of pure
 stat" for the residual — which is 2 x the WHOLE cached call (stat + the per-call
-dict copy), not 2 x the stat pass. And the revision that replaced it said
-"0.32–0.34 ms of stat overhead", which is the whole warm call attributed to the
+dict copy), not 2 x the stat pass. `873aec1812` then said "0.32–0.34 ms of stat
+overhead" (via `6ab6848b8b`'s 0.27–0.33 ms), which is the whole warm call attributed to the
 fingerprint: **half of it is `_migrations_dir()`'s resolution**, so the residual
 is ≈0.68 ms and only ≈0.34 ms of it is stat. Against the two denominators the
 reader can pick, the retired ~0.9–1.0 ms figure was overstated **1.3–1.5× against
