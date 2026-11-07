@@ -92,9 +92,11 @@ rejected — see the floor test):
   too;
 * nary-ordering — 3+ named options ("Mark and Sarah or Tom"), sibling
   #2653; and bare "latest" as an ORDERING INSTRUCTION ("from earliest to
-  latest" — #8775 scoped this to the ordering BOUND: an attributive
-  "latest" inside an interval question's own anchor clauses is narrative
-  text, not an instruction). The census's nary-ordering class is
+  latest" — #8775 scoped this to the ordering BOUND plus the template-owned
+  ATTRIBUTIVE case: a `latest` inside an interval question's own captured
+  anchors is narrative text ONLY where it is attributive AND sits in a relative
+  clause — see ``_recency_vetoes``, which is the definition; this sentence is a
+  pointer, not the rule). The census's nary-ordering class is
   RE-MEASURED to 2 named-subject rows (#2653; the census stored 160-char
   question TRUNCATIONS at the time, which is why the class was filed as 4 —
   #8055 replaced them with the verbatim dataset questions): the 2 genuine N-ary
@@ -196,9 +198,11 @@ class AssemblyShape(StrEnum):
 #         ('from earliest to latest'), sibling #2653's discovery family.
 #         #8775 SCOPED the bare-`latest` half: an ORDERING BOUND still
 #         vetoes, and so does any `latest` an interval template does not
-#         own — but inside an interval question's own resolved anchors an
-#         attributive `latest` is narrative text, not an instruction (see
-#         ``_recency_vetoes``).
+#         own — but a template-owned ATTRIBUTIVE `latest` that sits in a
+#         relative CLAUSE of a captured anchor is narrative text, not an
+#         instruction (the precise rule is ``_recency_vetoes``; "in the
+#         anchor" alone is NOT the condition, and a `latest` selecting the
+#         anchor's referent still vetoes).
 #       * the ATTRIBUTIVE 'most recent' — the SAME ordering instruction
 #         spelled the other way ('from earliest to most recent'): it is
 #         deliberately NOT promoted, so it falls through to the legacy
@@ -544,10 +548,16 @@ _RE_FREQUENCY = re.compile(
 # fire it should have had (#8055's un-truncation is what surfaced it). Bare
 # `latest` is therefore split in two:
 #   * as an ORDERING BOUND (``_RE_RECENCY_LATEST_BOUND``) it is part of
-#     ``_RE_RECENCY``, the surface that ALWAYS vetoes — so every ordering
-#     instruction (`from earliest to latest`, `from latest to earliest`,
-#     `latest first`) keeps rejecting, which is what keeps this pattern from
-#     becoming dead code for the ordering-list arm below;
+#     ``_RE_RECENCY``, the surface that ALWAYS vetoes — so the bound
+#     spellings the pattern covers (`from earliest to latest`, `from latest to
+#     earliest`, `latest first`) keep rejecting, which is what keeps this
+#     pattern from becoming dead code for the ordering-list arm below. NOT
+#     every conceivable ordering spelling: a word interposed between the
+#     direction and the connector ("from the earliest one to the latest") falls
+#     out of the bound arm, and inside a relative clause the exemption may then
+#     admit it — measured as zero census impact (all 4 census bound rows match
+#     and reject, pinned by ``test_recency_ordering_bounds_still_reject``), and
+#     recorded rather than papered over with a wider unmeasured regex;
 #   * anywhere ELSE it still vetoes, EXCEPT where an interval template owns
 #     the question — see ``_recency_vetoes``, the ONE predicate both guard
 #     sites call.
@@ -794,8 +804,11 @@ _RE_WH_LOOKUP = re.compile(r"\b(?:what|which|who|whom|whose|where|when)\b",
                            re.IGNORECASE)
 
 
-#: A RELATIVE / SUBORDINATE clause opener. #8775's defect is named in its own
-#: title — a "narrative relative clause" — and this is that clause's marker:
+#: A RELATIVE clause opener. #8775's defect is named in its own title — a
+#: "narrative relative clause" — and this is that clause's marker. It is the
+#: RELATIVE set only, NOT the wider subordinate set: `when`, `that`, `while` and
+#: `because` are deliberately absent, so a `latest` after one of those still
+#: VETOES (the safe direction — the arms fall back to legacy).
 #: "…the book reading event at the local library, **where** the author of 'The
 #: Silent Patient' is discussing her latest thriller novel".
 _RE_RELATIVE_CLAUSE = re.compile(r"\b(?:where|which|who|whom|whose)\b",
@@ -817,7 +830,7 @@ def recency_narrative_latest_enabled() -> bool:
     return env_flag(RECENCY_NARRATIVE_LATEST_ENV, True)
 
 
-def _interval_template_owns(question: str):
+def _interval_template_owns(question: str) -> re.Match[str] | None:
     """The interval template that matches ``question`` cleanly, or ``None``.
 
     Each template CAPTURES its own two anchors (named groups a/b). Returns the
@@ -830,8 +843,8 @@ def _interval_template_owns(question: str):
             or _RE_INTERVAL_BETWEEN_LEAD.match(question))
 
 
-def _latest_sits_in_a_relative_clause(match) -> bool:
-    """Is EVERY captured `latest` inside a relative/subordinate clause?
+def _latest_sits_in_a_relative_clause(match: re.Match[str] | None) -> bool:
+    """Is EVERY captured `latest` inside a relative clause?
 
     #8775's exemption is STRUCTURAL — the issue's own diagnosis is a "narrative
     relative clause" — and it is stated as such because two positional proxies
@@ -847,9 +860,10 @@ def _latest_sits_in_a_relative_clause(match) -> bool:
     WHICH one (the name-FTS leg is an OR-union, so it matches any object
     containing "exam"). Main abstained on all of those and still does.
 
-    ⚠️ DECLARED RESIDUAL, and it is NOT "text there is harmless" (#11458,
-    measured): this keys on the CLAUSE, a syntactic place and not a semantic
-    one, so a selecting `latest` that happens to sit after an incidental
+    ⚠️ DECLARED RESIDUAL, and it is NOT "text there is harmless" (#11458 is the
+    tracker; the five spellings below are the measurement, pinned by
+    ``test_recency_relative_clause_selector_residual_is_declared_8775``): this
+    keys on the CLAUSE, a syntactic place and not a semantic one, so a selecting `latest` that happens to sit after an incidental
     relative opener — "between the book **which** I read about my latest exam
     and my birthday" — is exempted and the question fires. The qualifier IS
     re-read: `extract_subject_terms` keeps the anchor verbatim, i.e.
@@ -890,10 +904,9 @@ def _recency_vetoes(question: str, *, owns=...) -> bool:
     * ``most recent`` / ``the last one`` / bare `latest` as an ORDERING BOUND
       (``_RE_RECENCY``) ALWAYS veto — main's reject, unchanged;
     * any OTHER bare `latest` vetoes too, UNLESS an interval template owns the
-      question AND every `latest` it carries sits in a relative/subordinate
-      clause of that template's own anchor (#8775 — the issue's "narrative
-      relative clause"). A selecting `latest` ("my latest exam", "the day of my
-      latest exam") still vetoes, exactly as main did;
+      question AND every `latest` it carries sits in a relative CLAUSE of that
+      template's own anchor (#8775 — the issue's "narrative relative clause").
+      A selecting `latest` ("my latest exam", "the day of my latest exam") still vetoes, exactly as main did;
     * off-switch off -> main's bare-token guard is the whole predicate.
 
     ONE predicate for both guard sites (the anchor-stripped residual in

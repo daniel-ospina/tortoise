@@ -743,10 +743,13 @@ def test_recency_narrative_latest_is_not_an_ordering_instruction():
     resolved anchors must not veto that question.
 
     The row is not a recency question at all: the interval template matches it
-    cleanly and CAPTURES both anchors, so the adjective in the second anchor's
-    extension ("…the author of 'The Silent Patient' is discussing her latest
-    thriller novel") is text no arm re-reads. Before the narrowing it returned
-    ``None``; the shape is ``interval`` with its 2 anchor terms intact.
+    cleanly and CAPTURES both anchors. The narrative clause is carried into the
+    term VERBATIM (``extract_subject_terms`` does not strip it — see
+    ``test_recency_relative_clause_selector_residual_is_declared_8775``), so the
+    justification is not "no arm re-reads it": it is that the token is
+    ATTRIBUTIVE — it neither orders nor SELECTS the anchor's referent — which is
+    the only thing #8775 exempts. Before the narrowing it returned ``None``; the
+    shape is ``interval`` with its 2 anchor terms intact.
 
     Non-vacuous: the off-switch test below shows the same question returning
     ``None`` under the pre-fix guard, so this assertion is the fix, not a
@@ -949,6 +952,9 @@ def test_env_example_declares_the_recency_narrative_latest_switch():
             body = body[1:]
         return body
 
+    assert RECENCY_NARRATIVE_LATEST_ENV == "TORTOISE_RECENCY_NARRATIVE_LATEST", (
+        "#8775's knob is documented under this literal name; renaming the "
+        "constant without renaming the declaration leaves a dead knob")
     assert RECENCY_NARRATIVE_LATEST_ENV in env, (
         f"{RECENCY_NARRATIVE_LATEST_ENV} (the #8775 recency guard) is an "
         "operator-visible lever that is not declared in .env.example")
@@ -960,9 +966,56 @@ def test_env_example_declares_the_recency_narrative_latest_switch():
         "assignment (the example form an operator copies), not just named in prose")
 
 
+#: #8775 DECLARED RESIDUAL (review 5; tracked in #11458) — a SELECTING `latest`
+#: that happens to sit INSIDE a relative clause is exempted by the structural
+#: rule, because a clause is a syntactic place and not a semantic one. Main
+#: abstained on every one of these; this head fires `interval`.
+_RELATIVE_CLAUSE_SELECTOR_RESIDUAL = (
+    "How many days passed between the book which I read about my latest exam "
+    "and my birthday?",
+    "How many days passed between the exam, which I took about my latest "
+    "tutor, and my birthday?",
+    "How many days passed between the fair where I met her latest husband and "
+    "my birthday?",
+    "How many days passed between the exam which my latest tutor set and my "
+    "birthday?",
+    "Between my graduation, where my latest tutor spoke, and my birthday, how "
+    "many days passed?",
+)
+
+
+def test_recency_relative_clause_selector_residual_is_declared_8775():
+    """#8775 (review 5, P2): the exemption's residual is DECLARED, not silent.
+
+    The rule keys on the relative CLAUSE, which is a syntactic place, so a
+    `latest` that SELECTS a referent but sits inside such a clause is exempted
+    and the question fires. The docstring used to claim the opposite was
+    harmless ("the arms never re-read an anchor's narrative extension"); that is
+    false — the SECOND assertion below is the falsifier, so the sentence was
+    CORRECTED rather than the rule narrowed. Two positional proxies were tried
+    in rounds 1-2 and both leaked a SELECTING `latest` through the veto, which
+    is the hazard the guard exists to prevent; a clause-internal selector is the
+    smaller direction.
+
+    BOTH directions are pinned: the class fires here (so a tightening rewrite
+    must update this declaration deliberately), and the off-switch restores
+    main's abstain on every spelling (so the class is provably #8775's own delta
+    and not a pre-existing behaviour). Deferred to #11458.
+    """
+    for q in _RELATIVE_CLAUSE_SELECTOR_RESIDUAL:
+        assert classify_question(q) is AssemblyShape.INTERVAL, q
+        # the SELECTING qualifier survives into the extracted term — this is why
+        # "text there is harmless" was wrong
+        assert "latest" in " ".join(extract_subject_terms(q)).lower(), q
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(RECENCY_NARRATIVE_LATEST_ENV, "0")
+        for q in _RELATIVE_CLAUSE_SELECTOR_RESIDUAL:
+            assert classify_question(q) is None, q
+
+
 def test_recency_latest_selecting_an_interval_anchor_still_rejects():
     """#8775 (reviews 1–3): the exemption is STRUCTURAL — a `latest` inside a
-    relative/subordinate clause — never a positional or vocabulary proxy.
+    relative CLAUSE — never a positional or vocabulary proxy.
 
     A `latest` that heads an interval anchor's own noun phrase SELECTS the
     referent, and firing the shape is wrong because the arm must then resolve
@@ -1013,7 +1066,8 @@ def test_recency_latest_selecting_an_interval_anchor_still_rejects():
         assert classify_question(q) is None, q
     # …while the issue's row fires: its `latest` sits inside the anchor's
     # RELATIVE CLAUSE (", where the author … is discussing her latest …"), the
-    # one structural place the arms never re-read.
+    # structural place #8775's exemption keys on — the clause IS carried into
+    # the term, so the exemption is for its being ATTRIBUTIVE, not unread.
     assert classify_question(_NARRATIVE_LATEST_Q) is AssemblyShape.INTERVAL
     assert classify_question(
         "How many days had passed since I finished the book when I attended "
