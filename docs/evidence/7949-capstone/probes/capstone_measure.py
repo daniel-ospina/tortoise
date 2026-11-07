@@ -354,8 +354,8 @@ ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
 # three modules it reaches one call down" for three review rounds while the
 # derivation had already grown past it (cycle 9 measured the comment at four
 # modules against eight in `tests/test_7949_c2_door.py::path_modules`). The
-# authority is `path_modules` in that test, which re-derives the set from the
-# code every run; every ``TORTOISE_*`` those modules read is accounted for,
+# authority is `path_modules` in that test; every ``TORTOISE_*`` those modules
+# read is accounted for,
 # either as an arm seam in ``SEAM_LEDGER`` (``TORTOISE_VET``,
 # ``TORTOISE_CLASSIFY_LATER``, ``TORTOISE_S4_DELTA``), or as a pin below, or as
 # an INPUT rather than a setting (``TORTOISE_DB_URI`` the graph it writes,
@@ -772,10 +772,28 @@ def door_record(observed: dict[str, str | None]) -> dict:
     }
 
 
-#: The ``extraction_mode`` values that mean a capture REACHED the door. ``sdk``
-#: reports ``llm:<route>`` for every lane that actually extracted; ``empty``,
-#: ``no-provider``, ``replayed`` and ``error`` all mean the capture returned
-#: BEFORE the lane dispatch (#3892 keyless, #1727 replay).
+#: The ``extraction_mode`` values that mean a capture REACHED the door.
+#:
+#: ⛔ The COLON is the discriminator, not the ``llm`` — the two lanes differ by
+#: exactly that character, so do not "tidy" this into a route-agnostic ``llm``
+#: prefix (the #10983 review measured that the whole suite stays green under
+#: ``"llm"``):
+#:
+#: * the v2 lane reports ``llm:<route>`` (``sdk.capture_session`` ->
+#:   ``_extract_session_v2`` -> the adapter's own ``route``, always truthy on a
+#:   success);
+#: * the OTHER lane reports a BARE ``"llm"`` — ``_extract_session_llm`` reports it
+#:   with no route and no colon, pinned by
+#:   ``tests/test_capture_session.py::test_capture_session_zero_extraction_is_warning_not_failure``.
+#:   A prefix of ``"llm"`` would therefore admit an m2 capture as door-entered,
+#:   which is the one bypass this witness exists to refuse. The bare ``"llm"``
+#:   and ``"error"`` spellings are pinned in
+#:   `tests/test_7949_c2_door.py::test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run`
+#:   so the widening cannot be made by aligning the m2 lane to this contract.
+#:
+#: ``empty``, ``no-provider``, ``replayed``, ``error`` and ``extraction-disabled``
+#: all mean the capture returned BEFORE the lane dispatch (#3892 keyless, #1727
+#: replay).
 DOOR_ENTERED_PREFIX = "llm:"
 
 

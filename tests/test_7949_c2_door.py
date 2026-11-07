@@ -109,7 +109,8 @@ SPARSE = REPO / "tortoise/sparse.py"
 #: os.environ.get(env_name)`), reached from the write path the acceptance takes
 #: (`sdk.py:16716 bind_point_subjects` inside `_extract_session_v2`, on a genuine
 #: create), and it gates whether the `:aboutSubject`/`:aboutObject` edge is
-#: written at all (`:405 decide_binding` -> `if outcome != BOUND: continue`).
+#: written at all (`:408 decide_binding` -> `if outcome != BOUND: continue` at
+#: `:409-416`; `:405` is the `kind_not_subject` refusal, not this gate).
 #: MEASURED: `resolve_thresholds()` -> `(0.7, 0.4)` and `decide_binding(0.90)` ->
 #: `bound`; with `TORTOISE_SUBJECT_TAU_HI=0.99` -> `(0.99, 0.4)` and `suspected`,
 #: i.e. the edge is not written. `_env_reads` returns the EMPTY SET for that
@@ -1137,7 +1138,15 @@ def test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run():
     assert probe.door_witness(entered) == {"entered": 1, "sessions": 1,
                                            "bypassed": []}
     assert probe.require_door_entered(entered)["entered"] == 1
-    for mode in ("replayed", "no-provider", "empty", None):
+    # ⛔ ``"llm"`` (bare) is the OTHER lane's spelling — ``sdk._extract_session_llm``
+    # reports it with no route, pinned by
+    # ``tests/test_capture_session.py::test_capture_session_zero_extraction_is_warning_not_failure``.
+    # Without it here, aligning the m2 lane to ``llm:<route>`` (which the
+    # ``capture_session`` docstring advertises as THE success shape) would widen
+    # the door to the exact bypass ``DOOR_ENTERED_PREFIX`` exists to refuse, and
+    # every other test in this file would stay green (#10983 review).
+    for mode in ("replayed", "no-provider", "empty", "error", "llm",
+                 "extraction-disabled", None):
         runs = [entered[0], {"session_id": "wp02", "extraction_mode": mode,
                              "ok": True}]
         assert probe.door_witness(runs)["bypassed"] == ["wp02"]
