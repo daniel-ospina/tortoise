@@ -100,6 +100,20 @@ def _fixture(name: str, text: str) -> Path:
 MANIFEST = _fixture("manifest.txt", _MANIFEST)
 WORKFLOW = _fixture("deploy-hosted.yml", _WORKFLOW)
 FLY_TOML = _fixture("fly.toml", _FLY_TOML)
+#: The ledger a FIXTURE run reads unless it says otherwise (#11332 review round 6).
+#:
+#: `ledger_path()` falls back to the gate's `DEFAULT_LEDGER` — the SHIPPED, tracked
+#: `.github/scripts/fly-secret-mitigations.txt` — when `FLY_MITIGATION_LEDGER` is unset.
+#: A fixture manifest paired with the shipped ledger is not a fixture: the gate
+#: validates every shipped entry against the manifest it was handed, so the FIRST
+#: real entry (the exact action the ledger header tells an operator to take
+#: mid-incident) exits 2 across every `_run` call that passes a fixture manifest —
+#: measured: 62 failures, on the change whose purpose is to stop the next deploy
+#: re-arming the mitigation. The coupling was found and fixed ONCE, at one call site
+#: (the F4 comment below); `_run` now pins the CLASS, and the empty fixture is what
+#: makes a fixture run hermetic. A test that wants the shipped ledger opts in
+#: through `extra_env`.
+EMPTY_LEDGER = _fixture("no-ledger.txt", "# empty\n")
 REAL_MANIFEST = REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
 REAL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-hosted.yml"
 REAL_FLY_TOML = REPO_ROOT / "fly.toml"
@@ -209,7 +223,7 @@ def _referenced_secret_names(workflow: Path) -> set[str]:
     return set(re.findall(r"secrets\.([A-Za-z0-9_]+)", workflow.read_text()))
 
 
-def _run(
+def _run_env(
     secrets: Path,
     *,
     manifest: Path = MANIFEST,
@@ -218,13 +232,22 @@ def _run(
     present: set[str] | None = None,
     drop_present: bool = False,
     extra_env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
+) -> dict[str, str]:
+    """The environment one fixture run is executed with.
+
+    Split out of `_run` so the harness's own seams are assertable directly: a
+    ledger left to the gate's `DEFAULT_LEDGER` fallback is invisible in the
+    subprocess result until the shipped ledger is non-empty (#11332 round 6).
+    """
     env = {k: v for k, v in os.environ.items() if k not in _AMBIENT}
     env.update(
         FLY_SECRETS_FILE=str(secrets),
         FLY_MANAGED_SECRETS_FILE=str(manifest),
         DEPLOY_WORKFLOW=str(workflow),
         FLY_TOML=str(toml),
+        # Hermetic by default — see `EMPTY_LEDGER`. Never omitted: an unset seam
+        # resolves to the SHIPPED tracked ledger, which is not a fixture input.
+        FLY_MITIGATION_LEDGER=str(EMPTY_LEDGER),
     )
     if not drop_present:
         # The deploy step states which GitHub Actions secrets the run carries (no
@@ -235,6 +258,28 @@ def _run(
         env["GH_SECRETS_PRESENT"] = " ".join(sorted(present))
     if extra_env:
         env.update(extra_env)
+    return env
+
+
+def _run(
+    secrets: Path,
+    *,
+    manifest: Path = MANIFEST,
+    workflow: Path = WORKFLOW,
+    toml: Path = FLY_TOML,
+    present: set[str] | None = None,
+    drop_present: bool = False,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = _run_env(
+        secrets,
+        manifest=manifest,
+        workflow=workflow,
+        toml=toml,
+        present=present,
+        drop_present=drop_present,
+        extra_env=extra_env,
+    )
     return subprocess.run(
         [sys.executable, str(SCRIPT)], capture_output=True, text=True, env=env, timeout=60
     )
@@ -3294,3 +3339,60 @@ class TestTheMitigationLedger:
             assert name in module.read_manifest(REAL_MANIFEST), (
                 f"the shipped ledger names {name}, which the manifest does not declare"
             )
+
+    def test_a_fixture_run_never_resolves_to_the_shipped_ledger(self):
+        """#11332 review round 6 — the CLASS, not the 74th call site.
+
+        `ledger_path()` falls back to `DEFAULT_LEDGER` (the SHIPPED tracked ledger)
+        when `FLY_MITIGATION_LEDGER` is unset, and the gate validates every shipped
+        entry against the manifest it was handed. So a fixture manifest plus an
+        UNSEAMED run is not a fixture: the first real ledger entry — the exact
+        action the ledger header and runbook §8.1 instruct an operator to take
+        mid-incident — exits 2 on every such call. Measured on this harness: 62
+        failures, on the change whose purpose is to stop the next deploy re-arming
+        the mitigation, with the cheapest green being to weaken these assertions.
+
+        The defect was found and fixed once at one call site (the F4 comment);
+        `_run_env` now names the ledger for the whole harness. This pins the class
+        on the mechanism rather than on today's content: asserting a green run
+        against the CURRENT (entry-free) shipped ledger proves nothing, which is
+        precisely the accident being closed.
+        """
+        sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("check_fly_secret_drift_hermetic", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        # The mechanism: with no seam, the gate reads the SHIPPED file — this is
+        # what makes an unseamed fixture run non-hermetic.
+        assert module.DEFAULT_LEDGER == REAL_LEDGER, (
+            "the gate's fallback ledger is no longer the shipped file this test "
+            "reasons about — re-derive the seam before trusting the assertions below"
+        )
+        original = os.environ.pop("FLY_MITIGATION_LEDGER", None)
+        try:
+            assert module.ledger_path() == REAL_LEDGER
+        finally:
+            if original is not None:
+                os.environ["FLY_MITIGATION_LEDGER"] = original
+
+        # The pin: every fixture run names a ledger, and that ledger parses to zero
+        # entries whatever the shipped file holds — so no shipped entry can ever
+        # change a fixture run's verdict.
+        env = _run_env(_secrets_file(_ALL_DECLARED, "hermetic-ledger-secrets.json"))
+        assert env["FLY_MITIGATION_LEDGER"] == str(EMPTY_LEDGER), (
+            "a fixture run left FLY_MITIGATION_LEDGER unset (or pointed it at the "
+            "shipped ledger): it is then validated against the shipped entries, and "
+            "the first real entry reds the suite"
+        )
+        assert Path(env["FLY_MITIGATION_LEDGER"]).resolve() != REAL_LEDGER.resolve()
+        assert module.read_mitigation_ledger(
+            Path(env["FLY_MITIGATION_LEDGER"]), module.read_manifest(MANIFEST)
+        ) == {}, "the harness's default ledger is not empty"
+
+        # …and the run that env produces is green, i.e. the seam is not just named
+        # but honoured by the subprocess.
+        assert _run(_secrets_file(_ALL_DECLARED, "hermetic-ledger-secrets.json")).returncode == 0
