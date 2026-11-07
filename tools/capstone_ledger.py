@@ -46,20 +46,27 @@ Record format (committed at `docs/evidence/9664-capstone/verdict-ledger.yml`):
 
     version: 1
     issue: 9664
+    criteria_expected: 22            # REQUIRED, TOP LEVEL: pins the denominator
     measured_at: {ref: origin/main, sha: <40 hex>, date: YYYY-MM-DD}
     criteria:
       - id: C1
         text: "<the criterion, VERBATIM from the issue>"
         verdict: verified            # verified | failed | blocked | not-covered
-        evidence: [<repo path>, "cmd:<command>"]   # required when verified
+        evidence: [<tracked repo path>, "cmd:<command>"]
+                                    # >=1 TRACKED PATH required when verified;
+                                    # a `cmd:` entry is a RECORD and confers nothing
         evidence_kind: screenshot    # screenshot | trace | command | server-observation
         reason: "<required unless verified>"
 
-⛔ Every cited path must exist in the tree. A row that names a file which is not
-there is REFUSED rather than counted, so a ledger cannot be made green by
-describing evidence instead of holding it. `evidence_kind: server-observation`
-carries an explicit waiver (it is the shape of step 5, which is a server-side
-observation with no screenshot by nature, #9664 comment 6692766222 §D).
+⛔ Every cited path must be a **TRACKED** file inside the tree. A row that names a
+path which is not there — or which exists only on the authoring box, e.g. a
+gitignored lane artifact — is REFUSED rather than counted, so a ledger cannot be
+made green by describing evidence instead of holding it. `evidence_kind:
+server-observation` carries an explicit waiver (it is the shape of step 5, which is
+a server-side observation with no screenshot by nature, #9664 comment 6692766222 §D).
+⛔ YAML merge keys (`<<`) are refused by name: `SafeConstructor` splices a merged
+value's pairs in without constructing that node, so the duplicate-key rule cannot
+see inside it, and this record's rule is that every row states its OWN verdict.
 
 Exit codes (a CLOSED set — a caller may branch on them):
     0  CLEAN       the uncovered list is empty; every row valid
@@ -152,13 +159,23 @@ def load_ledger(path: Path) -> dict[str, Any]:
             # as "not parseable YAML" — blaming the parser for our own check.
             seen: set[Any] = set()
             for key_node, _ in node.value:
-                # `<<` is the merge tag: `SafeConstructor.construct_mapping` flattens
-                # it itself, and flattening HERE would prepend the anchor's pairs so
-                # every OVERRIDE looked like a duplicate — refusing the only form of
-                # merge keys anyone uses. Skip it; the anchors are checked on their
-                # own node.
+                # ⛔ MERGE KEYS ARE REFUSED BY NAME. `<<` is not "just another key":
+                # `SafeConstructor.construct_mapping` splices the merged pairs in
+                # WITHOUT constructing that node, so this scan never sees them and
+                # a duplicate inside a merge value is silently last-wins. Measured:
+                # a row written as `<<: { …verdict: not-covered, verdict: verified}`
+                # loaded as `verified` and emptied the uncovered list — a false PASS
+                # reached through the one place the duplicate rule could not look.
+                # Refusing the tag is also the honest reading of this ledger's rule:
+                # every row states its OWN verdict, so a shared anchor that can carry
+                # a verdict the row does not say is not a shape this record accepts.
                 if key_node.tag == "tag:yaml.org,2002:merge":
-                    continue
+                    raise InvalidLedger(
+                        f"{path} line {key_node.start_mark.line + 1} uses a YAML merge "
+                        "key (`<<`) — every criterion row must state its own keys "
+                        "literally, because a merged anchor can carry a verdict the "
+                        "row does not say and the duplicate-key rule cannot see inside it"
+                    )
                 key = self.construct_object(key_node, deep=deep)
                 if key in seen:
                     raise InvalidLedger(
@@ -193,9 +210,6 @@ def load_ledger(path: Path) -> dict[str, Any]:
 #: hold at least one artifact IN THE TREE. `cmd:` entries stay in the record
 #: because they are useful to a reader, and they are checked only for being a
 #: recorded command rather than an empty string.
-_CMD_MIN_TOKENS: Final[int] = 2
-
-
 def _commit_state(sha: str) -> str:
     """`exists` | `absent` | `unprovable` for a measured-at sha.
 
@@ -236,7 +250,7 @@ def _commit_state(sha: str) -> str:
 
 
 def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, str]:
-    """A path must be a FILE inside the tree; a `cmd:` entry must name an artifact.
+    """A path must be a TRACKED FILE inside the tree; a `cmd:` entry must be non-empty.
 
     ⛔ This is the anti-forgery rule and the reason the tool is worth having: a
     row that *describes* its evidence in prose used to count. Now the file has
@@ -263,16 +277,19 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     """
     root = repo_root.resolve()
     if entry.startswith(_CMD_PREFIX):
-        # Well-formedness only — see `_CMD_MIN_TOKENS`: this arm confers nothing.
+        # Non-empty and parseable is the whole check — this arm confers nothing, so
+        # no shape or token rule here may invalidate a row whose held artifact is
+        # already present (`cmd:make` used to produce exit 1 and lose the report).
         command = entry[len(_CMD_PREFIX) :].strip()
         if not command:
             return False, "`cmd:` evidence names no command"
         try:
-            tokens = shlex.split(command)
+            shlex.split(command)
         except ValueError:
             return False, f"`cmd:` evidence is not a parseable command: {command!r}"
-        if len(tokens) < _CMD_MIN_TOKENS:
-            return False, f"`cmd:` evidence must be a COMMAND, not a word: {command!r}"
+        # Deliberately NO shape/token rule: this arm confers nothing, so a rule here
+        # can only false-block a row whose held artifact is already present
+        # (measured: `cmd:make` alongside a real path invalidated the record).
         return True, ""
     candidate = Path(entry)
     resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
@@ -280,7 +297,40 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
         return False, f"evidence path escapes the tree (`{entry}` resolves outside it)"
     if not resolved.is_file():
         return False, f"evidence path is not a file in the tree: {entry}"
+    if not _is_tracked(resolved, root):
+        # `is_file()` alone accepted a GITIGNORED artifact (measured:
+        # `WORKTREE-REPORT.md`, 68 KB of machine-local lane output) — so the row
+        # validated on the authoring box and was INVALID for every reader, which is
+        # the one thing "an artifact IN THE TREE" must not mean.
+        return False, (
+            f"evidence path is not TRACKED by git, so a reader's clone does not have it: {entry}"
+        )
     return True, ""
+
+
+def _is_tracked(resolved: Path, root: Path) -> bool:
+    """Is `resolved` tracked? `unprovable` (no git) does not blame the record."""
+    try:
+        rel = resolved.relative_to(root)
+    except ValueError:
+        return False
+    proc = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", str(rel)],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode == 0:
+        return True
+    probe = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return probe.returncode != 0 or probe.stdout.strip() != "true"
 
 
 def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str, Any]]:

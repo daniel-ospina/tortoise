@@ -507,23 +507,24 @@ def test_an_absolute_wildcard_is_refused_not_crashed(tmp_path):
         assert "Traceback" not in proc.stderr
 
 
-def test_merge_keys_are_flattened_not_reported_as_unparseable(tmp_path):
-    """`<<: *anchor` is legal YAML and a natural way to share a verdict across
-    rows; before the flatten it surfaced as "not parseable YAML"."""
+def test_a_merge_key_is_refused_by_name(tmp_path):
+    """`<<` is not "just another key": SafeConstructor splices the merged pairs in
+    without constructing the node, so the duplicate scan cannot see inside it.
+
+    Measured before the refusal: `<<: { … verdict: not-covered, verdict: verified}`
+    loaded as `verified` and emptied the uncovered list — a false PASS through the
+    one place the duplicate-key rule could not look. Every row must state its own
+    verdict, so the tag is refused with a message that says why.
+    """
     ledger = tmp_path / "ledger.yml"
     ledger.write_text(
         "version: 1\n"
         "issue: 9664\n"
-        "criteria_expected: 2\n"
+        "criteria_expected: 1\n"
         "measured_at: {ref: origin/main, sha: " + SHA + ", date: 2026-11-07}\n"
         "criteria:\n"
-        "  - &base\n"
-        "    id: A\n"
-        "    text: a criterion\n"
-        "    verdict: verified\n"
-        "    evidence: [" + REAL_EVIDENCE + "]\n"
-        "  - <<: *base\n"
-        "    id: B\n",
+        "  - <<: {id: A, text: t, verdict: not-covered, verdict: verified}\n"
+        "    evidence: [" + REAL_EVIDENCE + "]\n",
         encoding="utf-8",
     )
     proc = subprocess.run(
@@ -533,10 +534,28 @@ def test_merge_keys_are_flattened_not_reported_as_unparseable(tmp_path):
         cwd=str(REPO_ROOT),
         check=False,
     )
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "merge key" in proc.stderr
+    assert "not parseable YAML" not in proc.stderr
+
+
+def test_an_untracked_artifact_is_invalid(tmp_path):
+    """`is_file()` accepted a GITIGNORED lane artifact, so the row validated on the
+    authoring box and was INVALID for every reader — the opposite of "in the tree"."""
+    report = REPO_ROOT / "WORKTREE-REPORT.md"
+    if not report.is_file():
+        pytest.skip("no local WORKTREE-REPORT.md in this worktree")
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=["WORKTREE-REPORT.md"])]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "not TRACKED" in proc.stderr
+
+
+def test_a_one_word_cmd_entry_alongside_a_held_artifact_is_accepted(tmp_path):
+    """The arm confers nothing, so no shape rule may invalidate a row whose
+    artifact is present (measured: `cmd:make` produced exit 1 and lost the whole
+    uncovered list)."""
+    proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[REAL_EVIDENCE, "cmd:make"])]))
     assert proc.returncode == cl.EXIT_CLEAN, proc.stdout + proc.stderr
-    rows = cl.validate(cl.load_ledger(ledger))
-    assert [r["id"] for r in rows] == ["A", "B"]
-    assert rows[1]["verdict"] == "verified"  # inherited from the anchor
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────
