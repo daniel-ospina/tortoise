@@ -1144,9 +1144,12 @@ _PUBLISHED_CITES = {
 }
 
 #: The value-free gate `_value_verbatim_span` applies, published by the two
-#: artifacts this PR adds (they disagreed about it: the index row said
-#: `:3603-3604`, which is prose INSIDE the same docstring, while the runbook said
-#: `:3613-3614`). One site, three readers — so all three are pinned together.
+#: artifacts this PR adds (they disagreed about it: the index row pointed at
+#: prose INSIDE the gate's docstring, while the runbook pointed at the gate
+#: itself). One site, three readers — so all three are pinned together.
+#: ⛔ No concrete line number is spelled in this comment: the two examples that
+#: used to sit here went stale in the very drift this PR repairs, and an example
+#: that rots is the defect restated in the guidance (#10848 review P2).
 _VALUE_FREE_GATE = (5286, "if not _carries_value(content, quote):")
 
 #: The same contract, for the RUNBOOK — the doc half of the census (#10742).
