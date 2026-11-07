@@ -47,8 +47,9 @@ Task 10 (fresh 50-question E2E) was never run, so the delta contract's
 | accuracy ≥ 0.826 / chunk@20 ≥ 0.738 | **not measured here** — the eval lane's gates | see *What this does not measure* |
 
 Re-run (`ab-20261107T024226Z`): 33 912 → 2 047 tokens, **−93.96 %**, median
-−96.87 %, worst −85.19 %. The two runs differ by 0.18 points, and the worst
-session in either run is −85.16 %, so the effect is not carried by outliers.
+−96.87 %, worst −85.19 %, best −98.1 %. The two runs differ by 0.18 points, and
+the worst session in either run is −85.16 %, so the effect is not carried by
+outliers.
 
 ## The method — one variable
 
@@ -83,7 +84,9 @@ artifacts would be inventing a measurement, which is why it is stated here inste
 not a proof: `attempts=1` with no `error` on all 14 arm calls *implies* one
 contributing call per arm — it cannot exclude a raise that was silently retried.
 The class of attempt that escapes every counter stays a production follow-up
-(`_complete` has no `calls_raised` counter).
+(`_complete` has no `calls_raised` counter). `sessions_failed`, `partial` and
+`classify_later`/`templates` postdate them for the same reason: the instrument
+at this head writes them, the committed artifacts do not carry them.
 
 **Inputs are real, not synthetic.** The sessions come from the recorded
 write-path eval receipts (`tests/eval/write_path/receipts/7947-arms-2026-10-18/`):
@@ -121,8 +124,8 @@ dict carries `count` (census), `candidates` (what the classification mask could
 enumerate), `recorded`, `cap`, `cap_hit`, `cap_dropped` and `unclassified`, so a
 CAP drop and a MASK deficit (the two independent reasons a list can come up
 short) are never conflated: here `cap_dropped` is 0 everywhere and
-`unclassified` is 0 on six rows and 1 on one — the census counting a change in a
-field outside `_CORRECTION_FIELDS`.
+`unclassified` is 0 on 6 of the 7 rows and 1 on the remaining one — the
+census counting a change in a field outside `_CORRECTION_FIELDS`.
 
 ## ⚠️ The residual, partitioned from the artifact (do not read −94 % as a free win)
 
@@ -230,7 +233,7 @@ corrected items with the cap/census accounting above, composition totals, and th
 per-arm `s4_delta_empty` / `s4_delta_reemit_suspect` flags derived with
 production's own predicates) and `ab-20261107T024226Z.json` (the re-run).
 
-Instrument tests: `tests/test_s4_reeemit_tax.py` (**31** tests, offline, fake
+Instrument tests: `tests/test_s4_reeemit_tax.py` (**32** tests, offline, fake
 model) — they pin the ways a number like this goes wrong silently: a vacuous A/B, the
 two arms receiving different inputs, a mis-attributed cost (a per-call total
 rather than the final call; `null` rather than 0 when the provider reports
@@ -257,10 +260,15 @@ legitimate regeneration does not red it.
 `test_the_readme_figures_reproduce_from_the_committed_artifacts` is its
 literal-figure counterpart: it reads both
 committed JSONs and asserts every headline figure above is *recomputed* from
-them — the token sums, both reductions and medians, the worst session, the
-composition difference, the census-vs-mask deficit, `cap_hit`/`cap_dropped` on
-every row, the 62/1/1 partition with no content or name change, and
-`s4_delta_empty` on every delta row.
+them — the token sums, both reductions and medians, the worst and best sessions,
+**each composition channel in its own table cell** (a substring pin would stay
+green when the wrong cell changed: `201`, `12` and `62` each occur several times
+in this document), the census-vs-mask deficit as the sentence that states it, the
+62/1/1 bucket table, `cap_hit`/`cap_dropped` on every capped list of every arm,
+and `s4_delta_empty` on every delta row. The other pin — the internal-consistency
+one — additionally reconciles `summary.rows` against `arms` pairwise and each
+composition total against the measured arms, so an artifact assembled from two
+different runs cannot stay green.
 
 ⚠️ It does **not** pin this document's PROSE, and that gap is where this file
 went wrong four times: an arithmetic slip between the two arms' `s4_items`, and
