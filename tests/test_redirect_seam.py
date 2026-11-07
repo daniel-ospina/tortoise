@@ -708,71 +708,55 @@ def _thread_start_stamp_violations() -> list[str]:
 
     (1) the marker is set (conftest's installer ran — never module-body, so a
         leaked TEST_MODE env cannot patch stdlib);
-    (2) OUR wrapper is INSTALLED — reachable from `threading.Thread.start`
-        through the `__wrapped__` links `functools.wraps` records, at any depth
-        of third-party layers above it;
+    (2) OUR wrapper is INSTALLED — exactly ONE of our stamps is reachable from
+        `threading.Thread.start`, at any depth of third-party layers above it,
+        and it does not delegate through another stamp. That half has ONE home,
+        `_stamp_problems`; this census does not re-derive it;
     (3) re-invoking the installer changes nothing (idempotence — a non-idempotent
         installer installs a NEW function object and the identity MOVES).
 
     ⛔ WHAT THIS CANNOT SEE — AND WHAT IT REPORTS WRONGLY — stated so nobody
     reads it as more:
 
-    (a) NOT a blind spot: a stale copy at `Thread.start` IS caught, and named.
-        The reachability check compares OBJECTS, so a different function
-        carrying the same name / `__module__` / `__qualname__` misses the chain
-        and is reported as "… marker guard bypassed, or a stale module copy".
-        Measured: driving that state produces exactly that violation, so a
-        re-executed `tortoise.projection` is NOT indistinguishable from a
-        third-party layer — an earlier draft of this docstring claimed it was,
-        and that claim was false.
+    (a) It does NOT assert object identity, here or in `_stamp_problems`, and
+        that is deliberate rather than sloppy: the outer frame is legitimately
+        REPAINTED (sentry's `@wraps` layer) and a reachability test against the
+        module's current function would call that a double wrap — the exact
+        false red #11430 removed. Stamps are identified by `__globals__`
+        (`_is_stamp`), so a stale copy of our stamp at `Thread.start` reads as
+        OURS: tolerated when it delegates to the stdlib (the stamp still runs),
+        reported when its delegate reaches another stamp — which is what a plain
+        `importlib.reload` creates, since the module body re-executes in the SAME
+        `__dict__` and rewrites the installed stamp's delegate to itself.
 
-    (b) A REAL blind spot: `_ORIG_THREAD_START` is NEVER inspected. The walk
-        follows `__wrapped__` only, and this wrapper is a plain `def` that
-        publishes none, so the chain stops at it. That global is captured at
-        import and re-captured on `importlib.reload`, so after a reload it names
-        a stale copy of this wrapper (measured: `_ORIG_THREAD_START is <the
-        pre-reload wrapper>`). That particular reload state is still caught by
-        (a), because `Thread.start` holds the pre-reload object too. What
-        nothing here can see is a state where `Thread.start` is the CURRENT
-        wrapper while `_ORIG_THREAD_START` holds a stale copy.
+    (b) `_ORIG_THREAD_START` IS inspected (by `_stamp_problems`'s second fact),
+        so the reload double wrap is no longer a blind spot. What remains unseen
+        is a delegate that reaches a stamp only through a MODULE-GLOBAL lookup —
+        no `__wrapped__` link and no closure cell — for the reason given in
+        `_closure_stamp`: no static check can prove such a call site is REACHED.
 
     (c) A FALSE POSITIVE, fail-closed: a layer ABOVE ours that publishes no
-        `__wrapped__` — a hand-rolled `Thread.start = f` with no
-        `functools.wraps` — hides our wrapper from the walk, so an INSTALLED
-        wrapper is reported as "not reachable". Measured: a plain-def
-        interceptor above ours yields that violation while our wrapper sits
-        installed one level down. The reachability check is therefore sound only
-        through `functools.wraps`-publishing layers — which is what invariant
-        (2) says, and what the real wrapper in play
-        (`sentry_sdk.integrations.threading`) publishes.
+        `__wrapped__` and closes over no stamp — a hand-rolled
+        `Thread.start = f` reaching our stamp through globals — hides our
+        wrapper from the delegate walk, so an INSTALLED wrapper reads as "never
+        installed". A PLAIN delegating wrapper that closes over the stamp IS
+        tolerated (`_closure_stamp`); the closure-free shape is not guessed at.
 
-    So this census pins the MARKER, installer IDEMPOTENCE, and OUR WRAPPER'S
-    REACHABILITY through the `__wrapped__` links `functools.wraps` records —
-    not that the install cannot be what broke the stamp.
+    So this census pins the MARKER, installer IDEMPOTENCE, and the CHAIN the
+    stamp lives in — not that the install cannot be what broke the stamp.
     """
     import threading
 
     from tortoise import projection as proj_mod
 
-    proj = proj_mod
     violations: list[str] = []
     if getattr(threading.Thread, "_tortoise_stamp_installed", False) is not True:
         violations.append(
             "Thread.start stamp not installed in the test session "
             "(install_thread_stamp must run from conftest, never module-body)")
-    # Bounded walk (a seen-set, so a cycle cannot hang the census).
-    chain, seen, fn = [], set(), threading.Thread.start
-    while fn is not None and id(fn) not in seen:
-        chain.append(fn)
-        seen.add(id(fn))
-        fn = getattr(fn, "__wrapped__", None)
-    if proj._thread_start_inherit_stem not in chain:
-        violations.append(
-            "the Thread.start stamp wrapper is not reachable from "
-            f"threading.Thread.start ({threading.Thread.start!r}) — the installed "
-            "wrapper is not ours (marker guard bypassed, or a stale module copy)")
+    violations.extend(_stamp_problems(threading.Thread.start))
     before = threading.Thread.start
-    proj.install_thread_stamp()  # re-invocation → no-op (marker)
+    proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
     if threading.Thread.start is not before:
         violations.append(
             "re-invoked installer re-wrapped Thread.start (the class-attribute "
@@ -816,7 +800,7 @@ def test_a_third_party_wrapper_on_thread_start_is_not_a_double_wrap(monkeypatch)
     # TEETH 1: the stamp GONE (installer never ran, or a reload/restore wiped it)
     # must be reported, not silently accepted as "some wrapper is installed".
     monkeypatch.setattr(threading.Thread, "start", proj_mod._ORIG_THREAD_START)
-    assert any("not reachable" in v for v in _thread_start_stamp_violations()), (
+    assert any("never installed" in v for v in _thread_start_stamp_violations()), (
         "an ABSENT stamp passed the census")
 
     # TEETH 2: an installer that re-wraps on every call must be reported — this
