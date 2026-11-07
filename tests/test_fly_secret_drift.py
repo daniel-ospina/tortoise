@@ -3228,7 +3228,9 @@ class TestTheMitigationLedger:
         space-delimited accumulator. Drop either delimiter and `FOO_BAR` also matches
         `FOO`, so a ledger entry for `TORTOISE_BACKUP_KEY_PREVIOUS` would suppress
         `TORTOISE_BACKUP_KEY` as well — a REAL pair in this payload
-        (`deploy-hosted.yml:1189` / `:1194`), where the previous backup key is the
+        (`deploy-hosted.yml:1197` / `:1202`, pinned by
+        `test_the_backup_key_pair_the_delimiter_pin_cites_is_still_those_lines`), where
+        the previous backup key is the
         entry an operator is most likely to write after a rotation. The consequence
         is not a re-arm but the mirror-image defect: the LIVE key silently stops
         syncing on every deploy, so rotation breaks (#2318) and no gate reports it.
@@ -3497,27 +3499,40 @@ class TestTheMitigationLedger:
         assert proc.returncode == 2, proc.stdout + proc.stderr
         assert "assigns it a NON-EMPTY value" in proc.stdout, proc.stdout
 
-    def test_an_EMPTY_fly_toml_env_PLACEHOLDER_does_not_block_the_entry(self):
-        """`[env] = ""` is a placeholder the Fly secret SHADOWS — so it must not refuse.
+    @pytest.mark.parametrize(
+        ("literal", "allowed"),
+        [
+            ('""', True),  # the real fly.toml placeholder form
+            ("''", True),  # single-quoted empty — same value, different quoting
+            ('"0"', False),  # falsy-looking but a REAL value the deploy applies
+            ('"false"', False),  # ditto
+            ('"   "', False),  # whitespace is a value, not an absence
+        ],
+    )
+    def test_only_an_EMPTY_fly_toml_env_value_lets_the_entry_through(self, literal, allowed):
+        """`[env] = ""` is a PLACEHOLDER the Fly secret SHADOWS — a value is not.
 
-        `fly.toml` carries five of them (`TORTOISE_BACKUP_KEY`, `R2_ACCOUNT_ID`,
-        `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`) purely to document
-        the names. A Fly secret shadows `[env]`, so with the secret ABSENT the app
-        reads the empty string — which IS the deliberate absence the ledger records,
-        and the value is not a second delivery path. Treating any `[env]` KEY as
-        blocking made the five most likely incident mitigations (unset the backup key,
-        unset an R2 credential) UNRECORDABLE at exit 2, never bypassable, while the
-        ledger header and the runbook used `TORTOISE_BACKUP_KEY` as their worked
-        example (#11332 review, P1) — so the documented remedy would have been
-        refused by the machinery the docs described.
+        `fly.toml` carries five empty ones (`TORTOISE_BACKUP_KEY`, `R2_*`) purely to
+        document the names. A Fly secret shadows `[env]`, so with the secret ABSENT
+        the app reads the empty string — which IS the deliberate absence the ledger
+        records, and not a second delivery path. Treating any `[env]` KEY as blocking
+        made the five most likely incident mitigations (unset the backup key, unset an
+        R2 credential) UNRECORDABLE at exit 2, never bypassable, while the ledger
+        header and the runbook used `TORTOISE_BACKUP_KEY` as their worked example
+        (#11332 review, P1).
+
+        ⛔ Parametrized over the shapes a truthiness test would get WRONG: quoting is
+        normalised (`''` is empty too), but `"0"`, `"false"` and whitespace are REAL
+        values the deploy applies, so they must still block. A test that only covered
+        `""` would pass on an implementation that stripped quotes and nothing else.
         """
         toml = _fixture(
-            "ledger-env-placeholder.toml",
-            _FLY_TOML.replace("[env]\n", '[env]\n  SENTRY_DSN = ""\n', 1),
+            f"ledger-env-{literal.strip(chr(34) + chr(39)) or 'empty'}-{len(literal)}.toml",
+            _FLY_TOML.replace("[env]\n", f"[env]\n  SENTRY_DSN = {literal}\n", 1),
         )
-        assert 'SENTRY_DSN = ""' in toml.read_text()
+        assert f"SENTRY_DSN = {literal}" in toml.read_text()
         proc = _run(
-            _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], "ledger-env-ph-secrets.json"),
+            _secrets_file(["FASTAPI_INTERNAL_KEY", "GIT_SHA"], "ledger-env-value-secrets.json"),
             manifest=LEDGER_MANIFEST,
             workflow=LEDGER_WORKFLOW,
             toml=toml,
@@ -3527,9 +3542,14 @@ class TestTheMitigationLedger:
                 "FLY_MITIGATION_TODAY": "2026-11-07",
             },
         )
-        assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert "LEDGER NOT HONOURED" not in proc.stdout, proc.stdout
-        assert "SENTRY_DSN (owner daniel" in proc.stdout, proc.stdout
+        if allowed:
+            assert proc.returncode == 0, proc.stdout + proc.stderr
+            assert "LEDGER NOT HONOURED" not in proc.stdout, proc.stdout
+            assert "SENTRY_DSN (owner daniel" in proc.stdout, proc.stdout
+        else:
+            assert proc.returncode == 2, proc.stdout + proc.stderr
+            assert "LEDGER NOT HONOURED" in proc.stdout, proc.stdout
+            assert "assigns it a NON-EMPTY value" in proc.stdout, proc.stdout
 
     def test_a_ledgered_CONJUNCTION_MEMBER_does_not_report_the_derived_name_STALE(self):
         """The ledger emptying a derived name is the MITIGATION, not a stale declaration.
@@ -3603,6 +3623,60 @@ class TestTheMitigationLedger:
         assert "LEDGER-EMPTIED" in proc.stdout and "BACKUP_SWEEP_ENABLED" in proc.stdout, (
             "the explanation must be reported, not silently swallowed: " + proc.stdout
         )
+
+    def test_a_PERSISTED_derived_flag_the_ledger_empties_is_a_FALSE_RECORD(self):
+        """`flyctl secrets set` is ADDITIVE — an omission does not clear the old value.
+
+        `BACKUP_SWEEP_ENABLED=true` is staged `true` on every healthy deploy. A ledger
+        entry for a member of its conjunction empties it from the payload, and Fly
+        KEEPS the `true` already there: the app boots enabled-with-missing-secrets,
+        `tortoise/backup_config.py` raises a ConfigError that
+        `alert_channel.sweep_config_safe` swallows, and the sweep plus the staleness
+        watcher start disabled. The ledger's absence is then NOT in effect, so the
+        entry is a false record — reported as such with the one-command remedy, rather
+        than certified as "the mitigation working" (#11332 review round 4, P1).
+        """
+        manifest = _fixture(
+            "derived-live-manifest.txt", _LEDGER_MANIFEST + "BACKUP_SWEEP_ENABLED  workflow\n"
+        )
+        workflow = _fixture(
+            "derived-live-workflow.yml",
+            _LEDGER_WORKFLOW.replace(
+                "      - name: Set all app secrets on Fly.io\n",
+                "      - name: Set all app secrets on Fly.io\n"
+                "        env:\n"
+                "          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}\n",
+                1,
+            ).replace(
+                "          flyctl secrets set",
+                '          if [ -n "${SENTRY_DSN-}" ]; then\n'
+                "            ARGS+=(BACKUP_SWEEP_ENABLED=true)\n"
+                "          fi\n"
+                "          flyctl secrets set",
+                1,
+            ),
+        )
+        proc = _run(
+            _secrets_file(
+                ["FASTAPI_INTERNAL_KEY", "GIT_SHA", "BACKUP_SWEEP_ENABLED"],
+                "derived-live-secrets.json",
+            ),
+            manifest=manifest,
+            workflow=workflow,
+            present={"FASTAPI_INTERNAL_KEY", "OPT_SECRET", "SENTRY_DSN"},
+            extra_env={
+                "FLY_MITIGATION_TODAY": "2026-11-07",
+                "FLY_MITIGATION_LEDGER": str(_ledger(_entry("SENTRY_DSN"), name="dl.txt")),
+            },
+        )
+        assert proc.returncode == 1, (
+            "the ledgered input emptied a derived flag that is ALREADY live on Fly, so "
+            "the omission does not take effect — the run must not be green: "
+            + proc.stdout
+        )
+        assert "MITIGATION NOT IN EFFECT" in proc.stdout, proc.stdout
+        assert "BACKUP_SWEEP_ENABLED" in proc.stdout, proc.stdout
+        assert "flyctl secrets unset BACKUP_SWEEP_ENABLED" in proc.stdout, proc.stdout
 
     def test_the_gate_runs_over_the_REAL_workflow_with_a_non_empty_ledger(self):
         """The other end-to-end test pins the ledger EMPTY (round-2 F5).

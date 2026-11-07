@@ -5517,3 +5517,21 @@ def test_the_shipped_ledger_is_a_tracked_contract_file():
         "the ledger must name the issue whose contract it states — a silent file "
         "cannot be reviewed by the operator who needs to add an entry mid-incident"
     )
+
+
+def test_the_backup_key_pair_the_delimiter_pin_cites_is_still_those_lines():
+    """The citation above is a CLAIM, so it is pinned rather than trusted.
+
+    Two review rounds in a row found the line numbers in the delimiter pin stale
+    (`:1097/:1102`, then `:1189/:1194`) because the payload above them grew. A
+    citation that is wrong is worse than none: it sends the reader to an unrelated
+    line and reads as verification. Pinning the pair by CONTENT makes the next
+    drift a red test instead of a wrong comment (#11332 review round 4, P2).
+    """
+    lines = _WORKFLOW.read_text().splitlines()
+    for number, name in ((1197, "TORTOISE_BACKUP_KEY"), (1202, "TORTOISE_BACKUP_KEY_PREVIOUS")):
+        assert 0 < number <= len(lines), f"the workflow shrank past line {number}"
+        assert f"ARGS+=({name}=" in lines[number - 1], (
+            f"the delimiter pin cites deploy-hosted.yml:{number} for {name}, but that "
+            f"line is {lines[number - 1].strip()!r} — update the citation"
+        )

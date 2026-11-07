@@ -105,9 +105,11 @@ Exit codes (mirrors check-migration-drift / check-fly-machines-guard):
       is missing, malformed, indented, names a name the manifest does not
       declare, names a non-`gh-secret:` source, names one of the app's MANDATORY
       secrets, **or a ledgered name the payload still stages** — `LEDGER NOT
-      HONOURED`, which also covers a ledgered name `fly.toml [env]` assigns, since
-      the deploy applies that value whatever the secret list says). Fail-closed: an
-      unreadable state is never clean.
+      HONOURED`, which also covers a ledgered name `fly.toml [env]` assigns a
+      **NON-EMPTY** value — the deploy applies that value whatever the secret list
+      says. An `[env] = ""` PLACEHOLDER is not that: a Fly secret shadows `[env]`,
+      so with the secret absent the app reads the empty string, i.e. the deliberate
+      absence IS in effect. Fail-closed: an unreadable state is never clean.
 
       #11122: `LEDGER NOT HONOURED` is exit 2, NOT exit 1, and that distinction is
       the whole protection. Exit 1 is the deploy's documented bypass lane
@@ -1206,10 +1208,33 @@ def main() -> int:
         elif kind == "workflow":
             if name not in assigned:
                 if name in unmitigated:
-                    # The payload DOES assign it; the ledger is what emptied it. That
-                    # is the ledger working, not a stale declaration — and the generic
+                    # The payload WOULD assign it; the ledger is what emptied it. That
+                    # is the ledger working, not a stale declaration — the generic
                     # remedy below ("manage it from deploy-hosted.yml") would undo the
                     # fail-closed default this name exists for.
+                    #
+                    # ⛔ UNLESS THE VALUE IS ALREADY ON FLY, because `flyctl secrets
+                    # set` is ADDITIVE: an omission does not clear what is there, so a
+                    # PERSISTED derived flag keeps its old value while the payload no
+                    # longer states one. `BACKUP_SWEEP_ENABLED=true` is staged `true`
+                    # on every healthy deploy; a ledger entry for any member of its
+                    # conjunction then empties it from the payload, Fly keeps `true`,
+                    # and the app boots enabled-with-missing-secrets — a ConfigError
+                    # (`tortoise/backup_config.py`) that `alert_channel` swallows, so
+                    # the sweep AND the staleness watcher start disabled. Calling that
+                    # "the mitigation working" would be a green over exactly the state
+                    # this ledger exists to prevent, so it is a FALSE RECORD instead:
+                    # the recorded absence is not in effect (#11332 review round 4, P1).
+                    if name in set(fly_names):
+                        violations.append(
+                            f"MITIGATION NOT IN EFFECT — the ledger empties {name!r} "
+                            "from the payload, but `flyctl secrets set` is ADDITIVE, so "
+                            "the value already on Fly SURVIVES the omission and the "
+                            f"absence is not in effect. Unset it on Fly "
+                            f"(`flyctl secrets unset {name} --app {app}`) so the "
+                            "fail-closed value is what the next boot reads"
+                        )
+                        continue
                     mitigated_derived.append(name)
                     continue
                 violations.append(
@@ -1345,40 +1370,6 @@ def main() -> int:
     # every name this line prints is one the reader can act on by writing an entry.
     # One aggregated line, because N annotations is how a warning becomes
     # wallpaper.
-    # ⛔ BELT FIRST ON THE RELEASE PATH ONLY (#11332 review round 3, P2). This print
-    # used to sit ABOVE the `unhonourable`/`violations` returns, so a run that was
-    # then BLOCKED still announced "this deploy will CREATE N secret(s)" — a claim
-    # about a payload that was never staged. On a blocked run nothing is created, and
-    # the reader's remedy is the reported violation, not this warning.
-    would_create = sorted(
-        n
-        for n in live
-        if n not in set(fly_names)
-        and n not in mitigated
-        and declared.get(n, "").startswith("gh-secret:")
-    )
-    if would_create:
-        print(
-            f"::warning::#11122 — this deploy will CREATE {len(would_create)} Fly "
-            f"secret(s) that are currently ABSENT on {app}: {', '.join(would_create)}. "
-            "If an operator removed any of these ON PURPOSE (an incident mitigation), "
-            f"record it in {ledger_file.name} — that ledger is what stops the deploy "
-            "re-arming it. Absent-from-Fly and absent-from-the-ledger reads as "
-            "'never configured', which is what this deploy is about to fix."
-        )
-
-    if mitigated_derived:
-        print(
-            "LEDGER-EMPTIED — "
-            f"{len(mitigated_derived)} declared name(s) would be assigned by this "
-            "deploy but are NOT, because a ledger entry emptied an input they are "
-            "composed from. That is the mitigation working, not a stale declaration:"
-        )
-        for name in sorted(mitigated_derived):
-            print(
-                f"  - {name} (declared workflow-set; its composition needs a name the "
-                "ledger records as deliberately absent)"
-            )
     fly_conditional = [n for n in fly_names if n in set(conditional)]
     if fly_conditional:
         print(
@@ -1417,6 +1408,40 @@ def main() -> int:
             "control and drifts silently (#4126)."
         )
         return 1
+
+    if mitigated_derived:
+        print(
+            "LEDGER-EMPTIED — "
+            f"{len(mitigated_derived)} declared name(s) would be assigned by this "
+            "deploy but are NOT, because a ledger entry emptied an input they are "
+            "composed from. That is the mitigation working, not a stale declaration:"
+        )
+        for name in sorted(mitigated_derived):
+            print(
+                f"  - {name} (declared workflow-set; its composition needs a name the "
+                "ledger records as deliberately absent)"
+            )
+    # ⛔ BELT FIRST ON THE RELEASE PATH ONLY (#11332 review round 3, P2). This print
+    # used to sit ABOVE the `unhonourable`/`violations` returns, so a run that was
+    # then BLOCKED still announced "this deploy will CREATE N secret(s)" — a claim
+    # about a payload that was never staged. On a blocked run nothing is created, and
+    # the reader's remedy is the reported violation, not this warning.
+    would_create = sorted(
+        n
+        for n in live
+        if n not in set(fly_names)
+        and n not in mitigated
+        and declared.get(n, "").startswith("gh-secret:")
+    )
+    if would_create:
+        print(
+            f"::warning::#11122 — this deploy will CREATE {len(would_create)} Fly "
+            f"secret(s) that are currently ABSENT on {app}: {', '.join(would_create)}. "
+            "If an operator removed any of these ON PURPOSE (an incident mitigation), "
+            f"record it in {ledger_file.name} — that ledger is what stops the deploy "
+            "re-arming it. Absent-from-Fly and absent-from-the-ledger reads as "
+            "'never configured', which is what this deploy is about to fix."
+        )
 
     # Anything still standing is unconditionally propagated (or gated only by a
     # declaration the rules above accepted). No `unmanaged` subtraction is needed
