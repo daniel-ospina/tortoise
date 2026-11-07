@@ -5283,6 +5283,9 @@ surfaces:
   # `test_pack_extraction_slots_v31.py`; after `test_pack_state.py`), every addition
   # applied cleanly, and the rows accumulated 1 → 2 → 3 (above). Do not re-add this row;
   # before hand-registering any file, check it is absent from THIS list.
+  # The CLASS root is **#10032** — a conflict-free replay that appends a `core`
+  # entry the other side already holds, while leaving the YAML valid. This row is
+  # an instance of it, not a second report (#11258).
   - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
