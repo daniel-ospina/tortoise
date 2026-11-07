@@ -2791,6 +2791,31 @@ class TestTheMitigationLedger:
         assert "SENTRY_DSN (owner daniel, expires 2026-11-20)" in proc.stdout
         assert "LEDGER NOT HONOURED" not in proc.stdout
 
+    def test_every_entry_is_suppressed_not_only_the_last(self):
+        """N>1 is the NORMAL case, and nothing else pins it.
+
+        An accumulator that OVERWRITES (`MITIGATED="$NAME "`) keeps only the last
+        entry read and honours nothing else — while every structural assertion in
+        `tests/test_deploy_workflow.py` stays green (the path, the `case`, the
+        reassignment and the ordering are all still there). This drives BOTH entries
+        through the SHIPPED filter and relies on the gate's own check (0): if only the
+        last had been dropped, the first would still be in the payload's
+        `assigned | unconditional | live` and the gate would answer `LEDGER NOT
+        HONOURED` (exit 2) instead of 0 — which is exactly what
+        `test_a_ledgered_name_the_payload_still_stages_fails_the_deploy` proves the
+        instrument detects.
+        """
+        ledger = _ledger(_entry("SENTRY_DSN") + _entry("OPT_SECRET"))
+        proc = _ledger_run(ledger)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "MITIGATED — 2 secret(s)" in proc.stdout, proc.stdout
+        assert "SENTRY_DSN (owner daniel" in proc.stdout
+        assert "OPT_SECRET (owner daniel" in proc.stdout
+        assert "LEDGER NOT HONOURED" not in proc.stdout, (
+            "only one of the two entries was dropped from the payload — an "
+            "accumulator that overwrites keeps the LAST entry and honours nothing else"
+        )
+
     def test_the_same_payload_without_the_ledger_stages_the_name(self):
         """The suppression is the LEDGER's doing, not an accident of the fixture."""
         proc = _ledger_run(_ledger("# empty\n"))
