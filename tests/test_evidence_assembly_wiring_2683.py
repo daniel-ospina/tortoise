@@ -274,12 +274,15 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
         seeded_sdk, q, ks=(5,), top_k=10, pool_size=60,
         evidence_assembly=True)
 
-    # the arm marker + the census the run config records (D2: ON only)
+    # the arm marker + the census the run CHECKPOINT records (D2: ON only)
     assert on["evidence_assembly"] is True
     stats = on["evidence_assembly_stats"]
-    # THE WHOLE CENSUS, not a sample of it: this dict IS the run config's
-    # record of the arm, so a key that grows or disappears is a behaviour
-    # change the lane would otherwise ship unseen.
+    # THE WHOLE CENSUS, not a sample of it: this dict IS what the run records
+    # about the arm (`run.py:2897` writes it wholesale into the checkpoint), so
+    # a key that grows or disappears is a behaviour change the lane would
+    # otherwise ship unseen. ⛔ It is NOT in the published report: the Layer-1
+    # projection (`run.py:6145`) has no `evidence_assembly_stats`, so the
+    # artifact a lane reads cannot show the arm state either — filed as #11467.
     assert set(stats) == {
         "on", "applied", "tr_excluded", "pool_items", "package_items",
         "packages", "collapsed_duplicates", "verbatim_refs_kept",
@@ -334,7 +337,8 @@ def test_the_off_switch_leaves_the_old_path_unchanged(seeded_sdk, monkeypatch):
     """FAIL VALUE: a default that is ON (the #1745 fail-safe decision is OFF),
     an OFF path that emits the arm's keys (D2: the off-path outcome keeps
     today's exact shape), or a switch that only reads the explicit kwarg and
-    ignores the env the run config uses.
+    ignores the AMBIENT env — the only route the eval lane has today
+    (`run.py` never sets, passes or fingerprints the arm; #11467).
 
     The switch is ``TORTOISE_LME_EVIDENCE_ASSEMBLY`` (tri-state, only
     1/true/yes/on enables)."""
@@ -373,7 +377,10 @@ def test_the_off_switch_leaves_the_old_path_unchanged(seeded_sdk, monkeypatch):
     assert _ids(garbage["context_points"]) == _ids(
         explicit_off["context_points"])
 
-    # …and the env the run config will actually set DOES arm it
+    # …and the AMBIENT env var — the ONLY route the eval lane has today (no
+    # `evidence_assembly=` at `run.py`'s call site, no fingerprint entry, no
+    # report projection: #11467; the scoping doc records the same at
+    # `docs/scoping/2026-09-09-evidence-assembly-wave.md:188`) — DOES arm it.
     monkeypatch.setenv("TORTOISE_LME_EVIDENCE_ASSEMBLY", "1")
     armed = _r.retrieve_for_question(
         seeded_sdk, q, ks=(5,), top_k=10, pool_size=60)
