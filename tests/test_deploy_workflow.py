@@ -5520,6 +5520,36 @@ def test_the_shipped_ledger_is_a_tracked_contract_file():
     )
 
 
+def _citation_window(text: str, match: re.Match[str], span: int = 400) -> str:
+    """The text AROUND a citation, where the sentence naming what it pins lives."""
+    return text[max(0, match.start() - span) : match.end() + span]
+
+
+def _test_function_names_in_the_tracked_tree() -> set[str]:
+    """Every `def test_…` name in the tracked tree, in ONE index read.
+
+    `git grep` reads the repo index, so resolving the cited names costs one bounded
+    process instead of a glob-and-read over ~1.4k test modules. A git that cannot run
+    is a HARD FAILURE here, never a `skip`: an empty set would resolve every citation
+    as dangling (a false red), and a skip would pass the guard silently — both are a
+    verdict about a datum that was never read.
+    """
+    proc = _census_git(
+        ROOT, "grep", "-h", "-o", "-E", r"def (test_[A-Za-z0-9_]+)", "--", "tests/"
+    )
+    assert proc.returncode == 0, (
+        "`git grep` over the tests tree failed, so no test-name citation in these "
+        f"comments can be resolved at all (rc={proc.returncode}): "
+        f"{proc.stderr.strip()[:300]}"
+    )
+    names = set(re.findall(r"def (test_[A-Za-z0-9_]+)", proc.stdout))
+    assert names, (
+        "`git grep` returned no `def test_…` for the tracked tests tree — every cited "
+        "name would then read as dangling, which is this guard's empty-set fail-open"
+    )
+    return names
+
+
 def test_every_citation_of_the_backup_key_pair_resolves():
     """EVERY citation of the pair, not just the pin's own numbers (#11332 round 5, P2).
 
@@ -5529,25 +5559,33 @@ def test_every_citation_of_the_backup_key_pair_resolves():
     exactly that survived one round of "fixed". So this walks every citation in BOTH
     test files whose surrounding text names a backup-key variable, and requires the
     cited line to actually be the assignment of a backup-key name.
+
+    (#11332 review r6, P3) The paragraph that makes the delimiter pattern look pinned
+    cited its companion by **test name**, and this walk was blind to that form: it sat
+    in a backup-key window, so it counted as a citation of the pair while the
+    line-number regex walked past it and the name resolved to nothing. A pointer to a
+    test nobody wrote reads exactly like a pin. So the walk resolves test-name
+    citations too, in the same windows and by the same rule: if it is cited as the
+    thing that pins the pair, it has to exist.
     """
     expected = {1197: "TORTOISE_BACKUP_KEY", 1202: "TORTOISE_BACKUP_KEY_PREVIOUS"}
+    pair = tuple(expected.values())
     lines = _WORKFLOW.read_text().splitlines()
     citation = re.compile(r"deploy-hosted\.yml:(\d+)(?:\s*/\s*:(\d+))?")
+    name_citation = re.compile(r"`(?:[\w/]+\.py::)?(test_[A-Za-z0-9_]+)`")
+    defined = _test_function_names_in_the_tracked_tree()
     seen: set[int] = set()
+    named: dict[str, str] = {}
     for path in (
         ROOT / "tests" / "test_deploy_workflow.py",
         ROOT / "tests" / "test_fly_secret_drift.py",
     ):
         text = path.read_text()
+
         for match in citation.finditer(text):
-            window = text[max(0, match.start() - 400) : match.end() + 400]
-            numbers = [int(n) for n in match.groups() if n]
-            if not any(
-                name in window
-                for name in ("TORTOISE_BACKUP_KEY", "TORTOISE_BACKUP_KEY_PREVIOUS")
-            ):
+            if not any(name in _citation_window(text, match) for name in pair):
                 continue
-            for number in numbers:
+            for number in (int(n) for n in match.groups() if n):
                 seen.add(number)
                 assert 0 < number <= len(lines), (
                     f"{path.name} cites deploy-hosted.yml:{number}, past the end of "
@@ -5562,7 +5600,26 @@ def test_every_citation_of_the_backup_key_pair_resolves():
                     f"{path.name} cites deploy-hosted.yml:{number} for "
                     f"{expected[number]}, but that line is {lines[number - 1].strip()!r}"
                 )
+        for match in name_citation.finditer(text):
+            if not any(name in _citation_window(text, match) for name in pair):
+                continue
+            where = f"{path.name}:{text.count(chr(10), 0, match.start()) + 1}"
+            named[where] = match.group(1)
+
+    for where, name in sorted(named.items()):
+        assert name in defined, (
+            f"{where} cites `{name}` as the companion that pins the backup-key pair, "
+            "but no `def "
+            f"{name}` exists anywhere in the tracked tests tree — a citation of a "
+            "test nobody wrote reads as a pin and proves nothing (#11332 review r6, "
+            "P3). Point it at the test that does the pinning, or drop the claim."
+        )
     assert seen == set(expected), (
         f"the citation walk found {sorted(seen)} — it must see both halves of the "
         "pair, or this guard passes vacuously"
+    )
+    assert named, (
+        "the test-name walk resolved no citation at all — the delimiter paragraph "
+        "cites its companion pin by name, so an empty walk means this leg is not "
+        "looking where the citations are"
     )
