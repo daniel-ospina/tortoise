@@ -282,11 +282,15 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     # (`retrieve.py:3324-3326`). ⛔ MEASURED, so the next reader does not assume
     # it travels: it does NOT reach the run's artifacts. `run.py` contains no
     # `evidence_assembly` reference at all (`rg -n evidence_assembly
-    # tools/longmem_eval/run.py` → 0 hits), so the outcome whitelist that mirrors
-    # every sibling arm (`run.py:5348` temporal_leg_stats, `:5392`
-    # coverage_loop_stats, `:5403` session_reinjection_stats) omits this one, and
-    # the Layer-1 projection (`run.py:6145`+) omits it too. The arm state is
-    # recorded NOWHERE the eval lane can read it — both gaps are #11467.
+    # tools/longmem_eval/run.py` → 0 hits), so the outcome whitelist that
+    # mirrors four sibling arm-stat keys (`run.py:5348` temporal_leg_stats,
+    # `:5392` coverage_loop_stats, `:5403` session_reinjection_stats,
+    # `time_aware_stats`) omits this one, and the Layer-1 projection
+    # (`run.py:6145`+) omits it too. The arm state is recorded NOWHERE the eval
+    # lane can read it — not the checkpoint, not the Layer-1 report, and not the
+    # fingerprint (the `tr_session_*` pair rides the fingerprint and `r5_knobs`
+    # instead, `run.py:1922-1925` / `:5983-5991`; this arm has neither). Both
+    # gaps are #11467.
     # Hence this pin is the only guard the census has: a key that grows or
     # disappears is otherwise shipped unseen.
     assert set(stats) == {
