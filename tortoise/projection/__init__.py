@@ -735,9 +735,11 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 # dedup depending on allocator address recycling rather than on store identity.
 # The helper now resolves that same pool seam (#11328), so on the hosted path it
 # carries the endpoint and `_stable_endpoint()` returns it directly;
-# `_stable_endpoint()`'s other lanes — the projection's `_host` with the client's
-# port, then the address — remain for clients that resolve no endpoint at all
-# (a bare unit mock, the one shape with no store identity).
+# `_stable_endpoint()`'s remaining lanes — the pool's host+port as a PAIR when the
+# key does not resolve, then `_host` with no port, then the address — exist for
+# clients that resolve no (or only half an) endpoint: a bare unit mock, and any
+# client whose endpoint is incomplete. A half-resolved client deliberately gets
+# NO endpoint identity rather than a mixed tuple (see that method).
 _VECTOR_INDEX_PAIR_REPORTED: dict[tuple, tuple[frozenset, frozenset]] = {}
 _VECTOR_INDEX_PAIR_LOCK = threading.Lock()
 
@@ -18692,24 +18694,34 @@ class FalkorProjection(
 
     def _stable_endpoint(self):
         """The STORE identity both the `#4997` warning latch and the `#11087`
-        pair register key on — stable across projections of one store.
+        pair register key on — stable across projections of one store, for
+        every client shape a real projection can build.
 
         `_falkordb_version_cache_key()` answers `None` when the client resolves
-        no endpoint at all — a bare unit mock, the one shape with no store
-        identity — which used to collapse the key to `id(self)` on exactly the
-        hosted per-request path these registers exist for: one latch entry — and
-        one WARNING — per live request slot, never evicted. (That client shape
-        is also what made the version cache inert until #11328 taught the key to
-        read `connection_pool.connection_kwargs`.)
+        no endpoint — including a client that resolves only HALF of one — and
+        the lanes below add only what the key cannot, never a second field from
+        a second source:
 
-        So, in order: the cache key when it resolves; else the projection's
-        `_host` (set by `__init__` on every server projection) together with the
-        client's PORT, read from `connection_pool.connection_kwargs` (⛔ the port
-        is NOT a projection attribute and NOT a client attribute — the pool is
-        the seam `event_store._store_identity` and
-        `cypher_guard._client_store_key` already resolve it from); else the
-        address, which is a bare unit mock and the one shape with no endpoint
-        identity at all.
+        * the pool's host AND port **together** (both, or this lane declines);
+        * else `_host` with **no** port, only when no port resolves anywhere —
+          a DEGRADED bucket (it cannot separate two servers on one host) but a
+          stable one;
+        * else the ADDRESS (`("instance", id(self))`), which is reached by a
+          bare unit mock AND by any client that resolves only part of an
+          endpoint.
+
+        ⛔ A HALF-RESOLVED CLIENT GETS NO ENDPOINT IDENTITY, and that is a
+        deliberate trade of STABILITY for SAFETY. It could be combined as
+        `(projection _host, pool port)`, but nothing proves the two fields name
+        the same server, and such a mixed tuple can equal the real endpoint of a
+        DIFFERENT store — which merges two stores' registers and silences one of
+        them. So the mixed shape falls to the address lane instead. The cost is
+        bounded and stated: if one projection of a store resolves its endpoint
+        fully while another resolves only half of it, the two land in different
+        buckets (two reports rather than one) — a duplicate, where the mixed key
+        would produce a MISSING warning on a genuinely different store. Real
+        clients do not split: redis-py's client resolves host+port from its pool
+        together, or carries neither.
 
         ⛔ THE PORT IS PART OF THE IDENTITY, and keying on the host alone is a
         defect rather than a graceful degradation
@@ -18722,21 +18734,35 @@ class FalkorProjection(
         on a genuinely different store. The server shape here is
         `("server", host, port)` — the SAME tuple `_falkordb_version_cache_key`
         answers — so one store cannot land in two buckets depending on which of
-        the two lanes resolved its endpoint.
+        the two lanes resolved its endpoint. The only host-only bucket left is
+        the no-port-anywhere lane above, which cannot distinguish two ports and
+        says so.
         """
         endpoint = self._falkordb_version_cache_key()
         if endpoint is not None:
             return endpoint
         kwargs = _client_pool_kwargs(getattr(self, "db", None)) or {}
-        host = getattr(self, "_host", None) or kwargs.get("host")
-        if host is None:
-            return ("instance", id(self))
+        pool_host = kwargs.get("host")
         raw_port = kwargs.get("port")
-        try:
-            port = int(raw_port) if raw_port is not None else None
-        except (TypeError, ValueError):  # an unparseable port is no port
-            port = None
-        return ("server", str(host), port)
+        if pool_host is not None and raw_port is not None:
+            try:
+                return ("server", str(pool_host), int(raw_port))
+            except (TypeError, ValueError, OverflowError):
+                # An unparseable port is no endpoint identity — keep looking
+                # rather than mint a key that would collide across stores.
+                pass
+        own_host = getattr(self, "_host", None)
+        if own_host is not None and raw_port is None:
+            # ⛔ A HOST-ONLY bucket is a DEGRADED identity (it cannot separate
+            # two servers on one host) but it is all this store can offer, and
+            # it is *stable* — which is what keeps a per-request projection in
+            # one bucket. It is only minted when NO port resolves anywhere.
+            # Never combine `_host` with a pool port: nothing proves the two
+            # name the same server, and a mixed tuple can equal a real
+            # endpoint of a DIFFERENT store — merging two stores' registers
+            # and silencing one of them (round-2 review P3).
+            return ("server", str(own_host), None)
+        return ("instance", id(self))
 
     def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
         """Measure which of the labels the vector leg SERVES carry a VECTOR

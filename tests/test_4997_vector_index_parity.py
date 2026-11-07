@@ -834,6 +834,33 @@ def test_a_second_projection_of_the_same_store_does_not_repeat_the_pair(caplog):
     )
 
 
+def test_the_register_identity_never_mixes_sources():
+    """Round-2 review P3: `_stable_endpoint()` must never build its two fields
+    from two different sources.
+
+    A client that resolves only PART of an endpoint (a port in the pool, a host
+    on the projection) used to fall through to `(projection._host, pool port)` —
+    a tuple that matches NEITHER source and can equal a real endpoint of a
+    DIFFERENT store, so two stores would share one `#4997` warning latch and one
+    `#11087` pair register: one store's WARNING and report are suppressed and its
+    gap goes unreported. Reachable only through a mis-built client (redis-py
+    resolves both fields or neither), but silent when it happens.
+
+    ⛔ Falsifiable: the assertion below is the measured mixed tuple
+    `('server', 'conn-only-host', 6399)` under the old fallback.
+    """
+    proj = _bare()
+    proj._host = "conn-only-host"
+    proj.db = _SimpleNamespace(connection=_SimpleNamespace(
+        connection_pool=_SimpleNamespace(
+            connection_kwargs={"port": 6399})))   # port, no host
+    endpoint = proj._stable_endpoint()
+    assert endpoint == ("instance", id(proj)), (
+        "a half-resolved client must have NO endpoint identity, never a mixed "
+        f"tuple that can match another store (got {endpoint!r})"
+    )
+
+
 def test_two_ports_on_one_host_are_two_stores(caplog):
     """#11311: the store identity carries the PORT, not just the host.
 
