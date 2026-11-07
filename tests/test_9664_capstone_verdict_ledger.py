@@ -402,6 +402,10 @@ def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
         "cmd:uv run pytest ./tests/test_9664_capstone_*.py",
         "cmd:uv run python docs/./*.md",
         "cmd:uv run python docs/**/*.md",
+        # A runner declared in `_CHAIN_WORDS` must be reachable at position 0 too,
+        # and the chain example in the docstring must not be a false block.
+        "cmd:uvx pytest tests/test_9664_capstone_verdict_ledger.py",
+        "cmd:poetry run pytest tests/test_9664_capstone_verdict_ledger.py",
     ],
 )
 def test_a_cmd_entry_that_names_a_real_artifact_is_accepted(tmp_path, command):
@@ -513,7 +517,17 @@ def test_an_unresolvable_evidence_entry_is_invalid_not_a_traceback(tmp_path):
     replaced by a traceback, and an in-process caller catching `InvalidLedger`
     crashed instead.
     """
-    for entry in ("cmd:sh /tmp/*", "docs/evidence/9664-capstone/READ\x00ME.md"):
+    for entry in (
+        "cmd:sh /tmp/*",
+        # The cmd arm's own guard, reached via the NUL byte rather than the absolute
+        # pre-check: narrow the `except` to `(OSError,)` and THIS is the case that
+        # reds, which is what makes the guard actually pinned.
+        "cmd:sh docs/evidence/9664-capstone/READ\x00ME.md",
+        "docs/evidence/9664-capstone/READ\x00ME.md",
+        # `is_file()` stats the path, so an over-long component raises OSError from
+        # OUTSIDE a guard that wraps only `resolve()`.
+        "tools/" + "a" * 400 + ".py",
+    ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[entry])]))
         assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
         assert "Traceback" not in proc.stderr, proc.stderr

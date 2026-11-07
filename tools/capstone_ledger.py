@@ -210,6 +210,11 @@ RUNNERS: Final[frozenset[str]] = frozenset(
         "curl",
         "timeout",
         "env",
+        # Declared in `_CHAIN_WORDS` below, so they must be reachable at position 0
+        # too, or the documented shape is a false block (measured: `uvx pytest …`
+        # and `poetry run pytest …` were both refused).
+        "uvx",
+        "poetry",
     }
 )
 
@@ -359,7 +364,13 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     non-empty string meant `cmd:done` — or a sentence explaining that the work
     was done — satisfied the strongest verdict in the vocabulary, so one word
     defeated the whole record. A command entry must now NAME an artifact of this
-    tree (the script or test file it ran); prose names nothing and is refused.
+    tree in argument position; prose names nothing and is refused.
+
+    ⚠️ RESIDUAL, stated rather than hidden: this arm proves the entry is
+    COMMAND-SHAPED and cites a real artifact there. It does **not** prove the
+    command RAN it — `cmd:uv run python --help <path>` names the artifact and is
+    accepted, because the tool must never execute anything. The rule is "names an
+    artifact", not "ran it"; do not read a green ledger row as the stronger claim.
     """
     root = repo_root.resolve()
     if entry.startswith(_CMD_PREFIX):
@@ -407,7 +418,7 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
                 return True, ""
             return False, (
                 f"`cmd:` evidence names no artifact of this tree: {command!r} — the first "
-                f"argument after the runner must be the script or test file it ran "
+                f"thing in argument position after the runner must NAME the artifact "
                 f"(a bare path, a pytest node-id, or a glob over a named directory), and "
                 f"{why}. A command entry must NAME an artifact; prose names nothing."
             )
@@ -419,12 +430,17 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
     candidate = Path(entry)
     try:
         resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        # ⛔ `is_file()` is INSIDE the guard, not after it: it stats the path, so a
+        # name that is too long raises `OSError(ENAMETOOLONG)` and an unreadable
+        # directory component raises `PermissionError`. Both escaped `validate`'s
+        # "rows, or `InvalidLedger`" contract and printed a traceback with no
+        # `CAPSTONE-LEDGER: INVALID` marker (measured on a 400-char component).
+        if not resolved.is_relative_to(root):
+            return False, f"evidence path escapes the tree (`{entry}` resolves outside it)"
+        if not resolved.is_file():
+            return False, f"evidence path is not a file in the tree: {entry}"
     except (OSError, ValueError, NotImplementedError) as exc:
         return False, f"evidence path cannot be resolved ({type(exc).__name__}: {exc})"
-    if not resolved.is_relative_to(root):
-        return False, f"evidence path escapes the tree (`{entry}` resolves outside it)"
-    if not resolved.is_file():
-        return False, f"evidence path is not a file in the tree: {entry}"
     return True, ""
 
 
