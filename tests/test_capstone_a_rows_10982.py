@@ -479,11 +479,17 @@ def test_the_four_subject_families_are_counted_per_family_and_only_statements_ca
     probe = _probe()
     projection = _FakeProjection({
         "MATCH (n:Subject) RETURN count(n)": [[26]],
+        # A5's registered denominator promises the Point population BESIDE the Subject count, so
+        # the block must carry it (#11331 review round 8, P2-4b).
+        "MATCH (n:Point) RETURN count(n)": [[64]],
         "RETURN type(r) AS t, count(DISTINCT r) AS n": [["aboutSubject", 40]],
         "WHERE n.pointKind = 'statement'": [[40]],
     })
     out = probe._a5_subjects(projection)
     assert out["subjects"] == 26
+    assert out["point_population"] == 64, (
+        "A5 no longer reports the Point population its registered denominator promises beside the "
+        f"Subject count — the pinned floors a5_points/a2_candidates would have no field to guard: {out}")
     assert out["families"] == {"aboutSubject": 40, "memberOf": 0,
                                "ownedBy": 0, "managedBy": 0}
     assert out["statements_with_a_subject_edge"] == 40
@@ -633,6 +639,57 @@ def test_a_registered_non_bar_must_name_its_owner_decision_and_cannot_borrow_the
         assert any(needle in f for f in failures), (bad, failures)
 
 
+def test_the_floor_clause_exemption_is_BOUND_to_the_rows_own_pinned_floor():
+    """FAILS IF the words "floor of" can install an arbitrary bar on a bar-less row.
+
+    ⛔ The arm's named property is "a registered non-bar cannot also be a bar" (§7 item 1), but it
+    decided what a floor clause WAS by the two words in front of the comparator — so
+    `UNMEASURED(#10988 decides) floor of >= 0.5 typed_share` exited OK with no finding while the
+    same `>= 0.5` without the words was refused: a RECORD-ONLY edit giving A4 a bar, which is the
+    thing the `REGISTERED_NON_BAR_ROWS` register exists to make impossible (#11331 review round 8).
+
+    The clause is now identified by its VALUE: only a number the record PINS is a floor (§3.7), so
+    the binding both refuses the laundering and accepts the natural spelling of the row's OWN
+    floor — `floor ≥ 30`, which the phrase-only pattern refused as a false RED.
+    """
+    rows = check.parse_criteria_rows(PREREG.read_text())
+    floors = check._registered_floor_values(PREREG_DIR)
+    assert floors.get("A4") == 30.0, floors
+    assert "A1" in floors and "A5" in floors, floors
+    # The real record passes WITH the binding — i.e. the binding did not turn the pinned cells red.
+    assert check.check_completeness(rows, floors) == []
+
+    a4 = next(r for r in rows if r["id"] == "A4")
+
+    def failures(cell: str) -> list[str]:
+        return check.check_completeness(
+            [dict(r, threshold=cell) if r is a4 else r for r in rows], floors)
+
+    # (1) A bar laundered behind the words is REFUSED: 0.5 is not A4's pinned floor (30).
+    for cell in (
+        "UNMEASURED(#10988 decides) floor of >= 0.5 typed_share",
+        "UNMEASURED(#10988 decides) floor of ≥ 0.5 typed_share",
+        "UNMEASURED(#10988 decides) floor ≥ 0.5 typed_share",
+    ):
+        assert any("outside its floor" in f for f in failures(cell)), (cell, failures(cell))
+
+    # (2) A4's OWN floor, in every spelling `COMPARATORS` declares, still passes — including the
+    #     natural `floor ≥ 30` that a phrase-only pattern false-REDded.
+    for clause in ("floor of >= 30", "floor of ≥ 30", "floor >= 30", "floor ≥ 30",
+                   "floor of >=30"):
+        cell = f"UNMEASURED(#10988 decides) {clause} typed statements"
+        assert failures(cell) == [], (cell, failures(cell))
+
+
+# The one-directional binding the gate uses: a row absent from the map can never have a clause
+# stripped, which fails CLOSED rather than open.
+def test_an_unregistered_row_can_never_have_a_floor_clause_stripped():
+    assert check._registered_floor_values(Path("/nonexistent-evidence-dir")) == {}
+    assert check._strip_the_rows_own_floor("floor of >= 30 x", None) == " x"  # no record: legacy
+    assert check._strip_the_rows_own_floor("floor of >= 0.5 x", 30.0) == "floor of >= 0.5 x"
+    assert check._strip_the_rows_own_floor("floor of >= 30 x", 30.0) == " x"
+
+
 def test_a_REQUIRED_row_cannot_declare_itself_a_non_bar():
     """FAILS IF the `UNMEASURED(...)` exemption is reachable from a required row.
 
@@ -698,13 +755,20 @@ def _full_census(probe) -> dict:
         "A1": {"by_type": [], "by_endpoint_kind": [], "edges_total": 0,
                "by_pinned_family": {name: 0 for name in probe.A1_RELATION_FAMILIES},
                "rollup_queries": probe.unmeasured("a rollup query")},
-        "A2": {"attach": probe.unmeasured("a counter"), "mint": probe.unmeasured("a counter")},
+        "A2": {"attach": probe.unmeasured("a counter"),
+               "mint": probe.unmeasured("a counter"),
+               "held": probe.unmeasured("a counter"),
+               "candidates": probe.unmeasured("a counter"),
+               "decided_candidates": probe.unmeasured("a counter"),
+               "attach_share": probe.unmeasured("a counter")},
         "A3": {"statements": 10, "statements_with_an_event_root": 10,
                "cheap_joined": 2, "cheap_rate": 0.2, "event_root_coverage": 0.5,
                "cross_batch_joined": 1, "cross_batch_rate": 0.1, "relations": ["IMPL", "NAND"]},
         "A4": {"claim_points": 10, "excluded_capture_rows": 0, "typed": 1, "statement": 8,
                "null": 1, "typed_share": 0.1, "typed_by_kind": {"constraint": 1}},
-        "A5": {"subjects": 2, "named_actors": probe.unmeasured("the corpus's actor list"), "families": {"aboutSubject": 1, "memberOf": 0,
+        "A5": {"subjects": 2, "named_actors": probe.unmeasured("the corpus's actor list"),
+               "point_population": 40,
+               "families": {"aboutSubject": 1, "memberOf": 0,
                                            "ownedBy": 0, "managedBy": 0},
                "statements_with_a_subject_edge": 1},
         "TAGGED": {"edges": 0, "note": probe.TAGGED_NOTE},
@@ -721,12 +785,27 @@ def test_an_absent_census_renders_a_named_gap_never_nothing():
 
 
 def test_the_rendered_block_emits_every_row():
-    """FAILS IF a row is dropped from the log."""
+    """FAILS IF a row is dropped from the log, or a registered PART of one is.
+
+    ⛔ A row PRESENT is not the same as a row COMPLETE. A2's block emitted only ``attach``/``mint``
+    while its registration names a third arm (``held``, whose silence is RED), the DECIDED-candidate
+    population its bar divides by, the all-candidate count reported beside it, and ``attach_share``
+    — so the registered RED leg was unevaluable from the block a scoring child reads (#11331 review
+    round 8, P2-1). The renderer is the artifact; this arm reads it, not the dict it came from.
+    """
     probe = _probe()
     rendered = "\n".join(probe.a_row_census_lines(_full_census(probe)))
     for row in ("a1 ", "a2 ", "a3 ", "a4 ", "a5 ", "TAGGED_edges=0"):
         assert row in rendered, rendered
     assert "UNMEASURED(" in rendered
+    for part in ("attach=", "mint=", "held=", "candidates=", "decided_candidates=",
+                 "attach_share="):
+        assert "a2 " in rendered and part in rendered.split("a2 ", 1)[1].split("\n", 1)[0], (
+            f"the a2 line does not render {part} — the block would carry a registered part the "
+            f"log never shows:\n{rendered}")
+    # A5's registered denominator promises the Point population BESIDE the Subject count; a block
+    # field the log never renders is one a scorer never reads (#11331 review round 8, P2-4b).
+    assert "point_population=40" in rendered.split("a5 ", 1)[1].split("\n", 1)[0], rendered
 
 
 def test_the_PRODUCTION_tagged_note_is_the_not_a_target_annotation(monkeypatch):
@@ -745,6 +824,7 @@ def test_the_PRODUCTION_tagged_note_is_the_not_a_target_annotation(monkeypatch):
         "coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false)": [[0]],
         "coalesce(n.pointKind, 'NULL')": [],
         "MATCH (n:Subject) RETURN count(n)": [[0]],
+        "MATCH (n:Point) RETURN count(n)": [[0]],
         "RETURN type(r) AS t, count(DISTINCT r) AS n": [],
         "WHERE n.pointKind = 'statement'": [[0]],
     })
@@ -796,6 +876,7 @@ _EMPTY_ROWS: dict = {
     "coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false)": [[0]],
     "coalesce(n.pointKind, 'NULL')": [],
     "MATCH (n:Subject) RETURN count(n)": [[0]],
+    "MATCH (n:Point) RETURN count(n)": [[0]],
     "RETURN type(r) AS t, count(DISTINCT r) AS n": [],
     "WHERE n.pointKind = 'statement'": [[0]],
 }
