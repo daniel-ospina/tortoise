@@ -887,8 +887,9 @@ mean **18.89–20.10 → 3.82–3.91 ms**, `connect` calls per record **1.00 →
 `connection authorized` **+66 → +2** (`docs/evidence/9558-record-write-cost/`, whose eight committed
 `runs/*.json` every PROBE figure is arithmetic on — the `connection authorized` counts are not
 among them: they are a `grep -c` delta on the container's own log, the artifact's exception item 1).
-⚠️ The BEFORE tree is 164 commits behind the AFTER one's
-parent — 7 of them touching the measured files, which makes the delta conservative rather than
+⚠️ The BEFORE tree is 164 commits behind **this branch's base `23d227c534`** (the denominator is
+the base, not the AFTER tree's own parent `a4d1a358e2`, against which the same command reads
+168) — 7 of them touching the measured files, which makes the delta conservative rather than
 controlled. ⚠️ Two residual
 facts a later lane should not re-derive: the column-map CALL counts are unchanged at 1/record each (the WORK
 dropped, not the calls — a caller-held map is the deferred lifecycle change), and 0.68 ms/record of cache-consult

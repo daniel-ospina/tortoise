@@ -97,10 +97,15 @@ which made its numbers unfalsifiable — that is what `runs/` and
 `fingerprint-cost.json` fix, and `fingerprint_cost.py` exists because the first
 fix covered only the probe.
 
-⚠️ **The BEFORE tree is 164 commits behind the AFTER tree's parent**
-(`1730570510` is 2026-11-03; this branch's base is `23d227c534`, 2026-11-06), and
-**7 of those commits touch the two files under measurement** (+883/−25: per-statement
-`param_columns`, `Statement.__post_init__`, a per-write `_count_write_applied()`).
+⚠️ **The BEFORE tree is 164 commits behind THIS BRANCH'S BASE, `23d227c534`**
+(`1730570510` is 2026-11-03; the base is 2026-11-06), and **7 of those commits touch
+the two files under measurement** (+883/−25: per-statement `param_columns`,
+`Statement.__post_init__`, a per-write `_count_write_applied()`). ⛔ The denominator is the
+**base**, not the AFTER tree's own parent: the AFTER tree `6ab6848b8b` is **5** commits into
+the branch from that base (`e0e5484921`, `6c3b952066`, `440d1f95c2`, `a4d1a358e2`,
+`6ab6848b8b`), so measured against its parent `a4d1a358e2` the same command reads **168**
+commits / **11** touching / **+1465−48**. Those four extra commits are this PR's OWN, and a
+drift figure that counted them would subtract the change under measurement.
 So the delta is the pool plus the cache *plus* that drift. The direction is
 conservative — the drift ADDS per-record work to the AFTER tree, so the measured
 improvement is if anything understated — but it is a two-tree comparison whose
