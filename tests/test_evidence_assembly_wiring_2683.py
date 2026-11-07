@@ -20,7 +20,9 @@ leaves ``tests/test_evidence_assembly.py`` (30 passed) and
 the eval lane silently measures OFF-vs-OFF: ``evidence_assembly_stats`` is still
 computed (``applied: True``, ``collapsed_duplicates: N``) on the outcome the seam
 RETURNS — the runner's per-outcome whitelist (``run.py:5261-5480``) and its Layer-1
-projection (``:6145+``) carry every sibling arm and not this one, so nothing the
+projection (``:6145+``) carry four sibling arm-stat keys and not this one (the
+``tr_session`` ``_stats`` halves are dropped too — see the census comment below),
+so nothing the
 run persists shows the arm state (``#11467``) — and the run would report "Slice A
 changed nothing". That is a false null on the very arm
 the affected-set gate (#8486's ruling, 2026-11-07, comment 6710955512) lists
@@ -96,9 +98,6 @@ CHUNK_ID = "p2683chunk"
 DUP_ID = "p2683dupe"
 OTHER_ID = "p2683other"
 QUESTION_DATE = "2026-09-25"
-
-#: The DISTILLED statements the package must end up as anchors of.
-_STATEMENT_IDS = {POINT_ID, DUP_ID, OTHER_ID}
 
 
 @pytest.fixture(autouse=True)
