@@ -2034,16 +2034,18 @@ class _EntityHandlers:
         # holding that property no longer reproduces it. Accepted because the
         # owner rule says the property must not exist, no in-tree producer ever
         # emitted the key on this event (`api.add_document` takes no such
-        # parameter), and the destructive removal of what DOES exist has no
-        # shipped instrument ON A PRODUCTION SERVER GRAPH — a full restore's
-        # whole-graph wipe clears it where the L2 name rule admits the target
-        # (`test_`/`tortoise_test`-prefixed, or an embedded `path=` DB) — ⚠️ and it cannot
-        # be row-scoped (`MATCH (n) DETACH DELETE n`), so a graph holding ANY row whose
-        # PROSE the record does not carry must NOT be restored at all: copy that prose
-        # out first, because the wipe destroys the only copy (§17.2, `#11325`) — and
-        # is refused pre-wipe on a production name (`org_<org_id>`, its child, a
-        # legacy `team_…`),
-        # and a graph-side `REMOVE n.story_arc` is issued by nobody;
+        # parameter), and no shipped route clears the PROPERTY while KEEPING the
+        # entity: `tortoise_delete` reaches the node only by REMOVING it, and
+        # journals the delete that drops its record row. What DOES exist is
+        # removed destructively by a full restore's whole-graph wipe — which
+        # clears it where the L2 name rule admits the target
+        # (`test_`/`tortoise_test`-prefixed, or an embedded `path=` DB), and is
+        # refused pre-wipe on a production name (`org_<org_id>`, its child, a
+        # legacy `team_…`) — ⚠️ and it cannot be row-scoped
+        # (`MATCH (n) DETACH DELETE n`), so a graph holding ANY row whose PROSE
+        # the record does not carry must NOT be restored at all: copy that prose
+        # out first, because the wipe destroys the only copy (§17.2, `#11325`);
+        # a graph-side `REMOVE n.story_arc` is issued by nobody;
         # `update_entity(…, story_arc=None)` is REFUSED here as server-managed
         # (the `:Point` half DOES have an in-place clear,
         # `update_point(<id>, story_arc=None)` — #11325); `#10017`'s purge is
