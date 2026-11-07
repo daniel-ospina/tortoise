@@ -568,6 +568,13 @@ def test_the_protocol_states_its_target_metric_population_bar_and_falsifier():
     assert "LOST" in joined
     # the denominator is named, and the exclusion rule is "there is none"
     assert "denominator" in measurement["population"]
+    # the pass line must carry the bar's VACUITY FLOORS: without them a run
+    # where every enumerated condition holds (`rendered_live == 0`, `seen == n`,
+    # `regressions == []`) is still `inconclusive` (all-silent judge ⇒ nothing
+    # for the distilled arm to regress from), so a pass line that omits them
+    # says PASS for a run the bar refuses (#11460 review cycle 4)
+    assert "VACUITY FLOORS" in measurement["pass_line"]
+    assert "raw arm committed at least one" in measurement["pass_line"]
     assert measurement["exclusion_rule"].startswith("there is none")
     # the two-number split is IN the record (#9097 relay §4) — and stated as it
     # ACTUALLY holds here: the D8 gate is judge-free and authoritative, while

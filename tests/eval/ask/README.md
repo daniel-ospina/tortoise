@@ -113,9 +113,13 @@ report printed that name.
   the population is to **re-register** — a new commit of
   `preregistration.json` — *before* a run exists.
 - **Pass/fail line.** PASS iff the corpus verifies, the resolved config
-  matches the record, every pre-registered case ran in both arms,
-  `rendered_live == 0`, `seen == n`, and `verbatim_no_regression.regressions
-  == []`. No other number is compared against any threshold.
+  matches the record, every pre-registered case ran in both arms, **the vacuity
+  floors did not fire** (the corpus plants a superseded claim, carries a
+  verbatim case, and the raw arm committed one — without them the clauses below
+  would hold over a measurement never made, which is `inconclusive`, never a
+  pass), `rendered_live == 0`, `seen == n`, and
+  `verbatim_no_regression.regressions == []`. No other number is compared
+  against any threshold.
 - **What would falsify it.** Any superseded claim **rendered live** on the gate
   arm; any planted claim **not observed**; any verbatim case committed on the
   `raw` arm and **lost** by the distilled arm (a KU win with a verbatim loss is

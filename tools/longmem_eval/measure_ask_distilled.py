@@ -264,12 +264,20 @@ READER_PINNED = True
 #: clause must be able to say so.
 INJECTED_READER_SPEC = "injected"
 
-#: The judge pin for this benchmark: the OFFICIAL LongMemEval anscheck judge
+#: The pin a run whose spec names the OFFICIAL LongMemEval model records
 #: (``tools/longmem_eval/judge.py`` → ``build_judge()``), the same grading
 #: discipline the published LongMemEval numbers use. The rubric id is the same
 #: one the graded eval carries (``JUDGE_RUBRIC_ID`` in
 #: ``tools/longmem_eval/run.py``); the hash is computed with the same 16-hex
 #: convention so the two records are comparable.
+#:
+#: ⛔ **This is NOT this benchmark's pin.** The ask record's judge is
+#: :data:`PREREGISTERED_JUDGE_SPEC` (the owner-ruled DeepSeek judge), and its
+#: pin is ``unpinned:<spec>`` (:func:`judge_pin_for`). No ask run produces this
+#: value short of a ``--judge openai:gpt-4o-2024-08-06`` override that the bar
+#: then rejects as ``config_mismatch``. A re-registration that reads the old
+#: wording as "the ask judge" would restore the exact
+#: ``inconclusive``-by-construction defect #11460 removes.
 JUDGE_PIN = "ask-exit-anscheck-official-v1"
 #: The pin a MOCK-graded run carries. The pin is derived from the judge spec
 #: (never passed in independently), so a receipt cannot claim the official pin
@@ -520,7 +528,13 @@ def protocol(*, reader_spec: str | None = None,
                                "commit of this file), BEFORE a run exists",
             "pass_line": "PASS iff the corpus verifies, the config matches "
                          "this record, every pre-registered case ran in both "
-                         "arms, `superseded_live@<gate_arm>.rendered_live "
+                         "arms, the VACUITY FLOORS did not fire (the scored "
+                         "corpus plants at least one superseded claim, "
+                         "carries at least one verbatim case, and the raw "
+                         "arm committed at least one — with none of them the "
+                         "clauses above would hold over a measurement that "
+                         "was never made, which is `inconclusive`, never a "
+                         "pass), `superseded_live@<gate_arm>.rendered_live "
                          "== 0`, `superseded_live@<gate_arm>.seen == "
                          "superseded_live@<gate_arm>.n`, and "
                          "`verbatim_no_regression.regressions == []`. No "
