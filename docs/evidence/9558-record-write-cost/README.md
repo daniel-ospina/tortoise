@@ -200,9 +200,10 @@ consult costs (i) `_migrations_dir()` → `_complete()`, fifteen `Path.exists()`
 calls resolving the base **before** the key is built (`_schema_entry`'s
 `base = migrations_dir or _migrations_dir()`, with `_complete` at `:1497` and
 `_migrations_dir` at `:1502`; the seam is cited by SYMBOL on purpose — a bare line
-number re-stales under exactly the edits this PR makes, and this one moved
-`1659 → 1665 → 1667 → 1669 → 1670` inside it, i.e. four moves, including one
-*after* a revision of this very sentence had already counted them), and (ii) one
+number re-stales under exactly the edits this PR makes, and this one has re-staled
+repeatedly inside it (most recently `1659 → 1665 → 1667 → 1669 → 1670`, and one of
+those moves landed *after* a revision of this very sentence had counted the earlier
+ones — which is why no total is quoted here), and (ii) one
 `_migrations_fingerprint` pass over the same
 fifteen files (0.160–0.169 ms, `fingerprint-cost.json`). The RESOLUTION half is
 item 6 of the list at the top — taken on one box at `d51c7897d6`, re-takeable by
