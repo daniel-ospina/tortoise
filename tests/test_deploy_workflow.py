@@ -4503,9 +4503,13 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: DEFINED by. The productive fix is not another word in this alternation (that is the
     #: list-runs-out pattern this file has closed twice); it is to stop asking a regex to
     #: read English, and it is recorded with the other residuals on **#11301**. Until then
-    #: these five are pinned as a CHARACTERISATION — today's behaviour, not correctness —
-    #: so a future fix cannot move them silently and a reader cannot mistake the closure
-    #: claim for a measurement.
+    #: these five are RECORDED BELOW AS A DISCLOSURE — today's behaviour, not correctness —
+    #: verbatim, so the surface cannot be widened by omission and a reader cannot mistake
+    #: the closure claim for a measurement. ⛔ They carry NO assertion, and this comment
+    #: said "pinned as a CHARACTERISATION … so a future fix cannot move them silently"
+    #: until r29 (#11191 review r28 F1 / r29 F1): every row is already FALSE-and-ACCEPTED,
+    #: so a pin would red the FIX rather than the hole, which is the residue-as-spec defect.
+    #: The disclosure itself is at the five rows below ("DISCLOSURE, NOT A PIN").
     #: ⛔ …AND IT IS ONE GROUP, NOT A TOP-LEVEL ALTERNATION. `_PHRASE_RE` is
     #: CONCATENATED into `_INVERTED_FALSE`, `_INVERTED_TRUE` and `_FALSE_SHA_ADJACENT`, and
     #: `|` binds looser than concatenation — so an unwrapped alternation attaches the
@@ -7489,9 +7493,11 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         # ⚠️ The `, as #9601 says,` spelling of the same shape is NOT in this tuple: it is
         # still ACCEPTED, and MEASURED at `921238a52` (r19, before this round's guard
         # existed) as well — so it is a PRE-EXISTING residual decided by another arm, not a
-        # regression this round introduces and not a boundary of exemption (a). It is pinned
-        # as an open characterisation below and recorded on #11304; presenting it here as a
-        # closed boundary would be the over-claim r22 P3 names.
+        # regression this round introduces and not a boundary of exemption (a). It is
+        # RECORDED as an open characterisation below (open family 1 — a disclosure with NO
+        # assertion, since a pin would red the fix: #11191 review r28 F1 / r29 F2) and on
+        # #11304; presenting it here as a closed boundary would be the over-claim r22 P3
+        # names.
         # (c) a bare relation NOUN is a label for the false tree, not a relation of it —
         # the comma spelling is REFUSED above, so this row pins that the verdict is not
         # keyed on the comma
@@ -7561,9 +7567,14 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # merge the fix without re-baselining the weakness, and the assertion detects nothing in
     # the other direction (fail-open has nowhere worse to go). The shapes stay named here,
     # verbatim, so the surface cannot be silently widened by omission; the *enforced*
-    # boundary is the positive-control blocks that assert the near-boundary shapes are
-    # REFUSED (`_refutation_tail_alibi`, the ten false rows, `_restored_corrections`)
-    # together with the truthful controls that assert a correct tree is ACCEPTED.
+    # boundary is the positive-control blocks: those that assert the FALSE near-boundary
+    # shapes are REFUSED (`_refutation_tail_alibi`, and the ten false rows at
+    # `_asserted_false_with_true_appended`), TOGETHER WITH those that assert a TRUTHFUL
+    # sentence is ACCEPTED (`_restored_corrections` — a correction spelling must never be
+    # the shape the pin rejects — and the truthful-attribution control beside each residue).
+    # ⛔ `_restored_corrections` IS AN ACCEPT CONTROL, not a refusal one; an earlier cut of
+    # this sentence listed it among the REFUSED set, which mis-grouped one of the three
+    # blocks it names by direction (#11191 review r29 F3).
     # Closing any recorded row is therefore a GREEN change — do it, move the row, and re-run
     # the positive controls beside it. Recorded on #11301 (structured claim) and #11304
     # (aside/appositive family).
