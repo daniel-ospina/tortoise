@@ -124,7 +124,7 @@ Completeness check in the other direction: **every seam the plan names has a row
 | §6.2 | the register's contract; **no MCP/SDK surface** | **SF4**, **SF13** | `class` never `bypass`; an unclassified writer is a refusal at export |
 | §6.3 | versioning / error responses (register raises on duplicates, census exits non-zero) | **SF4**, **SF11** | no API version change, no new error codes |
 | §6.4 | the surface statement — S3's removal is the one thing that could change it | **SF13** | carries the approval request; **SF13 is the row a capstone must not skip** |
-| §7 | D1–D13, each already naming its layer | **SF1**, **SF2**, **SF3**, **SF4**, **SF6**, **SF8**, **SF9**, **SF10**, **SF11**, **SF12**, **SF15** | D1/D2→SF1–SF3 · D3/D4→SF4+SF6 · D5–D8→SF10/SF9/SF8 · D9–D11→SF11 · D12→SF15 · D13→SF12 (=`scan_fallback` pin). The cell lists the surfaces rather than saying "distributed": R5 now refuses a crosswalk row whose surface cell names nothing (`:340`), because a prose-only linkage is the one thing the gate cannot check — this row was the live false RED that arm was debugged against |
+| §7 | D1–D13, each already naming its layer | **SF1**, **SF2**, **SF3**, **SF4**, **SF6**, **SF8**, **SF9**, **SF10**, **SF11**, **SF12**, **SF15** | D1/D2→SF1–SF3 · D3/D4→SF4+SF6 · D5–D8→SF10/SF9/SF8 · D9–D11→SF11 · D12→SF15 · D13→SF12 (=`scan_fallback` pin). The cell lists the surfaces rather than saying "distributed": R5 now refuses a crosswalk row whose surface cell names nothing (`:389`), because a prose-only linkage is the one thing the gate cannot check — this row was the live false RED that arm was debugged against, and `§7` is now in `PLAN_SEAMS` so deleting the row is refused too (`:117`) |
 
 ---
 
@@ -165,7 +165,7 @@ Straight from the `test-design` checklist, restricted to the items that actually
 | **R2** | a §1 row whose layer is empty or outside `{unit, contract, live-docker, doc-assert, guard}` |
 | **R3** | a §1 row whose failure cell is empty or under 8 words (a mechanism restated is not a failure) |
 | **R4** | a §1 surface named by **no** child in §4 (the issue's "no surface that no child touches") |
-| **R5** | a plan §5/§6 seam missing from the §5 crosswalk, or a crosswalk row that names a surface with no row in §1 |
+| **R5** | a plan §5/§6/§7 seam missing from the §5 crosswalk, a crosswalk row that names a surface with no row in §1, or a crosswalk row whose **surface cell names nothing** (the third "names nothing" arm, beside R1's and R4's) |
 
 ⚠️ **R1's population pin is the load-bearing half**, and it is here because review measured the hole:
 deleting the `SF13` row **and every mention of it** leaves every referential check above satisfied, so
@@ -183,7 +183,7 @@ uv run python tools/test_design_map_check.py --self-test   # is the checker a ru
 against; the checker output is this change's own:
 
 ```text
-test-design-map-check: 15 surface(s) · 5 capabilit(y/ies) · 6 child(ren) · 9/9 plan seam(s) crosswalked · layers=contract,doc-assert,guard,live-docker,unit
+test-design-map-check: 15 surface(s) · 5 capabilit(y/ies) · 6 child(ren) · 10/10 plan seam(s) crosswalked · layers=contract,doc-assert,guard,live-docker,unit
 test-design-map-check: CLEAN — every rule holds
   ok   delete the SF13 row (the surface-change surface) → violation (R1 SF13: pinned surface is missing from the surface table)
   ok   blank SF10's layer (the new state S4 exists for) → violation (R2 SF10: no test layer assigned)
@@ -195,15 +195,17 @@ test-design-map-check: CLEAN — every rule holds
   ok   delete the SF13 row AND every mention of it (a consistent shrink) → violation (R1 SF13: pinned surface is missing from the surface table)
   ok   retype a crosswalk surface as one that has no row → violation (R5 §6.4: names SF99, which has no surface row)
   ok   blank the §6.4 surface cell (a crosswalk row that names nothing) → violation (R5 §6.4: names no surface)
+  ok   rename the §7 label AND blank its surface cell (a row the gate cannot see) → violation (R5 §7: missing from the §5/§6 crosswalk)
   ok   splice a raw `|` into SF2's contract cell (a row that is no longer 7 columns) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   splice a `\\|` into SF2's contract cell (escaped backslash + REAL delimiter) → refusal (SF2 has 8 column(s); the table needs exactly 7 (SF · surface · type · flow · layer · contract · failure) — a `|` inside a cell shifts every column after it)
   ok   delete the child table's section heading → refusal (section `## 4.` is missing — cannot check the map)
-self-test: 13/13 mutation(s) refused — the checker is not a rubber stamp
+self-test: 14/14 mutation(s) refused — the checker is not a rubber stamp
 ```
 
 The `--self-test` arm exists because a checker that passes on everything is worse than no checker:
-it applies the thirteen mutations an editor actually makes (remove a row, **remove a row and every mention
-of it**, blank a cell, blank a **crosswalk** row's surface cell, restate a failure as a mechanism, retype a
+it applies the fourteen mutations an editor actually makes (remove a row, **remove a row and every mention
+of it**, blank a cell, blank a **crosswalk** row's surface cell, **rename a crosswalk row and blank its
+cell**, restate a failure as a mechanism, retype a
 layer as a mechanism, retype a crosswalk surface as one that has no row, **splice a raw `|` into a cell**,
 **splice a `\\|` into a cell**, drop a child, drop a capability, forget a seam, destroy the section
 structure) to an in-memory
@@ -220,7 +222,7 @@ refusal cases report it. ⚠️ State the mechanism rather than overclaiming it:
 that a `|`-splitting relaxation **reds the arm**, not that the exact-7 refusal is the only rule that
 could notice. ⚠️ The floor is why re-opening the false PASS is no longer a one-place edit: at the
 shipped floor, deleting the width case alone exits 1
-(`self-test: 12 mutation(s) registered, at least 13 required`), and deleting it, **reverting the width
+(`self-test: 13 mutation(s) registered, at least 14 required`), and deleting it, **reverting the width
 rule's `!= 7` to `< 7`**, *and* lowering the floor to the population that is left still exits 1, because
 the parity case beside it catches the same relaxation. ⚠️ Name all three edits: deleting the case and
 lowering the floor alone leaves the **rule** intact, so the parity case is still refused by the rule it
@@ -255,7 +257,7 @@ check arm every time (`VIOLATION R1 SF<n>: surface is not in the pinned populati
 measured for SF1/SF2/SF5/SF10/SF12/SF15); dropping SF13 from the pin **and** building the consistent
 shrink reds the self-test too, because emptying §6.4's surface cell now trips `R5 §6.4: names no
 surface` — before that arm existed the same edit was the one case the arm reported as `NOT caught`
-(measured: `1/12` before, `13/13 refused` after). The pin is silent only when the shrink edits it
+(measured: `1/12` before, `14/14 refused` after). The pin is silent only when the shrink edits it
 **consistently with the row** *and* the row it empties is not a crosswalk row R5 reads — the
 three-place edit the last bullet measures. The two arms therefore cover different surfaces, and the
 honest limit is:
@@ -263,27 +265,29 @@ honest limit is:
 - **Two places beyond the row itself, for a surface no self-test case targets and no child names
   alone** — delete a surface row, **every mention of it** (R1/R4/R5 all referentially check what they
   read, so a row cannot go alone) *and* drop it from `SURFACES` — stays **green on both arms**
-  (measured on SF5 and on SF12: `14 surface(s) · 5 capabilit(y/ies) · 6 child(ren) · 9/9 plan seam(s)
-  crosswalked · layers=…` then `CLEAN — every rule holds`, exit 0, *and* `13/13 mutation(s) refused`,
-  exit 0). **Eleven** of the fifteen surfaces are in this class, and it is the case the paragraph above
+  (measured on SF5 and on SF12: `14 surface(s) · 5 capabilit(y/ies) · 6 child(ren) · 10/10 plan seam(s)
+  crosswalked · layers=…` then `CLEAN — every rule holds`, exit 0, *and* `14/14 mutation(s) refused`,
+  exit 0). **Nine** of the fifteen surfaces are in this class (SF3, SF4, SF5, SF6, SF7, SF8, SF9, SF12,
+  SF14 — SF1 and SF11 red on the R5 arm, because their §5 cells name one surface each), and it is the
+  case the paragraph above
   measures: deleting the row *without* its mentions is already a violation, so once the row and its
   mentions are gone the **pin is the edit neither arm sees**.
 - **For SF2, SF10 or SF13 — the three surfaces a mutation targets — the arm reds one step EARLIER**, on
   the self-test arm. Delete the row those cases target and the cases become `UNTESTABLE` rather than
-  "not caught" (measured: SF13 `2/13 case(s) UNTESTABLE`, SF2 `4/13`, SF10 `1/13` — each exit 1, and
+  "not caught" (measured: SF13 `2/14 case(s) UNTESTABLE`, SF2 `4/14`, SF10 `1/14` — each exit 1, and
   the summary line names a moved mutation target instead of accusing the checker), before any case is
   deleted.
 - **SF15 reds one step earlier too, on the CHECK arm** — it is the one surface a child names and
   nothing else (`| **C1** | **#11084** | **SF15** |`). Deleting SF15's row and every mention of it
   leaves C1 touching no surface, so `R4 #11084: touches no surface` fires (exit 1) before the pin or
-  any case is involved — which is why the silent class is eleven, not twelve.
+  any case is involved — which is why the silent class is nine, not ten.
 - **The floor is what stops the green being bought back.** Also deleting the cases that name the surface
   (SF13 has three: two delete-row cases and the `#11088` child-row case) leaves `10 mutation(s)
-  registered, at least 13 required`, exit 1 — so a shrink is red once it touches a named surface, but
+  registered, at least 14 required`, exit 1 — so a shrink is red once it touches a named surface, but
   `MIN_SELF_TEST_MUTATIONS` is not the first thing to fire, and it reds a shrunk population instead of
   printing a reassuring `self-test: 0/0 … not a rubber stamp`.
 
-So the claim this arm supports is narrower than "a silent shrink is impossible": for one of the eleven
+So the claim this arm supports is narrower than "a silent shrink is impossible": for one of the nine
 surfaces that no case targets and no child names alone, a shrink is **silent**, and a reviewer sees it
 only in the row-and-pin diff.
 
