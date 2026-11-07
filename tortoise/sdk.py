@@ -38034,6 +38034,30 @@ class TortoiseSDK:
                     _trunc["candidates"] = len(snap_hits) + (
                         1 if len(snap_hits) >= limit else 0)
                     _trunc["exact"] = False
+                    # #8447/#10560: the SAME fold the early return above and the
+                    # ``no_fallback_applicable`` return below both carry, and for
+                    # the same reason. This tier answers by RANKING the whole
+                    # kind-scoped corpus instead of by asking the retrieval
+                    # legs, so an ASKED leg that never answered
+                    # (``fts``/``index_missing`` — the #8488 lexical half
+                    # unreachable) contributes nothing to the rows this tier
+                    # saw: ``candidates`` counts only what THIS tier ranked, so
+                    # it can say nothing about the dead leg. The verdict this
+                    # tier must not publish is therefore ``truncated: false``
+                    # merely because the page came back short — the matches the
+                    # dead leg would have supplied were never READ by it — and
+                    # the tier's own recorded posture is "conservative in the
+                    # safe direction — this arm already reports
+                    # ``status: degraded``, so over-marking cannot turn a
+                    # HEALTHY read into a partial".
+                    #
+                    # ⚠️ Reaching this tier means the arm did NOT SERVE the
+                    # slot — if it had, ``raw_results`` would be non-empty and
+                    # this block is unreachable. It does NOT mean the arm is
+                    # disabled: a tripped breaker, a raised arm and a
+                    # cap-driven ``declined`` all leave the slot unserved with
+                    # ``TORTOISE_BM25_LEXICAL=1``.
+                    _trunc["incomplete"] = bool(_lost_legs)
                     return _with_read_status(
                         _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
@@ -38096,6 +38120,15 @@ class TortoiseSDK:
                     status_trace.append(_trace_entry(
                         "fallback", ran=True, degraded=True,
                         reason="tfidf_legacy", count=len(legacy_hits)))
+                # #8447/#10560: fold the lost-leg verdict here too — the same
+                # fold the floored return and the snapshot tier above carry, and
+                # the one ``no_fallback_applicable`` below carries as well (it
+                # is the third degraded return of the three; this is the second).
+                # A read whose ASKED lexical leg never answered may not publish
+                # ``truncated: false`` merely because the corpus fallback found
+                # rows: those rows were ranked from the whole corpus, not from
+                # the match set the dead leg owed this read.
+                _trunc["incomplete"] = bool(_lost_legs)
                 return _with_read_status(
                     _decorate_fallback_hits(legacy_hits, graph))
             if status_trace is not None:
