@@ -958,13 +958,23 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         # summary line free to go stale — a window half the observed run-to-run
         # spread, i.e. a legitimate re-run can land in it (#11385 review P3).
         assert f"−{s['token_weighted_reduction'] * 100:.2f} %" in readme, s
-        assert f"{s['min_session_reduction'] * 100:.2f}" in readme
+        # ⛔ anchored: a bare "85.16" also matches inside a longer number, and a
+        # computed 5.16 would satisfy it (#11385 review P3). The two runs state
+        # their worst differently — the table cell (primary) bolds it, the re-run
+        # sentence does not — so each is anchored where its own figure lives.
+        flat_m = " ".join(readme.split())
+        min_txt = f"{s['min_session_reduction'] * 100:.2f} %"
+        assert ((f"worst session **−{min_txt}**" if art is pri
+                 else f"worst −{min_txt}") in flat_m), s["min_session_reduction"]
         # composition: the legacy tax vs the delta arm's zero
         assert lg["verbatim_reemissions"] > 0 and dl["verbatim_reemissions"] == 0
         # ⛔ anchored on its clause: a bare `272` is satisfied by the document's
         # own `merged_items` 272, so a computed 27 would pass (#11385 review P3).
+        # ⛔ LEFT boundary too: right-anchored only, a computed 72 matched inside
+        # the document's "272 fewer items per 7 sessions" — the same prefix hole
+        # one digit to the left (#11385 review P3).
         few = _thousands(lg["s4_items"] - dl["s4_items"])
-        assert (f"{few} fewer items per 7 sessions" in readme
+        assert (f"| {few} fewer items per 7 sessions |" in readme
                 or f"i.e. {few} fewer items" in " ".join(readme.split())), few
         # ⛔ EVERY channel figure, pinned IN ITS TABLE CELL: a substring check
         # stays green when the wrong cell changes, because `201`, `12` and `62`
