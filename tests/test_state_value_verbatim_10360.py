@@ -1720,10 +1720,18 @@ _RESIDUAL_FAIL_OPEN = re.compile(r"\bfails?\s+open\b", re.I)
 #: (`is unjudged and open` GREEN — round 3, measured); this bound blocks the
 #: coordinator only when a subject and a verb follow it.
 _RESIDUAL_ANCHORED_OPENNESS = (
-    rf"\b({_RESIDUAL_OPEN_VERBS})\b"
+    # ⛔ THE VERB MAY ITSELF BE NEGATED FROM THE LEFT (#11258 review round 14 `P2`,
+    # MEASURED): `the ADJACENCY half is no longer kept open.` / `… no longer held
+    # open.` are the negated twins of the pinned reopenings `… is kept open.` /
+    # `… is held open.`, and the veto below sits AFTER the verb, so it could not
+    # see a negator in front of it. Both were RED — an honest closure refused.
+    # The lookbehind is a FIXED-WIDTH literal (`no longer ` is exactly 10 chars),
+    # which a Python lookbehind requires — `\s+`/`\b` make the pattern
+    # variable-width and `re` refuses it outright (measured).
+    r"(?<!no longer )\b(" + _RESIDUAL_OPEN_VERBS + r")\b"
     + _RESIDUAL_NEGATED_OPEN
     + r"(?:(?!\b(?:and|but)\s+(?:\w+\s+){0,4}?"
-    r"(?:is|are|was|were|fails?|stays?|remains?|keeps?|holds?)\b)[^.;]){0,30}?"
+    r"(?:is|are|was|were|fails?|stays?|remains?|keeps?|holds?)\b)[^.;]){0,40}?"
     r"(?:fail-)?open(?!\w)",
     # ⛔ A NEGATED reopening is a DENIAL of one: `(d2) does not reopen (d)'s
     # ADJACENCY result` is the row's own truthful scope boundary (#11223 fix
@@ -2300,6 +2308,10 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # would turn all three GREEN, which is round 2's measured regression again).
     "the ADJACENCY half is no longer merely open.",
     "the ADJACENCY half is no longer only open.",
+    # round 14: the row's OWN `, in practice, ` interpolation pushes the
+    # filler past the arm's 30-char bound, so the flipper bar never ran.
+    "the ADJACENCY half is no longer, in practice, merely open.",
+    "the ADJACENCY half is no longer, in practice, simply open.",
     "the ADJACENCY half is no longer far from open.",
     # round 6 (#11258 review round 3 `P1`): THE WAIVER IS NOT A PREFIX. Each of
     # these was GREEN while its counterpart without the word `spelling` RED — the
@@ -2494,6 +2506,10 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     "the ADJACENCY half is no longer, in practice, open.",
     "the ADJACENCY half is no longer being open.",
     "the ADJACENCY half is no longer an open question.",   # round 13: no longer refused
+    # round 14: the negated twins of the pinned `… is kept open.` / `… is held
+    # open.` reopenings — a true closure the arm used to refuse.
+    "the ADJACENCY half is no longer kept open.",
+    "the ADJACENCY half is no longer held open.",
 )
 
 #: ⛔ THE OVER-BLOCK LEDGER: truthful statements this pin REFUSES, each MEASURED
@@ -2680,10 +2696,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 121, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 123, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (121 — raised with the three floor-exclusive `no longer <participle>` shapes), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (123), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
@@ -2692,10 +2708,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
         "A `>=` at the current length costs nothing on growth and refuses any "
         "shrinkage; raise it in the same commit that adds proofs.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 33, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 38, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (33), i.e. ZERO SLACK, the same rule the ledger and the "
+        "CURRENT LENGTH (38), i.e. ZERO SLACK, the same rule the ledger and the "
         "mutation list carry: it was `>= 30` against a 33-entry list, so three "
         "honest closures were deletable with both tests GREEN (the stale "
         "\"within two of the current length\" note is why it read as tight; "
@@ -2714,7 +2730,7 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
         "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (7), i.e. ZERO SLACK: the round-11 entries are the "
+        "CURRENT LENGTH (6), i.e. ZERO SLACK: the round-11 entries are the "
         "`not … closed` cost, and slack above them is slack to delete it with")
     for required in (
             # the unit-token waiver cost — the one a lane actually meets, because
