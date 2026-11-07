@@ -72,7 +72,8 @@ it added (gaps) and how many it corrected.
 Exit codes: ``0`` measured (the report is written) · ``1`` NOT MEASURED (an
 unreadable receipt, a receipt with no embed list, **or zero usable pairs** —
 a measurement that produced no arm is not a zero result) · ``2`` refused (no
-``DEEPSEEK_API_KEY`` in the environment; a BAD FLAG also exits 2, via argparse).
+``DEEPSEEK_API_KEY`` in the environment, an interpreter older than 3.12, or a
+BAD FLAG — the last via argparse).
 
 ⚠️ WHAT THIS DOES NOT MEASURE, stated here so the report cannot be read
 wider than it is: accuracy / chunk@20 (the eval lane's gates), and model
@@ -84,11 +85,26 @@ being assumed away.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128 shape: refuse a <3.12 interpreter before the imports below — this module
+# uses `datetime.UTC` (3.11+) and the repo floor is 3.12, so on an older ambient
+# interpreter the failure would be an unattributed `AttributeError` instead of
+# the message that says how to run it. The gate that enforces this shape is
+# tests/test_entry_point_python_guard.py, not a style rule.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        f"tools/s4_reeemit_tax.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/s4_reeemit_tax.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import datetime as _dt
 import json
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any
