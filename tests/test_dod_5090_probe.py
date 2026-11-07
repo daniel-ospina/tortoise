@@ -1031,6 +1031,11 @@ def test_a_refusal_with_TWO_causes_names_BOTH_of_them():
             f"the byte figure ({label}) drops the unreadable-dimension cause: "
             f"{figure}")
         assert ("stored width" in figure or "stored widths" in figure), figure
+        # ⛔ …and `how` — the REMEDY channel — must name it too, or a reader
+        # fixes only the width and is refused again (#11389 review, P2).
+        assert "index dimension" in str(pay["how"]), (
+            f"`how` ({label}) names only the width while the refusal names "
+            f"both: {pay['how']}")
     # ⛔ …and the single-cause text is byte-identical: a label with NO covering
     # index has no index dimension to name, so the figure refuses in the old
     # words.
@@ -1044,6 +1049,25 @@ def test_a_refusal_with_TWO_causes_names_BOTH_of_them():
             "derived_payload_B"])
     assert solo == ("UNMEASURED(stored widths disagree (384, 1024), so stored "
                     "x width is not a figure)"), solo
+
+    # (e) A FAILED CATALOGUE READ DOES NOT CANCEL THE WIDTH THE PROBE MEASURED
+    # (#11389 review, P2). An unattributable catalogue row held BOTH columns at
+    # `catalogue row unreadable`, with `disagree` appearing nowhere in the row —
+    # though the probe had been issued and had returned both widths. Repair the
+    # catalogue, re-run, be refused again on the width: the same round trip.
+    blind = _CensusGraph(
+        catalogue=[[]], labels=["Point"],
+        vectors={"Point": (6, [[0.0] * 384] + [[0.0] * 1024] * 5)},
+    )
+    row_e = probe.vector_census(blind, "g", at="2026-11-07T00:00:00Z",
+                                graph_names=["g"])["labels"]["Point"]
+    for field in ("unindexed", "payload"):
+        blob = str(row_e["unindexed"] if field == "unindexed"
+                   else row_e["payload"]["derived_payload_B"])
+        assert ("catalogue row" in blob and "unreadable" in blob), (field, blob)
+        assert "disagree" in blob, (
+            f"{field} discards the disagreement the width probe measured "
+            f"because a DIFFERENT read failed: {blob}")
 
 
 def test_the_census_still_reports_zero_when_there_is_nothing_to_cover():

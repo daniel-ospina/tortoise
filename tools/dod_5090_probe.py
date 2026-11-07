@@ -3031,10 +3031,22 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             # and `unindexed` already do (review round 1, P2: the row said
             # `indexed: UNMEASURED(...)` and, one field over, "NO covering
             # index" — a coverage fact it had not measured).
-            payload = {"derived_payload_B": "UNMEASURED(the catalogue row was "
-                                            "unreadable, so coverage is not "
-                                            "provable)",
-                       "how": f"catalogue row unreadable: {unreadable_here[0]}"}
+            # ⛔ BUT A FAILED CATALOGUE READ DOES NOT CANCEL WHAT THE WIDTH
+            # PROBE MEASURED (#11389 review, P2). The probe is an independent
+            # read and its disagreement is a MEASURED fact; discarding it made
+            # a reader repair the catalogue, re-run, and be refused again on
+            # the width — the same round trip, in the one arm the previous
+            # enumeration did not count. Measured before the fix: `disagree`
+            # appeared nowhere in the row while the probe had returned both
+            # widths. The catalogue text is otherwise unchanged.
+            payload = {"derived_payload_B": (
+                           "UNMEASURED(the catalogue row was unreadable, so "
+                           "coverage is not provable"
+                           + (f"; {width_reason}" if width_reason else "")
+                           + ")"),
+                       "how": (f"catalogue row unreadable: {unreadable_here[0]}"
+                               + ("; the width probe did run" if width_reason
+                                  else ""))}
         elif width is None:
             # ⛔ The refusal, BEFORE the index is consulted: without a measured
             # width there is no byte figure, indexed or not — and when the probe
@@ -3049,16 +3061,25 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             # The single-cause texts are byte-identical: when `dim` is readable
             # — or the label has no covering index, where an index `dimension`
             # is not a cause at all — the old string is unchanged.
+            # ⛔ AND `how` NAMES IT TOO (#11389 review, P2). `how` is the
+            # REMEDY channel in this function (the dim-only arm says "needs the
+            # index dimension to cross-check the measured width"), so a `how`
+            # that names only the width sends the reader to re-probe something
+            # that will not lift the refusal. The refusal and the remedy must
+            # name the same causes or the field is worse than absent.
             payload_causes: list[str] = []
+            dim_cause = "the index dimension unreadable"
             if covering and dim is None:
-                payload_causes.append("the index dimension unreadable")
+                payload_causes.append(dim_cause)
             payload_causes.append(width_reason or "stored width not probeable")
+            how = ("a single width cannot stand for this label's stored vectors"
+                   if width_reason else "needs a width probe")
+            if covering and dim is None:
+                how += f", and {dim_cause}"
             payload = {"derived_payload_B": "UNMEASURED("
                                             + " and ".join(payload_causes)
                                             + ")",
-                       "how": ("a single width cannot stand for this label's "
-                               "stored vectors" if width_reason
-                               else "needs a width probe")}
+                       "how": how}
         elif not covering:
             # ⛔ #11088: THE UNINDEXED LABELS ARE THE POPULATION THIS CENSUS IS
             # FOR, and they had no byte figure at all. The payload used to be
@@ -3151,8 +3172,13 @@ def vector_census(graph, graph_name: str, at: str | None = None,
             "indexed": ("UNMEASURED(catalogue row unreadable: "
                         f"{unreadable_here[0]})" if unreadable_here
                         else bool(covering)),
-            "unindexed": (f"UNMEASURED(catalogue row unreadable: {unreadable_here[0]})"
-                          if unreadable_here else unindexed),
+            "unindexed": (
+                f"UNMEASURED(catalogue row unreadable: {unreadable_here[0]}"
+                # ⛔ …and the width the probe DID measure is not cancelled by
+                # it (#11389 review, P2): `width_reason` is a measured fact
+                # from an independent read. Same rule as the payload above.
+                + (f"; {width_reason}" if width_reason else "")
+                + ")" if unreadable_here else unindexed),
             "vector_indexes_on_label": found or "none",
             "index": idx or "none",
             # ⛔ EVERY index kind, not only VECTOR: §3.1's deciding datum for
