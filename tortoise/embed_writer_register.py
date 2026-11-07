@@ -190,6 +190,18 @@ class DuplicateWriterDeclaration(ValueError):
     """
 
 
+#: `#11444`. The class's definition is a claim about a ROUTE, so it is EXPORTED as data: the audit
+#: instrument that credits a `recognised_producer` declaration re-derives it against the writer's own
+#: callees, and it reads THIS tuple rather than holding a second spelling of the same names. A copy
+#: would drift in the false-hold direction — a seam added here would silently make every correct
+#: declaration look uncorroborated. Names only: not a pattern set, not a rule set.
+RECOGNISED_PRODUCER_SEAMS: tuple[str, ...] = (
+    "set_embedding_clause",
+    "_session_embedding",
+    "compute_session_embedding",
+)
+
+
 class UnknownWriterClass(ValueError):
     """A class outside :data:`CLASSES` — a typo, a retired name, or a requested `bypass`."""
 

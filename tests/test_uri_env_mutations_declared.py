@@ -349,6 +349,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # test gets its OWN graph, auto-restored at teardown).
     "test_8658_product_hit_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                               r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # #2683 Slice A arm WIRING: the same shape as the two siblings above and as
+    # `test_time_aware_eval_2520.py` — a module-level live-FalkorDB probe (set +
+    # save/restore in `finally`, so nothing leaks; DELIBERATE_URI because the
+    # probe IS what asserts the docker/FTS lane is reachable, and an embedded run
+    # would prove nothing about a seam that only exists there) plus a per-test
+    # `monkeypatch.setenv` fresh-graph fixture (the setenv IS the test input —
+    # each test gets its OWN graph, auto-restored at teardown).
+    "test_evidence_assembly_wiring_2683.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                                r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # C6 #2520: time-aware query expansion — module-level live-FalkorDB probe
     # (set + restore) + per-test fresh-graph fixture (the test_coverage_loop
     # pattern; the monkeypatch.setenv auto-restores).

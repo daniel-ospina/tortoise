@@ -81,11 +81,18 @@ means **four further resident HNSW structures**, not three. ⚠️ `STORAGE-ARCH
   owned is motion, not progress.
 
 **The counter-case, and why it wins:** two of the four DoD rows are PARTIAL on *the same population*
-(the 15 embedding writers with no recognised producer call), `#10541` — the issue that was to resolve
+(the embedding writers with no recognised producer call — **15 when this was written** (2026-11-04);
+**19 measured 2026-11-07**, of a 20-writer outside-gate population), `#10541` — the issue that was to resolve
 them — closed **COMPLETED** on 2026-11-04T00:49Z and **both rows are still PARTIAL at this head**. That is
 a genuine, currently-unfiled gap: an issue closed as complete whose own remainder outlived it. Proceeding
 is justified **only** to the extent the work either (a) makes V1 answerable, or (b) closes a genuinely
 unfiled gap. Both are in scope; nothing else is.
+
+⚠️ **Corrected 2026-11-07 (`#11444`, measured): the "same population" premise no longer holds for row 1.**
+Row 1's scorer reads `tortoise/embed_writer_register.py`, so all 20 writers discovery finds outside the gate
+are **credited** (13 `exempt`, 7 `recognised_producer`, owner issues cited per entry) and row 1 is `PARTIAL`
+on the shipped gate default alone. Row 2 is still `PARTIAL` on its own unresolved-label population. The
+argument above stands on row 2's half; it must not be quoted as "both rows hold on the writer population".
 
 ---
 
@@ -245,13 +252,23 @@ labels; *4 surfaces exist / 6 walked*.
 ### 7.1 Why REPOINT rather than PROCEED
 
 PROCEED would have implied the epic's existing acceptance still describes its work. It does not: one of
-four DoD rows is MET, one is an owner decision, and **both PARTIAL rows hold on the 15 embedding writers
-with no recognised producer call** (§1.3) — row 1 additionally on the gate being `set ON in: none` on the
-shipped default and one write path embedding outside it. **The instrument says re-classing that population
+four DoD rows is MET, one is an owner decision, and **both PARTIAL rows hold on the embedding writers
+with no recognised producer call** (§1.3 — 15 when this was written, 19 measured 2026-11-07) — row 1 additionally on the gate being `set ON in: none` on the
+shipped default and one write path embedding outside it. ⚠️ **Corrected 2026-11-07 (`#11444`, measured):
+the row-1 half of that sentence is superseded.** Row 1's scorer reads the product register, so the writer
+population and the one ungated path are **credited** (#5008) and row 1 is `PARTIAL` on the shipped gate
+default alone; row 2 is unchanged. The conclusion below is unaffected, and the decision it records is
+what later made row 1's scoring legible — but do not quote the superseded clause as current.
+**The instrument says re-classing that population
 moves neither verdict** (the `#10541` census comment in `tools/dod_5090_probe.py`: *"the census CLASSIFIES the unresolved set;
 it does not license moving this verdict … flipping this is a decision, not a cleanup"*), so rows 1–2 are
 closed by the **re-score decision** S2 carries (`03-scope.md:64`; `#11085`) — not by arming the gate and
-not by the register. **REPOINT** is option **C** from `#7879`'s own
+not by the register. ⚠️ **Corrected 2026-11-07 (`#11444`, measured):** that sentence is now true of row 2
+ONLY. Row 1's scorer reads the product register, so **row 1 does move on a re-classing** — its hold is
+`undeclared` (a writer the gate never sees and the product does not name), and row 1 reaches `MET` once
+every outside-gate writer is gated or named while the shipped gate default is ON. Row 2 is unchanged: the
+`#10541` census still classifies without licensing a verdict move there, because its question is which
+LABELS are query-servable, not who wrote the vector. **REPOINT** is option **C** from `#7879`'s own
 re-measurement comments — retire completed scope from the acceptance, keep the epic open on exactly what
 remains, and let the owner close it when the decision lands. It is neither discharge (§1.2 A1) nor
 re-scoping upward (inventing children the neighbours already own).
