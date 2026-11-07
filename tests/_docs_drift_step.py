@@ -36,6 +36,11 @@ DOCS_DRIFT_STEP_COMMANDS = (
     # `fetch-depth: 0` history this job checks out (its `measured_at_commit`
     # ancestry claim cannot be answered on a grafted `fetch-depth: 1` graph).
     "python3 tools/substrate_map_check.py --check",
+    # #2820 (landed on `main` while this de-duplication was in flight): the
+    # problem map's doc↔tree guard joins the same step for the same `#4454`
+    # reason, and it needs HISTORY for the same anchor-ancestry claim its #5086
+    # sibling above does.
+    "python3 tools/problem_map_check.py --check",
     # #11084: the #5090 vector-layer surface map's own guard. It takes no
     # `--check` — it verifies by default and exits 2 when the map cannot be read.
     "python3 tools/test_design_map_check.py",

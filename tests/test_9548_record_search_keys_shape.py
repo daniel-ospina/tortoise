@@ -384,34 +384,61 @@ def test_the_jsonb_map_is_not_reparsed_per_parameter(monkeypatch):
     1182 ms instead of 5.8 ms — a ~200x regression on the SYNCHRONOUS capture
     path, which §17 forbids the seam from adding.
 
-    Counted, not timed: the assertion is the NUMBER of migrations reads a plan
-    build performs, so it cannot flake on a loaded box. The answer is memoised in
-    `_JSONB_CACHE` for `_JSONB_CACHE_TTL_SECONDS`, so a COLD build is three
-    reads — `table_columns()`, `refused_props_names()`, and the jsonb map — and a
-    warm one is two. The cache is cleared first so the count means "once per
-    plan build" rather than "whatever was left warm by an earlier test".
-    A per-parameter re-parse shows up here as one read per string parameter
-    (measured on the regressed shape: ~180 for this plan).
+    Counted, not timed: the assertion is the NUMBER of PARSES a plan build
+    performs, so it cannot flake on a loaded box.
+
+    ⚠️ TWO counters, because the two readers no longer share a parsing path
+    (#9558 review cycle 2, P1). `jsonb_columns()` answers through
+    `_declared_types_for_dir`, which reads the migration files DIRECTLY — it does
+    not go through `_read_migrations`, which is the only thing an earlier version
+    of this test counted. Measured on that version: `reads` was 0 in a warm
+    process while the jsonb map was re-parsed once per plan, and the TTL disabled
+    (`_JSONB_CACHE_TTL_SECONDS = -1`) produced **100 jsonb parses with
+    `reads = 0`** — the assertion passed while the regression it names was
+    happening. So:
+
+    * `parses` counts `_declared_types_for_dir` — THE parse — and is the assertion
+      that matters: one per plan build, never one per bound parameter (the
+      regressed shape measured ~180 for this plan);
+    * `reads` counts `_read_migrations` as a cross-check on the column map, which
+      is now memoised per TREE (`_entry_sql`), so a cleared-cache build reads once
+      and a warm one reads zero.
+
+    Both caches are cleared first (#9558): the column map has its own
+    process-global cache, and clearing only the jsonb one left the count
+    meaningless.
     """
     from tortoise import record_projection as rp
 
     reads: list[int] = []
-    real = rp._read_migrations
+    parses: list[int] = []
+    real_reads = rp._read_migrations
+    real_parse = rp._declared_types_for_dir
 
-    def _counting(migrations_dir=None):
+    def _counting_reads(migrations_dir=None):
         reads.append(1)
-        return real(migrations_dir)
+        return real_reads(migrations_dir)
 
-    monkeypatch.setattr(rp, "_read_migrations", _counting)
+    def _counting_parse(migrations_dir):
+        parses.append(1)
+        return real_parse(migrations_dir)
+
+    monkeypatch.setattr(rp, "_read_migrations", _counting_reads)
+    monkeypatch.setattr(rp, "_declared_types_for_dir", _counting_parse)
     rp._jsonb_cache_clear()
+    rp._release_schema_cache()
     tenant = _tenant()
     record = _record(tenant, search_keys=GRAPH_KEYS)
     rp.replay_plan([record] * 20, org_id=tenant[0], graph_id=tenant[1])
     try:
-        assert len(reads) <= 3, (
-            f"one plan build read the migrations {len(reads)} times for 20 "
-            "records — the jsonb map is being re-parsed per bound parameter "
+        assert len(parses) == 1, (
+            f"one plan build PARSED the declared types {len(parses)} times for "
+            "20 records — the jsonb map is being re-parsed per bound parameter "
             "instead of once per build")
+        assert len(reads) <= 1, (
+            f"one plan build read the migrations {len(reads)} times for 20 "
+            "records — the column map is being re-read instead of served from "
+            "its cache")
     finally:
         rp._jsonb_cache_clear()
 

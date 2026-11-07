@@ -122,6 +122,7 @@ from tortoise.retrieval import (
     _validity_marker,  # noqa: F401 — re-exported for the eval tests
     render_context,
     resolve_pool_size,
+    session_key_of,  # #10540 — the SPLICE must key the pool the same way the SEED does
 )
 from tortoise.retrieval import (
     TOKEN_ESTIMATOR as _TOKEN_ESTIMATOR,  # noqa: F401
@@ -156,6 +157,7 @@ from tortoise.session_reinjection import (  # C4 (#2517): product rules
     DEFAULT_REINJECTION_SEED_SESSIONS,
     DEFAULT_REINJECTION_SEED_WINDOW,
     DEFAULT_REINJECTION_TOTAL_ITEMS,
+    _is_real_session_id,  # #10540 R11 — the splice's ANCHOR MAP needs it
 )
 
 from . import encode_cache, evidence
@@ -1046,15 +1048,60 @@ def _tr_complete_sessions(
         # session block is complete and contiguous; base order is otherwise
         # untouched (a session with no fetched material keeps its hits where
         # they were).
+        #
+        # #10540: keyed through the POOL AUTHORITY, never the raw snake prop.
+        # ``seeded_sessions`` above keys through ``retrieval.session_key_of``,
+        # which resolves a product turn hit from its wire ``sessionId``; a
+        # splice that read ``h.get("session_id")`` matched NOTHING on a
+        # camel-only pool, so the seed fires and the splice then matches
+        # nothing. No in-repo pool reaches that shape: BOTH eval annotators
+        # stamp ``session_id`` AND ``lme_session_index`` on every hit, and both
+        # outrank the camel leg — so this is CONSISTENCY HARDENING (a
+        # hand-built or future product-shaped pool cannot silently un-fix the
+        # seam), not a measurement of a live defect. On an eval pool the new
+        # expression adds no key that could MATCH a fetched group id — it
+        # returns the snake id where one exists, and otherwise the same
+        # ``idx:`` bucket the hit already carried (``_annotate_hits`` always
+        # stamps an index, so the camel leg is pre-empted; an Event hit's
+        # empty ``session_id`` becomes ``idx:<n>`` instead of ``""``) — so
+        # the #8713 census cannot move. ⚠️ ONE shape is exempt from that
+        # argument, which is why ``last_index`` below is gated by
+        # ``_is_real_session_id`` (#10540 R10/R11): a stored ``:Session``
+        # whose id literally starts with ``idx:`` (``_SAFE_SESSION_TAG_RE``
+        # permits ``:``, and ``ids.session_id_refusal`` refuses BLANK and
+        # non-``str`` ids while refusing nothing about ``idx:3``, so such a
+        # session is writer-producible) makes a REAL group key
+        # that a POOL hit's ``idx:<n>`` bucket can equal, so unguarded one
+        # session's chunks land inside an unrelated index-<n> hit's block and
+        # ``report["sessions"]`` counts a splice the seed never admitted. The
+        # fused POOL is what no in-repo lane produces (the colliding bucket
+        # needs an eval-stamped ``lme_session_index``), so this is defence,
+        # not a measured live defect; the guard costs the reachable path
+        # nothing (a seeded session's key is never an ``idx:`` bucket).
+        #
+        # ⛔ The GATE lives at the build loop, in ONE place (R11). The splice
+        # below needs no copy of it: ``last_index`` can only hold keys this
+        # loop admitted, so ``last_index.get(sid)`` is ``None`` for every key
+        # the guard rejects and ``None == i`` is False for every ``int i``.
+        # A copy there is not merely redundant — it is REACHED before the
+        # lookup, so a pool hit with a truthy non-``str`` snake id (the
+        # untyped-pool seam ``retrieval.session_key_of`` documents) would
+        # raise ``AttributeError`` on ``.startswith`` inside the guarded
+        # expression here and turn a completing run into the fail-open
+        # no-op this block exists to avoid. That is not hypothetical: on the
+        # round-10 tree (guard in BOTH loops) a pool hit with ``session_id:
+        # 5`` reported ``ok=False`` and completed nothing, while removing
+        # only the splice copy returned ``ok=True, sessions=1,
+        # injected=1`` (R11 mutation probe).
         last_index: dict[str, int] = {}
         for i, h in enumerate(pool):
-            sid = h.get("session_id") or ""
-            if sid in added:
+            sid = session_key_of(h)
+            if sid in added and _is_real_session_id(sid):
                 last_index[sid] = i
         merged: list[dict] = []
         for i, h in enumerate(pool):
             merged.append(h)
-            sid = h.get("session_id") or ""
+            sid = session_key_of(h)
             if added and last_index.get(sid) == i:
                 merged.extend(added.pop(sid))
         report["sessions"] = len(last_index)

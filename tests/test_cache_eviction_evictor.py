@@ -98,33 +98,26 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    # ⛔ Epic #1647 (cycle-6 P1-3 / cycle-8 P2-2): a raw client bypasses
-    # `_assert_test_graph` AND the per-test wipe scope, so this handle needs all
-    # three halves of the one contract — a per-test-UNIQUE name (`os.urandom`, the
-    # shape every other raw site in this tree uses), a name the sweep's OWNERSHIP
-    # VOCABULARY recognises (`test_…`), and the `finally` drop below.
+    # Epic #1647 (T7, cycle-6 P1-3): a raw client bypasses `_assert_test_graph`
+    # AND the per-test wipe scope, so the handle must be PER-TEST-UNIQUE, in an
+    # OWNED family, and JOURNALED in this same block — the three halves of one
+    # contract (cycle-8 P2-2), not a rename.
     #
-    # The `test_` prefix is NOT cosmetic (#11217 review P1): the journal is an
-    # ownership RECORD only for a name `owns_by_ownership_record` accepts
-    # (`_SWEEP_OWNED_PREFIXES`). Journal an outside name and the whole half is
-    # INERT — `_sweep_drop` puts it in `preserved`, then consumes the journal
-    # anyway, so the graph can never be reclaimed, and the leak this contract
-    # exists to close (#1647 cycle-8 P2-2: a per-test-unique name alone leaks one
-    # graph per run, and a killed run leaves it for the whole session) stays
-    # open while the ownership census goes GREEN. That census is not in this
-    # file: it is
-    # `tests/test_derived_names.py::_raw_detach_violations` — a false PASS there
-    # is what this prefix closes (#11217 review round 8, A4).
+    # ⛔ The `test_` prefix is load-bearing, not cosmetic: the session-end sweep
+    # drops only names that match `_SWEEP_OWNED_PREFIXES`
+    # (`tests/_embedded.py::owns_by_ownership_record`). A journaled
+    # `evict_<hex>` takes the PRESERVED branch — the sweep refuses to delete it
+    # AND still removes the journal, so the graph leaks while the only record
+    # that could reclaim it is destroyed. `tests/test_derived_names.py::
+    # test_raw_falkordb_client_detach_uses_per_test_unique_graph` pins the
+    # uniqueness+journal half; the owned prefix is pinned here by construction.
     #
-    # With all three halves a live peer's `scope=None` sweep is held off MID-TEST
-    # by `_peer_journaled_graphs` (#3074/#3214), and a killed run leaves a graph
-    # the session-end sweep actually owns and drops.
-    # Pinned by
-    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
-    # (both halves present) and by
-    # `test_lane_graph_name_is_owned_by_the_sweep_s_ownership_record` below (the
-    # prefix is INSIDE the vocabulary the journal's record is read against).
+    # The `uuid4` this replaced was unique but never OWNED and never journaled,
+    # which is why `main` reddened on the census once a PR's changed-files
+    # selection finally ran `tests/test_derived_names.py` (#11182's class, third
+    # site: this file came in with #11167 without the guard ever seeing it).
     graph_name = f"test_evict_{os.urandom(6).hex()}"
+
     _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")

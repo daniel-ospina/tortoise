@@ -1867,7 +1867,8 @@ and under no deny set, which #10389's fifth review round measured (`#10428`):
   ⚠️ That pin was RENAMED by `#10394` to `test_door_two_is_DENIED_on_BOTH_anchors_and_the_residual_says_so`
   — the name above is this entry's historical reference, and a grep for it now finds this line only.
   **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
-  restore re-rents the RAM. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
+  restore re-rents the RAM. ⚠️ **CORRECTED (`#11325`)**: `#10017`'s purge is the legacy TURN population and never
+  matched `:Source`/`:Event`; what the next restore re-rented was `#10000`'s write of the prose. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
   table, plus that test's premise), which is why it is filed rather than absorbed.
 - **The `:Event` fold — door 1's counterpart one label over, denied here (`#10428`).** `_upsert_event`
   persists extras with `skip = _META_KEYS | _EVENT_HANDLED`, and `story_arc` was in neither while
@@ -2109,6 +2110,46 @@ whole-graph and therefore clears a legacy copy too. ⛔ Only the NOT-PROJECTABLE
 the column, so no in-place route can exist); the declined pair has one, shipped —
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place. The classes differ in both why and which lane.
+
+⚠️ **CORRECTED (`#11325`, review of the `#10394` follow-up)**: this entry named `#10017`'s purge as the targeted repair
+for THIS class. Measured at the tool, `tools/purge_legacy_turns.py` deletes legacy episodic turn `:Point`s — its
+single destructive statement is `MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) WHERE t.is_episodic = true AND t.id IN $ids DETACH DELETE t` — never matches `:Source`/`:Event`, and contains no `story_arc` token — so a copy on either anchor
+survives it, and an operator following the sentence reads the sweep's unchanged `graph_only` as "the repair did not
+work". ⚠️ This stamp scopes itself to the REPAIR claim: the entry above is left as RECORDED, because a changelog is a
+historical record — the corrected instruction is this stamp's own, and no instrument ships a targeted
+`REMOVE n.story_arc` (`#11325`). The entry's earlier DURABILITY sentences
+("`#10017`'s graph-side purge was undone by the next routine recovery", "what makes `#10017`'s purge durable") are
+left as recorded — but they carry the SAME assumption this stamp retracts, that the purge clears THIS class. What the restore undid was `#10000`'s write deletions, and the acceptance
+they name (`purge → restore → sum(size(n.story_arc))` = 0) holds because the restore now writes no
+`story_arc` on either ANCHOR and its whole-graph wipe clears a legacy copy — not because a purge ran.
+
+⚠️ **CORRECTED AGAIN (`#11325` review cycle 2)**: the ENTRY above (its "⛔ Only the NOT-PROJECTABLE class"
+sentence) says the class "lacks a non-destructive" repair. That is true on the two ANCHORS this constant keys (`source`/`event`: `update_entity(…, story_arc=None)` is
+REFUSED as server-managed on BOTH anchors — `_SOURCE_SERVER_MANAGED_PROPS` / `_EVENT_SERVER_MANAGED_PROPS`, each raising
+with the stored value untouched) and **false on a
+`:Point`**, which has a non-destructive in-place one: `update_point(<id>, story_arc=None)` clears the property and KEEPS
+the node (measured — the `None` passes `sdk._refuse_unpaired_narrative`, whose refusal is on a NON-EMPTY narrative, and
+`update_point`'s `SET n += $props` removes a `None`-valued key). ⛔ **SUPERSEDED — see "CORRECTED (review cycle 3)" below; do not act on the next sentence.** Both of its claims are retracted there: the point's own `props` tail is NOT a record home (the clear's own record write overwrites it), and "the ONLY one" is replaced by the uniquely-true "no shipped route can put it back on a production graph". ⚠️ **That route is subject to the SAME per-row test as the
+anchors** — clear only where the record still HOLDS the text for the session (`public.session_narrative.narrative`, or the
+point's own `props` tail); where neither carries it the node's copy is the ONLY one and the clear deletes it, the
+`rebuild_all` that would put it back being refused PRE-WIPE on a production name (`§17.2`). ⚠️ Its durability is JOURNAL-bound only — ⚠️ and that bound has a REACH: a `rebuild_all` asks the SAME L2 name guard as the restore (`_assert_test_graph`, refused PRE-WIPE on every production name), so on a production server graph the replay is REFUSED and the `:Point` clear IS durable there; it is defeated only on a graph a rebuild can reach (a `test_`/`tortoise_test` server name, or an embedded `path=` DB): the journal
+records the `None`, but the `PointRevised` fold has no `story_arc` clause and the creation fold's open-set passthrough
+(`projection.entities._persist_extra_props`) SKIPS a `None` value, so a `rebuild_all` over a journal whose creation
+record carried the prose re-materialises it — that replay half is `#10429`'s. ⚠️ The RECORD→CACHE rebuild is the other
+way round: the patch stores `props.story_arc = null`, `_props_from_row` returns it, and `node_statement`'s
+`SET n += $props` REMOVES the key, so a record-sourced rebuild keeps the copy clear. The same live door is bound by
+the MCP tool `tortoise_update_point`. A `:Point` carrying the
+prose whose record tail does NOT also carry it is a `graph_only` occurrence of THIS count (`:Point`'s placeable set
+omits `story_arc`, §17.2; ⚠️ where the tail DOES carry it, `_partition_cache_owned`'s `keep |= set(record_props)` makes
+it COMPARED, and `record-restore` then RESTORES it), so an UNSCOPED version of this correction — as an earlier revision of
+this change's own §17.2 stated it, *"no shipped route clears the PROPERTY while keeping the entity"*, since amended to the
+anchor-scoped wording that is live there now — would have sent that
+operator to `tortoise_delete`, which REMOVES the node and journals the delete that drops its record row, when a
+clear-and-keep route shipped. ⛔ That quotation is of the SUPERSEDED revision, not of the entry above: this `#10394` entry never
+said "the PROPERTY" and never sent an operator to `tortoise_delete`, and `STORAGE-ARCHITECTURE.md` §17.2 at the merged
+tree states the bound per row rather than quoting the superseded phrase.
+
+⛔ **CORRECTED (review cycle 3) — the per-row test's SECOND home was wrong.** Cycle 2's stamp above (and every §17.2/§9.1 mirror of it) counted the point's own `props` tail as a record home that licenses the clear. **The clear consumes it**, so it is not a home that survives: `story_arc` is no `public.point` column, so `record_projection._split_properties` sends the key to the tail (its final `else: tail[prop] = value` has no null filter), and the record patch is a RIGHT-HAND merge (`props = props || %s::jsonb`, `_patch_statement`) — so the `{"story_arc": null}` the clear journals OVERWRITES the prose the tail held. On a pre-`#10389` unpaired `create_point(…, story_arc=…)` row, whose only record home IS that tail, the "safe" clear therefore destroys the last copy the record's KEYED VIEW holds — the exact failure class this change exists to prevent, one population over. ⚠️ The clear never touches the append-only journal, so a `rebuild_all` over a creation record that carried the prose still restores it (the replay bound stated above, in cycle 2's stamp, and in §17.2) — the claim is about the view an operator and the reconciler read, not about total loss. ⛔ The same stamp also retracts cycle 2's absolute *"the node's copy is the ONLY one"* at that per-row test: for a `:Point` the creation journal holds the prose too, so what is unique is that **no shipped route can put it back on a production graph**, not that the graph copy is the only copy. Retracted at all eight sites (both code docstrings, the `entities.py` comment, §9.1(a), §17.2, the epic's cache-projection section, the test docstring that stated the guidance, and — by THIS stamp rather than by rewriting it, because a changelog is a historical record — cycle 2's sentence above, which carries a `⛔ SUPERSEDED` pointer at the sentence itself so a reader arriving by `grep` cannot take it for live guidance). The per-row test now names `public.session_narrative.narrative` ONLY, and the mechanism is pinned by `tests/test_9555_narrative_cache_rebuild.py::test_the_point_props_tail_is_not_a_record_home_for_the_prose` — a null filter added on `point`, or a left-hand merge, makes the tail a home again and reds that pin until the guidance says so. ⚠️ What is NOT claimed: that a rebuild can always put the prose back — the replay is refused PRE-WIPE on every production name (cycle 2's stamp, above) — so the guidance stops counting the tail as a home either way.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED

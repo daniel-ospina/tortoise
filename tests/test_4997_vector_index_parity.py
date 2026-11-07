@@ -273,9 +273,15 @@ class _ServerClient:
     ⛔ No `.host`, `.port` or `._host` of its own: the endpoint lives in
     `connection_pool.connection_kwargs` (measured on the pinned `redis 7.4.1`,
     and the reason `FalkorProjection.__init__` records `_host` on the
-    PROJECTION instead of reading it off the client). That is also why
-    `_falkordb_version_cache_key()` answers `None` here, so every hosted
-    per-request projection takes `_stable_endpoint()`'s fallback lane.
+    PROJECTION instead of reading it off the client). Until #11328 that also
+    made `_falkordb_version_cache_key()` answer `None` here, so every hosted
+    per-request projection took `_stable_endpoint()`'s fallback lane; the key
+    now resolves from these pool kwargs, so a PRODUCTION-shaped client no
+    longer reaches that lane. The lanes remain reachable by the shapes that
+    still resolve no endpoint: a no-pool mock, and a client whose endpoint is
+    only half-resolved (see
+    `test_the_register_identity_never_mixes_sources`, which drives the address
+    lane with a pool-carrying client).
 
     A fake that carried `.port` directly would pin a client that does not
     exist and would stay green through the port-dropping defect (#11311).
@@ -810,12 +816,14 @@ def test_a_second_projection_of_the_same_store_does_not_repeat_the_pair(caplog):
     one (endpoint, graph).
 
     ⛔ Falsifiable only because `_bare()` carries a `_host` and (with `port=`) a
-    pool-backed server client: keyed on `id(self)` — which is what
-    `_falkordb_version_cache_key() or id(self)` yields once the redis client
-    hides its endpoint — the two projections get two keys and this records 2
+    pool-backed server client: keyed on `id(self)` — which is what a bare
+    `_falkordb_version_cache_key() or id(self)` yields for a mock with no
+    endpoint identity — the two projections get two keys and this records 2
     (measured on #11311's first cut). `port=` puts the two projections on the
-    PRODUCTION client shape, so this pin covers the fallback lane that the
-    hosted path actually takes rather than the no-pool mock lane.
+    PRODUCTION client shape, where the key now resolves from the pool kwargs
+    (`_falkordb_version_cache_key`, #11328); the fallback lanes remain reachable
+    by a client that resolves no endpoint — a no-pool mock, or one that resolves
+    only half of it.
     """
     rows_for_both = [_vector_row("Point")]
     first = _bare(rows_for_both, graph="test_11087_pair_stable", port=6379)
@@ -828,6 +836,67 @@ def test_a_second_projection_of_the_same_store_does_not_repeat_the_pair(caplog):
     assert len(pairs) == 1, (
         "one store, one contract: a rebuild must not re-report the same pair "
         f"(got {len(pairs)} record(s) from two projections)"
+    )
+
+
+def test_the_register_identity_never_mixes_sources():
+    """Round-2 review P3: `_stable_endpoint()` must never build its two fields
+    from two different sources.
+
+    A client that resolves only PART of an endpoint (a port in the pool, a host
+    on the projection) used to fall through to `(projection._host, pool port)` —
+    a tuple that matches NEITHER source and can equal a real endpoint of a
+    DIFFERENT store, so two stores would share one `#4997` warning latch and one
+    `#11087` pair register: one store's WARNING and report are suppressed and its
+    gap goes unreported. Reachable only through a mis-built client (redis-py
+    resolves both fields or neither), but silent when it happens.
+
+    ⛔ Falsifiable: the assertion below is the measured mixed tuple
+    `('server', 'conn-only-host', 6399)` under the old fallback.
+    """
+    proj = _bare()
+    proj._host = "conn-only-host"
+    proj.db = _SimpleNamespace(connection=_SimpleNamespace(
+        connection_pool=_SimpleNamespace(
+            connection_kwargs={"port": 6399})))   # port, no host
+    endpoint = proj._stable_endpoint()
+    assert endpoint == ("instance", id(proj)), (
+        "a half-resolved client must have NO endpoint identity, never a mixed "
+        f"tuple that can match another store (got {endpoint!r})"
+    )
+
+
+def test_an_unparseable_port_keeps_the_stable_bucket():
+    """Round-3 review P3: an unparseable port is NO PORT, not \"a port is
+    present\".
+
+    Gating the host-only lane on `raw_port is None` dropped it for a port that
+    exists but cannot be read, sending two projections of ONE store to
+    `("instance", id(self))` — one address-keyed register entry per projection
+    object, never evicted (the leak the pair register's own comment names) — for
+    no safety gain: a `('server', host, None)` bucket can never equal a real
+    `('server', host, port)` endpoint, so it cannot collide with a store whose
+    endpoint RESOLVED. (Round-4 review P3: the earlier wording said "cannot
+    collide with a different store", which is false — two DIFFERENT stores on one
+    host whose ports are both unreadable do share this bucket, and their `#4997`
+    latch and `#11087` register merge. That is the accepted degraded-but-stable
+    identity this lane and its parent both take for the portless shape, not a
+    claim that the bucket is unique.) Both projections must share the bucket.
+    """
+    def _proj_with_pool(raw_port):
+        proj = _bare()
+        proj._host = "h"
+        proj.db = _SimpleNamespace(connection=_SimpleNamespace(
+            connection_pool=_SimpleNamespace(
+                connection_kwargs={"host": "h", "port": raw_port})))
+        return proj
+
+    first, second = _proj_with_pool("nope"), _proj_with_pool("nope")
+    assert first._stable_endpoint() == second._stable_endpoint() == (
+        "server", "h", None), (
+        "an unreadable port must leave the STABLE host-only bucket intact, not "
+        f"scatter to per-object addresses (got {first._stable_endpoint()!r} / "
+        f"{second._stable_endpoint()!r})"
     )
 
 

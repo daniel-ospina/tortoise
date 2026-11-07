@@ -3439,6 +3439,19 @@ def test_the_ownership_arm_resolves_the_JOURNALED_VALUE_not_a_text_shape(tmp_pat
         "a local `def _journal_append` shadow stopped reding once the regex left "
         f"the decision: {_raw_detach_violations(root=tmp_path)}")
 
+    # ⛔ The ASYNC spelling of the shadow is the same shape, and it was pinned
+    # NOWHERE once the isolation test went: `AsyncFunctionDef` is a different AST
+    # node, so the exclusion has to hold on its own merits rather than by
+    # analogy (#11217 review of `8f122c24b8`, P3 — a coverage claim one shape
+    # wider than the artifact).
+    site.write_text(_raw_client_site(
+        '    name = f"test_ok_{os.urandom(4).hex()}"',
+        "    async def _journal_append(n): pass",
+    ), encoding="utf-8")
+    assert _raw_detach_violations(root=tmp_path), (
+        "an `async def _journal_append` shadow is still a DEFINITION, not a call "
+        f"— it must red: {_raw_detach_violations(root=tmp_path)}")
+
     # Only the binding LIVE at the call is journaled, so a DEAD earlier binding
     # must not be reported over a live UNDECIDABLE one — but the verdict on an
     # undecidable live value is now RED, not silent (#11217 round 5): the reason

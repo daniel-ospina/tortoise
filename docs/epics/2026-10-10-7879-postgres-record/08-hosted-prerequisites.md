@@ -874,15 +874,44 @@ wrong store.
 
 ### R10 — Connection pooling on the record write path · **S/M** · ops + code · **FOLLOW**
 
-**What:** `_default_connect` opens **one connection, one transaction per
+**What:** ~~`_default_connect` opens **one connection, one transaction per
 journal record**, and the module states the cost in place: *"~one connection + commit and ~4 ms of
 plan materialization"* — `table_columns()` is **deliberately uncached**, so every record re-reads the
-migrations. No pool exists.
+migrations. No pool exists.~~ ✅ **the mechanism LANDED (#9558/R10, PR #11386).** The pool now lives
+BEHIND the private hook `_default_connect` (so the read door reuses it too), the column map is cached
+on a per-file STAT identity — `(name, mtime_ns, size, inode, ctime_ns)`, NOT a content hash (a
+content-preserving stat rewrite inside one inode-clock tick is the one shape it cannot see, and a
+digest was measured at ~30–36 % of ONE consult's share of the win and rejected), and the cost was MEASURED before
+and after with one instrument against two trees: **49.72–52.86 → 255.68–261.61 records/s**, per-record
+mean **18.89–20.10 → 3.82–3.91 ms**, `connect` calls per record **1.00 → 0.00**, server-logged
+`connection authorized` **+66 → +2** (`docs/evidence/9558-record-write-cost/`, whose eight committed
+`runs/*.json` every PROBE figure is arithmetic on — the `connection authorized` counts are not
+among them: they are a `grep -c` delta on the container's own log, the artifact's exception item 1).
+⚠️ The BEFORE tree is 164 commits behind **this branch's base `23d227c534`** (the denominator is
+the base, not the AFTER tree's own parent `a4d1a358e2`, against which the same command reads
+168) — 7 of them touching the measured files, which makes the delta conservative rather than
+controlled. ⚠️ Two residual
+facts a later lane should not re-derive: the column-map CALL counts are unchanged at 1/record each (the WORK
+dropped, not the calls — a caller-held map is the deferred lifecycle change), and 0.68 ms/record of cache-consult
+overhead remains in two halves: ≈0.33 ms resolving the base (`_migrations_dir()` → `_complete()`, fifteen
+`Path.exists()` per consult) and ≈0.33 ms of fingerprint passes, because `replay_plan` drives both cached
+readers and each consult pays both — the filed fix (#11388) saves ONE fingerprint pass (0.160–0.169 ms) and
+leaves the resolution half in place. (An earlier revision of this line said "0.32–0.34 ms of pure stat",
+which was the whole warm call attributed to the fingerprint; the RESOLUTION half it now rests on (median 0.169 ms, measured on one box at that
+PR's head) is item 6 of the artifact's SEVEN "items that are neither" — printed not committed, because a wall-clock file
+must name the tree it was taken on, re-takeable by `fingerprint_cost.py --column-consult` — while its siblings ARE committed
+(the fingerprint pass in `fingerprint-cost.json`, the warm total in `runs/*.json`'s `table_columns_isolated_ms`); the second
+reader's 0.79x price ratio is item 7, a SENSITIVITY the probe cannot re-take (it records that reader's call count, never its
+time). 0.68 ms/record charges BOTH cached consults, since `replay_plan` drives both readers.) Batching the per-record insert was explicitly deferred, not forgotten (see
+above).
 **What it blocks:** capture latency at volume. **Not a first-customer gate** — hosted capture is off
 by owner ruling (2026-10-14) and the beta volume is unmeasured. **But it must land before the per-record cost of a real
-write volume can be measured.** Cheapest fix is the pooler DSN plus caching the column map; batching is the larger
-change and needs the ordering-across-three-doors question answered.
-**Decision needed:** none to start; the batching shape needs a measurement first.
+write volume can be measured.** ~~Cheapest fix is the pooler DSN plus caching the column map; batching is the larger
+change and needs the ordering-across-three-doors question answered.~~ ✅ **Superseded by what landed:** the fix was an
+IN-PROCESS pool behind `_default_connect` plus a stat-keyed column-map cache — not the pooler DSN, which remains a
+deployment option nobody has needed (the measured cost was the connect+auth handshake itself, which the pool removes at
+the client). Batching is still the larger change and still needs the ordering-across-three-doors question.
+**Decision needed:** none — the item is landed; batching's shape (and #11388's fingerprint hoist) are the open scopes.
 
 ### R11 — Land the byte gate, then wire the meter, before any allowance is configured · **S/M** · code + ops/config · **FOLLOW**
 
