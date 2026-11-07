@@ -74,11 +74,21 @@ assert that a refused/errored pass issued none.
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/cache_evict.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/cache_evict.py`"
+    )
+
 import argparse
 import contextlib
 import importlib
 import json
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
