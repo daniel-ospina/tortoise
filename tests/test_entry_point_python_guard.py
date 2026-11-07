@@ -983,11 +983,15 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     #
     # The status is DERIVED, not read off `.code`: `SystemExit()`, `SystemExit(None)`
     # and `SystemExit(False)` all exit 0 while `.code` is `None`/`None`/`False`, so
-    # `code != 0` is True for every one of them (measured). CPython's own rule is
-    # `0 if code is None else (code if isinstance(code, int) else 1)` — the string
-    # form exits 1, which is the shape two of the three pinned files must NOT use.
+    # `code != 0` is True for every one of them (measured). CPython turns `.code` into
+    # a status with `0 if code is None else (code if isinstance(code, int) else 1)` and
+    # the OS then keeps the low 8 bits — so `SystemExit(256)`, `(512)`, `(-256)` and
+    # `(768)` leave the process at **0** while the derived value is not (measured).
+    # Both steps are applied here, so this assertion is a true statement about the
+    # process status rather than an approximation of it — which is the distinction the
+    # rest of this census exists to enforce.
     _code = refusal.value.code
-    _status = 0 if _code is None else (_code if isinstance(_code, int) else 1)
+    _status = 0 if _code is None else ((_code & 0xFF) if isinstance(_code, int) else 1)
     assert _status != 0, (
         f"{rel}: the guard refused but the PROCESS exits {_status} — a refusal "
         f"that reports success is indistinguishable from the tool having run: "
