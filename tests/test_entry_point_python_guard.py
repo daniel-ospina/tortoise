@@ -974,8 +974,8 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # satisfied `_guard_or_fail` and every attribution assertion). Shape-generic
     # on purpose: it stays silent about WHICH non-zero code a file chooses
     # (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare` pins it for the
-    # three files this PR guards, because which code each can spare is a per-tool
-    # contract decision). Other corpus guards still refuse with a bare
+    # three files below, because which code each can spare is a per-tool contract
+    # decision). Other corpus guards still refuse with a bare
     # `SystemExit(<message>)` — exit 1 — where 1 is also the tool's own
     # DRIFT/failure code, `tools/bridge_table.py`, `tools/mcp_rename_table.py`
     # and `tools/sdk_surface.py` among them; that residue predates this PR and is
@@ -1053,8 +1053,8 @@ REFUSAL_WHY: dict[str, str] = {
     ),
     "tools/cache_evict.py": (
         "1 IS this tool's usage code (CACHE_EVICTION_EXIT_USAGE) — its verdicts are "
-        "2/3/4 — so the `raise SystemExit(<message>)` form is CORRECT here and must "
-        "not be normalised to 2"
+        "2/3/4 — so exit 1 is CORRECT here, whatever shape the guard uses to reach "
+        "it, and it must not be normalised to 2"
     ),
 }
 
