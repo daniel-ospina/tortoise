@@ -36,8 +36,17 @@ residue rather than intent:
   * the gate's scheduled pass last ran 2026-11-01T16:42Z — its log's last line
     still reports `runners=12` — and its state file still reads `mode=github`
     ("strip the label");
-  * its own header names this exact failure at `:926`: "a capped disarm would
-    strand `ubuntu-latest` on the runners outside the arm".
+  * its own header names this exact failure, in the paragraph that introduces
+    `FALLBACK_ARM_MAX`: "a capped disarm would strand `ubuntu-latest` on the
+    runners outside the arm".
+
+⛔ EVERY CITATION TO `ci_runner_gate.sh` IN THIS FILE IS BY SYMBOL, NEVER BY LINE
+NUMBER. A line number reads as authority while being the one thing in the
+sentence that silently rots: a reviewer found every `:NNN` cite here drifted by
+tens-to-hundreds of lines against the current gate, and it also makes the claim
+un-refutable — the reader cannot tell "the cite moved" from "the claim was
+never true". `tests/test_ci_runner_topology.py` pins each cited symbol's
+existence, so a rename reds a test instead of quietly making this prose wrong.
 
 A LIVE `ci_runner_gate.sh --status` read at 2026-11-07T17:09Z returns
 `mode=local ... runners=21 online_idle=4 online_busy=16 offline=1`, so the
@@ -45,14 +54,15 @@ recorded STATE is stale rather than the CAPABILITY — which is exactly why this
 tool decides from the measured pool and never from the log.
 
 ⛔ THE x64-ONLY DESIRED TOPOLOGY IS NOT A REVERSAL OF A RECORDED DECISION. A
-reviewer read `:930`'s "ARCH IS DELIBERATELY NOT A FILTER HERE" as forbidding the
-ARM64 strip; the gate's own write path falsifies that. `labels_for` (`:975`)
-derives each runner's body from ITS OWN host and omits `ubuntu-latest` whenever
-the pass is `off`, for EVERY managed runner — arch never enters the disarm —
-and `:882` says it directly: "in mode=github the pool is stripped by design"
-(`:507` words it "STRIPPED ON PURPOSE"). The `:930` block bounds the ENGAGE pass's cap (`arm_ids`, which runners
-a fallback arm may touch), not whether an ARM64 runner may carry the label at
-all. `docs/ops/ci-runner-x64.md` records the scope the #2327 decision left open:
+reviewer read the `arm_ids` comment "⛔ ARCH IS DELIBERATELY NOT A FILTER HERE"
+as forbidding the ARM64 strip; the gate's own write path falsifies that.
+`ci_runner_gate.sh::labels_for` derives each runner's body from ITS OWN host and
+omits `ubuntu-latest` whenever the pass is `off`, for EVERY managed runner —
+arch never enters the disarm — and its mode-off branch says it directly: "in
+mode=github the pool is stripped by design" (the gate's header words the same
+thing "STRIPPED ON PURPOSE"). That `arm_ids` comment bounds the ENGAGE pass's cap
+(`arm_ids`, which runners a fallback arm may touch), not whether an ARM64 runner
+may carry the label at all. `docs/ops/ci-runner-x64.md` records the scope the #2327 decision left open:
 "What changes is only *which architecture* may serve the fallback — which the
 decision never specified".
 
@@ -178,7 +188,7 @@ POOL_LABEL_X64 = "self-hosted-x64"
 POOL_LABEL_ARM64 = "self-hosted-arm64"
 
 #: BOTH markers: a runner's marker must match the host it is stamped on, so the marker the host
-#: does NOT own is dropped before the host's is added — `ci_runner_gate.sh:labels_for` drops both
+#: does NOT own is dropped before the host's is added — `ci_runner_gate.sh::labels_for` drops both
 #: (`"$POOL_LABEL_ARM64"|"$POOL_LABEL_X64") ;;`) and re-derives one from the host, which is why a
 #: gate pass and an `apply` pass must produce the same set for the same box.
 POOL_MARKERS = frozenset({POOL_LABEL_X64, POOL_LABEL_ARM64})
@@ -211,8 +221,9 @@ VIOLATION_UNMEASURED_EMPTY_POOL = "UNMEASURED_EMPTY_POOL"
 VIOLATION_ENGAGE_NO_X64_SERVER = "ENGAGE_PRODUCED_NO_X64_SERVER"
 
 #: The engaging-arm cap the OWNING gate applies, read from the SAME variable and with the SAME
-#: default (`agent-infra/scripts/ci_runner_gate.sh:222` — `FALLBACK_ARM_MAX="${CI_GATE_FALLBACK_ARM_MAX:-3}"`,
-#: OWNER RULING 2026-11-02, daniel-ospina/tortoise#9878). One value, two readers: if this tool
+#: default (`agent-infra/scripts/ci_runner_gate.sh`, the `FALLBACK_ARM_MAX` declaration —
+#: `FALLBACK_ARM_MAX="${CI_GATE_FALLBACK_ARM_MAX:-3}"`; OWNER RULING 2026-11-02,
+#: daniel-ospina/tortoise#9878). One value, two readers: if this tool
 #: kept its own number the two would arm different amounts of the same pool and neither would be
 #: wrong by its own reading.
 ARM_CAP_ENV = "CI_GATE_FALLBACK_ARM_MAX"
@@ -223,7 +234,8 @@ ARM_CAP_DEFAULT = 3
 #: failure mode of guessing here is silent: arming the whole pool under a typo.
 VIOLATION_ARM_CAP_UNREADABLE = "ARM_CAP_UNREADABLE"
 
-#: `FALLBACK_ARM_MAX=0` is not "arm nothing quietly" — `ci_runner_gate.sh:220-222` reads it as the
+#: `FALLBACK_ARM_MAX=0` is not "arm nothing quietly" — `ci_runner_gate.sh`'s `FALLBACK_ARM_MAX`
+#: block reads it as the
 #: fallback being DISARMED, where "the pool is released and the engaging pass REFUSES, rather than
 #: reporting a successful engage carrying nothing". A verb named `apply` that printed
 #: "0 changes — already at the desired topology" under it would be that false PASS.
@@ -523,9 +535,10 @@ def fallback_arm_cap() -> int | None:
 def arm_order(runners: Sequence[Runner]) -> list[Runner]:
     """The runners an engaging arm may touch, in the gate's own order: ids ASCENDING.
 
-    Mirrors `arm_ids` (`sort -n | awk -v n="$FALLBACK_ARM_MAX" 'NR<=n'` over the pool's managed
-    ids) — which is why the order is by numeric id and not by name: the two orders disagree on a
-    pool whose names carry no id (github-runner-10 sorts before github-runner-2 lexically).
+    Mirrors `ci_runner_gate.sh::arm_ids` (`sort -n | awk -v n="$FALLBACK_ARM_MAX" 'NR<=n'` over
+    the pool's managed ids) — which is why the order is by numeric id and not by name: the two
+    orders disagree on a pool whose names carry no id (github-runner-10 sorts before
+    github-runner-2 lexically).
 
     An OFFLINE runner is a registered slot that cannot serve a job, so it is not a candidate to
     arm; `serving_x64` applies the same reading to the post-state.
@@ -546,7 +559,7 @@ def desired_label_set(
 
     Only labels a write may carry: GitHub's read-only ones (`self-hosted`, the platform,
     the arch) are not in the result, because sending them back is a 422 AND because this
-    tool does not decide what a host IS — `ci_runner_gate.sh:labels_for` puts it plainly
+    tool does not decide what a host IS — `ci_runner_gate.sh::labels_for` puts it plainly
     ("the architecture is not an opinion the caller supplies: it is the `ARM64` / `X64`
     label GitHub stamps from the host at registration"). Inventing `Linux` for a macOS
     runner made the plan's `after` unreachable for it — a diff no write could close.
@@ -575,7 +588,8 @@ def desired_label_set(
     out.add(marker)
     # ⛔ THE DIRECTION IS EXPLICIT, AND THE OWNER-GATED HALF IS NEVER THE DEFAULT.
     if not engage:
-        # `--disengage`: the explicit disarm, every managed runner (`ci_runner_gate.sh:882`).
+        # `--disengage`: the explicit disarm, every managed runner (`ci_runner_gate.sh::labels_for`
+        # with the pass `off` — "in mode=github the pool is stripped by design").
         out.discard(FALLBACK_LABEL)
     elif host == HOST_LABEL_X64 and arm:
         # The ADDITIVE half — the reason this PR exists. It contradicts nothing.
@@ -602,9 +616,9 @@ def unmanaged_reason(runner: Runner) -> str | None:
     Three gates, and each one is named for the thing that actually implements it:
 
     * the PLATFORM gate — this file's own, because a macOS runner cannot join the Linux pool;
-    * `ci_runner_gate.sh:managed_ids` — the POOL-MARKER gate: "A runner carrying neither marker
+    * `ci_runner_gate.sh::managed_ids` — the POOL-MARKER gate: "A runner carrying neither marker
       is not ours to relabel, and leaving it untouched is the conservative reading";
-    * `ci_runner_gate.sh:labels_for` — the ARCH gate: a runner whose host arch it cannot
+    * `ci_runner_gate.sh::labels_for` — the ARCH gate: a runner whose host arch it cannot
       classify is a named failure, never a guess.
 
     A runner excluded by any gate is REPORTED and left byte-identical — never rewritten on a
@@ -626,12 +640,12 @@ def unmanaged_reason(runner: Runner) -> str | None:
         return (
             "carries neither pool marker ("
             + " / ".join(sorted(POOL_MARKERS))
-            + "), so it is not ours to relabel — left untouched (`ci_runner_gate.sh:managed_ids`)"
+            + "), so it is not ours to relabel — left untouched (`ci_runner_gate.sh::managed_ids`)"
         )
     if runner.host is None:
         return (
             "carries neither X64 nor ARM64, so its pool marker cannot be derived — left untouched; "
-            "an unclassifiable runner is a named failure, never a guess (`ci_runner_gate.sh:labels_for`)"
+            "an unclassifiable runner is a named failure, never a guess (`ci_runner_gate.sh::labels_for`)"
         )
     return None
 
@@ -1067,7 +1081,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
-    # ⛔ A CAP OF ZERO IS A DISARMED GATE, NOT A QUIET NO-OP. `ci_runner_gate.sh:220-222`:
+    # ⛔ A CAP OF ZERO IS A DISARMED GATE, NOT A QUIET NO-OP. `ci_runner_gate.sh`'s
+    # `FALLBACK_ARM_MAX` block:
     # "A value of 0 ... means the fallback is DISARMED: the pool is released and the engaging
     # pass REFUSES, rather than reporting a successful engage carrying nothing." This tool must
     # not answer a disarmed gate with "0 changes — already at the desired topology" and exit 0:

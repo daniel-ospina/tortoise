@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -1306,6 +1307,45 @@ def test_the_cap_string_matches_the_gate_it_mirrors():
     assert 'FALLBACK_ARM_MAX="${CI_GATE_FALLBACK_ARM_MAX:-3}"' in gate, (
         "the gate no longer declares the cap this tool mirrors — re-read #9878 before changing "
         "either side"
+    )
+
+
+@pytest.mark.skipif(
+    not (REPO_ROOT / "scripts" / "ci_runner_gate.sh").is_file(),
+    reason="agent-infra scripts are not materialised here (`tools/link_agent_infra_scripts.py`)",
+)
+def test_every_gate_citation_is_a_symbol_that_exists():
+    """REGRESSION (#11435 review round 3, P2): every `ci_runner_gate.sh:NNN` cite in the module had
+    drifted by tens-to-hundreds of lines with no test noticing.
+
+    Measured against the gate at this head: `:882` (cited for "the explicit disarm") is a
+    queue-ghost log line; `:926` / `:930` (cited for the header's capped-disarm warning and for
+    "ARCH IS DELIBERATELY NOT A FILTER HERE") are queue-clock comments; `:975` (cited for
+    `labels_for`) is an age UNREADABLE check; `:507` (cited for "STRIPPED ON PURPOSE") is a census
+    comment. A line number reads as authority while being the one part of the sentence that rots,
+    and it makes the claim un-refutable — a reader cannot tell "the cite moved" from "the claim
+    was never true".
+
+    So citations are by SYMBOL, and this test pins that each cited symbol is actually DEFINED in
+    the gate: a rename on either side reds here instead of quietly making the prose wrong.
+    """
+    module = (REPO_ROOT / "tools" / "ci_runner_topology.py").read_text()
+    gate = (REPO_ROOT / "scripts" / "ci_runner_gate.sh").read_text()
+    # A line-number cite of this script is the defect, wherever it appears in the module.
+    line_cites = re.findall(r"ci_runner_gate\.sh:\d", module)
+    assert not line_cites, (
+        f"{len(line_cites)} line-number citation(s) of ci_runner_gate.sh survive — cite the SYMBOL "
+        f"(the numbers drift silently against the gate)"
+    )
+    cited = sorted(set(re.findall(r"ci_runner_gate\.sh::([A-Za-z_][A-Za-z0-9_]*)", module)))
+    assert cited, "the module must cite the gate it mirrors, by symbol"
+    missing = [
+        name for name in cited
+        if not re.search(rf"^\s*(?:{name}\(\)|{name}=)", gate, re.MULTILINE)
+    ]
+    assert not missing, (
+        f"cited gate symbol(s) {missing} are not defined in ci_runner_gate.sh — the citation has "
+        f"rotted (renamed or removed). Cited: {cited}"
     )
 
 
