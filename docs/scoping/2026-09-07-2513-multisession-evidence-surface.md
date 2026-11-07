@@ -28,13 +28,16 @@ one is not**:
 - **§8 product-owner decision — DECIDED (c), 2026-09-22** (owner ruling, issue comment 5787468112),
   with its `OVERRIDES:` line carried in §8. This section said "one product-owner decision open" for
   six weeks *after* the ruling landed; corrected 2026-11-07.
-- **Phase-0 sealed baseline receipt (#2516 indicator 1) — NOT RUN.** Evals are parked on the owner's
-  ruling, and the eval lane's embedder preflight fails **under load** on our hosts: the blocker receipt
+- **Phase-0 sealed baseline receipt (#2516 indicator 1) — NOT RUN.** Evals are out of scope for this
+  reconciliation (the dispatch brief parks them; no owner ruling on it is recorded on this issue). The
+  tracker's own recorded blockers for the same runs are different in kind — lane budget / ingest cost
+  (#10540 "the run does not fit this lane's budget"; #10538 "ingest-bound at 156–375 s/q") — **plus**
+  the eval lane's embedder preflight failing **under load**: the blocker receipt
   (`docs/scoping/receipts/2026-09-22-2513-embedder-preflight-blocker.json`, PR #4679) records three
   consecutive `--mock` preflights timing out at 30.0–30.1 s at load ~250 on 10 CPUs, and #2518 recorded
   the same failure at `--workers 6` — after which `--mock` continues keyword-only, i.e. it measures a
-  degraded instrument. Note the constraint is **load-dependent, not absolute**: the 2026-09-17 capsweep
-  and #2518's 2026-09-24 run both loaded the real embedder (`BAAI/bge-small-en-v1.5`, hybrid FTS+vector+RRF),
+  degraded instrument. The constraint is **load-dependent, not absolute**: the 2026-09-17 capsweep and
+  #2518's 2026-09-24 run both loaded the real embedder (`BAAI/bge-small-en-v1.5`, hybrid FTS+vector+RRF),
   so a host that can load it under its own load can take the run. So the doc stays `draft`.
 - **No unlanded work exists on any #2513 branch** — by two different proofs, stated per branch because
   they are not the same proof (§10.1). The worktree this section named until 2026-11-07 —
@@ -244,12 +247,16 @@ identity of the files the branch adds against the commit that landed them:
 third is a byte-identical blob plus a content commit lineage. Do not quote "all three are merged PR
 heads" as the identity claim: it is false for row 3.
 
-The gate agrees: `uv run python tools/collision_preflight.py 2513 --repo .` exits **0** (CLEAN, 7/8
-surfaces, 2026-11-07 00:18 UTC) — the `--repo .` pin is required, because an unpinned `#2513` resolves
-in both `tortoise` and `agent-infra` and the tool refuses it as AMBIGUOUS (exit 2). `tools/who-is-on.sh
-2513 --repo .` reported **"nobody"** on the same run with 7/8 surfaces queried; that answer is only as
-complete as the surfaces it could query, and a later replay by the reviewer of this change saw 3 surfaces
-unqueried and exit 2 (`ANSWER INCOMPLETE`) — re-run it and read the surface count, not just the verdict.
+The gate agrees: `uv run python tools/collision_preflight.py 2513 --repo .` exits **0** —
+`VERDICT: CLEAN (exit 0) — 8/9 surfaces queried` (`ALL_SURFACES` has 9 members on this tree), re-run at
+2026-11-07 01:2x UTC *with this doc's own branch and PR already on the remote*, so the count includes
+this lane's signals. The `--repo .` pin is required: unpinned, `#2513` resolves in both `tortoise` and
+`agent-infra`, and the tool refuses it as AMBIGUOUS (exit 2).
+
+⚠️ Do **not** quote a `who-is-on` verdict as this doc's evidence. It enumerates *live* signals, so it
+read `nobody` at 00:18 UTC (before this lane existed) and `4 holder(s)` at 01:20 UTC (after this lane's
+branch/PR existed) — both correct for their moment, neither durable. The durable claim is the table
+above, not a point-in-time answer.
 
 ### 10.2 Per-unit landing state
 
@@ -264,10 +271,9 @@ must be able to name:
 | 4 | Aggregation-aware reading | **C5 #2521** | #2607 merge `7361250f0e1` (content `6550db3ee80`): `tortoise/aggregate.py::detect_aggregative_intent`, consumed **in-product** at `tortoise/reader.py:399`; #10550 sq `7e866e462f9` (reader keeps counting discipline when its type fragment loses it) | **product reader path** | #10553 open (exact-count accuracy before/after) |
 | — | Completeness loop (the loop both 1 and 2 compose through) | **C3 #2519** | #2608 sq `77e590f88f7`: `tortoise/coverage_loop.py` shell + `session_diverse_order`; `tortoise/retrieval.py::guard_and_recap_pool` is its single shipped composition point | `guard_and_recap_pool` has **two** non-test call sites — `tools/longmem_eval/retrieve.py:2294` and `tortoise/session_reinjection.py:561` (the re-injection merge) — and both are reached only from the eval lane (`retrieve.py:2597`) | **UNMEASURED**; #2569 / #2570 open |
 
-**The pattern this table records, plainly:** every mechanism is landed and OFF, and the two units
-whose arming point is the *product* (C5's reader fragment) differ in kind from the four whose arming
-point is the *eval lane*. "Landed" therefore never means "shipped to users" for this program — read
-the `Where it is armed` column, not the PR list.
+**The pattern this table records, plainly:** every mechanism is landed and OFF, but exactly **one** unit
+(#4, C5) has a *product* arming point while the other **four** are eval-lane arms. "Landed" therefore
+never means "shipped to users" for this program — read the `Where it is armed` column, not the PR list.
 
 ### 10.3 Proof the landed seams are live (the run that backs this section)
 
@@ -292,16 +298,18 @@ uv run pytest -q -p no:randomly tests/test_session_reinjection.py tests/test_cov
 # → 44 passed in 21.14s   (docker-lane E2E legs)
 ```
 
-**353 passed / 0 failed / 0 skipped.** ⚠️ Read this count for exactly what it is: the seams run at
-their **shipped defaults (OFF)** and are default-preserving, so the suite proves the mechanisms are
-live and inert-by-default — it does **not** show any lever moving a graded metric. That second claim
-is §6's business, and it is blocked (§10.4).
+**353 passed / 0 failed / 0 skipped.** ⚠️ Read this count for exactly what it is: the seams are exercised
+in **both** their default and armed states (several tests arm a mechanism ON explicitly —
+`TORTOISE_LME_AGGREGATIVE_FLAG`, `TORTOISE_LME_TEMPORAL_AGGREGATE_FLAG`,
+`TORTOISE_LME_ENTITY_KEY_EXPANSION` — to assert the mechanism engages), and the default-preserving
+cases are pinned too. What the suite does **not** show is a graded metric **moving**: that needs §6's
+cohort run, which is blocked (§10.4).
 
 ### 10.4 What remains (this is the scope exit, not a wish list)
 
 | Remaining | Why it is open, stated as a testable condition |
 |---|---|
-| **#2516 (C1)** | Its indicator 1 — a sealed Phase-0 baseline receipt — has not run. Blocked on: evals parked (owner ruling) **and** the eval-lane embedder preflight failing under load (§0). The metric it needs already exists (§10.2 row 3), so this is a *run*, not a build. |
+| **#2516 (C1)** | Its indicator 1 — a sealed Phase-0 baseline receipt — has not run. Blocked on: evals parked for this lane by the dispatch brief (no ruling recorded on the issue) **and** the tracker's own recorded blockers for the same runs (#10540 budget, #10538 ingest cost) **and** the eval-lane embedder preflight failing under load (§0). The metric it needs already exists (§10.2 row 3), so this is a *run*, not a build. |
 | **#10538 (C6 tail)** | The DATE-RANGE half landed (#10549); the unit's Target is not evidenced — same blocked run. |
 | **#2518 (C2)** | Measured and **not adopted**; its plan's fail-safe OFF stands. Open as a decision, not as work. |
 | **#10540 (C4 survivor)** | Re-injection that survives #8713; its instrument landed (#10632) but not the fix. |
