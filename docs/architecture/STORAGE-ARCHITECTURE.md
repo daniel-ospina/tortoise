@@ -125,14 +125,14 @@ The cause is not that we store a lot. **It is that we pay for the *total* rather
 > `docs/architecture/SEARCH-ARCHITECTURE.md`, which also **resolves V1** (§14.3).
 >
 > **NARROWED — "keep the limit in falkor high":** the cache stays **complete for beta**, and becomes a **bounded
-> window before launch**, sized by the tier's 30 %-of-price cost budget (a complete graph is $8.75/tenant against a
+> window once M2 measures it** (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5), sized by the tier's 30 %-of-price cost budget (a complete graph is $8.75/tenant against a
 > $5.70 budget, and density cannot divide a per-tenant line). So the full cache is retained *temporarily*, not
 > indefinitely.
 >
 > **OVERRIDES:** §2.0's *"keep the limit in falkor high"* — the 30 %-of-price budget makes a complete cache unaffordable at any density, and the
 > vector index is 467× cheaper per byte on disk *at the 8 GB tier's $43.75/GB-month, after the 75 % rule, against Postgres disk at $0.125/GB — the same
 > comparison §17.4 states as 584× (pure RATE) and 778.7× (with that density headroom); 467× is the 8 GB tier's basis*, so the cache is bounded by a
-> budget-derived window before launch.
+> budget-derived window once M2 measures it (`docs/architecture/SEARCH-ARCHITECTURE.md` §1.5).
 
 **This is the governing decision for this document.** Everything below is either (a) the reasoning behind it, or (b) the work that remains.
 
@@ -1520,7 +1520,7 @@ follows is the evidence each ruling rests on, which is design.
 **The ruling (owner, 2026-10-08, §2.0):** *"we do hybrid now, data goes to postgres and it's loaded to hot (falkor); for now we keep the limit in falkor high…"*
 
 > ⛔ **Split by the 2026-11-07 ruling — see §2.0's marker.** The dual-store read path is adopted (search in Postgres,
-> traversal in the graph); the full cache is retained for beta and bounded before launch.
+> traversal in the graph); the full cache is retained through private-beta and bounded once M2 measures it (`SEARCH-ARCHITECTURE.md` §1.5).
 
 **FalkorDB stays hosted, and there is still no engine rewrite. What changes is its ROLE:**
 
@@ -1531,15 +1531,15 @@ follows is the evidence each ruling rests on, which is design.
 
 ### 14.3 ⚠️ Open — except V1, ✅ RESOLVED 2026-11-07
 
-**✅ V1 is ANSWERED; V2–V4 below are still open.** The vector index moves to Postgres (`docs/architecture/SEARCH-ARCHITECTURE.md`), which also answers the first cache-tier question (§14.2).
+**✅ V1 is ANSWERED; V2 and V3 below stay open** — V3 is *unblocked* by V1, not delivered — and V4's mechanism ships. The vector index moves to Postgres (`docs/architecture/SEARCH-ARCHITECTURE.md`), which also answers the first cache-tier question (§14.2).
 
-**⚠️ The hybrid makes V1 more urgent, not less.** Where the graph is the store, moving the vector index is an optimisation. **Under the hybrid, FalkorDB is a CACHE, so every byte it holds is rent on something Postgres already stores** — which is the definition of the waste the split exists to remove. **V1 is the owner's call, and it is the *first* cache-tier question.**
+**⚠️ The hybrid *made* V1 urgent.** Where the graph is the store, moving the vector index is an optimisation. **Under the hybrid, FalkorDB is a CACHE, so every byte it holds is rent on something Postgres already stores** — which is the definition of the waste the split exists to remove. **That is why it was the *first* cache-tier question — and it is answered (✅ above, 2026-11-07).**
 
 | # | the question | why it is not settled | what turns on it |
 |---|---|---|---|
 | **V1** | **Should the vector index live in FalkorDB at all?** (§12.1c) | It changes **what the graph holds** — a real change to the retrieval path, not a tune. Owner raised it; the owner decided it on 2026-11-07 (✅ below). **The latency half is measured (§12.1d) — 1.5–5 ms — so the question is purely cost.** | **93 MB index total on a 195 MB graph** — measured 2026-11-04 on graph `live-v4` (`#10976`) — for an estimated **~10–15 ms**. The 93 MB is the **total** index size, of which only part is HNSW. The vector class's own size is §12.1a's **2026-09-24** measurement: **33,580 embeddings ≈ 51.6 MB of payload**, of which the unindexed `Object`+`Event` population — **12,657 vectors ≈ 19.4 MB, 38 % of every vector stored** — is the removable subset that #5090's 2026-10-08 arithmetic justifies (a SCOPE correction: the ≈50 MB figures count the `Point` leg too, which IS indexed). **No post-2026-09-24 per-label vector count has been taken**; `tools/dod_5090_probe.py --census` re-measures it on a named graph and its docstring forbids re-quoting the 12,657 count as current. **✅ RESOLVED 2026-11-07: the vector index does NOT live in FalkorDB — vectors and their payload move to Postgres (`pgvector`), while traversal, writes and EP stay in the graph** (`docs/architecture/SEARCH-ARCHITECTURE.md`). The figures above are the record of what the question cost. **The text index stays in the graph until a BM25-capable Postgres option is measured** (same doc §6.2). **The first cache-tier question (§14.2) — now answered.** |
-| **V2** | **Does a `Source` get a summary vector?** (§9.4) | Buys exactly one query class (*"which source is about X"*). Evidence is practice, not measurement. ⚠️ **"Summary" names the capability, not the input**: for a session `:Source` the embedded text is the S1 narrative from `public.session_narrative`, never `:Source.summary`; **and what a `:Source` with no session narrative (a document, a PR) embeds is itself part of this decision, unsettled.** | **~4.4 MB** — and **free** if V1 lands. |
-| **V3** | ⚠️ **The unindexed-embeddings defect** (§12.1b) | **This and V1 are the SAME decision** (owner, 2026-09-24) — `#4997` — *"isn't the research pointing us to create those vectors but keep them in supabase?"* **Yes: keep the vectors, make them searchable, put them where RAM is cheap.** | **Rides on V1 — ✅ answered by it (2026-11-07):** the vectors move to Postgres, where the unindexed ones become searchable as rows in a table we already pay for. |
+| **V2** | **Does a `Source` get a summary vector?** (§9.4) | Buys exactly one query class (*"which source is about X"*). Evidence is practice, not measurement. ⚠️ **"Summary" names the capability, not the input**: for a session `:Source` the embedded text is the S1 narrative from `public.session_narrative`, never `:Source.summary`; **and what a `:Source` with no session narrative (a document, a PR) embeds is itself part of this decision, unsettled.** | **~4.4 MB** — and **now free**: V1 is resolved (2026-11-07). |
+| **V3** | ⚠️ **The unindexed-embeddings defect** (§12.1b) | **This and V1 are the SAME decision** (owner, 2026-09-24) — `#4997` — *"isn't the research pointing us to create those vectors but keep them in supabase?"* **Yes: keep the vectors, make them searchable, put them where RAM is cheap.** | **Unblocked by V1 — ✅ the DECISION is answered, ⚠️ the WORK remains (2026-11-07):** the vectors move to Postgres, which makes indexing the previously unindexed labels *possible* as rows in a table we already pay for — but nothing yet decides that they get an index. |
 | **V4** | ✅ **The silent `ok` — the trace must name its mechanism.** | `run_vector_query` records the mechanism (`index` / `scan` / `scan_fallback`), so a full scan is distinguishable from an index hit. **V1-INDEPENDENT — the vectors' location does not change this requirement.** | **Correctness of the observability layer** — the failure mode is that a 300–500 ms scan at month-6 volume can report `ok`. |
 
 ---
