@@ -1438,10 +1438,20 @@ _RESIDUAL_CLOSED_VERDICT = (
     #   GREEN  the time-unit half has yet, in practice, to be closed.  / … fully …
     #   RED    the ADJACENCY half remains to be closed
     #   GREEN  the ADJACENCY half remains, for now, to be closed.
-    # The row's own register is exactly `, in practice, ` / `, after the widen, `
-    # / `, for now, `, so filling the slot is the EASY edit, not the exotic one.
-    # `never … closed` above already carried a 30-char window — the asymmetry was
-    # unintended and is what hid these.
+    # ⛔ AND AN EARLIER REVISION OF THIS NOTE WAS FALSE (#11258 round 21,
+    # MEASURED): it said "the row's own register is exactly `, in practice, ` /
+    # `, after the widen, ` / `, for now, `". The registry writes NONE of them —
+    # `in practice`, `after the widen` and `for now` occur 0 times in
+    # `config/v4-mechanisms.yml`, exact AND whitespace-flattened. The claim was
+    # stated where a lane reasons from, which is the class this file polices
+    # (rounds 16-17 corrected two of its members); a lane that looked for the
+    # form in the row found nothing.
+    # What IS measured: the row does interpolate parenthetically (`measured at
+    # this head`, `, paraphrase, `), English supplies these adverbials freely,
+    # and each form above is pinned RED in `_RESIDUAL_REOPENING_MUTATIONS`.
+    # Filling the slot is the EASY edit because the LANGUAGE offers it — not
+    # because the row contains it today. `never … closed` above already carried a
+    # 30-char window; that asymmetry was unintended and is what hid these.
     r"\b(?:has|have|had|is|are|was|were)\b[^.;]{0,20}?\b(?:yet|still)\b[^.;]{0,20}?"
     r"to\s+be\s+(?:\w+\s+)?closed\b",
     r"\bremains?\b[^.;]{0,20}?\bto\s+be\s+(?:\w+\s+)?closed\b",
@@ -1493,9 +1503,12 @@ _RESIDUAL_CLOSED_VERDICT = (
 #: the honest denial from the reopening, and naming the shape here is the honest
 #: alternative to claiming coverage.
 #: ⛔ AND EVERY FILLER WINDOW IS BOUNDED, so a filler LONGER than the bound defeats
-#: that arm (#11258 review round 15 `P1`, MEASURED): the row's register supplies
-#: multi-token interpolations (`, in practice, ` / `, at this head, `), and two of
-#: them stacked exceed `[^.;]{0,25}?` / `{0,30}` / `{0,20}`. GREEN at this revision:
+#: that arm (#11258 review round 15 `P1`, MEASURED): multi-token interpolations
+#: are ordinary English (`, in practice, ` / `, at this head, ` — ⛔ NOT "the
+#: row's own register": the row writes NEITHER comma form, 0 occurrences each, and
+#: its one `at this head` is bare, inside `measured at this head`; #11258 round 21,
+#: MEASURED), and two of them stacked exceed `[^.;]{0,25}?` / `{0,30}` /
+#: `{0,20}`. GREEN at this revision:
 #: `the ADJACENCY half is no longer, in practice and at this head, judged.`,
 #: `the units are no longer, in practice and at this head, fused.`,
 #: `the ADJACENCY half is not, in practice and at this head, closed.`,
@@ -1631,9 +1644,11 @@ _RESIDUAL_OPENNESS = (
     # past-tense shapes are hypothetical, so BOTH arms admit `was|were` and the
     # leak closes on both sides.
     # ⛔ ONE WINDOW FOR BOTH ARMS: a 20-char bound on (b) made the same sentence
-    # RED on the class-word side and GREEN on the unit side once it carried the
-    # row's own `, after the widen, ` register (MEASURED: `\`minute\` is, after the
-    # widen landed, no longer fused` → GREEN at 20, RED at 80).
+    # RED on the class-word side and GREEN on the unit side once it carried an
+    # interpolated `after the widen landed` (MEASURED: `\`minute\` is, after the
+    # widen landed, no longer fused` → GREEN at 20, RED at 80). ⛔ NOT "the row's
+    # own register": `after the widen` occurs 0 times in the registry, and no
+    # commit ever added it (`git log -S` is empty; #11258 round 21, MEASURED).
     # ⛔ IT READS THE WHOLE ANCHOR VOCABULARY, not a hand-copied six (#11258 review
     # round 16 `P1`, MEASURED): the literal here was narrower than
     # `_RESIDUAL_CLASS_ANCHOR` by exactly `the guarantee`, `retention` and
@@ -2400,8 +2415,9 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half is anything but being closed.",
     # ⛔ ROUND 13 (#11258 review round 13 `P1`, MEASURED): the same `\s+`
     # adjacency survived in `_RESIDUAL_CLOSED_VERDICT`, whose plain forms all
-    # pinned RED while ONE interpolated word or comma — the row's own register —
-    # turned them GREEN.
+    # pinned RED while ONE interpolated word or comma — ordinary English, and
+    # pinned RED here in the three forms below (⛔ NOT "the row's own register": the
+    # row writes none of them, #11258 round 21, MEASURED) — turned them GREEN.
     "the time-unit half has yet, in practice, to be closed.",
     "the ADJACENCY half remains, for now, to be closed.",
     "the ADJACENCY half does, in practice, not close the gap.",
@@ -2574,9 +2590,11 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "`m` is no longer fused",
     "the units were no longer fused in this revision",
     "`minute` was no longer fused after the widen",
-    # ... and the row's own `, after the widen, ` register inside the window,
-    # which the 20-char bound read as GREEN on the unit side and RED on the
-    # class-word side.
+    # ... and an interpolated `after the widen landed` inside the window, which
+    # the 20-char bound read as GREEN on the unit side and RED on the class-word
+    # side. ⛔ NOT "the row's own register" — `after the widen` occurs 0 times in
+    # the registry (#11258 round 21, MEASURED); the shape is pinned here because
+    # the language offers it, and that is the whole basis for the window.
     "`minute` is, after the widen landed, no longer fused",
     # ⛔ THE WAIVER'S OWN FALSIFIERS (#11258 review round 5 `P1`, MEASURED): the
     # unit arm was widened but the waiver's WITHHOLDING set was not, so prefixing
@@ -2909,9 +2927,13 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     # these are honest DENIALS of a reopening — the direction the run exists to
     # accept — and each is refused because its adverb (or a parenthetical comma)
     # sits between `not` and `been`, which a FIXED-WIDTH lookbehind cannot cross.
-    # `, in practice, ` is this row's OWN register, not an exotic construction, so
-    # a lane writing an update meets it; the refusal message names this ledger as
-    # the route out, so the entry must exist for that route to be true.
+    # `, in practice, ` is ORDINARY English, and the row does not write it today
+    # (`in practice` occurs 0 times in `config/v4-mechanisms.yml`, #11258 round 21,
+    # MEASURED) — so this cost is met by a lane EDITING the row, not by its current
+    # text. ⛔ The round-20 finding's lede inherited the false "row's own register"
+    # claim from the note above; the finding itself stands, because the refusal
+    # message names this ledger as the route out, so the entry must exist for that
+    # route to be true.
     # ⛔ DO NOT "FIX" THESE BY WIDENING THE RUN: a variable-width `not … been`
     # lookbehind is impossible in `re`, and the adverb-list alternative is the
     # closed-list trade rounds 2/9/10 measured against (a dropped adverb re-opens
@@ -3330,6 +3352,51 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         " (with its measured verdict) rather than leaving two lists: "
         f"{now_accepted}"
     )
+
+
+def test_the_filler_windows_are_justified_by_the_language_not_by_the_row():
+    """The interpolation notes cite a MEASUREMENT, not "the row's own register" (#11258 round 21).
+
+    ⛔ MEASURED, and this is the correction: six notes in this file called
+    `, in practice, ` / `, after the widen, ` / `, for now, ` "the row's own
+    register" — and `config/v4-mechanisms.yml` writes NONE of them (0 occurrences
+    each, exact AND whitespace-flattened; no commit ever added one, `git log -S`
+    is empty for all three). The class is the one this file polices: a lane reading
+    the note looks for the form in the row and does not find it. Round 20's `P3`
+    severity argument inherited the false half verbatim ("the row writes it"),
+    which is why the correction belongs on the artifact rather than in a comment.
+
+    What the notes claim now is TWO-SIDED, and both sides are pinned here:
+      * the row does not contain the comma-delimited forms — so the cost is met by
+        a lane EDITING the row, not by the row's current text, and
+      * each form is still pinned RED in `_RESIDUAL_REOPENING_MUTATIONS` — THAT
+        list, not the row, is what justifies the filler windows. Deleting one of
+        those mutations would otherwise leave the windows justified by nothing a
+        reader can re-measure.
+
+    ⛔ PRE-FIX BEHAVIOUR: with the "row's own register" prose restored, the suite
+    stayed green (105 passed at `7cfb51aa0d4`) — nothing re-measured the claim, so
+    it could stay false indefinitely, and it did (written in round 13, still there
+    at round 20). Both assertions below are measured, not asserted: revert either
+    side and this test reds.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    row = _residual_region(text)
+    flat_row = " ".join(row.split())
+    for interpolation in (", in practice,", ", after the widen", ", for now,"):
+        assert interpolation not in flat_row, (
+            f"the registry now WRITES {interpolation!r} — that is fine, but the "
+            "notes in `_RESIDUAL_CLOSED_VERDICT` / `_RESIDUAL_OPENNESS` / the "
+            "over-block ledger state the cost as met by an EDIT; re-measure those "
+            "notes against the row's new text rather than leaving a claim that is "
+            "true for the wrong reason")
+        assert any(interpolation in mutation
+                   for mutation in _RESIDUAL_REOPENING_MUTATIONS), (
+            f"no mutation pins {interpolation!r} RED — the filler windows are "
+            "justified by the language, and the proof of that justification is "
+            "this list; a window whose only red-required shape is gone is a window "
+            "with no falsifier")
 
 
 def test_every_refusal_names_the_over_block_ledger():
