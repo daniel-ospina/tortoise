@@ -682,10 +682,11 @@ def reconcile_record_and_cache(
     against a record that is correct. The repair for that occurrence on either
     ANCHOR is a DESTRUCTIVE CLEAR, and its only shipped route is a full
     ``record-restore`` — whose wipe is whole-graph and **cannot** be narrowed to
-    those rows, so a graph holding ANY row the record does not carry must not be
-    restored at all: copy that prose out first, because the wipe destroys it and
-    the record has nothing to restore it from (the module docstring's (5) states
-    the rule and its pin) — measured by
+    those rows, so a graph holding ANY row whose prose neither
+    ``public.{source,event}.story_arc`` nor ``public.session_narrative.narrative``
+    carries must not be restored at all: copy that prose out first, because the
+    wipe destroys it and the record has nothing to restore it from (the module
+    docstring's (5) states the rule) — measured by
     `test_the_record_restore_writes_no_story_arc_on_any_node` arm (3), ⚠️ and
     refused PRE-WIPE on a production server graph name, #2944's L2 guard; or a
     graph-side ``REMOVE n.story_arc`` that no in-tree instrument issues today;
