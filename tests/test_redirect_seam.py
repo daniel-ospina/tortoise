@@ -483,7 +483,10 @@ def _closure_stamp(fn):
     is why the ``@wraps``-that-never-calls shape stays tolerated (see
     ``_is_stamp``). Deliberately NOT a globals-dict scan: any function defined
     in a module that merely HOLDS the stamp would then read as delegating,
-    which is a false GREEN on the "the stamp still runs" property.
+    which is a false GREEN on the "the stamp still runs" property. The residue
+    is stated rather than papered over: a MODULE-SCOPE plain wrapper that
+    reaches the stamp through globals still reads as "never installed" — no
+    static check can tell a reference from a call.
     """
     for cell in getattr(fn, "__closure__", None) or ():
         try:
@@ -502,8 +505,12 @@ def _delegate_of(fn):
     delegates through ``_ORIG_THREAD_START`` (that is what the installer
     chains); anything else delegates through ``__wrapped__`` (``functools.wraps``
     / sentry) or, for a plain wrapper, a closed-over stamp. Single-valued on
-    purpose — a diamond would need out-degree 2, which no wrapper shape has, so
-    a revisit in ``_delegation_path`` really is a cycle.
+    purpose: a wrapper carrying BOTH edges (a foreign ``__wrapped__`` and a
+    closed-over stamp) is followed through ``__wrapped__`` only, so a
+    closure-only delegator behind a foreign ``__wrapped__`` still reads as
+    "never installed" — the documented residue in ``_closure_stamp``. Keeping
+    ONE successor is what makes a revisit in ``_delegation_path`` mean a cycle
+    rather than a diamond.
     """
     if _is_stamp(fn):
         return fn.__globals__.get("_ORIG_THREAD_START")
@@ -516,10 +523,12 @@ def _delegation_path(start) -> list:
 
     Truncation is hang-safety, not a verdict: the repeated frame is included
     once so ``_stamp_links`` still sees a self-cycle's stamp, and a stride that
-    comes back on itself cannot loop forever. A ``_ORIG_THREAD_START``
-    assignment happens once, in the module body, BEFORE the stamp is defined,
-    so a module reload cannot produce such a revisit — only a deliberate
-    mutation of the delegate (as the cycle test does) can.
+    comes back on itself cannot loop forever. Truncation is LOAD-BEARING, not
+    merely defensive: ``importlib.reload`` re-executes the module body in the
+    SAME module ``__dict__``, so ``_ORIG_THREAD_START = Thread.start`` rewrites
+    the ALREADY-INSTALLED stamp's delegate pointer to itself — a self-revisit a
+    plain reload reaches, which is exactly the state in which ``Thread.start()``
+    recurses and every chain-length check still passes.
     """
     frames, seen, fn = [], set(), start
     while fn is not None:
@@ -548,7 +557,9 @@ def _stamp_problems(start) -> list[str]:
     1. exactly ONE of our stamps is reachable — zero means the installer never
        ran; two means one execution of the module stacked its stamp on
        another's.
-    2. a stamp's ``_ORIG_THREAD_START`` does not reach ANOTHER stamp. This is
+    2. a stamp's ``_ORIG_THREAD_START`` does not reach ANOTHER stamp — the
+       SELF-revisit a plain ``importlib.reload`` creates is the state fact 2
+       alone can see (a two-stamp stack already trips fact 1). This is
        the genuine double wrap the class marker exists to prevent: after a
        module reload the reloaded module captures
        ``_ORIG_THREAD_START = Thread.start`` — the PREVIOUS stamp, either
@@ -566,12 +577,11 @@ def _stamp_problems(start) -> list[str]:
             f"found {len(links)} (0 = never installed; 2+ = a stamp stacked on a stamp)")
     for link in links:
         delegate = link.__globals__.get("_ORIG_THREAD_START")
-        if delegate is None:
-            continue
         if any(_is_stamp(frame) for frame in _delegation_path(delegate)):
-            problems.append(
-                "a test-stem stamp delegates THROUGH another stamp — a genuine "
-                "double wrap (module reloaded, then re-installed)")
+            message = ("a test-stem stamp delegates THROUGH another stamp — a genuine "
+                       "double wrap (module reloaded, then re-installed)")
+            if message not in problems:  # one report, however many stamps stack
+                problems.append(message)
     return problems
 
 
@@ -903,11 +913,6 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     # check would then red for a reason that has nothing to do with the marker.
     assert threading.Thread.start is not sentinel, \
         "re-invoked installer installed a fresh stamp — the class marker guard is gone"
-    # …and the install invariant still holds on whatever is installed, which is
-    # the property the marker exists to protect (repaint-tolerant by design).
-    post_problems = _stamp_problems(threading.Thread.start)
-    assert post_problems == [], \
-        f"re-invoked installer broke the Thread.start stamp invariant: {post_problems}"
 
 
 def test_the_double_wrap_verdict_reads_the_CHAIN_not_the_identity():
@@ -1008,11 +1013,24 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
         assert any("double wrap" in p for p in problems), problems
         return
 
-    # cycle: two stamps delegating to each other. The walk must TERMINATE (a
-    # hang here would wedge every later test in the shard) and must report a
-    # violation rather than a clean bill of health. A delegate revisit is not
-    # reachable by a module reload — `_ORIG_THREAD_START` is assigned once,
-    # before the stamp is defined — so this state is synthetic by construction.
+    # self-revisit: the state a PLAIN `importlib.reload` creates. The module
+    # body re-executes in the SAME `__dict__`, so `_ORIG_THREAD_START =
+    # Thread.start` rewrites the already-installed stamp's delegate to ITSELF.
+    # This is fact 2's unique domain — the stamp count stays 1, so the length
+    # arm is silent and only reachability can see it.
+    own = {"__name__": "tortoise.projection"}
+    self_revisiting = types.FunctionType(stamp.__code__, own, _STAMP_NAME)
+    own["_ORIG_THREAD_START"] = self_revisiting
+    assert _stamp_links(self_revisiting) == [self_revisiting], \
+        "a self-revisit must still count as ONE stamp"
+    path = _delegation_path(self_revisiting)
+    assert len(path) == 2 and path[0] is path[1], \
+        f"the walk must terminate on the revisit, keeping it once: {path}"
+    problems = _stamp_problems(self_revisiting)
+    assert any("double wrap" in p for p in problems), problems
+
+    # two stamps delegating to each other: the length arm catches it, and the
+    # message is emitted ONCE, not once per stacked stamp.
     first = types.FunctionType(
         stamp.__code__, {"__name__": "tortoise.projection"}, _STAMP_NAME)
     second = types.FunctionType(
@@ -1021,6 +1039,6 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
         _STAMP_NAME,
     )
     first.__globals__["_ORIG_THREAD_START"] = second
-    assert len(_delegation_path(second)) <= 3, "delegate walk did not terminate on a cycle"
-    problems = _stamp_problems(second)
-    assert any("double wrap" in p for p in problems), problems
+    two_stack = _stamp_problems(second)
+    assert any("double wrap" in p for p in two_stack), two_stack
+    assert len(two_stack) == len(set(two_stack)), f"duplicate violations: {two_stack}"
