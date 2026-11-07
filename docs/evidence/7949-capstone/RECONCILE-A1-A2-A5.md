@@ -530,8 +530,15 @@ gh api "repos/daniel-ospina/tortoise/issues/11021/timeline?per_page=100" \
                                                           # the keywords that read cannot see, and their
                                                           # PR-side closingIssuesReferences is the field the
                                                           # paragraph above says is NOT empty — measured in
-                                                          # the same command:
-for n in 10997 10812 8447; do
+                                                          # the same command. ⛔ The loop reads BOTH poles:
+                                                          # the three rows that GAIN an entry (10997, 10812,
+                                                          # 8447) and the two arm examples that must NOT
+                                                          # (#10999 is arm 2, #11021 is arm 3). Both arms
+                                                          # tell the reader to run this read BEFORE naming
+                                                          # the arm, so the negative result for their own
+                                                          # rows has to be printed here — arm 2's and arm
+                                                          # 3's classifications rest on it:
+for n in 10997 10812 8447 10999 11021; do
   echo "#$n — includeClosedPrs:true"
   gh api graphql -f query="{repository(owner:\"daniel-ospina\",name:\"tortoise\"){issue(number:$n){closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number state}}}}}" \
     --jq '.data.repository.issue.closedByPullRequestsReferences.nodes'
