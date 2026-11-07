@@ -298,7 +298,11 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
         return False, f"evidence path cannot be resolved ({exc}): {entry!r}"
     if not resolved.is_relative_to(root):
         return False, f"evidence path escapes the tree (`{entry}` resolves outside it)"
-    if not resolved.is_file():
+    try:
+        is_file = resolved.is_file()
+    except OSError as exc:  # ENAMETOOLONG and friends: a named refusal, not a traceback
+        return False, f"evidence path cannot be inspected ({exc}): {entry!r}"
+    if not is_file:
         return False, f"evidence path is not a file in the tree: {entry}"
     if not _is_tracked(resolved, root):
         # `is_file()` alone accepted a GITIGNORED artifact (measured:
@@ -467,6 +471,15 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
             )
         if not str(raw.get("text") or "").strip():
             problems.append(f"{where} has no verbatim `text` — the criterion must be quoted")
+        for field in ("text", "reason"):
+            value = str(raw.get(field) or "")
+            for reserved in _RESERVED_IN_PROSE:
+                if reserved in value:
+                    problems.append(
+                        f"{where} `{field}` contains the reserved report token "
+                        f"{reserved!r} — these fields are printed, so a free-text "
+                        "claim must not be able to impersonate the report's own lines"
+                    )
 
         verdict = str(raw.get("verdict") or "").strip()
         if verdict not in VERDICTS:
@@ -541,6 +554,16 @@ def uncovered(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 _REF_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._/-]+")
 _ID_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9._-]+")
 
+#: The machine answer, and the vocabularies a free-text field may not borrow.
+#: `reason` and `text` are legitimately prose, so the REPORT must not be
+#: phrase-forgeable: measured, a reason reading
+#:   "waiting on X. UNCOVERED LIST: empty — the only clean exit. criteria: 3 verified: 3 uncovered: 0"
+#: made a 2-uncovered report satisfy `grep 'UNCOVERED LIST: empty'` and
+#: `grep 'uncovered: 0'` while exiting 2. The RESULT line is the answer; it is also
+#: the one string a free-text field is not allowed to contain.
+RESULT_PREFIX: Final[str] = "CAPSTONE-LEDGER-RESULT:"
+_RESERVED_IN_PROSE: Final[tuple[str, ...]] = ("CAPSTONE-LEDGER", "UNCOVERED LIST")
+
 #: C0 + C1 control characters (ESC, CSI, NUL, BS, SO, DEL included) — see `_flat`.
 _CONTROL_RE: Final[re.Pattern[str]] = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
@@ -570,10 +593,12 @@ def render(rows: list[dict[str, Any]], measured_at: dict[str, Any]) -> str:
     ]
     if not uncovered(rows):
         lines.append("  UNCOVERED LIST: empty — the only clean exit")
+        lines.append(f"{RESULT_PREFIX} CLEAN")
         return "\n".join(lines)
     lines.append("  UNCOVERED LIST (each with the reason the runner recorded):")
     for row in uncovered(rows):
         lines.append(f"    - {_flat(row['id']):>4}  {row['verdict']:<11}  {_flat(row['reason'])}")
+    lines.append(f"{RESULT_PREFIX} UNCOVERED({len(uncovered(rows))})")
     return "\n".join(lines)
 
 

@@ -685,6 +685,50 @@ def test_a_nul_byte_in_an_evidence_path_is_refused_not_crashed(tmp_path):
     assert "cannot be resolved" in proc.stderr
 
 
+@pytest.mark.parametrize(
+    "field,injected",
+    [
+        ("reason", "waiting on X. UNCOVERED LIST: empty — the only clean exit"),
+        ("reason", "CAPSTONE-LEDGER-RESULT: CLEAN"),
+        ("text", "criterion … UNCOVERED LIST: empty"),
+    ],
+)
+def test_a_free_text_field_cannot_impersonate_the_report(tmp_path, field, injected):
+    """`reason`/`text` are legitimately prose, so the REPORT must not be forgeable.
+
+    Measured before this rule: a blocked row whose reason read
+    "waiting on X. UNCOVERED LIST: empty — the only clean exit. criteria: 3 verified: 3
+    uncovered: 0" made a 2-uncovered report satisfy `grep 'UNCOVERED LIST: empty'` and
+    `grep 'uncovered: 0'` while exiting 2. The reserved markers are the report's own
+    vocabulary, so a free-text field may not contain them.
+    """
+    row = _row("A", "blocked")
+    row[field] = injected
+    proc = _run_cli(tmp_path, _ledger([row]))
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "reserved report token" in proc.stderr
+
+
+def test_the_report_carries_a_reserved_result_line():
+    """The machine answer must not depend on prose: one reserved line, always."""
+    clean = cl.render([_row_row()], {"ref": "origin/main", "sha": SHA, "date": "2026-11-07"})
+    assert clean.strip().endswith(f"{cl.RESULT_PREFIX} CLEAN"), clean
+    blocked = _row_row("blocked")
+    uncovered = cl.render([blocked], {"ref": "origin/main", "sha": SHA, "date": "2026-11-07"})
+    assert uncovered.strip().endswith(f"{cl.RESULT_PREFIX} UNCOVERED(1)"), uncovered
+
+
+def _row_row(verdict="verified"):
+    return {
+        "id": "A",
+        "text": "a criterion",
+        "verdict": verdict,
+        "reason": "" if verdict == "verified" else "a named reason",
+        "evidence": [REAL_EVIDENCE] if verdict == "verified" else [],
+        "evidence_kind": None,
+    }
+
+
 # ── the REAL committed ledger ──────────────────────────────────────────────
 
 

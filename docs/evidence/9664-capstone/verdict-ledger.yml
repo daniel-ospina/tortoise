@@ -342,8 +342,8 @@ criteria:
     reason: >-
       Artifacts exist and are dated (54 PNGs, every one carrying a 20261026 stamp)
       and a live link now exists, but coverage is not per-step: step 5 has ZERO
-      screenshots — by nature, since it is a server-side observation (S5 carries
-      the `server-observation` waiver, so that half is already stated). What still
+      screenshots — by nature, since it is a server-side observation (S5's
+      `server-observation` evidence_kind marks that shape; no kind waives a row). What still
       blocks this row is step 3's card, the one surface no run has ever captured:
       it needs a signed-in dashboard session.
 
