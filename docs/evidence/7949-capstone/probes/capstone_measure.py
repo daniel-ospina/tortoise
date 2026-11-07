@@ -836,10 +836,13 @@ DOOR_ENTERED_PREFIX = "llm:"
 #: ⚠️ REPORTED, NOT SCORED — and that half is stated here rather than left to be
 #: discovered. Nothing about a failed capture stops the pass from being scored:
 #: ``main`` still exits 0 and the record's ``run.status`` is still ``"COMPLETED"``,
-#: which is the one field ``tools/capstone_verdict_check.py`` V5 reads, so a run
-#: with a failed capture is not distinguishable from a clean one BY THE GATE (a
-#: human reading the log is). Filed as **#11414**; changing the exit or the status
-#: is a gate decision, not a comment fix.
+#: which is the field ``tools/capstone_verdict_check.py`` V5 reads to decide the
+#: pass completed — it also reads ``run.steps_observed`` and the step-accounting
+#: keys, and none of those distinguishes a failed capture either, because the
+#: step totals are summed over sessions. So a run with a failed capture is not
+#: distinguishable from a clean one BY THE GATE (a human reading the log is).
+#: Filed as **#11414**; changing the exit or the status is a gate decision, not
+#: a comment fix.
 DOOR_ENTERED_THEN_FAILED = ("error",)
 
 
