@@ -851,6 +851,7 @@ jobs:
           python3 tools/mcp_rename_table.py --check
           python3 tools/sdk_surface.py --check
           python3 tools/substrate_map_check.py --check
+          python3 tools/problem_map_check.py --check
           python3 tools/test_design_map_check.py
       - uses: actions/setup-node@v4
         with:
