@@ -43,6 +43,115 @@ The two arms therefore hold the *same fact* and differ in **form** — narrative
 turn vs distilled claim — so a raw-vs-distilled difference measures the
 distillation, never a corpus difference.
 
+## The pre-registration — what was fixed, and before what (#11460)
+
+`preregistration.json` is the **authoritative** record; this section is the
+readable copy of it, and it is committed **before** any arm runs. A
+pre-registration is citable later as *"this was decided before the number
+existed"*, so everything below is a field of that file — not prose beside it —
+and each field restates a clause the exit bar actually enforces
+(`evaluate_exit_bar`).
+
+### Judge — re-registered to the owner-ruled DeepSeek judge
+
+| | value |
+|---|---|
+| judge | `deepseek/deepseek-v4-pro` |
+| pin | `unpinned:deepseek/deepseek-v4-pro` (an honest label — see below) |
+| rubric | `longmemeval-official`, hash `82d07b0de05daa48` (**unchanged**: only *who* grades moved, not *what* they grade with) |
+| credential | the eval's dedicated key, **by name only** — `judge_key_env` in the receipt/report, never its value and never a fragment of it |
+
+> **OVERRIDES:** the LongMemEval official judge (`gpt-4o-2024-08-06`, the
+> paper's judge, and what this record pinned until 2026-11-07) — the owner
+> ruled DeepSeek as our eval judge (`#2281` comment 6590088403, 2026-11-02:
+> *"D1-JUDGE is SETTLED: use DeepSeek as the eval judge"*), so the record
+> names DeepSeek and the pin travels as `unpinned:<spec>`: no number graded
+> under this record may claim official-judge comparability.
+
+Why this had to move: the decision rule makes any run whose resolved judge
+differs from the record **`inconclusive: config_mismatch`**. Frozen against
+the official spec, a DeepSeek-graded run was inconclusive *by construction*,
+however green it was. Both sides of that comparison now read one function
+(`resolve_judge_spec`), so the protocol and the run name the same judge. The
+clause itself is **not** weakened: a DeepSeek-graded run against the *old*
+record still returns `config_mismatch` (pinned by
+`test_the_official_judge_still_cannot_grade_this_pre_registration`).
+
+### Target, metric, population, bar, falsifier
+
+- **Target.** The ask lane commits the **current** state on the
+  `knowledge-update` class, and does **not regress** on the `verbatim` class,
+  when the product's own reader answers over a distilled +
+  planted-supersession corpus.
+- **Metric.** `superseded_live@<gate_arm>` (per planted superseded claim:
+  `seen` / `rendered_live` / `flagged`, attributed by the validity window) and
+  `verbatim_no_regression` (per verbatim case: `raw.committed` vs
+  `distilled.committed`, plus the list of cases the gate arm lost).
+  `current_state@<arm>` — the knowledge-update current-state **rate** — is
+  **reported, never thresholded** (D8). The judge's semantic grade is **not** a
+  metric (see the two-number split below).
+- **Population and denominator.** Every case `corpus.cases` names, in **both**
+  arms inside **one** invocation; every class `corpus.classes` names. The
+  denominators are read from the corpus itself (`n_cases`, `seen`/`n`,
+  `verbatim.n`) and never assumed: a zero denominator is `inconclusive`, not a
+  pass.
+- **Exclusion rule — there is none.** A case is never dropped to make the bar
+  clean: a run that misses a pre-registered case, class or arm is
+  `inconclusive` (a subset run is not this measurement), and a case that failed
+  to run in either arm is `inconclusive` too. The only legitimate way to change
+  the population is to **re-register** — a new commit of
+  `preregistration.json` — *before* a run exists.
+- **Pass/fail line.** PASS iff the corpus verifies, the resolved config
+  matches the record, every pre-registered case ran in both arms,
+  `rendered_live == 0`, `seen == n`, and `verbatim_no_regression.regressions
+  == []`. No other number is compared against any threshold.
+- **What would falsify it.** Any superseded claim **rendered live** on the gate
+  arm; any planted claim **not observed**; any verbatim case committed on the
+  `raw` arm and **lost** by the distilled arm (a KU win with a verbatim loss is
+  a FAIL, not a trade); a corpus with no planted supersession, no verbatim case,
+  or a raw arm that committed none (the clauses would hold **vacuously**); a
+  corpus whose manifest or hash does not verify; a run whose judge, reader,
+  pin, rubric hash, seed flags, arm set or gate arm differ from this record.
+- **Not claimed.** No rate is published as a benchmark result and no absolute
+  judge-scored accuracy is claimed. The published claim is the two mechanical
+  clauses; the D8 rate is reported without a threshold.
+
+### Per-category rows (#11460 row surface; mechanism #2516)
+
+The record pre-registers the **row surface**, so a headline can never merge the
+classes away: one row for `knowledge-update` (the D8 gate + the reported rate)
+and one for `verbatim` (the paired comparison). The run report renders
+§2b *Per-category readings* from the same per-case rows the bar reads, and each
+class gets its own `PASS`/`FAIL`/`inconclusive` reading — **with no per-class
+threshold**, exactly as there is none for the headline. The **type-stratified
+gate MECHANISM** is [#2516](https://github.com/daniel-ospina/tortoise/issues/2516)'s:
+it is declared as a dependency, not re-implemented here.
+
+### Two-number split (D14 / #5085) — written into the record
+
+The **mechanical checks are authoritative**: corpus verification, superseded
+`seen`/`rendered_live`, and the paired verbatim/raw comparison. The judge's
+grade is **additive** — it never enters `metrics`, never enters a verdict, and
+is never folded into the headline. That is the harness's own posture
+(`tests/eval/write_path/runner.py`: mechanical checks are authoritative over
+judge output; the judged arm never enters `metrics`). It is also why a
+substituted (`unpinned:`) judge cannot weaken the published bar — and why no
+rate is claimed from it.
+
+### Re-registering
+
+```bash
+uv run python -m tools.longmem_eval.measure_ask_distilled preregister \
+    --out tests/eval/ask/preregistration.json
+```
+
+Byte-deterministic (sorted keys, fixed indent, no timestamps), so re-running it
+over an unchanged corpus and judge is a no-op — a record that changed on a
+re-write would be a bar a later lane could "refresh" without a commit to point
+at. `preregister` refuses to write over a corpus that does not verify, and the
+publish step refuses a run whose recorded pre-registration is not an ancestor of
+the run commit, so the ordering is a property of history rather than a promise.
+
 ## Sealed-key discipline
 
 The answer key's only on-disk home is `gold/`. The **run** step is handed

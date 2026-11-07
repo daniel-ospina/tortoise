@@ -506,6 +506,149 @@ def test_preregistration_is_refused_over_a_corpus_that_does_not_verify(tmp_path)
         m.write_preregistration(tmp_path / "prereg.json", corpus_root=root)
 
 
+# ── 1b. #11460 — the protocol names the OWNER-RULED judge ─────────────────
+
+class _DeepSeekStubJudge(_StubJudge):
+    """The same offline grading rule, under the PRE-REGISTERED identity.
+
+    ``score`` honours a caller-declared spec only on an EXACT model-id match
+    (substring containment let ``model_id="gpt-4o"`` claim the official spec),
+    so this stub carries the spec itself. No network, no key, no judge call —
+    the identity is what these tests measure.
+    """
+
+    model_id = m.PREREGISTERED_JUDGE_SPEC
+
+
+def test_the_committed_protocol_is_registered_to_the_owner_ruled_judge(
+        tmp_path):
+    """#11460 indicator 1 — the committed record names the DeepSeek judge and
+    carries ``unpinned:<spec>``, and writing it twice is byte-identical.
+
+    The determinism half is the staleness guard: a record that changed on a
+    re-write would be a record whose line a later lane could "refresh" into a
+    different bar without a commit to point at.
+    """
+    committed = m.load_preregistration()
+    spec = m.PREREGISTERED_JUDGE_SPEC
+    assert committed["judge"]["model_spec"] == spec
+    assert committed["judge"]["model_spec"] != m.DEFAULT_JUDGE_MODEL
+    # the pin travels WITH the spec — a DeepSeek run can never claim the
+    # official label (the OVERRIDES line on #2281/#11460) …
+    assert committed["judge"]["pin"] == f"unpinned:{spec}"
+    assert committed["judge"]["pin"] != m.JUDGE_PIN
+    # …and the RUBRIC is unchanged: only WHO grades moved, not what they grade
+    # with. A moved rubric hash would silently re-score every published case.
+    assert committed["judge"]["rubric_id"] == m.JUDGE_RUBRIC_ID
+    assert committed["judge"]["rubric_id_hash"] == m.judge_rubric_id_hash()
+
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    m.write_preregistration(first)
+    m.write_preregistration(second)
+    assert first.read_bytes() == second.read_bytes()
+    assert first.read_bytes() == ask_corpus.PREREGISTRATION_PATH.read_bytes()
+
+
+def test_the_protocol_states_its_target_metric_population_bar_and_falsifier():
+    """#11460 — a pre-registration is citable LATER as "this was decided before
+    the number existed", so the target, the metric, the population (with its
+    denominator and exclusion rule), the pass/fail line and the falsifier are
+    fields of the record — not prose beside it."""
+    record = m.load_preregistration()
+    measurement = record["measurement"]
+    for field in ("target", "metric", "population", "exclusion_rule",
+                  "pass_line", "not_claimed"):
+        assert measurement.get(field), f"measurement.{field} is empty"
+    assert measurement["falsifier"], "a pre-registration with no falsifier "
+    # the falsifiers are the bar's OWN clauses, not new ones
+    joined = " ".join(measurement["falsifier"])
+    assert "RENDERED LIVE" in joined
+    assert "NOT OBSERVED" in joined
+    assert "LOST" in joined
+    # the denominator is named, and the exclusion rule is "there is none"
+    assert "denominator" in measurement["population"]
+    assert measurement["exclusion_rule"].startswith("there is none")
+    # the two-number split is IN the record (#9097 relay §4)
+    split = record["scoring"]["two_number_split"]
+    assert "AUTHORITATIVE" in split["authoritative"]
+    assert "NEVER enters `metrics`" in split["additive"]
+    # …and the per-category ROW SURFACE is pre-registered, with #2516 declared
+    per_category = record["decision_rule"]["per_category"]
+    assert len(per_category["rows"]) == 2
+    assert "#2516" in per_category["mechanism_dependency"]
+
+
+def test_a_run_graded_by_the_pre_registered_judge_is_not_a_config_mismatch(
+        tmp_path):
+    """#11460 indicator 2 — the exact-match clause still bites, but a run
+    graded by the judge the record NAMES now matches it.
+
+    Before this change the clause compared the run's judge to the frozen
+    official spec, so every DeepSeek-graded run was ``inconclusive`` by
+    construction.
+    """
+    _, scored = _scored(tmp_path, judge=_DeepSeekStubJudge())
+    root = Path(scored["corpus_root"])
+    assert scored["judge_model_spec"] == m.PREREGISTERED_JUDGE_SPEC
+    assert scored["judge_pin"] == f"unpinned:{m.PREREGISTERED_JUDGE_SPEC}"
+    prereg = _mock_prereg(root, judge_spec=m.PREREGISTERED_JUDGE_SPEC)
+    bar = m.evaluate_exit_bar(
+        scored=scored, manifest=ask_corpus.verify_manifest(root), prereg=prereg)
+    assert bar["verdict"] == "pass", bar
+    assert not any("judge" in reason for reason in bar["reasons"]), bar
+
+
+def test_the_official_judge_still_cannot_grade_this_pre_registration(tmp_path):
+    """#11460 indicator 3 — the NEGATIVE test: the re-registration MOVED the
+    pinned judge, it did not delete the clause.
+
+    A run graded by DeepSeek against the OLD (official) record must still be
+    ``inconclusive: config_mismatch``.
+    """
+    _, scored = _scored(tmp_path, judge=_DeepSeekStubJudge())
+    root = Path(scored["corpus_root"])
+    old = _mock_prereg(root, judge_spec="openai:gpt-4o-2024-08-06")
+    bar = m.evaluate_exit_bar(
+        scored=scored, manifest=ask_corpus.verify_manifest(root), prereg=old)
+    assert bar["verdict"] == "inconclusive", bar
+    assert bar["failure_origin"] == "config_mismatch"
+    assert any("judge" in reason for reason in bar["reasons"]), bar["reasons"]
+
+
+def test_the_receipt_and_report_name_the_eval_key_and_never_its_value(
+        tmp_path, monkeypatch):
+    """#11460 indicator 4 — the published artifacts state the eval's dedicated
+    credential BY NAME and carry no value (owner ruling on #2281: "never its
+    value, and never a fragment long enough to identify it").
+
+    Pinned by grepping the emitted artifacts for the configured VALUE: a
+    sentinel that appears anywhere in the receipt or the report fails here.
+    """
+    sentinel = "sk-DEEPSEEK-EVAL-KEY-SENTINEL-11460"
+    for other in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", sentinel)
+    _, scored = _scored(tmp_path, judge=_DeepSeekStubJudge())
+    root = Path(scored["corpus_root"])
+    # the NAME is resolved through the judge transport's own resolver
+    assert scored["judge_key_env"] == "DEEPSEEK_API_KEY"
+    receipt = _receipt(scored, commit="e" * 40, cost_usd=0.0,
+                       prereg_sha256="0" * 64)
+    report = m.render_report(
+        receipt=receipt, scored=scored,
+        prereg=_mock_prereg(root, judge_spec=m.PREREGISTERED_JUDGE_SPEC),
+        prereg_sha256="0" * 64)
+    for artifact, rendered in (("receipt", json.dumps(receipt)),
+                               ("report", report)):
+        assert "DEEPSEEK_API_KEY" in rendered, (
+            f"the {artifact} must state which key graded the run, by name")
+        assert sentinel not in rendered, (
+            f"the {artifact} carries the key's VALUE — the ruling forbids it")
+    # …and the per-category rows are rendered, one per class
+    assert "2b. Per-category readings" in report
+    assert "`knowledge-update`" in report and "`verbatim`" in report
+
 # ── 2. the sealed key is not readable by the RUN step ─────────────────────
 
 def test_the_runner_cannot_read_the_sealed_gold(tmp_path):
