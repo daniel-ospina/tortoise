@@ -1,12 +1,12 @@
 ---
-title: "#10976 — cache EGRESS: the measurement"
+title: "Cache egress — the measurement (#10976)"
 type: evidence
 domain: platform
 doc_status: live
 created: 2026-11-06
 subjects.team: epistemic-team
-aboutSubjects: Tortoise memory graph, FalkorDB cache
-aboutObjects: "#10976, tortoise/cache_evictor.py, tortoise/cache_eviction.py, STORAGE-ARCHITECTURE.md §17, docs/evidence/7950-capstone"
+aboutSubjects: Tortoise memory graph
+aboutObjects: "#10976, tortoise/cache_evictor.py, tortoise/cache_eviction.py, epic #7879, docs/architecture/STORAGE-ARCHITECTURE.md"
 ---
 
 # #10976 — cache EGRESS: the measurement
