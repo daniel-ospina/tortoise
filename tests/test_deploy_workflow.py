@@ -5087,10 +5087,37 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: The guard is the one `_COREF_ASSERTS_FALSE` already carries in the other direction,
     #: and `_NEG` carries for its bare `not`: a genitive, kinship or appositive tail after
     #: the false sha means the negation is about that tail, not about the predication.
+    #: ⛔ THE OBJECT GUARD WAS DECORATION-BLIND, SO MARKDOWN DEFEATED IT (#11191 review r7,
+    #: F1, P2 — MEASURED fail-open, a REGRESSION against `origin/main`, 5 shapes). The
+    #: guard consumed the OPENING decoration (`[`*_]{0,3}` before the sha) but not the
+    #: CLOSING one, so both tail lookaheads below were compared against a BACKTICK
+    #: instead of the word after it and neither could ever fire — on property written
+    #: in markdown, about shas the file itself always writes backticked:
+    #:   "`ff6379eb2` is the tree immediately before #9548, not `ff6379eb2` itself."
+    #:   "`ff6379eb2` is the tree immediately before #9548, not `ff6379eb2` the merge
+    #:    that landed #9601."
+    #:   "The census immediately before #9548 returns 5 lines at `ff6379eb2`, not
+    #:    `ff6379eb2` the ancestor."
+    #:   "The tree immediately before #9548 is not `ff6379eb2` the merge that landed
+    #:    #9601."   (same hole through the `is not` spelling)
+    #:   "The tree immediately before #9548 is not `ff6379eb2` the ancestor."
+    #: All five were ACCEPTED at this head and REFUSED by `origin/main` — a fail-open in
+    #: the direction that matters, on the real §A8 cell's own idiom. The closing
+    #: decoration is now part of the pattern, and the tail set gains the two shapes the
+    #: backtick was hiding: a REFLEXIVE (`itself`, emphatic identity — it denies nothing
+    #: that was claimed) and a DETERMINER head (`the|a|an`, which makes the sha the
+    #: modifier of a following noun phrase, i.e. an appositive tail rather than the
+    #: negation's object). Measured both directions over a 31-shape corpus: all five move
+    #: accept → REFUSE, all thirteen truthful shapes keep their verdict, and NO shape that
+    #: `origin/main` accepts is refused here (measured at head / this change / `main`).
     _NOT_FALSE_SHA = re.compile(
-r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
+        r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}"
+        + re.escape(_FALSE_TREE)
+        + r"[`*_]{0,3}"
         + r"(?!\s*['\u2019]s\b)(?!\s+(?:parent|child|son|ancestor|descendant|successor|"
-        r"predecessor|merge|commit|tree|sha)\b)",
+        r"predecessor|merge|commit|tree|sha)\b)"
+        r"(?!\s+(?:itself|themselves|himself|herself)\b)"
+        r"(?!\s+(?:the|a|an)\s)",
         re.I,
     )
     #: The denial tokens a correction can carry BETWEEN the sha and the phrase. `isn't`,
@@ -7012,6 +7039,25 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             not _is_corrected(norm, _phrase)
             for _phrase in re.finditer(_PHRASE_RE, norm, re.I)
         )
+
+    def _offender_sentences(text: str) -> list[str]:
+        """The phrase-bearing sentences of `text` that still assert the false equivalence.
+
+        ⛔ ONE DEFINITION, FOUR CALLERS, AND THAT IS THE POINT (#11191 review r7, F3, P3 —
+        MEASURED). The §A8 gate and the A2 injection controls each built their OWN
+        `[s for s in re.split(...) if _refuses_before_9548(s)]` comprehension, so the
+        controls re-implemented the thing they guard: replacing the GATE's predicate with
+        `if False` left the whole suite green (111 passed, measured on a scratch copy) —
+        a control duplicated beside a gate cannot notice the gate's removal. Every
+        caller now goes through this function, so neutering the predicate reds at the
+        A2 controls, and neutering a CALLER reds at its own `!= row`/`assert ...` line.
+        """
+        return [
+            sentence
+            for sentence in re.split(r"(?<=\.)\s+", text)
+            if _refuses_before_9548(sentence)
+        ]
+
     # ... and a cell that still NAMES the phrase must CORRECT it — deny the equivalence,
     # or name the tree the phrase actually refers to. Deleting the clause is equally
     # correct, so all three shapes pass — what may not pass is the bare equivalence,
@@ -7031,11 +7077,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # true sha is not enough: the exemption is the REFERENT (or the predicate), which is
     # why the substring form and the distance form were both wrong and the shapes are
     # EXECUTED below.
-    offenders = [
-        sentence
-        for sentence in re.split(r"(?<=\.)\s+", row)
-        if _refuses_before_9548(sentence)
-    ]
+    offenders = _offender_sentences(row)
     assert not offenders, (
         "§A8's evidence cell dates a figure to \"before #9548\" without either "
         "denying it applies to `ff6379eb2` or naming `047c91f7a` (the arming "
@@ -7260,6 +7302,26 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     assert not _figure_gate(_one_figure_changed), (
         "the GATE accepts a cell that states a second, WRONG figure at the true tree — "
         "measured on the gate itself, not on its helper (#11191 review, F5)"
+    )
+    # ⛔ …AND THE GATE IS DRIVEN WITH THE ARTEFACT ITSELF (#11191 review r7, F3, P3 —
+    # MEASURED: `assert _figure_gate(row)` replaced with `assert True` left the whole suite
+    # green, because every control above builds its OWN input and none of them passes the
+    # REAL row through the gate). This control rewrites the cell's own figure and requires
+    # the gate to reject it, so the wiring from the document to the gate is exercised
+    # rather than assumed. It does not make the `assert` statement undeletable — nothing
+    # in-file can — and it does not claim that: what it pins is that the gate's verdict on
+    # THIS cell is a measurement of THIS cell.
+    _row_with_a_wrong_figure = re.sub(
+        r"not one: \d+\*\*", f"not one: {_row_measured + 1}**", row, count=1
+    )
+    assert _row_with_a_wrong_figure != row, (
+        "the artefact-level figure control no longer rewrites the cell's own figure, so "
+        "it proves nothing (#11191 review r7, F3)"
+    )
+    assert not _figure_gate(_row_with_a_wrong_figure), (
+        "§A8's evidence cell with its own figure changed still passes the gate, so the "
+        "artefact-level check is not measuring the cell it guards "
+        "(#11191 review r7, F3, P3)"
     )
     # Controls, executed — the arm must still RED on the shape it was written for …
     assert _refuses_before_9548(
@@ -8247,6 +8309,49 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the COMPLEMENT arm (`… is not `ff6379eb2``) is dead: with its regex deleted "
         "this sentence is refused, so no control executed it (#11191 review r2, P1)"
     )
+    # ⛔ THE COMPLEMENT'S OBJECT MAY NOT BE AN APPOSITIVE TAIL (#11191 review r7, F1, P2 —
+    # MEASURED fail-open, 5/5 ACCEPTED at this head and REFUSED by `origin/main`).
+    # `_NOT_FALSE_SHA` consumed the OPENING markdown decoration but not the CLOSING one, so
+    # its two tail lookaheads were compared against a backtick and could never fire — and
+    # the negation's "object" became whatever noun phrase FOLLOWED the false sha, which is
+    # not the equivalence. Both directions are pinned: the five defect shapes must REFUSE,
+    # and the truthful twins must keep their verdict, because a guard that closes this by
+    # refusing the correction is the trade this file's own disclosure tables name.
+    _complement_appositive = (
+        "`ff6379eb2` is the tree immediately before #9548, not `ff6379eb2` itself.",
+        "`ff6379eb2` is the tree immediately before #9548, not `ff6379eb2` the merge "
+        "that landed #9601.",
+        "The census immediately before #9548 returns 5 lines at `ff6379eb2`, not "
+        "`ff6379eb2` the ancestor.",
+        "The tree immediately before #9548 is not `ff6379eb2` the merge that landed #9601.",
+        "The tree immediately before #9548 is not `ff6379eb2` the ancestor.",
+    )
+    _complement_appositive_passed = [
+        s for s in _complement_appositive if not _refuses_before_9548(s)
+    ]
+    assert not _complement_appositive_passed, (
+        "the COMPLEMENT arm exempts a sentence whose `not` negates an APPOSITIVE TAIL of "
+        "the false sha rather than the equivalence, so the bare claim passes (all five "
+        "were REFUSED by `origin/main`; reverting the closing-decoration/tail guard "
+        "leaves the whole suite green) — a false PASS in gate code "
+        "(#11191 review r7, F1, P2):\n  " + "\n  ".join(_complement_appositive_passed)
+    )
+    _complement_truths = (
+        "The tree immediately before #9548 is `047c91f7a`, not `ff6379eb2`.",
+        "`047c91f7a` is the tree immediately before #9548, not `ff6379eb2`.",
+        "It is not `ff6379eb2` that is the tree immediately before #9548; it is "
+        "`047c91f7a`.",
+        "The tree immediately before #9548 is not `ff6379eb2` but `047c91f7a`.",
+        "The tree immediately before #9548 is `047c91f7a`, not `ff6379eb2` the tree the "
+        "row used to name.",
+    )
+    _complement_truths_refused = [s for s in _complement_truths if _refuses_before_9548(s)]
+    assert not _complement_truths_refused, (
+        "the appositive-tail guard now refuses a TRUTHFUL correction, so it closed a "
+        "fail-open by opening the false-RED class this file refuses to trade for "
+        "(#11191 review r7, F1 — both directions measured):\n  "
+        + "\n  ".join(_complement_truths_refused)
+    )
     assert _refuses_before_9548(
         "10 lines at `047c91f7a` or 5 lines immediately before #9548 at `ff6379eb2`"
     ), (
@@ -8577,11 +8682,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     assert _injected_row != row, (
         "the A2 control no longer injects into §A8's evidence cell, so it proves nothing"
     )
-    _injected_offenders = [
-        sentence
-        for sentence in re.split(r"(?<=\.)\s+", _injected_row)
-        if _refuses_before_9548(sentence)
-    ]
+    _injected_offenders = _offender_sentences(_injected_row)
     assert _injected_offenders, (
         "a false equivalence injected into §A8's own evidence sentence passes, because "
         "the cell's own denial exempts the whole sentence — the pin is disabled on the "
@@ -8614,10 +8715,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the A2 in-clause control no longer injects beside §A8's own denial, so it "
         "proves nothing (#11191 review, A2)"
     )
-    assert any(
-        _refuses_before_9548(sentence)
-        for sentence in re.split(r"(?<=\.)\s+", _same_clause_injected)
-    ), (
+    assert _offender_sentences(_same_clause_injected), (
         "a false equivalence injected INSIDE the same clause as §A8's own `NOT the tree "
         "immediately before #9548` passes — the denial is clause-scoped but the clause is "
         "delimited on the COMMA, so a comma-less conjunction lets it reach the injected "
@@ -8640,10 +8738,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the A2 comma-splice control no longer injects into §A8's evidence cell, so it "
         "proves nothing (#11191 review r11, A2)"
     )
-    assert any(
-        _refuses_before_9548(sentence)
-        for sentence in re.split(r"(?<=\.)\s+", _comma_spliced)
-    ), (
+    assert _offender_sentences(_comma_spliced), (
         "a false equivalence COMMA-SPLICED beside §A8's own `NOT the tree immediately "
         "before #9548` passes — the denial arm is handed the whole clause, so the cell's "
         "own correction exempts a second occurrence after the comma. The contract's first "
@@ -8656,10 +8751,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the arming commit's parent), `047c91f7a` is the tree before #9548",
         1,
     )
-    assert not any(
-        _refuses_before_9548(sentence)
-        for sentence in re.split(r"(?<=\.)\s+", _comma_spliced_true)
-    ), (
+    assert not _offender_sentences(_comma_spliced_true), (
         "the comma-splice control refuses the TRUTHFUL splice as well, so it measures the "
         "comma rather than the claim — a false RED in the same arm that closes the "
         "fail-open (#11191 review r11, A3)"
@@ -9769,10 +9861,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the comma-splice control no longer injects into §A8's evidence cell, so it proves "
         "nothing (#11191 review r11, P1)"
     )
-    assert any(
-        _refuses_before_9548(sentence)
-        for sentence in re.split(r"(?<=\.)\s+", _spliced_row)
-    ), (
+    assert _offender_sentences(_spliced_row), (
         "a false equivalence spliced onto §A8's own `NOT the tree immediately before "
         "#9548` passes ON THE REAL ROW — the pin is disabled on the cell it exists to guard "
         "by the cell's own correction (#11191 review r11, P1)"
