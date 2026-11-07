@@ -154,7 +154,7 @@ THE TRIGGER DECISION, AND ITS DETECTION LATENCY
   record row; ``update_entity(…, story_arc=None)`` is REFUSED as server-managed
   on BOTH anchors (``_SOURCE_SERVER_MANAGED_PROPS`` /
   ``_EVENT_SERVER_MANAGED_PROPS`` — each raises and the stored value is
-  untouched, measured) — ⚠️ **but the ``:Point`` half DOES have one, and it is
+  untouched, measured)) — ⚠️ **but the ``:Point`` half DOES have one, and it is
   non-destructive**: ``update_point(<id>, story_arc=None)`` clears the property
   and KEEPS the node (measured — the ``None`` passes
   ``sdk._refuse_unpaired_narrative``, whose refusal is on a NON-EMPTY narrative,
@@ -841,7 +841,7 @@ def log_result(result: RecordReconcileResult,
         # journal whose creation record carried the prose restores it (#10429),
         # while the RECORD→CACHE rebuild replays the stored null and keeps it
         # clear); #10017's purge is a DIFFERENT population — legacy episodic turn
-        # :Points — and names no story_arc). Calling them all "owned" sends the
+        # :Points — and names no story_arc. Calling them all "owned" sends the
         # operator to the wrong repair.
         line += (f" [graph_only={result.graph_only_total} cache-held "
                  f"property occurrence(s) not compared ({names}{more})]")
