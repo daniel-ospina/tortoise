@@ -92,11 +92,13 @@ rejected — see the floor test):
   too;
 * nary-ordering — 3+ named options ("Mark and Sarah or Tom"), sibling
   #2653; and bare "latest" as an ORDERING INSTRUCTION ("from earliest to
-  latest" — #8775 scoped this to the ordering BOUND plus the template-owned
-  ATTRIBUTIVE case: a `latest` inside an interval question's own captured
-  anchors is narrative text ONLY where it is attributive AND sits in a relative
-  clause — see ``_recency_vetoes``, which is the definition; this sentence is a
-  pointer, not the rule). The census's nary-ordering class is
+  latest" — #8775 scoped this to the ordering BOUND plus a purely STRUCTURAL
+  exemption: a `latest` inside an interval question's own captured anchors is
+  NOT a veto where it sits in a relative CLAUSE (opener in its own clause) —
+  see ``_recency_vetoes``, which is the definition; this sentence is a pointer,
+  not the rule. The exemption tests NO semantics: a `latest` that SELECTS its
+  anchor's referent but sits after such an opener is exempted too, which is the
+  DECLARED RESIDUAL tracked in #11458). The census's nary-ordering class is
   RE-MEASURED to 2 named-subject rows (#2653; the census stored 160-char
   question TRUNCATIONS at the time, which is why the class was filed as 4 —
   #8055 replaced them with the verbatim dataset questions): the 2 genuine N-ary
@@ -198,11 +200,13 @@ class AssemblyShape(StrEnum):
 #         ('from earliest to latest'), sibling #2653's discovery family.
 #         #8775 SCOPED the bare-`latest` half: an ORDERING BOUND still
 #         vetoes, and so does any `latest` an interval template does not
-#         own — but a template-owned ATTRIBUTIVE `latest` that sits in a
-#         relative CLAUSE of a captured anchor is narrative text, not an
-#         instruction (the precise rule is ``_recency_vetoes``; "in the
-#         anchor" alone is NOT the condition, and a `latest` selecting the
-#         anchor's referent still vetoes).
+#         own — but a template-owned `latest` that sits in a relative CLAUSE
+#         of a captured anchor does NOT (the precise rule is
+#         ``_recency_vetoes``; "in the anchor" alone is NOT the condition).
+#         The test is structural, never semantic: a `latest` that selects the
+#         anchor's referent still vetoes when it has NO opener in its own
+#         clause, and when it HAS one it is exempted — the declared residual
+#         tracked in #11458.
 #       * the ATTRIBUTIVE 'most recent' — the SAME ordering instruction
 #         spelled the other way ('from earliest to most recent'): it is
 #         deliberately NOT promoted, so it falls through to the legacy
@@ -555,8 +559,12 @@ _RE_FREQUENCY = re.compile(
 #     every conceivable ordering spelling: a word interposed between the
 #     direction and the connector ("from the earliest one to the latest") falls
 #     out of the bound arm, and inside a relative clause the exemption may then
-#     admit it — measured as zero census impact (all 4 census bound rows match
-#     and reject, pinned by ``test_recency_ordering_bounds_still_reject``), and
+#     admit it — measured as zero census impact (all 4 census bound rows MATCH
+#     this pattern: ``gpt4_7abb270c``/``gpt4_f420262c`` return ``None``, and
+#     ``gpt4_7f6b06db``/``gpt4_e061b84f`` fire ``class-plural`` because #8056's
+#     branch precedes this guard under its own OVERRIDES — the measured
+#     correction to #8775's indicator-2 wording, pinned by
+#     ``test_recency_ordering_bounds_still_reject``), and
 #     recorded rather than papered over with a wider unmeasured regex;
 #   * anywhere ELSE it still vetoes, EXCEPT where an interval template owns
 #     the question — see ``_recency_vetoes``, the ONE predicate both guard
@@ -807,8 +815,12 @@ _RE_WH_LOOKUP = re.compile(r"\b(?:what|which|who|whom|whose|where|when)\b",
 #: A RELATIVE clause opener. #8775's defect is named in its own title — a
 #: "narrative relative clause" — and this is that clause's marker. It is the
 #: RELATIVE set only, NOT the wider subordinate set: `when`, `that`, `while` and
-#: `because` are deliberately absent, so a `latest` after one of those still
-#: VETOES (the safe direction — the arms fall back to legacy).
+#: `because` are deliberately absent, so those conjunctions are never openers
+#: themselves. They do not CREATE an exemption — but they do not undo one
+#: either: the opener search takes the last opener in the prefix, so a `latest`
+#: governed by `when` is still exempted if an EARLIER relative opener survives
+#: the clause-boundary check. That case is part of the declared residual
+#: (#11458), not a promise that the wider set vetoes.
 #: "…the book reading event at the local library, **where** the author of 'The
 #: Silent Patient' is discussing her latest thriller novel".
 _RE_RELATIVE_CLAUSE = re.compile(r"\b(?:where|which|who|whom|whose)\b",
