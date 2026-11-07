@@ -570,12 +570,45 @@ def test_the_shipped_call_RESOLVES_the_switch_instead_of_using_the_constant():
     assert resolver_calls, (
         "retrieve.py no longer resolves the non-eviction switch - the env "
         "off-switch is dead (#10538)")
+    # ⚠️ The KEY LITERAL, not just "some os.environ.get(" (cycle 11, finding 1):
+    # the prefix form accepted a renamed key, e.g.
+    # ``os.environ.get("TORTOISE_LME_TEMPORAL_LEG_PLACEMENT")``, which keeps the
+    # off-switch dead while ``run.py`` still resolves the real key into the
+    # fingerprint — a guard-OFF checkpoint resuming under a guard-ON build.
+    def _is_env_read(node: ast.AST, key: str) -> bool:
+        return (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Attribute)
+                and node.func.value.attr == "environ"
+                and bool(node.args)
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == key)
+
     assert any(
-        any(ast.unparse(arg).startswith("os.environ.get(") for arg in node.args)
+        any(_is_env_read(arg, "TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION")
+            for arg in node.args)
         for node in resolver_calls
     ), (
-        "the resolver must be handed the SAME env the fingerprint reads "
-        "(os.environ.get)")
+        "the resolver must be handed the SAME env the fingerprint reads: "
+        "os.environ.get('TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION')")
+    # ...and the resolved value must actually BE what the arm receives: the
+    # name is assigned EXACTLY ONCE, from that call (a later
+    # ``_tl_non_eviction = True`` would discard it — cycle 11, finding 1b).
+    assigned = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_tl_non_eviction"
+                for t in node.targets)
+    ]
+    assert len(assigned) == 1, (
+        f"_tl_non_eviction must be assigned exactly once: {len(assigned)}")
+    assert (isinstance(assigned[0].value, ast.Call)
+            and isinstance(assigned[0].value.func, ast.Name)
+            and assigned[0].value.func.id
+            == "resolve_temporal_leg_non_eviction"), (
+        f"the switch must BE the resolver's result, not "
+        f"{ast.unparse(assigned[0].value)}")
     # ...and the resolved name is what gets forwarded
     assert _shipped_call()["non_eviction"].id == "_tl_non_eviction"
 
@@ -607,10 +640,11 @@ def test_the_receipt_REJECTION_list_comes_from_the_trace():
                     and key.value == "non_eviction_rejected"):
                 continue
             found = True
-            assert isinstance(value, ast.Call) and isinstance(
-                value.func, ast.Name) and value.func.id == "list", (
-                f"non_eviction_rejected must be list(...): {ast.unparse(value)}")
-            assert "rejected" in ast.unparse(value), ast.unparse(value)
+            # exact receiver + key, structurally (cycle 11, finding 2):
+            # `list({}.get("rejected") or [])` shared the token and would empty
+            # the field for every row — the field the design calls "where the
+            # ids come from".
+            assert _wraps(value, "list", "rejected"), ast.unparse(value)
     assert found, "the receipt lost non_eviction_rejected"
 
 
@@ -622,12 +656,40 @@ def test_the_empty_leg_reason_gets_the_REAL_refusal_count():
     calls = _call_keywords("retrieve_for_question",
                            "temporal_leg_empty_reason")
     assert calls, "the empty-reason call site vanished - re-anchor this pin"
+    # exact receiver AND key (cycle 11, finding 2): a prefix check accepted
+    # `len(_tl_guard_trace.get("accepted") or [])`, which makes
+    # `non_eviction_guard` unproducible — every guard refusal re-reads as
+    # `no_window_candidates`.
     assert any(
-        ast.unparse(kw["guard_rejected"]).replace(" ", "").startswith(
-            "len(_tl_guard_trace.get(")
+        _wraps(kw["guard_rejected"], "len", "rejected")
         for kw in calls if "guard_rejected" in kw
     ), [ast.unparse(kw["guard_rejected"]) for kw in calls
         if "guard_rejected" in kw]
+
+
+def _is_trace_get(node: ast.AST, key: str) -> bool:
+    """``_tl_guard_trace.get("<key>")`` — receiver AND key, structurally.
+
+    ⚠️ Structural, not textual (cycle 11): a substring test on ``ast.unparse``
+    is quote-sensitive, and ``"rejected" in unparse(value)`` accepted a FOREIGN
+    receiver or the wrong key.
+    """
+    return (isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "_tl_guard_trace"
+            and bool(node.args)
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == key)
+
+
+def _wraps(call: ast.AST, fn_name: str, inner_key: str) -> bool:
+    """``<fn_name>(_tl_guard_trace.get("<inner_key>") ...)``"""
+    return (isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Name)
+            and call.func.id == fn_name
+            and any(_is_trace_get(node, inner_key) for node in ast.walk(call)))
 
 
 def _stats_dicts() -> list[ast.Dict]:
@@ -1129,3 +1191,119 @@ def test_the_receipt_normalises_a_traceless_target_to_the_documented_none():
             assert "none" in literals, (
                 f"non_eviction_targeting must normalise to 'none': {ast.dump(value)}")
     assert found, "the receipt lost the non_eviction_targeting field"
+
+
+# ── 13. the remaining wiring tokens the receipt block depends on ───────────
+
+def test_the_trace_holder_is_an_empty_dict_not_None():
+    """#10538 (cycle 11, finding 4): ``_tl_guard_trace: dict[str, Any] = {}`` was
+    unpinned, so ``= None`` survived every suite — and ``_tl_guard_trace.get(…)``
+    then raises ``AttributeError`` on every guarded-leg row. Load-bearing
+    precisely because no test drives ``retrieve_for_question`` with the temporal
+    leg on, so this block is defended only by AST pins."""
+    src = Path(r.__file__).read_text()
+    holders = [
+        node for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "_tl_guard_trace"
+    ]
+    assert len(holders) == 1, f"{len(holders)} declarations of _tl_guard_trace"
+    assert isinstance(holders[0].value, ast.Dict) and not holders[0].value.keys, (
+        "_tl_guard_trace must be initialised to an empty dict, not "
+        f"{ast.unparse(holders[0].value) if holders[0].value else None}")
+
+
+def test_the_shipped_call_arms_the_guard_with_the_QUESTION_WINDOW():
+    """#10538 (cycle 11, finding 5): the guard is scoped to the DATE-WINDOW arm,
+    so ``date_window=_tl_date_window`` at the shipped call is the guard's ONLY
+    production reachability. ``date_window=None`` there survives every suite
+    (they call the leg directly), silently reverting #10538 to "shipped but
+    never armed" while all the mechanism pins stay green.
+    """
+    keywords = _shipped_call()
+    expectations = {
+        "date_window": "_tl_date_window",
+        "window": "effective_top_k",
+        "limit": "_tl_limit",
+        "weight": "_tl_weight",
+    }
+    for name, ident in expectations.items():
+        assert name in keywords, f"the shipped call dropped {name}="
+        node = keywords[name]
+        assert isinstance(node, ast.Name) and node.id == ident, (
+            f"{name}= must be {ident}, not {ast.unparse(node)}")
+
+
+def test_the_inert_leg_reports_the_target_it_actually_had():
+    """#10538 (cycle 11, minor): the inert branch's ``targeting`` value was
+    unpinned, so a window-targeted row with no picks could be mislabelled
+    ``"none"`` — the one field that makes ``applied: False`` legible.
+
+    Pinned behaviourally: a clustered window-shaped pool whose picks the guard
+    admits NOTHING for still reports ``targeting: "window"`` (the arm had a
+    target, it just produced no pick) and ``applied`` is False.
+    """
+    trace: dict = {}
+    tl.temporal_leg_fusion_order(
+        ISSUE_POOL, anchors=(), window=WINDOW, limit=LIMIT,
+        date_window=RANGE, guard_trace=trace, weight=0.0)
+    assert trace["applied"] is False, trace
+    assert trace["targeting"] == "window", (
+        "an inert but WINDOW-targeted row must not report 'none' — it had a "
+        f"target: {trace}")
+    assert trace["rejected"] == [] and trace["accepted"] == []
+
+
+def test_a_REDUNDANT_slot_may_be_traded_but_a_deleted_session_may_not():
+    """#10538 (cycle 11, finding 3): the guard's third condition has to read
+    ``deleted_sessions``, not ``evicted_sessions`` — they are deliberately
+    different (``evicted`` is the superset: sessions that lost *A* slot), and the
+    ruling's unit is the SESSION.
+
+    Unpinned they were indistinguishable, because every fixture where the reason
+    fires has the two fields coinciding. This is the shape where they differ:
+    ``sB`` holds TWO slots inside the six-slot window, the pick displaces one of
+    them and ``sB`` stays visible through the other. So the arm is WIDENING by
+    trading a redundant slot — explicitly allowed — and the guard must ADMIT it.
+
+    With ``evicted_sessions`` in that branch instead, the pick is refused and the
+    reason names a session that was never deleted: net harm reported where the
+    ruling permits the trade, which is a guard that blocks the fix it belongs to.
+    """
+    pool = (
+        [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-01",
+          "content": "alpha"} for i in range(4)]
+        + [{"id": "b0", "session_id": "sB", "session_date": "2023-04-02",
+            "content": "alpha"},
+           {"id": "b1", "session_id": "sB", "session_date": "2023-04-02",
+            "content": "alpha"}]
+        + [{"id": f"c{i}", "session_id": "sC", "session_date": "2023-04-03",
+            "content": "alpha"} for i in range(4)]
+    )
+    geometry = dict(window=6, limit=1,
+                    date_window=("2023-04-01", "2023-04-30"),
+                    max_chunks_per_session=None)
+
+    # the UNGUARDED arm really does trade the redundant slot ...
+    u_order, u_picks = tl.temporal_leg_fusion_order(
+        pool, non_eviction=False, **geometry)
+    assert u_picks, "this fixture must be the FIRING case"
+    u = tl.window_arm_retention(pool, u_order, picks=u_picks, window=6,
+                                max_chunks_per_session=None)
+    assert u["evicted_sessions"] == ["sB"], u
+    assert u["deleted_sessions"] == [], (
+        "the fixture must evict WITHOUT deleting, or it cannot discriminate")
+    assert u["net"] >= 0, u
+
+    # ... and the guard ADMITS it, because no session leaves the window.
+    trace: dict = {}
+    g_order, g_picks = tl.temporal_leg_fusion_order(
+        pool, guard_trace=trace, **geometry)
+    assert g_picks == u_picks, (
+        "the guard refused a permitted trade: reading evicted_sessions instead "
+        f"of deleted_sessions — {trace['rejected']}")
+    assert trace["rejected"] == [] and trace["accepted"] == u_picks
+    g = tl.window_arm_retention(pool, g_order, window=6,
+                                max_chunks_per_session=None)
+    assert g["deleted_sessions"] == [] and g["net"] >= 0
