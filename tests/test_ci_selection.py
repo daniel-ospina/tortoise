@@ -490,6 +490,14 @@ def test_problem_map_guard_runs_on_the_diffs_it_guards():
 
     tool = _sel(["tools/problem_map_check.py"])
     assert tool["full"] is False
+    # ⛔ THE ARM ITSELF, not just the pin. Without this line the `CORE_ALSO`
+    # entry added in review round 11 was pinned by NOTHING: the pin arrives
+    # through `tier1` whether the entry is there or not, `--integrity` does not
+    # read `CORE_ALSO` (`tools/ci_selection.py:1479`), so deleting the entry
+    # dropped this arm from `surfaces: ['core']` (779 tests) to `[]` (80) with
+    # every gate green — the silent-drop class the entry exists to close, found by
+    # round 12 reading the test against its own comment (#1349/#3332/#3616).
+    assert tool["surfaces"] == ["core"], tool["surfaces"]
     assert "test_problem_map_2820.py" in tool["test_files"], (
         "a tool-only edit must run the tool's own negative controls — `tools/` is "
         "swallowed by NON_PYTHON_PREFIXES, so CORE_ALSO is the only thing that "

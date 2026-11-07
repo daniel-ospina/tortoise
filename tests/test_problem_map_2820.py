@@ -59,6 +59,12 @@ def _decoy_and_ours() -> tuple[str, str]:
     count move: a decoy that EQUALS §2 is what makes the whole-body mutant
     (`_INDEX_COUNTS.search(body)`) agree and therefore FAIL, while the fixed check
     reads the entry row and still reports the disagreement.
+
+    ⚠️ Fail-CLOSED fragility, stated so it is not mistaken for a pass: `ours`
+    subtracts one from OPEN, so an OPEN of 0 would emit `**N fixed · -1 open · …**`,
+    which `_INDEX_COUNTS` does not match — the control would then red with "states
+    no headline" rather than "the two disagree". That is a loud false red on a
+    future document (never a silent pass), and §8 records five rows still open.
     """
     text = DOC.read_text(encoding="utf-8")
     counts = pmc.parse_summary(text)

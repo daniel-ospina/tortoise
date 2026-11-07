@@ -220,7 +220,7 @@ deliberately built first".
 |---|---|---|---|---|
 | #2725 | the `venture` domain pack itself — fund/portfolio kinds, relation logic, lifecycle chains (owner approval gate) | VERIFIED-FIXED | `e9ac7b637` | `tests/test_venture_pack.py` |
 | #2696 | epic: meeting-ingestion pipeline for venture-builder customers — meeting-attuned extraction, per-startup segregation, HTTP ingest surface | OPEN | `` | `` |
-| #2728 | per-graph pack selection — backend enforcement **plus** the dashboard Settings modal | VERIFIED-FIXED | `08a6b0288` | `website/apps/dashboard/src/packs.test.js`, `tests/test_pack_selection_by_graph.py` |
+| #2728 | per-graph pack selection — backend enforcement **plus** the dashboard Settings modal | VERIFIED-FIXED | `08a6b0288` | `website/apps/dashboard/src/packs.test.js`, `website/apps/dashboard/src/packsModalTripwire.test.js`, `tests/test_pack_selection_by_graph.py` |
 | #2726 | register `meeting_transcript` + `meeting_minutes` sourceKinds (tier decision per #398) and allow them in pack `sourceTypes` | VERIFIED-FIXED | `24a640f2c` | `tests/test_source_credibility.py` |
 | #2749 | `main` is red — `test (b)` fails on a clean `origin/main`, blocking `python-ci-gate` for every PR | VERIFIED-FIXED | `f84daa169c`, `4c4eb7ddd7` | `tests/test_sdk_props_coercion.py`, `tests/test_uri_env_mutations_declared.py` |
 | #2748 | `tests/test_delivery_tenancy.py` carries 2 pre-existing ruff I001 import-sort errors on `main` | VERIFIED-FIXED | `cc72a9151` | `tests/test_delivery_tenancy.py` |
