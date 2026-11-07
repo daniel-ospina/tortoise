@@ -781,13 +781,13 @@ Exit 0 only when **all** of these hold:
      it, not only the five the epic closes on.
    - **A REGISTERED non-bar is complete, and a floor is not a bar.** A threshold that declares
      `UNMEASURED(<ground>)` is complete **only** when its ground names the issue that gates the row
-     (A4 names `#10988`/`#1022`) — and the floor clause beside it (`… above the floor of
-     `` >= 30 `` …`) may never be what satisfies the numeric arm. A floor is a REFUSAL boundary
+     (A4 names `#10988`/`#1022`) — and the floor clause beside it (`` … above the floor of
+     `>= 30` … ``) may never be what satisfies the numeric arm. A floor is a REFUSAL boundary
      (§3.7), so a row that has no bar must not pass the "has a bar" check on the floor's number.
      `tools/capstone_preregistration_check.py` enforces both halves: it strips the comparator THE
      FLOOR OWNS and refuses any comparator left outside it, and it requires a `#NNNN` reference.
      ⛔ **The exemption is the row's PINNED value AND its own floor unit, and the clause must END
-     the cell at that unit** (§10.12): `floor of ` >= 30 `` typed statements ` is `A4`'s floor,
+     the cell at that unit** (§10.12): `` floor of `>= 30` typed statements `` is `A4`'s floor,
      while a rate spelled after the same unit (`typed statements per claim`, `…, share`, `… ratio`)
      re-scopes the number and is a BAR, refused exactly as `>= 30 % typed` is. Only closing
      punctuation may follow the unit, to the end of the cell — an allowlist rather than a denylist
@@ -1635,8 +1635,8 @@ follows its unit but the closing parenthesis:
 "a registered non-bar cannot also be a bar" arm, and round 10 bound that exemption to the row's
 **pinned value AND its floor unit** — but on a **prefix** of the unit. So a RATE spelled *after* the
 unit walked through the other side of the same hole that `>= 30 % typed` walked through before it:
-measured at `#11331` review round 11, `floor of ` >= 30 `` typed statements per claim, and compared to
-no bar ` — and the same cell with `share` or `ratio` in place of `per claim` — left the gate at
+measured at `#11331` review round 11, `` floor of `>= 30` typed statements per claim, and compared to
+no bar `` — and the same cell with `share` or `ratio` in place of `per claim` — left the gate at
 **`exit=0` / `OK`** with `criteria[A4].floor` untouched, while the identical cell with `%` after the
 number was refused. `typed statements per claim` is the ordinary way to write a rate whose denominator
 is a claim, and it is exactly the `A4`-vs-`D3` bar `#10988`/`#1022` have **not** ruled on, so the
