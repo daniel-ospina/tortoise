@@ -288,9 +288,10 @@ def test_the_arm_rebinds_the_reader_window_to_the_package(
     # `time_aware_stats`) omits this one, and the Layer-1 projection
     # (`run.py:6145`+) omits it too. The arm state is recorded NOWHERE the eval
     # lane can read it — not the checkpoint, not the Layer-1 report, and not the
-    # fingerprint (the `tr_session_*` pair rides the fingerprint and `r5_knobs`
-    # instead, `run.py:1922-1925` / `:5983-5991`; this arm has neither). Both
-    # gaps are #11467.
+    # fingerprint (the `tr_session_admission` / `tr_session_completion` CONFIG
+    # FLAGS ride the fingerprint and `r5_knobs` instead, `run.py:1922-1925` /
+    # `:5983-5991`; this arm has neither) — and their `_stats` halves are dropped
+    # exactly like this arm's, so #11467 has a second instance.
     # Hence this pin is the only guard the census has: a key that grows or
     # disappears is otherwise shipped unseen.
     assert set(stats) == {
