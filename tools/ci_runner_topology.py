@@ -155,6 +155,12 @@ HOST_LABEL_ARM64 = "ARM64"
 POOL_LABEL_X64 = "self-hosted-x64"
 POOL_LABEL_ARM64 = "self-hosted-arm64"
 
+#: BOTH markers: a runner's marker must match the host it is stamped on, so the marker the host
+#: does NOT own is dropped before the host's is added — `ci_runner_gate.sh:labels_for` drops both
+#: (`"$POOL_LABEL_ARM64"|"$POOL_LABEL_X64") ;;`) and re-derives one from the host, which is why a
+#: gate pass and an `apply` pass must produce the same set for the same box.
+POOL_MARKERS = frozenset({POOL_LABEL_X64, POOL_LABEL_ARM64})
+
 #: The API's own `type` value for a label GitHub stamps at registration (and which a
 #: write may therefore not include). The read-only/custom split is taken from THIS,
 #: never inferred from a name list.
@@ -181,6 +187,12 @@ VIOLATION_UNMEASURED_EMPTY_POOL = "UNMEASURED_EMPTY_POOL"
 #: label has delivered nothing, however clean every other reading is — the same false PASS the
 #: default-direction fix was supposed to close, one layer down (an empty or fully-offline x64 arm).
 VIOLATION_ENGAGE_NO_X64_SERVER = "ENGAGE_PRODUCED_NO_X64_SERVER"
+
+#: A runner carrying the OTHER architecture's pool marker. `runs-on: [self-hosted, self-hosted-x64]`
+#: is an AND, so an ARM64 box carrying `self-hosted-x64` is selected for x64 work — the #6897
+#: mis-serve, reached through the marker instead of through `ubuntu-latest`. It is also a FALSE
+#: PASS: `violations()` read only `ubuntu-latest`, so this pool reported `verdict: OK`.
+VIOLATION_FOREIGN_POOL_MARKER = "FOREIGN_POOL_MARKER"
 
 
 @dataclass(frozen=True)
@@ -338,6 +350,29 @@ def violations(runners: Sequence[Runner]) -> list[Violation]:
             )
         )
 
+    # 1b. The same mis-serve through the POOL MARKER. `runs-on: [self-hosted, self-hosted-x64]` is
+    # an AND, so a box carrying a marker its host does not own is selected for work it cannot run —
+    # and this reading was missing entirely, so such a pool reported `verdict: OK`.
+    for runner in sorted(runners, key=lambda r: r.name):
+        if runner.host is None or PLATFORM_LINUX not in runner.labels:
+            continue
+        own = POOL_LABEL_X64 if runner.host == HOST_LABEL_X64 else POOL_LABEL_ARM64
+        foreign = POOL_MARKERS - {own}
+        carried = sorted(runner.custom_labels & foreign)
+        if carried:
+            found.append(
+                Violation(
+                    kind=VIOLATION_FOREIGN_POOL_MARKER,
+                    runner=runner.name,
+                    why=(
+                        f"host is {runner.host} but it carries {', '.join(repr(c) for c in carried)}, "
+                        f"a marker for another architecture's pool; `runs-on` matches an AND, so work "
+                        f"pinned to that marker lands here and is mis-served (#6897). "
+                        f"REMEDY: the marker is re-derived from the host."
+                    ),
+                )
+            )
+
     # 2. The fallback is engaged somewhere, but never where it can serve x64 work.
     # `online`: an OFFLINE runner that carries the label serves nothing, so counting it
     # here would let `census` (which excludes offline capacity) and this check disagree
@@ -402,7 +437,14 @@ def desired_label_set(runner: Runner, *, engage: bool) -> list[str]:
         # left byte-identical. Both gates are the gate script's own (`managed_ids` / `labels_for`).
         return sorted(runner.custom_labels)
     marker = POOL_LABEL_X64 if host == HOST_LABEL_X64 else POOL_LABEL_ARM64
-    out = {label for label in runner.custom_labels if label != FALLBACK_LABEL}
+    # ⛔ DROP BOTH MARKERS, THEN ADD THIS HOST'S. Filtering only the fallback left a runner
+    # advertising the OTHER arch's pool (`self-hosted-x64` on an ARM64 box), which `runs-on`'s AND
+    # semantics turns into an x64 job landing on ARM64 — and it made `apply` and
+    # `ci_runner_gate.sh` disagree about the same runner's label set.
+    out = {
+        label for label in runner.custom_labels
+        if label != FALLBACK_LABEL and label not in POOL_MARKERS
+    }
     out.add(marker)
     # ⛔ x64 ONLY. An ARM64 runner never carries the hosted x86_64 fallback: that is the
     # whole point of this file, and it is the same disarm `ci_runner_gate.sh` performs on

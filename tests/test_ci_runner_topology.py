@@ -870,3 +870,66 @@ def test_the_read_back_survives_a_missing_gh_binary(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert rc == 1
     assert "UNVERIFIED" in err, f"a transport failure on the read-back must be reported, not raised: {err}"
+
+
+# ---------------------------- a marker the host does not own is the same mis-serve
+def test_a_foreign_pool_marker_is_a_violation_and_apply_heals_it():
+    """REGRESSION (#10912 review round 5, BLOCKING): `desired_label_set` filtered only the FALLBACK
+    label, so the OTHER arch's pool marker survived — an ARM64 box carrying `self-hosted-x64`.
+    `runs-on: [self-hosted, self-hosted-x64]` is an AND, so x64 work lands on ARM (#6897), and
+    `check` read only `ubuntu-latest`, so the pool reported `verdict: OK` — a false PASS in the
+    field every reader keys on. `ci_runner_gate.sh:labels_for` drops BOTH markers; so must this.
+    """
+    arm_with_x64_marker = topo.parse_runner(
+        _runner(77, "pi-runner-vm-9", ["self-hosted", "Linux", "ARM64", "self-hosted-arm64", "self-hosted-x64"])
+    )
+    kinds = [v.kind for v in topo.violations([arm_with_x64_marker])]
+    assert topo.VIOLATION_FOREIGN_POOL_MARKER in kinds, (
+        f"an ARM64 box advertising the x64 pool must be named, not read as OK: {kinds}"
+    )
+    desired = topo.desired_label_set(arm_with_x64_marker, engage=True)
+    assert "self-hosted-x64" not in desired, f"apply must heal the marker from the host: {desired}"
+    assert "self-hosted-arm64" in desired
+    post = [
+        topo.parse_runner(
+            _runner(77, "pi-runner-vm-9",
+                    sorted(arm_with_x64_marker.read_only | set(desired)),
+                    read_only=arm_with_x64_marker.read_only)
+        )
+    ]
+    assert topo.violations(post) == [], "the healed runner must be clean"
+
+
+def test_an_x64_marker_on_an_x64_box_survives_the_marker_reset():
+    """The counterpart: healing must not strip the correct marker (an idempotent reconcile)."""
+    x64 = topo.parse_runner(_runner(1, "pi-runner-x64-1", X64))
+    desired = topo.desired_label_set(x64, engage=True)
+    assert sorted(desired) == ["self-hosted-x64", "ubuntu-latest"], desired
+
+
+# ------------------------ a read failure must not carry a capacity CLAIM (round 4 fix 4)
+def test_an_empty_read_back_reports_only_the_read_failure(monkeypatch, capsys):
+    """REGRESSION (#10912 review round 5): the "a read failure is not a capacity reading" branch
+    had ZERO coverage — forcing `already_unmeasured` to False (the pre-fix behaviour: append the
+    engage violation and print ❌ capacity over a pool nobody read) left all 33 tests green.
+    """
+    pre = measured()
+    reads = [pre, []]  # the write takes; the read-back returns ZERO rows
+    monkeypatch.setattr(topo, "fetch_runners", lambda repo=topo.REPO, _r=reads: _r.pop(0))
+    monkeypatch.setattr(topo, "fetch_oldest_queued_seconds", lambda repo=topo.REPO: None)
+    monkeypatch.setattr(
+        topo,
+        "apply_plan",
+        lambda pending, *, dry_run, repo=topo.REPO: [
+            {"runner": n, "id": rid, "before": b, "after": a, "applied": True}
+            for n, (rid, b, a) in pending.changes.items()
+        ],
+    )
+    rc = topo.main(["apply", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1 and payload["ok"] is False
+    kinds = [v["kind"] for v in payload["post"]["violations"]]
+    assert kinds == [topo.VIOLATION_UNMEASURED_EMPTY_POOL], (
+        f"nothing was measured, so nothing may be claimed about capacity: {kinds}"
+    )
+    assert payload["post"]["verdict"] == topo.VIOLATION_UNMEASURED_EMPTY_POOL
