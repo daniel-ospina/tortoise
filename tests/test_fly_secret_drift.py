@@ -40,6 +40,11 @@ _AMBIENT = (
     "FLY_SECRETS_CMD",
     "GH_SECRETS_PRESENT",
     "FLY_STUB_TIMEOUT",
+    # #11122 review F9: the ledger's seams are as exportable as the rest, and an
+    # exported `FLY_MITIGATION_TODAY` silently moves the expiry boundary of every
+    # unrelated test in this file.
+    "FLY_MITIGATION_LEDGER",
+    "FLY_MITIGATION_TODAY",
 )
 
 _FLY_TOML = """\
@@ -1832,6 +1837,16 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         # whose GitHub secret does not exist) — which is exactly the state the
         # versioned default was added for, so this fixture models production.
         present=_declared_gh_names(REAL_MANIFEST),
+        # #11122 review F4: this fixture models a Fly app carrying every declared
+        # name, which is exactly the state in which a REAL ledger entry means
+        # `MITIGATION NOT IN EFFECT`. Left reading the shipped ledger, this test
+        # would assert `returncode == 0` against a state the FIRST real entry makes
+        # illegal — so the operator writing one mid-incident would have to edit
+        # tests before the mitigation could land, and the cheapest green is to
+        # weaken the assertion that models production. The ledger gets its own tests
+        # (`TestTheMitigationLedger`, which drives the SHIPPED artifacts over the
+        # shipped ledger); here it is pinned out of the way.
+        extra_env={"FLY_MITIGATION_LEDGER": str(_fixture("no-ledger.txt", "# empty\n"))},
     )
     assert "STALE DECLARATION" not in r.stdout, r.stdout
     assert "UNDECLARED" not in r.stdout, r.stdout
@@ -2665,30 +2680,36 @@ ENV_ONLY_KEY          fly-toml-env
 GIT_SHA               workflow
 """
 
-# The filter, copied in shape from the real step (bash BUILTINS only — the gate
-# classifies the payload by executing it on a PATH that holds only fly/flyctl, so
-# a `grep`/`awk` here would abort the classification with `command not found`).
-_LEDGER_FILTER = """\
-          MITIGATED=" "
-          LEDGER="${FLY_MITIGATION_LEDGER:-.github/scripts/fly-secret-mitigations.txt}"
-          if [ -r "$LEDGER" ]; then
-            while IFS= read -r LINE || [ -n "$LINE" ]; do
-              case "$LINE" in ''|'#'*) continue ;; esac
-              NAME="${LINE%%[[:space:]]*}"
-              case "$NAME" in ''|'#'*) continue ;; esac
-              MITIGATED="$MITIGATED$NAME "
-            done < "$LEDGER"
-          fi
-          PAID_ARGS=()
-          for ARG in "${ARGS[@]}"; do
-            ARG_NAME="${ARG%%=*}"
-            case "$MITIGATED" in
-              *" $ARG_NAME "*) continue ;;
-            esac
-            PAID_ARGS+=("$ARG")
-          done
-          ARGS=("${PAID_ARGS[@]}")
-"""
+# The filter is the REAL block, extracted from the shipped step — not a
+# transcription. A copy drifts (the first draft of this fixture already used
+# different variable names and a different default path), and a copy can be
+# broken without any test noticing, which is precisely the failure the test below
+# exists to catch: with a hand-copied filter the suite proves that the COPY
+# filters. Extracting it means a regression in the real block turns these tests
+# red (review F5).
+_LEDGER_BLOCK_START = "# ⛔ #11122 — THE MITIGATION LEDGER"
+_LEDGER_BLOCK_END = '          flyctl secrets set --stage "${ARGS[@]}" --app tortoise-y4mjjq'
+
+
+def _real_ledger_filter() -> str:
+    """The ledger block of the SHIPPED sync step, verbatim (anchored, fail-loud)."""
+    run = REAL_WORKFLOW.read_text()
+    assert _LEDGER_BLOCK_START in run, (
+        f"{_LEDGER_BLOCK_START!r} not found in deploy-hosted.yml — the ledger block "
+        "moved or was dropped; the fixture that executes it would otherwise pass "
+        "vacuously against a copy"
+    )
+    start = run.index(_LEDGER_BLOCK_START)
+    # Back up to the LINE start: the block's own lines are indented to the YAML
+    # `run: |` body, and a slice beginning mid-indent starts a scalar at column 0,
+    # which does not parse.
+    start = run.rindex("\n", 0, start) + 1
+    end = run.index(_LEDGER_BLOCK_END)
+    assert start < end, "the ledger block moved AFTER the flyctl call"
+    return run[start:end].rstrip() + "\n"
+
+
+_LEDGER_FILTER = _real_ledger_filter()
 
 _LEDGER_WORKFLOW = f"""\
 name: Deploy Hosted API
@@ -2789,9 +2810,15 @@ class TestTheMitigationLedger:
         proc = _ledger_run(
             _ledger(_entry()), workflow=LEDGER_WORKFLOW_UNFILTERED
         )
-        assert proc.returncode == 1, proc.stdout + proc.stderr
+        # EXIT 2, not 1 (#11122 review F1): exit 1 is the deploy's documented bypass
+        # lane, so classifying a broken sync filter there lets an operator's
+        # `skip-fly-secret-provenance` (armed for an unrelated stale declaration)
+        # re-stage every mitigated secret — silently, because that bypass's report
+        # speaks about declarations, never about mitigations.
+        assert proc.returncode == 2, proc.stdout + proc.stderr
         assert "LEDGER NOT HONOURED" in proc.stdout
         assert "re-arm the mitigation" in proc.stdout
+        assert "never bypassable" in proc.stdout
 
     def test_a_ledgered_name_live_on_fly_fails(self):
         """The entry would be a false record, and it freezes that secret's rotation."""
@@ -2891,13 +2918,57 @@ class TestTheMitigationLedger:
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "0 mitigated" in proc.stdout
 
+    def test_an_indented_entry_is_refused_not_passed_on_to_the_wrong_fault(self):
+        """The two readers must accept the same lines (#11122 review F6).
+
+        The sync filter tokenises with bash's `[[:space:]]` against the RAW line, so
+        an indented entry names an empty secret and is silently ignored; this reader
+        used to `strip()` first and accept it. The pair then produced the worst
+        possible report — the gate saw the payload still stage the name and told the
+        operator to fix `deploy-hosted.yml`, a fault that is not there — whose
+        plausible remedy (arm the bypass) re-arms the mitigation.
+        """
+        for prefix in ("  ", "\t"):
+            proc = _ledger_run(_ledger(prefix + _entry()))
+            assert proc.returncode == 2, (prefix, proc.stdout + proc.stderr)
+            assert "starts with whitespace" in proc.stderr, proc.stderr
+            assert "column 0" in proc.stderr, proc.stderr
+            assert "LEDGER NOT HONOURED" not in proc.stdout, (
+                "the indentation must be reported as the fault it is, not blamed "
+                "on the sync step"
+            )
+
+    def test_the_suppression_is_the_REAL_filter_not_a_copy(self):
+        """The fixture executes the block that ships (review F5).
+
+        `_LEDGER_FILTER` is sliced out of `deploy-hosted.yml` by its own markers, so
+        a regression in the real block — a dropped trailing space in the name set, a
+        `continue` that becomes `break`, the assignment back to `ARGS` removed — turns
+        this red. With a hand-copied fixture the suite proved only that the COPY
+        filtered, and the shipped filter was never executed with a non-empty ledger at
+        all (the other end-to-end test runs it against the real ledger, which is
+        deliberately empty).
+        """
+        assert "MITIGATION_LEDGER" in _LEDGER_FILTER, (
+            "the fixture filter is not the shipped block — the anchors in "
+            "`_real_ledger_filter` drifted, so these tests would prove nothing"
+        )
+        assert "STAGED_ARGS" in _LEDGER_FILTER
+        proc = _ledger_run(_ledger(_entry()))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "LEDGER NOT HONOURED" not in proc.stdout
+        # …and with the block removed, the SAME fixture stages the name — which is
+        # what makes the assertion above about the filter rather than about the ledger.
+        unfiltered = _ledger_run(_ledger(_entry()), workflow=LEDGER_WORKFLOW_UNFILTERED)
+        assert unfiltered.returncode == 2, unfiltered.stdout + unfiltered.stderr
+
     def test_the_belt_warns_only_about_names_the_ledger_could_record(self):
         """The fallback warning must be ACTIONABLE: one aggregated line, and only
         `gh-secret:` names — a `workflow` name cannot be ledgered (the validator
         refuses it), so telling the reader to record it would be wrong advice."""
         proc = _ledger_run(_ledger("# empty\n"))
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        warning = [l for l in proc.stdout.splitlines() if "will CREATE" in l]
+        warning = [line for line in proc.stdout.splitlines() if "will CREATE" in line]
         assert len(warning) == 1, "exactly one aggregated warning line, not N annotations"
         assert "SENTRY_DSN" in warning[0]
         assert "GIT_SHA" not in warning[0], "a `workflow` name is not the ledger's to record"
@@ -2924,7 +2995,7 @@ class TestTheMitigationLedger:
             "deploy filters ARGS by and the gate reads — a missing one is exit 2"
         )
         entries = module.read_mitigation_ledger(
-            REAL_LEDGER, module.read_manifest(REAL_MANIFEST), module._today()
+            REAL_LEDGER, module.read_manifest(REAL_MANIFEST)
         )
         for name in entries:
             assert name in module.read_manifest(REAL_MANIFEST), (
