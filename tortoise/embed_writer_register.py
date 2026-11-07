@@ -67,9 +67,13 @@ claim and a slogan:
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,
 whose `__init__` is the head of the `projection → pack_state → sdk → projection` cycle where a
 module-scope read of the config constants is a **reproduced `ImportError`**
-(`projection/__init__.py:1466-1481`). This module imports only the standard library, so importing it
-can never enter that cycle — pinned in a subprocess by
-`test_the_register_imports_without_entering_the_projection_cycle`.
+(`projection/__init__.py:1466-1481`). This module imports only the standard library — pinned by
+`test_the_register_is_not_a_second_rule_set`, which reads this file's own `import` statements — so
+importing it can never ENTER that cycle, which
+`test_the_register_imports_without_entering_the_projection_cycle` proves separately in a subprocess
+by asserting that `tortoise.projection`, `tortoise.pack_state` and `tortoise.sdk` never reach
+`sys.modules` (a narrower claim than "imports nothing from `tortoise`": the package `__init__` still
+loads `tortoise` and its config).
 
 **⚠️ What the closure claim does NOT cover — read this before quoting `#11086`.** "No silent
 bypass" holds for the population **discovery decides**, and that population is bounded by the
@@ -542,11 +546,13 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: write it GATES. ⛔ That is not the same sentence as "the gate decides every vector this writer
 #: stores": the module docstring's caveat refutes the wider one for `create_point`/`update_point`,
 #: whose caller-supplied vector is stored verbatim — `create_point` calls `encode_for_row`
-#: UNCONDITIONALLY (`tortoise/sdk.py:13821-13824`) and then discards the result (`if "embedding" in
-#: props:` replaces it at `:14023-14026`, and `_create_map["embedding"] = _embedding_expr` at
-#: `:14057` assigns the caller branch last), while `update_point` genuinely skips the derive
-#: (`:18651-18652`) — so on one path the gate RUNS and its verdict is OVERWRITTEN, on the other it is not
-#: called at all. Neither outcome is "the gate decides this vector".
+#: UNCONDITIONALLY (the derive is behind no `props` guard) and then discards the result
+#: (`if "embedding" in props:` pops the caller vector, and `_create_map["embedding"] =
+#: _embedding_expr` is assigned AFTER the props loop, so the caller branch wins), while
+#: `update_point` genuinely skips the derive when `"embedding" in props` — so on one path the gate
+#: RUNS and its verdict is OVERWRITTEN, on the other it is not called at all. Neither outcome is
+#: "the gate decides this vector". ⛔ Symbols only, never a line number: this block is comment prose
+#: and nothing re-derives it, which is the rot `WriterClass.reason`'s rule exists to prevent.
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
 #: docstring: the census's discovery is a source-text regex PLUS the AST pass that decides the
 #: LITERAL container key (`rec["embedding"] = …`), and writers neither can spell (a map-merge, a
