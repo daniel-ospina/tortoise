@@ -2316,10 +2316,19 @@ def _sdk_methods_on_vector_leg(
         if (isinstance(node, ast.Name) and node.id in entrant
                 and node.id not in (shadowed or ())):
             return node.id
-        if (isinstance(node, ast.Attribute) and node.attr in entrant
-                and isinstance(node.value, ast.Name)
-                and node.value.id == "self"):
-            return node.attr
+        if isinstance(node, ast.Attribute) and node.attr in entrant:
+            receiver = node.value
+            # `self`, and the in-module receivers that stand for it (#11389
+            # review, P3): `super()` and `type(self)`. A genuinely FOREIGN
+            # receiver (`self.conn.helper(1)`) is still excluded — that is the
+            # trade-off the docstring states, and it is about over-attributing
+            # someone else's method, not about missing our own base class.
+            if isinstance(receiver, ast.Name) and receiver.id == "self":
+                return node.attr
+            if (isinstance(receiver, ast.Call)
+                    and isinstance(receiver.func, ast.Name)
+                    and receiver.func.id in ("super", "type")):
+                return node.attr
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == "getattr" and len(node.args) in (2, 3)
                 and isinstance(node.args[0], ast.Name)
@@ -2483,8 +2492,16 @@ def _sdk_methods_on_vector_leg(
     for fn in functions:
         if fn is leg:
             continue
+        # ⛔ ONLY A NAME-RESOLVED CALL'S `func` IS THE CLOSURE'S (#11389 review,
+        # P2). Excluding every `Call.func` also excluded `getattr(self, n)(…)`,
+        # whose func is itself a `Call`: the closure cannot resolve that call,
+        # so the reach was neither traversed NOR declared — the silent-short-list
+        # class in the dangerous direction, hidden by the guard against false
+        # alarms. Only `Attribute`/`Name` funcs (the forms `calls` extracts) are
+        # excluded; anything else stays visible to the mention walk.
         call_funcs = {id(c.func) for c in ast.walk(fn)
-                      if isinstance(c, ast.Call)}
+                      if isinstance(c, ast.Call)
+                      and isinstance(c.func, (ast.Attribute, ast.Name))}
         # ⛔ SCOPED TO THE BODY WALK BELOW, not `ast.walk(fn)` (#11337 review,
         # P2). The whole-subtree walk collected a NESTED def's locals, so a
         # nested `_review_pool = 5` suppressed a genuine mention in the
@@ -2503,6 +2520,16 @@ def _sdk_methods_on_vector_leg(
                     continue
                 if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
                     shadowed.add(n.id)
+                # ⛔ These two bind a name on the NODE, not as `Name(Store)`
+                # (#11389 review, P3): `except X as _pool` keeps the name in
+                # `ExceptHandler.name`, and `import _pool` in the alias. A local
+                # that reuses an entrant's name is not a reach either way.
+                elif isinstance(n, ast.ExceptHandler) and n.name:
+                    shadowed.add(n.name)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for alias in n.names:
+                        bound = alias.asname or alias.name.split(".")[0]
+                        shadowed.add(bound)
                 stack_s.extend(ast.iter_child_nodes(n))
         stack = list(fn.body)
         while stack:

@@ -3189,7 +3189,20 @@ def _byref_sdk_source() -> str:
         "        def inner():\n"
         "            _review_pool = 5\n"
         "            return _review_pool\n"
-        "        return _safe(_review_pool, 'object')\n")
+        "        return _safe(_review_pool, 'object')\n"
+        "    def CALLS_a_getattr(self):\n"
+        "        return getattr(self, '_review_pool')('object')\n"
+        "    def passes_from_super(self):\n"
+        "        return _safe(super()._review_pool, 'object')\n"
+        "    def shadows_via_EXCEPT(self):\n"
+        "        try:\n"
+        "            pass\n"
+        "        except Exception as _review_pool:\n"
+        "            pass\n"
+        "        return _safe(_review_pool)\n"
+        "    def shadows_via_IMPORT(self):\n"
+        "        import _review_pool\n"
+        "        return _safe(_review_pool)\n")
 
 
 def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
@@ -3234,7 +3247,10 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               "passes_a_DEFAULTED_getattr",
               # A NESTED def's local is a different scope: it must not suppress
               # the ENCLOSING body's genuine mention (#11337 review, P2).
-              "mentions_past_a_NESTED_shadow")
+              "mentions_past_a_NESTED_shadow",
+              # A `getattr(...)(…)` func is NOT resolvable by the closure, so its
+              # mention must stay visible; `super()` is an in-module receiver.
+              "CALLS_a_getattr", "passes_from_super")
     for name in shapes:
         assert name not in methods, (
             f"{name} reaches the leg through a reference this scan cannot "
@@ -3274,8 +3290,11 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
     # A LOCAL that reuses an entrant's name is not a reach: `_review_pool = 5`
     # binds the NAME without referring to the method, and declaring it would
     # caveat a complete table — the same cry-wolf failure as the resolved call.
-    assert "shadows_an_entrant_name" not in declared, (
-        f"a local shadowing an entrant's name was declared as a reach: {declared}")
+    for shadowing in ("shadows_an_entrant_name", "shadows_via_EXCEPT",
+                      "shadows_via_IMPORT"):
+        assert shadowing not in declared, (
+            f"a local shadowing an entrant's name was declared as a reach: "
+            f"{shadowing} in {declared}")
     # A foreign receiver is not an in-module method either.
     assert "passes_a_FOREIGN_receiver" not in declared, (
         f"a call on a FOREIGN receiver was declared as an in-module reach: {declared}")
