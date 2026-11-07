@@ -543,11 +543,21 @@ def test_tr_complete_sessions_splices_on_the_wire_identity_10540(monkeypatch):
 
     ``seeded_sessions`` keys through ``retrieval.session_key_of``, which
     resolves a product turn hit from its wire ``sessionId``. The splice used
-    to read ``h.get("session_id")`` directly, so on a camel-only pool — the
-    exact population #10540 exists for — the seed fired, the graph fetch ran,
-    and nothing was spliced: the report read ``seeded: 1`` with ``injected:
-    0``. Measured with the snake-only splice restored: ``(['a0','a1'],
-    sessions=0, injected=0)``; with this fix ``sessions=1, injected=1``.
+    to read ``h.get("session_id")`` directly, so the two halves could
+    disagree: on a camel-only pool — the exact population #10540 exists for —
+    the seed fires, the graph fetch runs, and nothing is spliced.
+
+    ⚠️ Scope of that disagreement, measured and scoped: it is a state this PR
+    PASSES THROUGH, not the base it starts from. At ``origin/main`` the
+    authority has no camel leg either, so ``seeded_sessions`` returns ``[]``
+    on this pool and ``_tr_complete_sessions`` returns BEFORE the splice — the
+    sibling docstring in ``tests/test_session_reinjection_rules.py`` states
+    that baseline. With this PR's authority change ALONE (``40c4d85578``) the
+    seed fires and the snake-only splice then matches nothing (``seeded: 1``,
+    ``injected: 0``). Both halves land together here so a later revert of
+    either cannot leave the seam half-wired: with the snake-only splice
+    restored this test reds (``sessions=0, injected=0``) while the fixed tree
+    reports ``sessions=1, injected=1``.
 
     This is the ONE assertion that makes the snake-only splice red — the
     snake-keyed sibling above exercises the leg that did not change.

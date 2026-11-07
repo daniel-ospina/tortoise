@@ -1068,13 +1068,20 @@ def test_injected_group_anchors_on_its_own_sessions_product_base_ranks():
     session's injected group lands immediately AFTER that session's own base
     ranks.
 
-    MEASURED before the fix on the pool below: the anchor map was built from
-    phantom keys, so ``sessA`` had no base rank at all and its injected turn
-    fell to ``reinjection_merge_order``'s defensive TAIL —
+    MEASURED by REMOVING the camel leg from ``session_key_of`` — a mutation of
+    this tree, NOT a pre-fix behaviour of it: the anchor map is then built
+    from phantom keys, ``sessA`` has no base rank at all, and its injected
+    group falls to ``reinjection_merge_order``'s defensive TAIL —
     ``['A_t0', 'B_t0', 'B_t1', 'A_t1']`` — placing one session's context
     behind every other session's evidence. That is the displacement direction
     this issue's title forbids, arriving from the SEED side rather than from
-    a head placement."""
+    a head placement.
+
+    ⚠️ The distinction matters, and the module docstring now makes the same
+    one: pre-fix there was no camel leg, so ``seeded_sessions`` returned
+    ``[]`` and NO injected group existed to place. The tail is reachable only
+    from a pool keyed by one authority and merged by another — the shape this
+    test constructs directly, and the one the fix removes."""
     pool = [_wire_turn("A_t0", "sessA"), _wire_turn("B_t0", "sessB"),
             _wire_turn("B_t1", "sessB")]
     added = {"sessA": [_wire_turn("A_t1", "sessA")]}
