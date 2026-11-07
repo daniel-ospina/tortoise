@@ -4,7 +4,7 @@ type: plan
 domain: planning
 doc_status: draft
 created: 2026-11-05
-updated: 2026-11-05
+updated: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #5090, child issues, MECE decomposition, test-design, capstone"
@@ -116,14 +116,22 @@ claim and not an assertion:
 - **O:** quantify the stored vectors that no index and no efficient query path can serve, and put the
   consequence of removing them in front of the owner — because removal is a **surface change**.
 - **I:** a **read-only** dry-run census naming every label whose stored vectors have no vector index, with
-  vector count and bytes, and **exactly which `entity_type` values would return zero rows** afterwards.
+  vector count and bytes, and **exactly which `entity_type` values would change** afterwards. ⚠️ **Corrected
+  2026-11-06 (`#11088`, measured):** this read "would return zero rows". That holds only for a query that
+  matched *only* by meaning — a lexically-matching query keeps answering from the FTS leg — so the
+  delivered census names the affected `entity_type` SET and the loss as **semantic recall**. Evidence and
+  the `:Source` caveat: `S3-VECTOR-CENSUS.md` §3.1/§7.
 - **T:** the census runs without writing; it exits non-zero on an unreadable catalogue rather than reporting
   an empty population; the affected query paths are enumerated; **the removal is requested, not performed**.
 - **Complexity:** standard · **Blocked by:** none (the census half) · **Blocks:** none.
 - ⛔ **Why the removal is not in this child's authority:** `entity_type='object'` / `'event'` vector search
-  **returns rows today** by full scan. (`Source`/`Subject` carry no vector index; the 2026-09-24 count found
-  no vectors there either, though both labels' writers do store `embedding` — so what the census finds on them is
-  a measurement, not an assumption.) Removing the vectors removes that answer —
+  **returns rows today** by full scan — and the census widened the affected population to **FOUR labels /
+  FIVE `entity_type` values** (`event`, `object`, `document`, `source`, `subject`) **on the population it
+  measured** (the set is whatever `--census` prints for the graph a removal applies to), because `:Source`
+  maps to `document`+`source` (`S3-VECTOR-CENSUS.md` §4.1/§7). `Source`/`Subject` carry no vector **INDEX** — an index
+  fact, not a claim about the property: both labels' writers DO store `embedding`, and the 2026-09-24 inventory
+  reports no per-label vector count for them at all, so what they hold is what `--census` measures, never
+  something inferred from the inventory (`S3-VECTOR-CENSUS.md` §5). Removing the vectors removes that answer —
   an MCP/SDK surface change, which `AGENTS.md` requires **Daniel's approval for before implementation**.
   The census is the evidence for that request; acting on it is not a lane's.
 - ⚠️ **Contradiction test, recorded:** **no recorded decision authorises** this removal. The 2026-09-24

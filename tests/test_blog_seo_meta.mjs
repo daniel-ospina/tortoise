@@ -20,6 +20,13 @@ import {
 } from "../website/functions/blog/_shared/seo-keywords.ts";
 import { readFileSync } from "node:fs";
 import { rateLimited, __resetRateLimits } from "../website/functions/blog/_shared/agent-auth.ts";
+import {
+  headHtml,
+  htmlPage,
+  DEFAULT_OG_IMAGE,
+  DEFAULT_OG_IMAGE_WIDTH,
+  DEFAULT_OG_IMAGE_HEIGHT,
+} from "../website/functions/blog/_lib.ts";
 import { constraints } from "../website/functions/blog/_shared/seo-constraints.ts";
 import {
   META_TITLE_MAX,
@@ -1791,6 +1798,110 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
     "...and the generated title is left as the model wrote it — no keyword prefix, no rewrite " +
       "(the ` | Tortoise` suffix is the length contract's own, not the repair's)",
   );
+}
+
+// ── The blog's link preview and icon (the §"no preview, no favicon" defect) ─
+//
+// ⛔ THE DEFECT THIS PINS. `headHtml` used to emit `og:image` ONLY when the post
+// had a cover, while `twitter:card` was emitted unconditionally — so /blog and
+// every coverless post advertised a large-image card and shipped no image, and a
+// shared link rendered as a bare title. The shell linked a single SVG icon
+// (`/blog/favicon.svg`, a different mark from the rest of the site). Both are
+// asserted against the REAL renderer, because the renderer is where the
+// condition lived.
+console.log("");
+console.log("the blog's link preview and icon");
+{
+  const url = "https://tortoise.premiselabs.co/blog";
+  const index = headHtml({ title: "Blog — Tortoise", description: "Memory for agents.", url });
+
+  const ogImage = (h) => (h.match(/<meta property="og:image" content="([^"]*)"/) ?? [])[1] ?? null;
+  const attr = (h, tag, name) =>
+    (h.match(new RegExp(`<meta ${tag}="${name}" content="([^"]*)"`)) ?? [])[1] ?? null;
+
+  assertEq(ogImage(index), DEFAULT_OG_IMAGE, "a surface with no cover falls back to the blog's own card");
+  // A RELATIVE url here would render no card at all: no scraper resolves it. The
+  // static pages' guard checks this per page; the blog's constant is checked here,
+  // because every coverless surface inherits it.
+  assert(
+    /^https:\/\/[^/]+\//.test(DEFAULT_OG_IMAGE),
+    `the fallback card must be an absolute https URL, got ${DEFAULT_OG_IMAGE}`,
+  );
+  assertEq(
+    attr(index, "property", "og:image:width"),
+    String(DEFAULT_OG_IMAGE_WIDTH),
+    "the fallback card declares its real width",
+  );
+  assertEq(
+    attr(index, "property", "og:image:height"),
+    String(DEFAULT_OG_IMAGE_HEIGHT),
+    "...and its real height",
+  );
+  assertEq(
+    attr(index, "name", "twitter:image"),
+    DEFAULT_OG_IMAGE,
+    "twitter:image mirrors og:image — X does not always fall back from the card tag",
+  );
+  assert(
+    (attr(index, "property", "og:image:alt") ?? "").trim().length > 0,
+    "the card carries non-blank alt text (a suppressed image still has to read)",
+  );
+  assertEq(
+    attr(index, "name", "twitter:image:alt"),
+    attr(index, "property", "og:image:alt"),
+    "...and the Twitter alt agrees with it, so one platform cannot describe a different picture",
+  );
+
+  const withCover = headHtml({
+    title: "A post",
+    description: "d",
+    url: `${url}/post`,
+    image: "https://cdn.example.com/cover.png",
+    imageAlt: "A post",
+    type: "article",
+  });
+  assertEq(ogImage(withCover), "https://cdn.example.com/cover.png", "a post with a cover keeps its own image");
+  assertEq(
+    attr(withCover, "property", "og:image:width"),
+    null,
+    "a cover's dimensions are NOT invented — the author's upload is not 1200x630 by construction, " +
+      "and a declared size the bytes do not keep makes scrapers crop the wrong region",
+  );
+  assertEq(
+    attr(withCover, "property", "og:image:alt"),
+    "A post",
+    "the caller's imageAlt wins over the description",
+  );
+
+  const noCover = headHtml({ title: "No cover", description: "d", url: `${url}/b`, type: "article" });
+  assertEq(ogImage(noCover), DEFAULT_OG_IMAGE, "a coverless post gets the fallback card, not nothing");
+
+  // A hostile title must not break out of an attribute.
+  const hostile = headHtml({
+    title: 'A "quoted" & <script>alert(1)</script> title',
+    description: "d",
+    url,
+  });
+  assert(
+    !hostile.includes("<script>alert(1)</script>"),
+    "a title containing markup is escaped, not injected into the card's attributes",
+  );
+
+  const shell = htmlPage({ head: index, body: "" });
+  for (const href of ["/favicon.ico", "/favicon.png", "/apple-touch-icon.png"]) {
+    assert(shell.includes(`href="${href}"`), `the blog shell links ${href} — the same mark as the static pages`);
+  }
+  assert(
+    !shell.includes("favicon.svg"),
+    "the blog no longer links its own SVG mark, so the tab glyph does not change between / and /blog",
+  );
+
+  // And the fallback asset is really on disk, at the size the tags promise.
+  const card = readFileSync(new URL("../website/blog/og-image.png", import.meta.url));
+  const pngW = card.readUInt32BE(16);
+  const pngH = card.readUInt32BE(20);
+  assertEq(`${pngW}x${pngH}`, `${DEFAULT_OG_IMAGE_WIDTH}x${DEFAULT_OG_IMAGE_HEIGHT}`,
+    "the fallback card on disk is exactly the size the tags declare");
 }
 
 console.log("");
