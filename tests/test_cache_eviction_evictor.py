@@ -85,7 +85,7 @@ class _Record:
 @pytest.fixture()
 def lane():
     """A dedicated graph on the live lane container, dropped afterwards."""
-    import uuid
+    import os
 
     import redis
     from falkordb import FalkorDB
@@ -98,7 +98,14 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    graph_name = f"evict_{uuid.uuid4().hex[:12]}"
+    graph_name = f"evict_{os.urandom(6).hex()}"
+    # #5128-class hygiene (cycle-6 P1-3 / cycle-8 P2-2): the raw client bypasses
+    # `_assert_test_graph` AND the per-test wipe scope, so a per-test-unique name
+    # alone still leaks one empty graph per run. Journaling the name is the
+    # ownership contract the session-end sweep reads — without it the graph is
+    # UNOWNED and the sweep can never drop it.
+    from tests._embedded import _journal_append
+    _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
     try:
