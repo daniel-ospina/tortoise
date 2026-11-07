@@ -3205,7 +3205,9 @@ def _byref_sdk_source() -> str:
         "        return _safe(_review_pool)\n"
         "    def mention_past_a_COMPREHENSION_shadow(self):\n"
         "        _safe(_review_pool)\n"
-        "        return [x for _review_pool in (1, 2)]\n")
+        "        return [x for _review_pool in (1, 2)]\n"
+        "    def binds_it_in_a_COMPREHENSION_only(self, rows):\n"
+        "        return [x for _review_pool in rows]\n")
 
 
 def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
@@ -3297,7 +3299,10 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
     # binds the NAME without referring to the method, and declaring it would
     # caveat a complete table — the same cry-wolf failure as the resolved call.
     for shadowing in ("shadows_an_entrant_name", "shadows_via_EXCEPT",
-                      "shadows_via_IMPORT"):
+                      "shadows_via_IMPORT",
+                      # A comprehension TARGET is a binding, not a mention: it
+                      # read as a reach once the scope skip went in (#11389).
+                      "binds_it_in_a_COMPREHENSION_only"):
         assert shadowing not in declared, (
             f"a local shadowing an entrant's name was declared as a reach: "
             f"{shadowing} in {declared}")

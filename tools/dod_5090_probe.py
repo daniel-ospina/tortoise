@@ -2313,7 +2313,12 @@ def _sdk_methods_on_vector_leg(
         # `recall_state = 5` binds the NAME without referring to the method, and
         # declaring it would caveat a complete table — the same cry-wolf failure
         # the resolved-call exclusion removes (#11337 review, P2).
+        # ⛔ A STORE/DEL name is a BINDING, not a mention (#11389 review, P2 —
+        # a regression introduced by skipping comprehension scopes: the mention
+        # walk then reached `[_pool for _pool in rows]` and read the target as a
+        # reference, a spurious caveat on a complete table).
         if (isinstance(node, ast.Name) and node.id in entrant
+                and isinstance(node.ctx, ast.Load)
                 and node.id not in (shadowed or ())):
             return node.id
         if isinstance(node, ast.Attribute) and node.attr in entrant:
@@ -2430,10 +2435,11 @@ def _sdk_methods_on_vector_leg(
     # ⚠️ OUTSIDE THE WALK, and named rather than implied: a nested `def`'s
     # decorators and parameter DEFAULTS (evaluated when the outer method runs —
     # `def inner(cb=self._review_pool)` IS a real reach), and a comprehension's
-    # own scope. Those are not reported, so the census doc says so too; the
-    # class-definition-time argument that would justify excluding a METHOD
+    # own binding targets. Those are not reported, so the census doc says so too;
+    # the class-definition-time argument that would justify excluding a METHOD
     # signature's default does not apply to a nested def, and the previous
-    # comment wrongly used it for both. Under-
+    # comment wrongly used it for both. (A mention INSIDE a comprehension body
+    # IS walked and IS reported — only the target binding is skipped.) Under-
     # reporting is the dangerous direction for a surface an owner approves, so
     # the shape is REPORTED through the same `UNMEASURED` channel the handler
     # scan uses for its own bound (see `by_reference` below) instead of being
