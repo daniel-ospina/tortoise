@@ -1,0 +1,253 @@
+---
+title: "Search architecture — where the vector index lives, and what the graph engine keeps"
+type: architecture
+domain: platform
+doc_status: live
+created: 2026-11-07
+ownedBy: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: tortoise
+---
+
+# Search architecture — where the vector index lives, and what the graph engine keeps
+
+**Decision (owner, 2026-11-07):**
+
+1. **The vector index and the embedding payload move to Postgres** (`pgvector`). This **resolves V1**
+   (`#4997` / `STORAGE-ARCHITECTURE.md` §14.3): the vector index does **not** live in FalkorDB.
+2. **The text index stays in FalkorDB for now.** Moving it to a Postgres ranker is a *measured*
+   regression (§6.2), so it is deferred behind a measurement, not adopted on a hunch.
+3. **Traversal, writes and EP stay in FalkorDB.** The Cypher surface (~1,900 statements) is untouched.
+4. **The graph becomes a bounded window before launch**, sized by the tier's cost budget — §7.
+
+**The product goal:** *"a high quality search system with manageable cost, speed matters but is not the
+top criterion"* (owner). Every ordering below follows that sentence.
+
+**Sibling documents:** `STORAGE-ARCHITECTURE.md` owns authority per layer (§2.0/§3) and the cost model
+(§17.4); `CONSUMPTION-MODEL.md` owns metering; **this document owns where each search leg executes, and
+what the graph engine holds.**
+
+---
+
+## 1. The method ruling that made this decidable
+
+**We have no dataset.** The only figures available come from dogfooding runs of **superseded product
+versions**. Owner ruling, 2026-11-07: *"it doesn't matter if 17% is 10 or 30%, what matters is the
+engineering principles. Then we'll measure and optimise after beta launch."*
+
+⇒ **No decision below rests on a measured proportion of the graph.** The share a hot cache would hold is
+an **output** we measure from real tenants, never an input. An earlier draft sized the split from an
+estimated "structure ≈ 17% of the graph"; that figure was a subtraction across three measurements and two
+different tenants, taken from a total the vendor's own field list shows is incomplete (FalkorDB's memory
+readout is blind to the vector index, which lives in a separate module). A published FalkorDB breakdown
+puts non-index structure at **41 %**. **The range is 17–44 % and it is unmeasured; it is not an input to
+anything here.**
+
+---
+
+## 2. First principles — what a hot copy is actually for
+
+A hot copy can buy only three things:
+
+1. **Lookup by key** — a B-tree answers in microseconds. A cache buys nothing.
+2. **Find by similarity** — needs an index. Postgres holds it on disk, and the operating system keeps the
+   hot pages in memory **as part of the database we already run**. A separately rented RAM index buys a
+   *guarantee*, not a capability.
+3. **Walk the connections** — the only genuine candidate, and **not because the data is big**: a walk is
+   *dependent steps*, so the win is keeping the whole walk inside one engine, **not** keeping bytes in RAM.
+
+**"Inside one engine" ≠ "in RAM".** That is why the vector index can move to Postgres without losing the
+walk: the walk stays a graph query in FalkorDB, reading nodes and edges, and only the *similarity
+candidates* come from Postgres. Two systems are already in the path either way.
+
+**The price multiple decides the rest** (§17.4.1; vendor pages verified 2026-10-10): FalkorDB rents
+**provisioned RAM at $43.75–73/GB-month**, and a graph may occupy **75 %** of it ⇒ **$58.33 per GB of graph
+data**. Postgres disk is **$0.125/GB**. **~467×.** An embedding costs the same to store in either; the
+*index over it* is 467× dearer in RAM.
+
+**And the vector move is quality-neutral on the evidence.** At 381,559 vectors — inside our range —
+independent measurement puts pgvector/Qdrant/OpenSearch **within 0.0015 nDCG@10 of exact search**; the
+benchmark's own conclusion is *"choose the engine for operations, not for quality."* No published case
+shows a RAM-resident index returning better answers at this scale.
+
+---
+
+## 3. What runs where, after this decision
+
+| job | home | change |
+|---|---|---|
+| authoritative state (claims, entities, connections, operators, text, embeddings, turns, narrative) | **Postgres** | none — already the record |
+| **vector search** — ANN over embeddings | **Postgres** (`pgvector` + HNSW) | **MOVES** — was `db.idx.vector.queryNodes` (2 executing sites) |
+| **text search** — BM25-family over 7 fields / 5 labels | **FalkorDB** (`db.idx.fulltext`, TF-IDF) | **stays** — see §6.2; the move is deferred behind M3 |
+| **multi-hop traversal** (2-hop epistemic minimum: claim → operator → claim) | **FalkorDB** (Cypher) | none |
+| **writes, projections, backup/restore** | **FalkorDB** (Cypher) | none |
+| **EP state and computation** | state on graph nodes; **arithmetic in Python** | none — the EP-scalar carve-out stands (§6.3) |
+
+**The executing surface of the vector move is small and that is why it is tractable:** two
+`db.idx.vector.queryNodes` calls (both argument orders), the vector-index creation, and the ranking code
+behind them. Everything else in the search path is unchanged.
+
+**What the move costs, stated so it is not discovered late:**
+
+- `public.point/source/event.embedding` is **`jsonb`** today, and **`pgvector` appears in 0 of 79
+  migrations** — so this is a **column-type migration plus a full index build and a backfill** of existing
+  rows, not a query edit.
+- **A walk starts from seeds.** Under a bounded window (§7) a seed may not be resident, so the walk must
+  **materialise its seeds before traversing** — a write on the query path, which is the highest-risk item
+  in §8 and is priced there.
+
+---
+
+## 4. Authority (unchanged, cited not restated)
+
+`STORAGE-ARCHITECTURE.md` §2.0/§3: **Postgres is the system of record for every layer.** FalkorDB is a
+derived cache, never authoritative; deleting it loses nothing recoverable from Postgres — with EP's
+recomputed scalars as the one declared exception. Nothing here changes authority.
+
+---
+
+## 5. What "high quality search" means here, ranked
+
+| # | property | why it outranks what follows |
+|---|---|---|
+| **Q1** | **Traversal is complete and correct** — a walk sees every connection that exists, and EP is computed over a closed component | a truncated graph does not return a worse answer, it returns a **different** one: a missing node silently becomes a prior (`coalesce(ep_alpha, 1.0)`) |
+| **Q2** | **Nothing is silently invisible** — a search finds a claim or says it could not look | a shortfall reporting success is the failure class §17.3 exists to forbid |
+| **Q3** | **Both retrieval legs work** — lexical and semantic, on all searchable labels | see §6.2: the lexical leg is the one a move would damage |
+| **Q4** | **Latency**, measured | matters; never outranks a wrong or missing answer |
+| **Q5** | **Cost inside the 30 % rule** | a hard ceiling, and the last discriminator |
+
+---
+
+## 6. The three things that can go wrong, and what each requires
+
+### 6.1 Filtered vector recall — the top quality risk (move required, guard required)
+
+Every tenant's vectors share one index, filtered by `org_id`/`graph_id` — the archetypal **correlated
+filter** for HNSW post-filtering, where measurement elsewhere shows **0 rows of 10 returned at 0.1 %
+selectivity**, both at stock settings and with `iterative_scan` tuned; relaxed-order scanning recovers
+0.975 at 100k vectors but **0.847 at 1M**.
+
+**Required before launch:** a **per-tenant-size filter strategy** (exact scan for small tenants using the
+record's existing `(org_id, graph_id)` index, partial index for the few large ones, partitioning above),
+and a **shortfall assertion in the read path** — a tenant holding ≥ k rows must never quietly receive
+fewer. A recall-only test passes while the product under-returns.
+
+### 6.2 Text ranking — why the text index does NOT move yet
+
+`ts_rank`/`ts_rank_cd` have **no IDF and no length normalisation**; independent measurement at 381k
+vectors puts Postgres full-text **8–23 nDCG@10 points behind BM25**, with its hybrid scoring **below
+vector-only** on all three datasets. FalkorDB, by contrast, pins **TF-IDF on absolute score magnitudes** —
+so a move invalidates every absolute threshold and the recorded fusion weights (`{"vector": 1.5}` +
+implicit 1.0), and `to_tsvector` cannot reproduce the product's tokenizer behaviour (`ERR-4032` →
+`err4032` **plus** the adjacency phrase, `#8933`).
+
+**Therefore:** the text index **stays** until **M3** measures a BM25-capable Postgres option (extensions
+are candidates, not assumptions) with **score distributions**, not only ranks, plus the identifier
+fixture. Moving it opportunistically would trade a known cost win for a measured quality loss — the
+opposite of the ordering in §5.
+
+### 6.3 EP state — the carve-out stands, and the fix is not to store it
+
+`ep_*`, `confidence`, `posterior_*` and `baseline_set` are **recomputed from the structure and never stored
+as authority**; the record schema carries **no column** for them and its `chk_point_props_no_derived`
+`CHECK` **refuses them by name** (`supabase/migrations/20261012000003_record_epistemic.sql:128-130`, whose
+table comment restates the carve-out). ⚠️ **The one narrowed exception, stated so this section does not
+overstate the carve-out:** `baseline_source` / `baseline_alpha` / `baseline_beta` **are** columns —
+PRIMARY when `baseline_source = 'set-by-author'`, because an author-set prior is a non-reconstructible
+input rather than a derived value (the `#7955` correction to §17.5; `STORAGE-ARCHITECTURE.md:2048` says
+the carve-out is **not** reopened by it). That ruling stands and nothing here reverses it.
+
+**Which is why the retention unit must be a CLOSED component (§7):** a closed subgraph has no missing
+boundary, so recomputing EP for it is **exact**, not approximate. Retention policy and the EP carve-out
+therefore point the same way — and no schema change is needed.
+
+**One live defect must be fixed independently of all of this, and it is already in the code.** A claim
+with **no persisted α/β answers the neutral Beta(1,1) mean 0.5** (`search_engine.py:280` and `:339` state
+the rule; `sdk.py:37208` repeats it) **and the ranker coalesces the value** — `coalesce(n.confidence, …)`
+at `ranking.py:795` and `coalesce(n.confidence, 0.5)` at `ranking.py:1873`. `ingest.py:206` names the
+same construct as *"the silent `coalesce(n.confidence, 0.5)` default"*. So **missing belief state returns
+a plausible number instead of an error**, and it is indistinguishable from a computed one at the point
+where ordering happens. **Rule: absent state is `null` with `ep_state: "absent"`, never 0.5** — a value
+the ranker refuses to order on.
+
+---
+
+## 7. The window — what the graph holds once it must be bounded
+
+**Why it is on the launch path and not a later optimisation:** a *complete* graph costs **$8.75/tenant**
+against a **$5.70** budget (30 % of $19). Density cannot fix that — density divides the *fixed* lines, and
+this is a per-tenant line. **The window is what makes the pricing work.**
+
+**The unit of retention is a CLOSED component, not a node.** A retained hub whose neighbours were evicted
+pays for the node and still cannot complete the walk. Retaining closed neighbourhoods (1–2 hops) also
+makes EP recomputation exact (§6.3).
+
+**The policy, as researched:**
+
+| rule | why |
+|---|---|
+| **retain closed components / 2-hop closures** | closure is what makes a walk and an EP recompute correct; measured cache studies show 1-/2-hop closure prefetch raises hit ratio for **every** policy tested |
+| **cap the pin: count, bytes, AND a degree ceiling** | unconditional hub pinning is a *measured* anti-pattern ("they can thrash each other"; naive pinning scored 62.4 % miss vs LRU at 60.2 %). Degree is **U-shaped** — helpful mid-tail, harmful at the head; a single huge hub can eat a 77 MB window |
+| **window-local touch counters + admission control** | recency beats static degree ranking, and adaptive policies beat every static one measured; eviction must be budget-triggered, not per-request, or the cycle "demote a leaf → the next query needs it → re-materialise → evict another leaf" becomes a storm |
+| **reserve ≈6× the window in provisioned RAM for rebuild peaks** | **measured**: re-materialising into FalkorDB peaks at **4.9–5.9× the resting size** — a 77 MB window can transiently demand ~300–460 MB, and the engine has **no per-graph memory cap**. This is the #1 production risk. Do not shard the window into many small graphs (`NODE_CREATION_BUFFER` costs 16 384 slots each) |
+| **a walk materialises its seeds first** | search returns ids from Postgres; a non-resident seed must be written into the graph before traversing — a write on the query path, which is why the headroom above is mandatory |
+| **label what was truncated** | a confidence within 2 hops of a truncated boundary is **refused** (`degraded: "insufficient_graph"`); beyond that it may be returned as `degraded: "truncated_boundary"`. The shipped residency marker (`residency.py`, `not-hot`, `TORTOISE_RESIDENCY`) is this mechanism, and it is currently OFF |
+
+⚠️ **The honesty item:** the bounded-cache literature measures **latency and hit rate, not answer
+quality**, and the best trace-aware policy reached ~54 % hit rate for 2-hop expansions. **Whether a
+windowed graph harms retrieval quality is unmeasured anywhere** — which is why §9 measures it before the
+window is trusted, and why beta runs the graph **complete**.
+
+---
+
+## 8. Cost
+
+Rates per §17.4.1 (vendor pages, **verified 2026-10-10 — re-check before a published tier**): FalkorDB
+$43.75/GB-month provisioned at the 8 GB tier (**$58.33 per GB of graph data** after the 75 % rule);
+Postgres disk $0.125/GB; plan $25 + compute $60 per project.
+
+| | complete graph (beta) | windowed (launch) |
+|---|---|---|
+| graph per solo tenant | ~150 MB ⇒ **$8.75** | ~77 MB ⇒ **$4.38** |
+| Postgres storage | negligible | **dominant line** (multi-GB, still cents) |
+| vs the $5.70 budget | **154 %** — above, and known | **77 %** — inside |
+
+⚠️ **The Postgres side is not free of unknowns, only of cost:** under both states the dominant unmeasured
+lines are **compute tier, provisioned IOPS and egress**, driven by the **miss rate** — which nobody has
+measured (§17.4.6). The table is the storage lines and says so.
+
+---
+
+## 9. Measurement plan
+
+| # | measurement | decides |
+|---|---|---|
+| **M1** | vector move: recall@10 vs exact ground truth, p95, **and the shortfall rate at 1 % / 10 % / 50 % selectivity** | whether the move ships — a recall-only test is not sufficient (§6.1) |
+| **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the launch gate for §7 — the literature has no answer |
+| **M3** | text ranking: a BM25-capable Postgres option vs the current TF-IDF, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
+| **M4** | rebuild peak memory and latency per tenant at the real window size | the 6× headroom (§7), the #1 risk |
+| **M5** | the **miss rate** per tenant | the compute/IOPS/egress tier |
+
+---
+
+## 10. Review gate — closed
+
+Two independent adversarial reviews (memory competitors / state of practice; engineering claims) both
+returned **STANDS WITH CHANGES**; neither found a case where a RAM-resident index returns better answers
+at 10⁴–10⁶ vectors. A third and fourth pass validated the retention policy (`SOUND WITH CHANGES`) and the
+EP-state question, and their corrections are carried: closed-component retention, capped pinning with a
+degree ceiling, window-local touch counters, 6× rebuild headroom, `null`-not-0.5, and the measured
+`4.9–5.9×` rebuild peak. The corrections that *changed the decision* are recorded in §1 (no ratio as an
+input), §6.2 (text does not move) and §6.3 (EP state is not stored).
+
+**What would reopen this decision:** M2 showing a windowed graph loses retrieval quality beyond an
+accepted bound; or M1 failing the filtered-recall bar; or a measured vendor/cost change that makes a
+complete graph affordable.
+
+---
+
+## 11. Out of scope
+
+Tier prices and overage values; the compute/IOPS/egress tier; retention (`#3853`); the session cap
+(`#4010`); the `record_only` tier's scope beyond `:Point` (`#10017`); **the implementation order** —
+deliberately last, per the owner: canonical docs first.
