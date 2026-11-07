@@ -832,6 +832,14 @@ DOOR_ENTERED_PREFIX = "llm:"
 #: a bypass no longer prevents — carries them per session (``errors=[…]`` on the
 #: session's own line and in the machine record) plus a ``sessions failed: […]``
 #: line on stderr after the write.
+#:
+#: ⚠️ REPORTED, NOT SCORED — and that half is stated here rather than left to be
+#: discovered. Nothing about a failed capture stops the pass from being scored:
+#: ``main`` still exits 0 and the record's ``run.status`` is still ``"COMPLETED"``,
+#: which is the one field ``tools/capstone_verdict_check.py`` V5 reads, so a run
+#: with a failed capture is not distinguishable from a clean one BY THE GATE (a
+#: human reading the log is). Filed as **#11414**; changing the exit or the status
+#: is a gate decision, not a comment fix.
 DOOR_ENTERED_THEN_FAILED = ("error",)
 
 
