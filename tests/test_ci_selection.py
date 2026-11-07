@@ -1000,9 +1000,10 @@ def _in_tree_files_the_site_guard_opens() -> set[str]:
     it as an icon — `test_the_wordmark_is_never_used_as_an_icon` requires that no page
     does — so the page-derived half structurally cannot include it.
 
-    ⛔ TWO SHAPES ARE RESOLVED, and the boundary is stated rather than implied:
-    a literal path (`(self.WEB / "assets" / "og-tortoise.jpg")`) and a class constant
-    holding a literal (`self.ICON_PNG = "favicon.png"`, read as
+    ⛔ THREE SHAPES ARE RESOLVED, and the boundary is stated rather than implied:
+    a literal path chain (`self.WEB / "assets" / "og-tortoise.jpg"`), whether it is
+    read inline or bound to a name first (`shared = self.WEB / "assets" / "x.png"`);
+    and a class constant holding a literal (`self.ICON_PNG = "favicon.png"`, read as
     `(self.WEB / self.ICON_PNG)`). NOT resolved: a name bound at runtime — today the
     `(self.WEB / n).read_bytes()` comprehension over `(self.ICON_PNG, self.ICON_APPLE)`.
     That is deliberate and not a coverage hole: a runtime-bound reader takes its names
@@ -1019,8 +1020,11 @@ def _in_tree_files_the_site_guard_opens() -> set[str]:
     # shape `test_website_static.py` already uses for the shared card) never has the
     # chained call on the same line, so requiring it made the derivation blind to
     # exactly the shape a future author is most likely to copy — and silent about it,
-    # which is the #1349 class this test exists to close. Measured on this tree: the
-    # widened pattern yields the same two files, both already in SOURCE_PATTERNS.
+    # which is the #1349 class this test exists to close. Measured on this tree, this
+    # chain pass yields `website/assets/og-tortoise.jpg` and `website/logo.png`; the
+    # constant pass below adds the three icon files, all five already registered in
+    # SOURCE_PATTERNS, so no ratchet burden is added — it only stops the derivation
+    # being blind to a shape the guard itself already uses.
     for match in re.finditer(
             r'\.WEB\s*/\s*((?:"[^"\n]+"\s*/\s*)*"[^"\n]+")',
             src):
