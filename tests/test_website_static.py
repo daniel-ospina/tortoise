@@ -3992,9 +3992,12 @@ class TestSiteIconAndSocialPreviewContract:
     ship (PNG IHDR, JPEG SOF, ICO directory) — stdlib only, no imaging library,
     so the guard runs in the fast lane.
 
-    ⛔ WHAT THIS CAN SEE ABOUT CONTENT, AND WHAT IT STILL CANNOT. The PNG icons are
-    DECODED (`_png_palette`) and must hold at least 8 distinct colours with no colour
-    above 95% of the canvas, so a flat rectangle in place of a mark reds. The card is
+    ⛔ WHAT THIS CAN SEE ABOUT CONTENT, AND WHAT IT STILL CANNOT. Every icon is
+    DECODED (`_png_palette`) — `favicon.png`, `apple-touch-icon.png`, and the PNG
+    payloads inside `favicon.ico` (the container Windows and Edge actually draw) — and
+    must hold more than one colour with no colour above 95% of the canvas, so a flat
+    rectangle in place of a mark reds. Two colours is legitimate art and passes; the
+    measured placeholder this PR deletes reds at 99.2% one colour. The card is
     a JPEG, which this file cannot decode without dragging a wheel into the fast
     lane, so it is bounded by ENCODED SIZE (>= 40 KB) — a proxy, with its
     measurements written beside it, and it does reject a solid 1200x630 JPEG (22,016
@@ -4026,8 +4029,15 @@ class TestSiteIconAndSocialPreviewContract:
     # Recorded as a number so the relationship is ASSERTED (`FLAT_CARD_BYTES <
     # CARD_MIN_BYTES`) rather than left implicit in a comment.
     FLAT_CARD_BYTES = 22_016
-    # A decoded icon must hold at least this many distinct colours...
-    ICON_MIN_COLOURS = 8
+    # A decoded icon must hold at least this many distinct colours — TWO, because a
+    # hard-edged two-colour mark is legitimate art (pixel art, a `crispEdges` SVG
+    # export, anything without antialiasing) and a guard that reds honest artwork is a
+    # guard the next person weakens instead of fixes. This was 8, and the comment
+    # beside the check claimed "a two-colour logo would still pass at 8" — it could
+    # not, 2 < 8, so the sentence asserted the opposite of what the code did. What
+    # rejects the degenerate case is the PAIR: one flat colour trips this floor AND
+    # the dominant-colour floor below. Neither alone is enough to describe a mark.
+    ICON_MIN_COLOURS = 2
     # ...and no single colour may cover more than this fraction of its canvas.
     ICON_MAX_DOMINANT = 0.95
 
@@ -4228,6 +4238,10 @@ class TestSiteIconAndSocialPreviewContract:
                 "bpp": bpp,
                 "is_png": is_png,
                 "actual": cls._png_size(payload) if is_png else None,
+                # Kept so the CONTENT check can decode what the directory merely
+                # describes: every assertion above reads the container's claims and
+                # the payload's geometry, and a solid-colour payload satisfies both.
+                "payload": payload,
             })
         return out
 
@@ -4314,7 +4328,27 @@ class TestSiteIconAndSocialPreviewContract:
         The `rel` is asserted, not just the `href`: `<link rel="preload"
         href="/favicon.ico">` mentions the file and gives the tab no icon at all, and
         an href-only check cannot tell the two apart.
+
+        The `sizes` attribute is held to the BYTES rather than to a literal, because a
+        declared size is a promise a renderer reserves space for: a 512px re-export of
+        a 256px file is square, is >= 180, passes every size assertion — and makes all
+        14 pages lie about it. So the tag is checked against the IHDR (PNG) and against
+        the directory (ICO), which is what the tab will actually draw.
         """
+        png_w, png_h = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        ico_sizes = {
+            i["declared"][0]
+            for i in self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())
+        }
+
+        def declared_sizes(token: str) -> set[int]:
+            assert token, "the tag declares no sizes= — a renderer then guesses"
+            pairs = re.findall(r"(\d+)x(\d+)", token)
+            assert pairs, f"sizes={token!r} is not a '<w>x<h>' list"
+            assert all(a == b for a, b in pairs), (
+                f"sizes={token!r} declares a non-square slot; a tab icon is square")
+            return {int(a) for a, _ in pairs}
+
         for page in self._pages():
             links = self._links(self._head(page.read_text()))
             for href in (f"/{self.ICON_ICO}", f"/{self.ICON_PNG}"):
@@ -4322,6 +4356,19 @@ class TestSiteIconAndSocialPreviewContract:
                            for ln in links), (
                     f"{page.name} does not declare {href} as a rel=icon — a page with no "
                     "icon shows a blank tab and, on a share, no avatar")
+            for ln in links:
+                if "icon" not in ln.get("rel", "").split():
+                    continue
+                if ln.get("href") == f"/{self.ICON_PNG}":
+                    assert declared_sizes(ln.get("sizes", "")) == {png_w}, (
+                        f"{page.name} declares sizes={ln.get('sizes')!r} for "
+                        f"{self.ICON_PNG}, whose IHDR is {png_w}x{png_h} — the tag and "
+                        "the bytes must agree, or the tab reserves the wrong box")
+                elif ln.get("href") == f"/{self.ICON_ICO}":
+                    assert declared_sizes(ln.get("sizes", "")) == ico_sizes, (
+                        f"{page.name} declares sizes={ln.get('sizes')!r} for "
+                        f"{self.ICON_ICO}, whose directory holds {sorted(ico_sizes)} — "
+                        "the tag and the container must agree")
             assert any(ln.get("href") == f"/{self.ICON_APPLE}"
                        and ln.get("rel") == "apple-touch-icon" for ln in links), (
                 f"{page.name} does not declare {self.ICON_APPLE} as rel=apple-touch-icon; "
@@ -4361,10 +4408,32 @@ class TestSiteIconAndSocialPreviewContract:
         # ...and every one of them has something DRAWN on it. A 256x256 flat
         # rectangle is a valid PNG at a valid size and shows a blank tab: the
         # measured placeholder this PR deletes from the blog was exactly that shape.
-        # The floor is low on purpose (a two-colour logo would still pass at 8); what
-        # it rejects is the degenerate case, not art the next person might choose.
-        for name in (self.ICON_PNG, self.ICON_APPLE):
-            problems = self._icon_mark_violations(name, (self.WEB / name).read_bytes())
+        # ⛔ THE ICO'S PAYLOADS ARE INCLUDED. `favicon.ico` is the file Windows and Edge
+        # draw, and every assertion above reads the container's CLAIMS plus the
+        # payload's geometry — a two-entry ICO declaring 32 and 48 over solid
+        # `#060b14` payloads satisfies the entry count, the `{32,48}` set, the
+        # `declared == actual` pairing AND `(1 plane, 32 bpp)`, i.e. all of them, while
+        # rendering a blank tab. Measured on a synthesized file.
+        # ⛔ WHAT THIS DOES NOT ASSERT. The pair below answers "is anything drawn on
+        # it", not "is this the right art": one flat colour reds (dominant == 1.0) and
+        # the deleted placeholder reds at 99.2%, but a 60 KB photograph of something
+        # unrelated passes both. The distinct-colour floor is **2**, not 8: a
+        # hard-edged two-colour mark (pixel art, a `crispEdges` SVG export, any mark
+        # without antialiasing) is legitimate art and must not red — and the earlier
+        # floor of 8 did red it while this very comment claimed a two-colour logo
+        # would pass at 8. It could not, and a guard that cries wolf at honest
+        # artwork is a guard the next person weakens instead of fixes.
+        drawn: list[tuple[str, bytes]] = [
+            (f"website/{n}", (self.WEB / n).read_bytes())
+            for n in (self.ICON_PNG, self.ICON_APPLE)
+        ]
+        drawn += [
+            (f"website/{self.ICON_ICO} entry {n} ({i['declared'][0]}x{i['declared'][1]})",
+             i["payload"])
+            for n, i in enumerate(icons) if i["is_png"]
+        ]
+        for name, data in drawn:
+            problems = self._icon_mark_violations(name, data)
             assert not problems, "\n".join(problems)
 
     def test_the_wordmark_is_never_used_as_an_icon(self):

@@ -414,9 +414,21 @@ SOURCE_PATTERNS = {
                    # that prefix would also claim every CSS/JS edit in the tree and
                    # make this surface's blast radius meaningless. Same
                    # #1349/#3332/#3616 silent-drop class as the entries above.
+                   #
+                   # ALL THREE link-preview cards, because
+                   # `test_the_declared_preview_size_matches_the_file` resolves the
+                   # `og:image` of EVERY page and holds it to its declared type, its
+                   # declared size and the 40 KB content floor — including the two
+                   # campaign pages' cards. Registering only the shared one left the
+                   # other two exactly in the class this paragraph describes:
+                   # measured `select(["website/assets/investors-og.jpg"])` ->
+                   # surfaces=[], so swapping that file for a 2 KB flat rectangle ran
+                   # none of the byte assertions that reject it.
                    "website/favicon.ico", "website/favicon.png",
                    "website/apple-touch-icon.png",
                    "website/assets/og-tortoise.jpg",
+                   "website/assets/investors-og.jpg",
+                   "website/assets/design-partners-intro-og.jpg",
                    # #3673: the served skill documents and the installer belong to
                    # this surface. The parity contract between
                    # `tortoise/onboarding/SKILL.md` and its served mirror is

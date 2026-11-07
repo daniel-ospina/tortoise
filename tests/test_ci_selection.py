@@ -962,12 +962,21 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
 
     Asserted per-asset, on the surface AND on the guard file: `tests/` falls through
     to `core` on its own, so a bare "non-empty" check can pass with the wiring absent.
+
+    ⛔ ALL the cards the guard reads, not just the shared one: the same
+    `test_the_declared_preview_size_matches_the_file` resolves the `og:image` of
+    EVERY page, so `investors-og.jpg` and `design-partners-intro-og.jpg` are held to
+    the same 40 KB floor. Measured before they were listed:
+    `select(["website/assets/investors-og.jpg"])` → `surfaces: []` — a 2 KB flat
+    rectangle in place of either card ran none of the assertions that reject it.
     """
     assets = (
         "website/favicon.ico",
         "website/favicon.png",
         "website/apple-touch-icon.png",
         "website/assets/og-tortoise.jpg",
+        "website/assets/investors-og.jpg",
+        "website/assets/design-partners-intro-og.jpg",
     )
     for changed in assets:
         assert (REPO / changed).is_file(), f"the asset this test guards is gone: {changed}"

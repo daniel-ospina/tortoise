@@ -1891,9 +1891,35 @@ console.log("the blog's link preview and icon");
   );
 
   const shell = htmlPage({ head: index, body: "" });
-  for (const href of ["/favicon.ico", "/favicon.png", "/apple-touch-icon.png"]) {
-    assert(shell.includes(`href="${href}"`), `the blog shell links ${href} — the same mark as the static pages`);
-  }
+  // ⛔ THE `rel` IS PART OF THE ASSERTION, and an href-only check cannot see it:
+  // `<link rel="preload" href="/favicon.ico">` names the file and gives the tab no
+  // icon at all. `tests/test_website_static.py` was fixed for exactly this and this
+  // file was left behind, so the one surface that once shipped a SECOND, different
+  // glyph still had the false PASS the static fix was written to remove. Each
+  // `<link>` tag is read as a whole and matched on `rel` *and* `href` together.
+  const links = [...shell.matchAll(/<link\b[^>]*>/g)].map((m) => m[0]);
+  const linkAttr = (tag, name) =>
+    (tag.match(new RegExp(`\\b${name}="([^"]*)"`)) ?? [])[1] ?? null;
+  const linkWith = (rel, href) =>
+    links.find((tag) =>
+      (linkAttr(tag, "rel") ?? "").split(/\s+/).includes(rel) && linkAttr(tag, "href") === href);
+
+  assert(
+    links.length > 0,
+    "the blog shell emits <link> tags at all — an empty list would make every check below vacuous",
+  );
+  assert(
+    Boolean(linkWith("icon", "/favicon.ico")),
+    "the blog shell links /favicon.ico as rel=icon — the same ICO as the static pages (rel=preload would name the file and give the tab nothing)",
+  );
+  assert(
+    Boolean(linkWith("icon", "/favicon.png")),
+    "the blog shell links /favicon.png as rel=icon",
+  );
+  assert(
+    Boolean(linkWith("apple-touch-icon", "/apple-touch-icon.png")),
+    "the blog shell links /apple-touch-icon.png as rel=apple-touch-icon — iOS otherwise draws a page screenshot",
+  );
   assert(
     !shell.includes("favicon.svg"),
     "the blog no longer links its own SVG mark, so the tab glyph does not change between / and /blog",
