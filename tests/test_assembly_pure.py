@@ -710,8 +710,10 @@ def test_census_in_scope_recall_and_shape_rejections():
 # ══════════════════════════════════════════════════════════════════════════
 # #8775 — the R13 recency guard's bare `latest` is scoped, not dropped
 #
-# Measured over the census's 133-row temporal corpus: 5 rows carry a
-# ``_RE_RECENCY`` surface. 4 are the ORDERING BOUND "from earliest to
+# Measured over the census's 133-row temporal corpus: 5 rows carry a recency
+# surface — 5 match ``_RE_RECENCY_BARE`` (main's pre-#8775 bare-token pattern),
+# and after this narrowing only 4 match ``_RE_RECENCY``. Those 4 are the
+# ORDERING BOUND "from earliest to
 # latest" and the guard is CORRECT for them. The 5th (``0db4c65d``) is an
 # ATTRIBUTIVE "…is discussing her latest thriller novel" — a narrative
 # relative clause INSIDE an anchor the interval template already resolved —
