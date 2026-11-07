@@ -2189,14 +2189,37 @@ export PROBE_EXPECT_STATUS="200"
 export STUB_PROBE_CODES="200"
 export STUB_PROBE_RC=28                       # headers arrived, the BODY never did
 export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+# Telegram creds present on purpose: the TRANSITION PAGE is the artifact that
+# wakes the on-call, and it is the one this case must be able to assert on.
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
 run_watchdog
 assert_eq "$RC" "1" "liveness: 200 with an INCOMPLETE transfer → exit 1 (not a healthy answer)"
 assert_contains "$(created_json)" "PROD DOWN" \
   "liveness: 200 + curl_exit=28 → PROD DOWN (the body never arrived, so nothing returned)"
 assert_contains "$(created_json)" "transfer did NOT complete" \
   "the incident BODY names the real class (an incomplete transfer), not 'HTTP 200 was fine'"
+assert_contains "$(created_json)" "the body never arrived" \
+  "the incident body's VERDICT ROW names the incomplete transfer (not 'no answer … 5xx')"
+assert_not_contains "$(created_json)" "no answer (timeout / connection error / 5xx)" \
+  "…and does not fall back to the generic 'no answer' row for this class"
 assert_eq "$(count_calls 'CURL probe')" "3" \
   "liveness: an incomplete transfer is RETRYABLE, so all 3 attempts ran (no UNEXPECTED short-circuit)"
+# ⛔ THE PAGE, not just the body (#11340 review, P1). The body is the
+# diagnostic; the transition page is what actually wakes someone, and it used to
+# render `PROBE_CODE` — i.e. the HEALTHY `200` it had just read — as the reason:
+#   🔴 PROD DOWN — api.premiselabs.co (served request) probe failing (HTTP 200 after 3 attempts)
+# whose cheapest reading is "the monitor is wrong", against the one arm built to
+# be believed when it says a request did not return. Mutant this reds: put
+# `HTTP ${PROBE_CODE}` back at the page site, or fix only one of the five sites.
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "the transfer did not complete" \
+  "the transition PAGE names the refusal (an incomplete transfer), not the healthy status"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "(HTTP 200 after" \
+  "…the page must never render the healthy code as the reason for a DOWN verdict"
+assert_contains "$OUT" "verdict: DOWN (HTTP 200 but the transfer did not complete" \
+  "the RUN LOG names the refusal as well (it is the first artifact read during an incident)"
+assert_contains "$OUT" "verdict DOWN (HTTP 200 but the transfer did not complete" \
+  "the FAIL line (the GitHub-notification text) names the refusal, not the code"
 
 # The same guard must sit in the SHARED probe, not in the liveness arm: the
 # restartable API target has the identical false-PASS shape, and there a
@@ -2209,6 +2232,57 @@ run_watchdog
 assert_eq "$RC" "1" "API target: 200 with an INCOMPLETE transfer → exit 1"
 assert_contains "$(created_json)" "PROD DOWN" \
   "API target: the shared probe() applies the same rule (no arm-local special case)"
+
+# ── 100c: the DOWN REASON rides every artifact that pages (#11340 review, P1) ─
+# `down_reason()`'s other three call sites are on the REPEAT paths — the
+# still-DOWN comment and the two escalation texts — and no case drove an
+# incomplete transfer through them, so a fix applied to the transition page
+# alone (or to one escalation arm alone) would have stayed green. Both
+# escalation arms are pinned here because they are two DIFFERENT strings.
+reset_case
+seed_issue down "$((NOW - 1800))" 5 "$((NOW - 1200))" ""     # repeat past the comment throttle, sustained past the escalation gate
+export STUB_PROBE_CODES="200"
+export STUB_PROBE_RC=28
+export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export ESCALATE_ENABLED="1"
+export ESCALATE_SUSTAINED_MINUTES="20"
+export ESCALATE_MIN_RUNS="2"
+run_watchdog
+assert_eq "$RC" "1" "100c: an incomplete transfer on an ADOPTED incident → exit 1"
+assert_eq "$(num_lines "$STUB_TMP/comments.log")" "1" \
+  "100c: the still-DOWN comment fired (past the throttle) — the arm this case needs"
+assert_contains "$(comments_all)" "the transfer did not complete" \
+  "100c: the STILL-DOWN COMMENT names the refusal, not the healthy status"
+assert_not_contains "$(comments_all)" "(HTTP 200)" \
+  "100c: …and never renders '(HTTP 200)' as the reason a request failed"
+assert_contains "$OUT" "escalation outcome: page" "100c: the sustained leg paged (the arm this case pins)"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "the transfer did not complete" \
+  "100c: the HUMAN NEEDED escalation names the refusal"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "(HTTP 200)" \
+  "100c: …never '(HTTP 200)'"
+
+# The REMINDER arm is the other escalation text (e2e(n)'s seeding): a stale
+# CONFIRMED page turns the same verdict into "STILL RUNNING …".
+reset_case
+printf '%s' "{\"body\":\"<!-- watchdog-state kind=down first_failure_ts=$((NOW - 25000)) down_runs=40 last_down_ts=$((NOW - 60)) last_comment_ts=$((NOW - 60)) cap_notified_ts=0 escalate_state=sent escalate_ts=$((NOW - 7200)) page_ok_ts=$((NOW - 7200)) restarts= -->\"}" > "$STUB_TMP/issue.json"
+export STUB_SEARCH_MARKER='PROD%20DOWN'
+export STUB_SEARCH_JSON="$(search_json 42)"
+export STUB_PROBE_CODES="200"
+export STUB_PROBE_RC=28
+export STUB_PROBE_STDERR="Operation timed out after 3002 milliseconds with 10 out of 40 bytes received"
+export TELEGRAM_BOT_TOKEN="tg-token"
+export TELEGRAM_CHAT_ID="12345"
+export ESCALATE_ENABLED="1"
+export ESCALATE_SUSTAINED_MINUTES="20"
+export ESCALATE_MIN_RUNS="2"
+run_watchdog
+assert_contains "$OUT" "escalation outcome: remind" "100c(reminder): the leg reminds (the arm this case pins)"
+assert_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "the transfer did not complete" \
+  "100c(reminder): the REMINDER escalation names the refusal, not the healthy status"
+assert_not_contains "$(grep 'CURL telegram' "$STUB_TMP/calls.log")" "(HTTP 200)" \
+  "100c(reminder): …never '(HTTP 200)'"
 
 
 # ── 88b: a DOWN on the MACHINE-BACKED liveness target names the MACHINE ────

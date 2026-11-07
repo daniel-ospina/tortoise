@@ -955,9 +955,12 @@ failure_label() { # <class>
 #            route/deploy surface instead of the PKCE flow (review P2).
 PROBE_DEGRADED_REASON="status"
 
-# Sets: PROBE_VERDICT, PROBE_CODE, PROBE_FAILURE_CLASS, PROBE_EVIDENCE
-# (multi-line). PROBE_FAILURE_CLASS is the curl-level failure layer from
-# classify_failure() and is what decides whether a restart is even on the table.
+# Sets: PROBE_VERDICT, PROBE_CODE, PROBE_FAILURE_CLASS, PROBE_CURL_EXIT,
+# PROBE_INCOMPLETE_TRANSFER, PROBE_EVIDENCE (multi-line). PROBE_FAILURE_CLASS is
+# the curl-level failure layer from classify_failure() and is what decides
+# whether a restart is even on the table. PROBE_INCOMPLETE_TRANSFER is 1 when the
+# final attempt's status line looked healthy but the transfer did not complete;
+# it is what down_reason() renders instead of a bare, self-refuting code.
 # Retries DOWN verdicts (transient blips) — an UNEXPECTED verdict is a
 # deterministic answer, so it stops immediately.
 probe() {
@@ -965,6 +968,8 @@ probe() {
   PROBE_EVIDENCE=""
   PROBE_CODE="000"
   PROBE_FAILURE_CLASS="none"
+  PROBE_CURL_EXIT="0"
+  PROBE_INCOMPLETE_TRANSFER=0
   PROBE_DEGRADED_REASON="status"
 
   attempt=1
@@ -993,6 +998,11 @@ probe() {
     PROBE_CODE="$code"
     err_raw="$(cat "$err_file" 2>/dev/null || true)"
     PROBE_FAILURE_CLASS="$(classify_failure "$rc" "$err_raw")"
+    # The curl exit code of THIS attempt rides along with the code it produced:
+    # it is the second half of "why was this verdict DOWN", and the DOWN-facing
+    # prose (down_reason) cannot say it without it (#11340 review, P1).
+    PROBE_CURL_EXIT="$rc"
+    PROBE_INCOMPLETE_TRANSFER=0
     err_body="$(scrub_output "$err_raw" 300)"
     PROBE_EVIDENCE="${PROBE_EVIDENCE}attempt ${attempt}/${PROBE_ATTEMPTS}: http_code=${code} curl_exit=${rc} failure=${PROBE_FAILURE_CLASS} elapsed=${timing}s"
     [ -n "$err_body" ] && PROBE_EVIDENCE="${PROBE_EVIDENCE} curl=\"${err_body}\""
@@ -1013,6 +1023,7 @@ probe() {
     # to the same DOWN/retry class as `000` (and keeps the failure LAYER that
     # `classify_failure` already recorded, so restart eligibility is unchanged).
     if [ "$v" = "UP" ] && [ "$rc" -ne 0 ]; then
+      PROBE_INCOMPLETE_TRANSFER=1
       PROBE_EVIDENCE="${PROBE_EVIDENCE}transfer did NOT complete (curl_exit=${rc}, layer=${PROBE_FAILURE_CLASS}) although the status line was ${code} — the BODY never arrived, so this is not an answer (#10892 review round 6, P1)"$'\n'
       v="DOWN"
     fi
@@ -1050,6 +1061,29 @@ probe() {
 
   PROBE_VERDICT="DOWN"
   return 0
+}
+
+# The DOWN verdict's REASON, in words, for every artifact that wakes a human
+# (#11340 review, P1). Since #10892 a DOWN can arise from a HEALTHY status line:
+# curl emits `%{http_code}` once the RESPONSE HEADERS arrive (libcurl: "the last
+# received … response code", zero only if none was received), so a response that
+# stalls MID-BODY yields `200` with a non-zero exit code (28 = timed out) and a
+# truncated body — the `rc -ne 0` guard in probe() refuses that as an answer.
+# Rendering the refusal as "(HTTP 200)" tells the on-call the monitor is wrong
+# about the one thing the arm exists to prove, on the artifact that actually
+# wakes them: the page, the still-DOWN comment, both escalations, the run log and
+# the `fail` line. So the reason carries the refusal, not the status that
+# contradicts it.
+# It is a NO-OP for every other verdict — with no incomplete transfer this prints
+# exactly the `HTTP <code>` those call sites printed before, so UP/DEGRADED text
+# is unchanged (and `HTTP 000` DOWN still reads as itself).
+down_reason() {
+  if [ "${PROBE_INCOMPLETE_TRANSFER:-0}" = "1" ]; then
+    printf 'HTTP %s but the transfer did not complete (curl_exit=%s, layer=%s)' \
+      "$PROBE_CODE" "${PROBE_CURL_EXIT:-unknown}" "${PROBE_FAILURE_CLASS:-unknown}"
+  else
+    printf 'HTTP %s' "$PROBE_CODE"
+  fi
 }
 
 # Runner-side egress control. 0 = this runner can reach the internet. 1 = it
@@ -1746,7 +1780,14 @@ render_body() { # <kind> <kindlabel> <selfheal-note>
   local kind="$1" kindlabel="$2" heal="$3" summary what assertion
   if [ "$kind" = "DOWN" ]; then
     summary="🔴 **${PROBE_HOST_LABEL} is DOWN** — the probe got no answer from the app."
-    what="no answer (timeout / connection error / 5xx) after ${PROBE_ATTEMPTS} attempts"
+    # Same rule as down_reason(), one row lower: a DOWN whose status line was
+    # HEALTHY must say so here, or the verdict row contradicts the evidence line
+    # this same body prints verbatim (#11340 review, P1).
+    if [ "${PROBE_INCOMPLETE_TRANSFER:-0}" = "1" ]; then
+      what="an INCOMPLETE transfer after ${PROBE_ATTEMPTS} attempts — the status line was HTTP ${PROBE_CODE}, but the body never arrived (curl_exit=${PROBE_CURL_EXIT:-unknown}, layer=${PROBE_FAILURE_CLASS:-unknown})"
+    else
+      what="no answer (timeout / connection error / 5xx) after ${PROBE_ATTEMPTS} attempts"
+    fi
   else
     summary="🟠 **${PROBE_HOST_LABEL} answered unexpectedly** — the probe reached the app, but not with an expected response."
     # The verdict row is what an operator reads FIRST; it must name the ACTUAL
@@ -2101,7 +2142,7 @@ main() {
   log "escalation: enabled=${ESCALATE_ENABLED} sustained=${ESCALATE_SUSTAINED_MINUTES}m/${ESCALATE_MIN_RUNS} runs remind=${CAP_RENOTIFY_MINUTES}m recipient=$(if [ -n "${ESCALATION_CHAT_ID}" ]; then if [ "${ESCALATION_CHAT_ID}" = "${TELEGRAM_CHAT_ID}" ]; then printf 'telegram-default'; else printf 'telegram-override'; fi; else printf 'UNCONFIGURED'; fi)"
 
   probe
-  log "verdict: ${PROBE_VERDICT} (HTTP ${PROBE_CODE})"
+  log "verdict: ${PROBE_VERDICT} ($(down_reason))"
   # #4573: the independent-liveness record. Emitted for EVERY verdict (see
   # emit_heartbeat) — a working pager during an incident must not read as dead.
   emit_heartbeat "$PROBE_VERDICT"
@@ -2439,7 +2480,7 @@ The service failed ${STATE_DOWN_RUNS} probe run(s), starting $(fmt_iso "$STATE_F
       exit 1
     fi
     note "filed ${kind} incident #${issue} — ${title}"
-    page "🔴 ${kind} — ${PROBE_HOST_LABEL} probe failing (HTTP ${PROBE_CODE} after ${PROBE_ATTEMPTS} attempts). Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+    page "🔴 ${kind} — ${PROBE_HOST_LABEL} probe failing ($(down_reason) after ${PROBE_ATTEMPTS} attempts). Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
   fi
 
   # ── self-heal decision ───────────────────────────────────────────────────
@@ -2748,7 +2789,7 @@ ${heal_note}"
   else
     do_comment=1
     STATE_LAST_COMMENT_TS="$now"
-    comment_body="🔁 **Still ${kind}** — probe run #${STATE_DOWN_RUNS} failed at $(fmt_iso "$now") (HTTP ${PROBE_CODE}); down since $(fmt_iso "$STATE_FIRST_FAILURE_TS") (~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min).
+    comment_body="🔁 **Still ${kind}** — probe run #${STATE_DOWN_RUNS} failed at $(fmt_iso "$now") ($(down_reason)); down since $(fmt_iso "$STATE_FIRST_FAILURE_TS") (~$(( (now - STATE_FIRST_FAILURE_TS) / 60 )) min).
 
 ${heal_note}"
   fi
@@ -2827,9 +2868,9 @@ ${heal_note}"
       esc_why="This class is one self-healing cannot close, so nothing else will escalate it."
     fi
     if [ "$esc_decision" = "remind" ]; then
-      esc_text="🔁 STILL RUNNING for ~${esc_age_min} min (reminder) — ${esc_subject} since $(fmt_iso "$esc_anchor"); ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. Nothing has closed it. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+      esc_text="🔁 STILL RUNNING for ~${esc_age_min} min (reminder) — ${esc_subject} since $(fmt_iso "$esc_anchor"); ${STATE_DOWN_RUNS} failing probe run(s), $(down_reason). Nothing has closed it. Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
     else
-      esc_text="📟 HUMAN NEEDED — ${esc_subject} for ~${esc_age_min} min; ${STATE_DOWN_RUNS} failing probe run(s), HTTP ${PROBE_CODE}. ${esc_why} Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
+      esc_text="📟 HUMAN NEEDED — ${esc_subject} for ~${esc_age_min} min; ${STATE_DOWN_RUNS} failing probe run(s), $(down_reason). ${esc_why} Incident #${issue}: https://github.com/${REPO}/issues/${issue}"
     fi
     if page_required "$esc_text"; then
       STATE_ESCALATE_STATE="sent"
@@ -2848,7 +2889,7 @@ ${heal_note}"
     fi
   fi
 
-  fail "verdict ${PROBE_VERDICT} (HTTP ${PROBE_CODE}) — failing this run so GitHub's own notifications fire; incident: #${issue}"
+  fail "verdict ${PROBE_VERDICT} ($(down_reason)) — failing this run so GitHub's own notifications fire; incident: #${issue}"
   exit 1
 }
 
