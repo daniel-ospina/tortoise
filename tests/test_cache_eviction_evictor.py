@@ -84,11 +84,21 @@ class _Record:
 
 @pytest.fixture()
 def lane():
-    """A dedicated graph on the live lane container, dropped afterwards."""
-    import uuid
+    """A dedicated graph on the live lane container, dropped afterwards.
 
+    ⛔ The name is per-test-unique **and** journaled (#11182) — a raw
+    `FalkorDB(` client bypasses `_assert_test_graph`, so the journal entry is the
+    ONLY record that this graph is ours: without it a peer session's `scope=None`
+    sweep sees an unowned name and may `GRAPH.DELETE` it mid-test (#3074/#3214).
+    The `test_` family is what `_sweep_drop`'s fail-closed gate deletes; the old
+    `evict_…` name was outside it, so even a journaled copy would have been
+    PRESERVED and leaked. Pinned by
+    `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`.
+    """
     import redis
     from falkordb import FalkorDB
+
+    from tests._embedded import _journal_append
 
     host = _live_utils.service_host()
     port = _live_utils.docker_port()
@@ -98,7 +108,8 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    graph_name = f"evict_{uuid.uuid4().hex[:12]}"
+    graph_name = f"test_evict_{os.urandom(6).hex()}"
+    _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
     try:
