@@ -2430,7 +2430,8 @@ def _sdk_methods_on_vector_leg(
     # it carries the entity types found along the paths it can take.
     #
     # ⚠️ DECLARED BOUND (#11337): "name-resolved" is the whole claim. The callee
-    # extraction below reads `func.attr` / `func.id`, so a reach that takes a
+    # extraction ABOVE reads `func.attr` / `func.id`; the walk below collects
+    # mentions instead, so a reach that takes a
     # leg-reaching function BY REFERENCE is not an edge in this graph and the
     # closure cannot traverse it. The forms are not a list to keep current —
     # `_safe(self._review_pool, …)`, a `key=`/callback, `functools.partial`,
