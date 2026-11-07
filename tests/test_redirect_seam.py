@@ -562,12 +562,31 @@ def _thread_start_stamp_violations() -> list[str]:
     (3) re-invoking the installer changes nothing (idempotence — a non-idempotent
         installer installs a NEW function object and the identity MOVES).
 
-    ⛔ WHAT THIS CANNOT SEE, stated so nobody reads it as more: our wrapper is a
-    plain `def` and publishes no `__wrapped__`, so the chain walk STOPS at it —
-    a stale copy left by a re-executed `tortoise.projection` (same name, same
-    `__module__`/`__qualname__` that `wraps` copies, different `__globals__`) is
-    indistinguishable here from a third-party layer. This census pins that the
-    install CANNOT be what broke the stamp, not that no wrapper exists above it.
+    ⛔ WHAT THIS CANNOT SEE, stated so nobody reads it as more. Two residuals live
+    here and only ONE of them is real:
+
+    (a) A stale copy at `Thread.start` IS caught, and named. The reachability
+        check compares OBJECTS, so a different function carrying the same
+        name / `__module__` / `__qualname__` misses the chain and is reported as
+        "… marker guard bypassed, or a stale module copy". Measured at this
+        head: driving that state produces exactly that violation, so a
+        re-executed `tortoise.projection` is NOT indistinguishable from a
+        third-party layer — an earlier draft of this docstring claimed it was,
+        and that claim was false.
+
+    (b) `_ORIG_THREAD_START` is NEVER inspected. The walk follows `__wrapped__`
+        only, and this wrapper is a plain `def` that publishes none, so the
+        chain stops at it. That global is captured at import and re-captured on
+        `importlib.reload`, so after a reload it names a stale copy of this
+        wrapper (measured: `_ORIG_THREAD_START is <the pre-reload wrapper>`).
+        That particular reload state is still caught by (a), because
+        `Thread.start` holds the pre-reload object too. What nothing here can
+        see is a state where `Thread.start` is the CURRENT wrapper while
+        `_ORIG_THREAD_START` holds a stale copy: no check reads that global.
+
+    So this census pins the MARKER + REACHABILITY contract — our wrapper is
+    installed where `Thread.start` resolves, and the installer is idempotent —
+    not that the install cannot be what broke the stamp.
     """
     import threading
 
