@@ -156,8 +156,14 @@ Two readings fit the gap channel, and nothing in this artifact separates them:
 2. the delta contract suppressed genuine gap-finding, i.e. up to 12 gaps per 7
    sessions are now missed.
 
-Separating those needs the gap items classified (the artifact records each one's
-content and kind, so it is a reading task, not another measurement).
+Separating those needs the gap items classified, and the artifact supports that as a
+reading task rather than another measurement — **with one gap**: `added_items` records
+content and kind for entities, events and points, but an OPERATOR carries neither
+(`_item_record` reads `content`/`name` and `pointKind`/`kind`; an operator is keyed by
+`src`/`dst`/`op_type`), so an operator gap is recorded with `content: ""`, `kind: null`
+and its identity only inside the 160-char `key`. In the primary run 5 of 12 legacy gaps
+and 2 of 6 delta gaps are operators, so that partition needs the receipt, not just the
+artifact.
 
 ## What this does **not** measure
 

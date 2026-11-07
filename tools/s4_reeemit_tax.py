@@ -65,10 +65,10 @@ it added (gaps) and how many it corrected.
     # and the CI pin that the two renders differ at all)
     uv run python tools/s4_reeemit_tax.py dry-run --receipt …
 
-Exit codes: ``0`` measured (the report is written) · ``1`` IO (an unreadable
-receipt, a receipt with no embed list) · ``2`` refused (no
-``DEEPSEEK_API_KEY`` in the environment — a measurement that cannot call the
-model is not a zero result; a BAD FLAG also exits 2, via argparse).
+Exit codes: ``0`` measured (the report is written) · ``1`` NOT MEASURED (an
+unreadable receipt, a receipt with no embed list, **or zero usable pairs** —
+a measurement that produced no arm is not a zero result) · ``2`` refused (no
+``DEEPSEEK_API_KEY`` in the environment; a BAD FLAG also exits 2, via argparse).
 
 ⚠️ WHAT THIS DOES NOT MEASURE, stated here so the report cannot be read
 wider than it is: accuracy / chunk@20 (the eval lane's gates), and model
@@ -237,9 +237,6 @@ def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
     #     (`_accumulate_call_cost`'s sibling branch — the counter one to the left);
     #   * `deadline_aborts`      — killed by the wall clock after the provider had
     #     already been asked: billed, counted nowhere.
-    # A usage block carrying `prompt_tokens` but no `completion_tokens` fires
-    # none of them, so the recovery cross-check below also refuses a sum it
-    # cannot show is complete.
     dropped = (int(cost_acc.get("calls_without_tokens") or 0)
                + int(cost_acc.get("calls_without_usage") or 0)
                + int(stats.get("deadline_aborts") or 0))
@@ -249,6 +246,23 @@ def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
             f"{dropped} of {cost_acc.get('calls') or '?'} call(s) — rejected, "
             "usage-less or deadline-aborted)")
     if cost > 0:
+        # ⛔ A FOURTH path to a partial total, and one no counter above can see:
+        # a call that RAISED never reaches `_accumulate_call_cost` at all, so it
+        # is in neither `cost` nor any counter. `attempts` is the true running
+        # attempt count (`stats["attempts"]`, re-accumulated across escalation),
+        # and `cost["calls"]` counts the attempts that actually contributed — so
+        # a gap between them means part of the spend is missing. Comparing them
+        # is the only fail-closed check available for this path, and it needs no
+        # new production counter. (An earlier revision claimed a "recovery
+        # cross-check below" covered this; the cross-check sits BELOW the
+        # `cost > 0` early return, so it could never run here.)
+        calls = int(cost_acc.get("calls") or 0)
+        attempts = int(stats.get("attempts") or 0)
+        if attempts and calls < attempts:
+            return None, ("unmeasured (only "
+                          f"{calls} of {attempts} attempt(s) contributed a "
+                          "token count — the rest raised, billed, counted "
+                          "nowhere)")
         return cost, "stats.cost.completion_tokens"
     rec = stats.get("recovery") or {}
     healthy = int(rec.get("s4_out_tokens") or 0)
@@ -664,8 +678,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             "PREVIOUS-graph hits (max_queries=15 x limit=3, the capture's own "
             "turn echoes dropped). Relabelling the session's own list as "
             "already-in-the-graph is the maximally gap-SUPPRESSING input for a "
-            "delta contract, so the delta arm's added_by_s4 / s4_items are read "
-            "as a floor, not as production behaviour.",
+            "delta contract, so the measured saving is a CEILING and the "
+            "delta arm's added_by_s4 / s4_items read as a floor.",
             "model_id is the model REQUESTED; the served id is not recorded here.",
             "Accuracy / chunk@20 are the eval lane's gates and are NOT measured here.",
         ],

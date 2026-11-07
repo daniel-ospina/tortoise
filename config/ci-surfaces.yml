@@ -3884,8 +3884,8 @@ surfaces:
   # artifact-only diff came back `changed == []` and took the docs-only early
   # return — the #1349/#3332/#3616 silent-drop class, which `CORE_ALSO` in
   # `tools/ci_selection.py` closes. Hermetic — a fake model and `tmp_path`
-  # receipts, no DB, no graph, no network, no model call (the `run` verb needs a
-  # paid key and is never invoked by the suite) — so it is deliberately NOT
+  # receipts, no DB, no graph, no network, no model call (the `run` verb reaches the provider only
+  # with an adapter stub — the suite invokes it, but never past `_model_for`) — so it is deliberately NOT
   # carve_out-registered, for the same reason `test_journal_growth.py` isn't.
   - test_s4_reeemit_tax.py
   # #10806: the test-lane container REAPER's actuator. DB-free and docker-free
