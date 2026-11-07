@@ -4133,7 +4133,7 @@ class TestSiteIconAndSocialPreviewContract:
                     elif ftype == 3:
                         line[i] = (line[i] + (a + b) // 2) & 0xFF
                     elif ftype == 4:
-                        line[i] = (line[i] + paeth(a, b, c)) & 0xFF
+                        line[i] = (line[i] + a) & 0xFF
                     else:
                         raise AssertionError(f"bad PNG filter {ftype}")
             prev = line
