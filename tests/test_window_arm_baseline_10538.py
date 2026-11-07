@@ -171,9 +171,15 @@ def test_the_retention_recount_agrees_with_a_hand_count():
 
 
 def test_the_shipped_geometry_is_net_zero_and_loses_sole_representatives():
-    """The measured fact the whole open ruling rests on: at ``window=12`` the arm
-    widens by 2 and drops 2, and the two it drops are the SOLE visible
-    representatives of their sessions. Nothing in the repo pinned this before."""
+    """The measured fact the non-eviction ruling RESTED on: at ``window=12`` the
+    arm widens by 2 and drops 2, and the two it drops are the SOLE visible
+    representatives of their sessions. Nothing in the repo pinned this before.
+
+    ⚠️ "RESTED on", not "rests on" (review cycle 6): the owner ruled on this
+    fact on 2026-11-07 and the guard now refuses exactly these picks — the
+    question this test's premise leaves open is PLACEMENT, not eviction (see the
+    module docstring). A premise that still calls eviction undecided is how a
+    later lane argues the guard's refusal is the bug to remove."""
     pool = _pool([("sA", 10), ("sB", 1), ("sC", 1), ("sD", 1), ("sE", 1),
                   ("sF", 1)])
     order, picks = _fused(pool, window=SHIPPED_WINDOW)
