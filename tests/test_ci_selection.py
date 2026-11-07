@@ -19656,6 +19656,30 @@ def test_journal_growth_guard_runs_on_a_tool_or_probe_change():
         assert "test_journal_growth.py" in r["test_files"], (changed, r)
 
 
+def test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change():
+    # #11385 (review P1): `tests/test_s4_reeemit_tax.py` (registered `core`) pins
+    # the instrument that produces the PR's headline number — a vacuous A/B (both
+    # arms rendering the same prompt), a PARTIAL cost total published with a
+    # total-looking basis, an error path that discards the spend of the expensive
+    # arm, a corrections channel an items-not-in-S2 filter silently drops, and an
+    # empty test whose scope diverged from production's. BOTH guarded paths are
+    # flat NON_PYTHON_PREFIXES entries (`tools/`, `docs/`) matching no
+    # SOURCE_PATTERNS row, so without the CORE_ALSO entries a tool-only or
+    # artifact-only diff was filtered out BEFORE the "not matched -> core"
+    # fallback and the pins never ran on the files they hold (the
+    # #1349/#3332/#3616 silent-drop class, same shape as
+    # `tools/journal_growth.py` above). The evidence path is listed because the
+    # suite re-derives the committed `ab-*.json` artifacts' headline figures, so
+    # an artifact-only edit must select the pins that read it.
+    for changed in ("tools/s4_reeemit_tax.py",
+                    "docs/evidence/1789-s4-reeemit-tax/README.md",
+                    "docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json"):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, r)
+        assert r["surfaces"] == ["core"], (changed, r)
+        assert "test_s4_reeemit_tax.py" in r["test_files"], (changed, r)
+
+
 def test_dashboard_deploy_script_change_selects_core_not_tier1():
     # PR #8852 review P2: `website/apps/dashboard/deploy.sh` is the documented
     # manual deploy, and the #8816 guard (`tests/test_e2e_wrangler_prewarm.py`,
