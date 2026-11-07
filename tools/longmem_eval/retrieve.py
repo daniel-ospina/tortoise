@@ -1052,9 +1052,14 @@ def _tr_complete_sessions(
         # ``seeded_sessions`` above keys through ``retrieval.session_key_of``,
         # which resolves a product turn hit from its wire ``sessionId``; a
         # splice that read ``h.get("session_id")`` matched NOTHING on a
-        # camel-only pool, so the arm fetched, reported ``seeded: N`` and
-        # injected zero. On an eval pool both resolve to the same snake id, so
-        # this is a no-op there (the #8713 census cannot move).
+        # camel-only pool, so the seed fires and the splice then matches
+        # nothing. No in-repo pool reaches that shape: BOTH eval annotators
+        # stamp ``session_id`` AND ``lme_session_index`` on every hit, and both
+        # outrank the camel leg — so this is CONSISTENCY HARDENING (a
+        # hand-built or future product-shaped pool cannot silently un-fix the
+        # seam), not a measurement of a live defect. On an eval pool both
+        # expressions return the same snake id, so the #8713 census cannot
+        # move.
         last_index: dict[str, int] = {}
         for i, h in enumerate(pool):
             sid = session_key_of(h)

@@ -259,12 +259,17 @@ falsified two specifics of the issue text. They are **not** adopted:
    collisions (212 shared dataset ids across the 100-question tail cohort) never
    co-exist in one graph. **Residual:** a content-addressed seed point shared across
    Sessions expands every containing Session (`WITH DISTINCT s` dedups, does not
-   constrain). **SEED limitation — CLOSED by #10540:** a product turn Point carries
-   no `session_id` PROPERTY, so `session_key_of` used to key a turn HIT as the
-   per-hit phantom and a turn hit could not seed; it now also reads the camel
-   wire identity `sessionId` that the product's point fetch emits from the
-   `Session CONTAINS` edge, so a turn hit seeds its own session and the injected
-   group anchors after that session's own base ranks. The GRAPH side is unchanged:
+   constrain). **SEED limitation — CLOSED at the IDENTITY layer by #10540:** a
+   product turn Point carries no `session_id` PROPERTY, so `session_key_of` used
+   to key a turn HIT as the per-hit phantom and a turn hit could not seed; it now
+   also reads the camel wire identity `sessionId` that the product's point fetch
+   emits from the `Session CONTAINS` edge, so a turn hit CAN seed its own session
+   and the injected group then anchors after that session's own base ranks.
+   **Not the ARM:** no caller under `tortoise/` invokes the fetch/merge (every
+   call site is `tools/longmem_eval/retrieve.py`), so the arm is still off in the
+   product; and every pool it consumes today carries `session_id` +
+   `lme_session_index` on every hit (`_annotate_hits`), both of which outrank the
+   camel leg — see `session_reinjection`'s module docstring for the full scope. The GRAPH side is unchanged:
    the fetch still scopes by `(s:Session)-[:CONTAINS]->(p:Point)` and still returns
    `coalesce(p.session_id, s.id)`, because the missing thing was the hit's
    PASSAGE-side identity, never the Point property.

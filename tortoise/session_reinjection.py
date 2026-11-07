@@ -73,9 +73,9 @@ ONE bounded graph pass:
    within the product every containing Session is a legitimate source
    session, but a seed shared across sessions widens the fetch.
 
-   ✅ SEED identity — CLOSED by #10540 AT THE AUTHORITY, and the closure
-   is the whole point of that change. The fetch TARGET was already
-   product-real; the SEED gate was blind, because the pool key authority
+   ✅ SEED identity AT THE IDENTITY LAYER — closed by #10540. The fetch
+   TARGET was already product-real; the SEED gate
+   was blind, because the pool key authority
    (``retrieval.session_key_of``) read the snake ``session_id`` prop ONLY and
    the product's point fetch POPS that prop from EVERY point hit it returns
    (turn and extracted alike — ``sdk.tortoise_fts_query`` builds the entry,
@@ -87,38 +87,35 @@ ONE bounded graph pass:
    join (that lane dedups with its own ``ask_session_key``, and the arm is
    off in the product).
 
-   ⛔ **TWO BOUNDS on that closure, named rather than implied** — the
-   authority now reads the wire spelling, but a pool that does not CARRY it
-   still cannot seed:
-
-   * **An id outside the render allowlist.** The wire value is sanitised at
-     the producer (``_safe_session_tag``, strip + allowlist), so a session
-     whose id fails it — e.g. a caller-supplied ``"session/2026-11-05
-     10:00"`` — arrives as ``sessionId: ""``. The reader calls it UNKNOWN
-     and the pool calls it a phantom, i.e. they AGREE, and such a session
-     is still unseedable. That is the render sanitiser's shape (and
-     #9599's padded/odd-id question), not this change's.
-   * **An ANNOTATED pool** (the eval pipeline's only shape).
-     ``tools/longmem_eval/retrieve.py::_annotate_hits`` emits
-     ``lme_session_index`` from ``p.get("lme_session_index", -1)`` — an
-     ABSENT prop is COERCED into an explicit ``-1`` — and stamps
-     ``session_id`` from the Point props. An absent index therefore keys
-     as ``idx:-1``, which OUTRANKS the camel leg (it must: the index leg is
-     what keeps #8713's census byte-identical), so the camel leg is
-     structurally unreachable there and the arm still seeds nothing on an
-     annotated product pool. Filed separately; fixing it is a change to the
-     annotation, not to this authority.
-
    ``session_key_of`` now also reads the CAMEL wire identity ``sessionId``,
    which is the spelling the product's own point fetch emits: it resolves the
    session from ``n.sessionId`` / the snake prop / the ``:Session CONTAINS``
    edge and then pops the snake key (``sdk.tortoise_fts_query``), i.e. the
    reader ALREADY saw the identity (``retrieval.hit_session_id`` → ``[session
-   A]``) while the pool one layer below it did not. So a RAW turn hit seeds
-   its own session, and :func:`reinjection_merge_order` anchors that
-   session's injected group after its own base ranks. (The defensive tail is
-   NOT the pre-fix symptom and not a fallback either: a group only exists for
-   a key in ``seed_order``, whose own pool hit always supplies an anchor
+   A]``) while the pool one layer below it did not. So a turn hit CAN seed its
+   own session, and :func:`reinjection_merge_order` anchors that session's
+   injected group after its own base ranks.
+
+   ⛔ SCOPE of the closure in this section — it is the IDENTITY, not the ARM.
+   Three facts a reader must not lose: (1) **no caller under ``tortoise/``
+   invokes this module** — every call site is the eval driver
+   (``tools/longmem_eval/retrieve.py``) — so the arm is still OFF in the
+   product, exactly as the ASK-lane sentence above says; (2) every pool
+   the arm consumes today is built by ``_annotate_hits``, which stamps
+   ``session_id`` AND ``lme_session_index`` on EVERY hit
+   (``tools/longmem_eval/retrieve.py``), both of which outrank the camel leg —
+   and it COERCES an absent index into an explicit ``-1``
+   (``p.get("lme_session_index", -1)``), which keys ``idx:-1`` and outranks the
+   camel leg the same way — so on today's only live path the camel branch is
+   not reached at all; and (3) an id OUTSIDE the render allowlist is emitted
+   by the fetch as ``sessionId: ""`` (``_safe_session_tag``, applied at the
+   producer), so the reader calls it UNKNOWN and the pool calls it a phantom —
+   they AGREE, and such a session (a caller-supplied ``"session/2026-11-05
+   10:00"``) is still unseedable. What #10540 changes is what the AUTHORITY
+   answers for a product-shaped hit; it does not wire the arm, it does not
+   widen the allowlist, and it moves no eval-visible key. (The defensive tail
+   is NOT the pre-fix symptom and not a fallback either: a group only exists
+   for a key in ``seed_order``, whose own pool hit always supplies an anchor
    rank, so an absent group key is DROPPED by the merge rather than tailed —
    see :func:`source_session_chunk_pass`; pinned by
    ``tests/test_session_reinjection_rules.py::test_an_unseeded_group_key_is_``

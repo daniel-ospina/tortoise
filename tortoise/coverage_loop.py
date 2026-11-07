@@ -449,8 +449,9 @@ def _session_of(hit: dict, session_key: Callable[[dict], str] | None = None) -> 
     from every point hit) — censused as a phantom, so for a
     captured-session pool of TURN hits this census counted zero real
     sessions. #10632's own instrument INHERITED that blindness rather than
-    covering it (``reader_window_displacement`` keys through this same
-    function and filters the ``idx:*`` namespace, so it reported
+    covering it (``reader_window_displacement`` keys through the same
+    AUTHORITY, ``retrieval.session_key_of`` — which this function delegates
+    to — and filters the ``idx:*`` namespace, so it reported
     ``sessions_before = 0`` for such a pool); a hit whose session was
     present in a spelling the authority read was never affected.
     """
