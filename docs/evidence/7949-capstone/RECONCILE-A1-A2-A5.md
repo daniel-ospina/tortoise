@@ -422,12 +422,13 @@ done
                                                           # that happened late is not on page 1, so the
                                                           # command prints NOTHING and "nothing" reads as
                                                           # "no closed event". The failure is POSITIONAL,
-                                                          # not "timeline over 100 events": #11021 above has
-                                                          # 91 events and its close is in page 1, so it
-                                                          # prints — let that close drift past event 100 and
-                                                          # the same command would print nothing. No count is
-                                                          # quoted here on purpose: it drifts. A truncated
-                                                          # check is worse than none.
+                                                          # not "timeline over 100 events": #11021's close
+                                                          # sits inside page 1, so the command prints — push
+                                                          # that same close past event 100 and it would print
+                                                          # nothing. No count is quoted here on purpose: a
+                                                          # count drifts, and quoting one is how this note
+                                                          # got it wrong twice. A truncated check is worse
+                                                          # than none.
 git rev-parse origin/main                                 # 80c912244 — the squash commit IS the tip
 git fetch origin 78e8abae6b2cabc67d2cba75c53bfe7757c232e6   # BY SHA: the branch moved on, so
                                                           # without this the next line exits 128
