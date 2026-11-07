@@ -646,6 +646,8 @@ mechanisms:
       - _value_slot_divergence
       - _refuse_rewritten_value
       - _value_slots
+      - _state_value_verbatim_enforced
+      - STATE_VALUE_VERBATIM_SWITCH
     note: >-
       WHAT IS NOW MECHANICAL (neither half is prompt text):
       (1) A NON-VERBATIM VALUE IS NOT SILENTLY WRITTEN. `_refuse_rewritten_value`
@@ -1314,6 +1316,40 @@ mechanisms:
       `_refuse_rewritten_value` + the `_mint_endpoint` guard make a rewritten
       value *unreachable*; and the residual list above is STATED rather than
       absorbed.
+      (p) THE ENFORCEMENT HAS ITS OWN OFF-SWITCH, AND WHAT IT RESTORES IS
+      STATED (2026-11-07 `#10360`). `TORTOISE_STATE_VALUE_VERBATIM` — the
+      module's ONE read of it, `_state_value_verbatim_enforced`, through the
+      `env_truthy` contract — defaults to **ON**, so unset, blank or unparseable
+      resolves ON and a typo can never silently disarm the guarantee. It is read
+      once per POINT at the emit site and handed to the rule as `armed=` (so the
+      hard-cut disclosure and the refusal cannot read two different answers for
+      one point), and the rule reads it itself when a caller passes none — so a
+      future second emit path inherits the switch rather than bypassing it. An
+      explicit falsy spelling (`0`/`false`/`no`/`off`) makes the emit site take
+      NO judgment: no refusal, no hard-cut disclosure, and no
+      `refused_value_contents` / `refused_value_slots` entry, so
+      `_mint_endpoint`'s resurrection guard cannot fire either — a rewritten
+      value is WRITTEN and re-mintable, i.e. the pre-#10513 REFUSAL semantics,
+      which is what a rollback has to mean (a switch that disarmed the refusal
+      while leaving the mint guard armed would be half-armed: it would close one
+      door and not the other). ⚠️ What OFF does NOT restore, so "rollback" is not
+      read as "byte-identical to the old build": the #10513 MINT-site changes are
+      not behind this switch — `_mint_endpoint`'s token-safe content cut and the
+      S5 quote's ABSENT-on-hard-cut behaviour stay as `main` ships them. Neither
+      withholds a memory. What the switch also does NOT move is the JUDGMENT —
+      `_value_slot_divergence` / `_value_slots` keep their verdicts, so flipping
+      it never re-derives a tolerance battery. It exists because this is the one
+      rule in the module that WITHHOLDS a durable memory: an over-blocking
+      refusal in production has to be reversible without a deploy. Pinned on both
+      arms by
+      `test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write`,
+      `test_the_off_switch_leaves_the_MINT_guard_off_too`,
+      `test_the_off_switch_does_not_move_the_JUDGMENT`,
+      `test_the_off_switch_is_read_at_ONE_site`,
+      `test_the_off_switch_is_INTRINSIC_so_a_second_call_site_cannot_bypass_it` and
+      `test_the_off_switch_is_declared_in_the_env_contract`. It is advertised to
+      operators in `.env.example` (this repo's env contract) with its default,
+      its revert trigger and what a revert does NOT undo.
 
 
   - id: atomic_point_write
@@ -1368,7 +1404,36 @@ mechanisms:
       as `Cls.name` — including a tuple target, a subscript target and a NESTED
       class `Outer.Inner.name`, or a class body that GUARDS its binding with
       `if` / `for` / `try` / `with` — or a collection that mixes a complete
-      statement with an incomplete fragment) wherever it is used. What no static
+      statement with an incomplete fragment) wherever it is used — ACROSS MODULES
+      TOO, and not only along an import edge: the taint is the UNION of every scanned
+      file's tainted spellings, so a fragment bound in one module and used in another
+      is refused even when the two modules never import each other — with ONE shape
+      excepted, which this pin does NOT reach: a SUBSCRIPT target (`D["k"] = …`)
+      mints only a receiver-qualified `expr:` key, so `carrier.D["k"]` completed in
+      another module is reported as neither found nor assembled (measured: `found`
+      holds the binding, `assembled` is empty; identical on `main`, which makes it a
+      DETECTOR gap and not a property of this pin — tracked, with two remedies, on
+      #9901). Keying on the
+      SPELLING is what makes that reach, and it is deliberately fail-CLOSED: a
+      coincident name in an unrelated module refuses too (a false block on a name
+      nobody assembled, never a false pass on one that was). A RENAME that hides the
+      spelling — `from a import X as Y` re-exported and used as `Y` — is followed to a
+      fixpoint over the import graph, with a RELATIVE import resolved through
+      `node.level` (its dots live there and not in `node.module`, so a
+      `module.startswith(".")` test never fires). An attribute target also mints its
+      FINAL name FOR THE TAINT TEST, so `self._ddl` bound here and `OBJ._ddl` used
+      there is refused too; the JOIN that names the completed statement keeps the
+      receiver-qualified spelling only (a final name in the join's binding map made a
+      colliding key `rebound` and took the keyword-split join with it — measured, and
+      pinned). That join therefore stays per-module, so a cross-module fragment is
+      reported as an unverifiable USE rather than classified — the refusal polarity,
+      never a reading of absence. The JOIN is the one place that is per-module: a
+      statement SPLIT across two modules, where the keyword half is not itself a
+      fragment the scan recognises (`carrier.PREFIX = "CREATE "` joined with
+      `"CONSTRAINT pt UNIQUE NODE Point"` in another module), is NOT joined and is
+      therefore not reported — measured, identical on main before this change, and no
+      such shape exists under `tortoise/`; it is a detector gap on #9901, not a
+      property of the refusal. What no static
       scan reaches is stated as EXAMPLES rather than as a closed list — a fragment
       whose keyword lives entirely outside the scanned module (handed in by a
       helper or a default argument), a lookup resolved dynamically

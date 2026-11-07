@@ -5187,8 +5187,63 @@ def _write_span_is_hard_cut(text: object, cap: int) -> bool:
     return _write_span(s, cap, hard_cut_single_token=False) == ""
 
 
+#: #10360 — the ONE name of the carve-out's write-path switch. Every read of
+#: it goes through `_state_value_verbatim_enforced`, so the guarantee has one
+#: switch rather than a second spelling per call site (`#4097`'s lesson).
+STATE_VALUE_VERBATIM_SWITCH = "TORTOISE_STATE_VALUE_VERBATIM"
+
+
+def _state_value_verbatim_enforced() -> bool:
+    """#10360: is the write path's verbatim-value refusal ARMED? (default: YES)
+
+    The off-switch of the carve-out's enforcement — the one control an operator
+    has over a rule that WITHHOLDS a durable memory, and the reason it can be
+    shipped at all: a refusal that over-blocks in production must be reversible
+    without a deploy.
+
+    Resolution is `env_truthy.env_flag`'s (#4097), so ``TORTOISE_STATE_VALUE_VERBATIM``
+    unset / blank / unparseable → **ON**: a typo can never silently disarm the
+    guarantee, which is the only safe direction for a default-ON gate.
+
+    ⛔ **What OFF restores, stated exactly, because "off" has to mean a rollback.**
+    With the switch off the emit site takes no judgment at all: no refusal, no
+    hard-cut disclosure, and — the half that is easy to miss —
+    ``refused_value_contents`` / ``refused_value_slots`` stay empty, so
+    `_mint_endpoint`'s resurrection guard cannot fire either. A rewritten value is
+    then WRITTEN, and an operator naming it re-mints it, exactly as the pre-#10513
+    REFUSAL path did. Anything less would leave a half-armed guard that refuses one
+    door and not the other.
+
+    ⛔ **What OFF does NOT restore, stated so "rollback" is not read as "byte-identical
+    to the old build":** the #10513 changes at the MINT site are not behind this
+    switch — `_mint_endpoint`'s token-safe content cut and the S5 quote's
+    ABSENT-on-hard-cut behaviour stay exactly as `main` ships them. Neither
+    withholds a memory, so the rollback's purpose (undo an over-blocking refusal)
+    is served; an operator who expected pre-#10513 mint bytes would not get them,
+    and that is recorded here rather than discovered.
+
+    ⛔ **What OFF does NOT change:** the JUDGMENT. `_value_slot_divergence` and
+    `_value_slots` keep returning what they return (they are the production value
+    engine, shared with `value_gate`/#4899), so the switch moves the DOOR, never
+    the classifier — an operator can flip it, re-measure, and flip it back without
+    re-deriving a tolerance battery.
+
+    ⛔ **One read per POINT, plus a FALLBACK for a caller that passes none:** the
+    emit site reads it once for the point and hands the answer to
+    `_refuse_rewritten_value` as ``armed``, so the hard-cut disclosure and the
+    refusal cannot disagree about the same point; a caller that hands none in
+    makes the rule read it itself (measured on a 3-point batch: the helper is
+    called exactly 3 times — once per point, never twice). So a future second
+    emit path inherits the switch instead of restoring a refusal nobody can turn
+    off. All reads go through this helper, which is the module's ONE `env_flag`
+    read of the name.
+    """
+    return env_flag(STATE_VALUE_VERBATIM_SWITCH, True)
+
+
 def _refuse_rewritten_value(content: object, quote: object, *,
-                            warnings: list[str]) -> bool:
+                            warnings: list[str],
+                            armed: bool | None = None) -> bool:
     """#10360: True when this point must NOT be written — its value was rewritten.
 
     The ENFORCEMENT half of the carve-out, in the write path rather than in
@@ -5217,7 +5272,20 @@ def _refuse_rewritten_value(content: object, quote: object, *,
     The refusal is deliberate and REPORTED: the warning quotes both values and
     the verbatim one, so the rewrite is recoverable from the run without the
     original session.
+
+    ⛔ **The off-switch is checked HERE, not only at the caller** (review round 2,
+    P3). A caller-side gate alone is bypassed by the next call site someone adds —
+    a second emit path wiring this rule would silently restore a refusal nobody
+    can turn off. Intrinsic means every caller inherits the switch; it returns
+    `False` with no warning, so the OFF arm collects no refused key and
+    `_mint_endpoint`'s guard stays off with it. A caller that has already resolved
+    the switch for THIS point passes it as ``armed`` (the emit site does), so the
+    disclosure and the refusal cannot read two different answers for one point.
     """
+    if armed is None:
+        armed = _state_value_verbatim_enforced()
+    if not armed:
+        return False
     diverged = _value_slot_divergence(content, quote)
     if not diverged:
         return False
@@ -9852,7 +9920,14 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # cut cycles 14/15/17 removed elsewhere; the S5 site asks for `""`
         # instead of judging). Fail OPEN with the reason NAMED, so the unjudged
         # point is visible in the run rather than silently covered.
-        _hard_cut = (
+        # #10360: the off-switch, read once for THIS POINT and handed to the rule
+        # (`armed=`), so the hard-cut disclosure and the refusal can never read two
+        # different answers for one point. ⛔ NOT a batch-level read: an earlier
+        # revision claimed one and the code did not have it — the rule re-read the
+        # value, so a mid-batch flip suppressed the disclosure and wrote the
+        # divergent value with no warning (review round 2, P3, reproduced).
+        _value_fidelity_judged = _state_value_verbatim_enforced()
+        _hard_cut = _value_fidelity_judged and (
             _write_span_is_hard_cut(_raw_content, _MAX_CONTENT)
             or _write_span_is_hard_cut(
                 str(p.get("quote") or "").strip(), _MAX_QUOTE)
@@ -9865,7 +9940,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "NOT judged on this pair (fail-open; the cut can read a value "
                 "short, which is not evidence of a rewrite)"
             )
-        elif _refuse_rewritten_value(content, quote, warnings=warnings):
+        elif _refuse_rewritten_value(content, quote, warnings=warnings,
+                                     armed=_value_fidelity_judged):
             # ⚠️ BOTH keys are needed, and cycle 5's "only the clamped one"
             # reading was WRONG (cycle 6 measured it): the clamped key matches a
             # ref `_mint_endpoint` truncates, while the unclamped key is what it
@@ -11812,7 +11888,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         # `span_start`/`span_end`/`span_source` verbatim, so an entry that guessed
         # the cue's own `rule_id` (the S4 prompt renders the whole embed list, so
         # the shape is visible) shipped a `span_source` naming a text that does not
-        # index it, and skipped the `_MAX_QUOTE` clamp on the way — the exact
+        # index it, and skipped the `_MENTION_CAPS["quote"]` clamp on the way — the exact
         # address defects the two branches above fix (review cycle 5, P2). Routing
         # it through `_mention_record` keeps the cue's `rule_id`/`reason` the carry
         # exists for, while clamping the quote first and demoting an unverified
@@ -12125,6 +12201,50 @@ def _mention_rule(surface: str, rule_id: object) -> str:
     return _referentiality.RULE_CHANNEL
 
 
+def _verified_span_source(*, declared: str, surface: str, quote: str,
+                          narrative: str, span_start: int | None,
+                          span_end: int | None) -> str:
+    """The ONE verdict on a DECLARED span: ``declared`` if it verifies, else ``"model"``.
+
+    ``span_source`` is a provenance claim — ``quote``/``narrative`` say "the cue
+    derived these offsets in THAT text", ``"model"`` says "the model asserted these
+    bytes". Honouring a declaration that does not verify publishes an address whose
+    label names a text it does not index, which is the forgery #11021 exists to
+    stop; demoting a declaration that DOES verify relabels a cue-derived address as
+    model-invented. Both builders therefore need the SAME answer for the same
+    input, so the rule lives here and nowhere else (#11368).
+
+    The two builders each carried a copy before this. They agreed only because
+    three spellings of 200 happened to agree (``_MAX_QUOTE``, the ``[:200]``
+    literal, ``_MENTION_CAPS["quote"]``), and a no-test change to one of them made
+    ``_mention_record`` store a 250-char quote while ``_clamped_mention`` stored 200
+    for the same entry — a green suite over a false provenance label.
+
+    ⚠️ TWO exceptions, stated deliberately and applied on BOTH sides:
+
+    - an absent **narrative** is an UNKNOWABLE haystack, not a failed verification.
+      ``narrative`` defaults to ``""`` in both builders (``execute_embed``'s
+      ``story_arc``), so demoting on it relabelled a genuinely cue-derived address
+      (review at ``40a0a81e6``, P2; re-verified at ``0c15ad04d``).
+    - an absent **quote** is a definite MISMATCH: ``"quote": null`` is IN the output
+      contract and ``commit_schema.Mention.quote`` defaults to ``""``, so there is
+      no text to address — exempting it shipped a ``quote``-labelled span into a
+      record with no quote, and a consumer resolving ``quote[start:end]`` read bytes
+      that do not exist (review at ``1a7072e22``, P2).
+
+    Only ``quote`` and ``narrative`` are verifiable declarations; any other value
+    (``"model"``, junk, absent) is ``"model"``, which is also what a failed
+    verification returns — the honest name for "the model said so".
+    """
+    if declared not in ("quote", "narrative"):
+        return "model"
+    if declared == "narrative" and not narrative:
+        return declared
+    haystack = quote if declared == "quote" else narrative
+    wanted = (span_start, span_end)
+    return declared if _mention_span(haystack, surface) == wanted else "model"
+
+
 def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
                     rule_id: str, reason: str, narrative: str,
                     quote: str, span: dict | None = None) -> dict:
@@ -12158,10 +12278,13 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
     span per ``span_source`` reads the wrong bytes").
 
     ⚠️ TWO exceptions, both stated rather than implied, and BOTH builders apply
-    them: an absent **narrative** is UNKNOWABLE (no haystack was supplied, so the
-    declaration stands unchecked instead of being relabelled ``"model"``), while
-    an absent **quote** is a MISMATCH (``"quote": null`` is in the output
-    contract, so there is no text to address).
+    them because BOTH call :func:`_verified_span_source` — the single home of the
+    declared-space rule (#11368; it was coded twice here and in
+    :func:`_clamped_mention`, agreeing only by coincidence of two 200s): an absent
+    **narrative** is UNKNOWABLE (no haystack was supplied, so the declaration stands
+    unchecked instead of being relabelled ``"model"``), while an absent **quote** is
+    a MISMATCH (``"quote": null`` is in the output contract, so there is no text to
+    address).
 
     ⛔ ``isinstance(True, int)`` is ``True``, and ``True`` is not an offset: a
     boolean offset is DROPPED, not coerced to ``1``. ``commit_schema.validate_span``
@@ -12171,13 +12294,21 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
     # ⛔ STRIP **THEN** CAP: `_clamped_mention` now strips before capping too, so a
     # padded surface over the cap is the same name on both builders — capping
     # first left `"i"` here and `"itx"` there (review at `d785f3da8`, P3).
-    surface = str(surface or "").strip()[:200]
+    # ⛔ EVERY cap is read from `_MENTION_CAPS`, never spelled here (#11368). The
+    # literals these lines used to carry (`200`, `_MAX_QUOTE`, `60`) were a SECOND
+    # spelling of the clamp builder's caps, and the two builders agreed only for as
+    # long as the spellings happened to agree — moving THIS builder's own literal
+    # (`_MAX_QUOTE`) left the record storing a 250-char quote while `_clamped_mention`
+    # stored 200 for the same entry, with no test reddening (review at `7aa10dad8`,
+    # P3: the operands are not interchangeable — moving `_MENTION_CAPS["quote"]`
+    # instead moves the CLAMP and leaves this builder, the mirror image).
+    surface = str(surface or "").strip()[:_MENTION_CAPS["surface"]]
     # ⛔ The record's own text is CLAMPED FIRST, because the span is located in it:
     # locating in the unclamped quote and then storing 200 chars shipped
     # `span_source: "quote"` with offsets pointing past the end of the quote the
     # record names — an address that resolves to nothing, which is worse than no
     # address (review cycle 3, P2).
-    quote = str(quote or "")[:_MAX_QUOTE]
+    quote = str(quote or "")[:_MENTION_CAPS["quote"]]
     span_start: int | None = None
     span_end: int | None = None
     span_source = ""
@@ -12207,26 +12338,18 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
                 # `span_start=3, span_end=9, span_source="quote"` against
                 # `quote[3:9] == ' quick'` for surface `the problem`), and
                 # `validate_payload_dict` accepts it (review cycle 4, P2).
-                if declared == "quote":
-                    verified = _mention_span(quote, surface)
-                elif declared == "narrative":
-                    # ⛔ AN ABSENT NARRATIVE IS AN UNKNOWABLE HAYSTACK, not a
-                    # failed verification — the rule `_clamped_mention` states and
-                    # pins. `narrative` defaults to `""` in BOTH builders, so
-                    # demoting on it relabelled a genuinely cue-derived address as
-                    # `"model"` AND made the two builders disagree about WHICH TEXT
-                    # the same offsets address: the two-answers class this PR
-                    # closes (review at `40a0a81e6`, P2; re-verified at
-                    # `0c15ad04d`). `_clamped_mention`'s comment named the
-                    # divergence as known and this side as the incorrect one; they
-                    # now agree. An absent QUOTE stays a definite MISMATCH
-                    # (`"quote": null` is in the output contract).
-                    verified = (_mention_span(narrative, surface)
-                                if narrative else (span_start, span_end))
-                else:
-                    verified = None
-                span_source = (declared
-                               if verified == (span_start, span_end) else "model")
+                # ⛔ ONE VERDICT, ONE HOME (#11368): :func:`_verified_span_source`
+                # is the single implementation of the declared-space rule, and
+                # `_clamped_mention` calls the SAME function. The two builders each
+                # carried their own copy before, agreeing only by coincidence of
+                # `_MAX_QUOTE == _MENTION_CAPS["quote"] == 200` — a false PASS on the
+                # label (a `span_source` asserting a verification the sibling
+                # builder would not perform), with no test reddening when the
+                # spellings drifted.
+                span_source = _verified_span_source(
+                    declared=declared, surface=surface, quote=quote,
+                    narrative=narrative, span_start=span_start,
+                    span_end=span_end)
         except Exception:
             span_start, span_end, span_source = None, None, ""
     else:
@@ -12248,7 +12371,7 @@ def _mention_record(*, surface: str, claim: dict, kind_guess: str | None,
             "span_start": span_start,
             "span_end": span_end,
             "span_source": span_source,
-            "kind_guess": (kind_guess or "")[:60] or None,
+            "kind_guess": (kind_guess or "")[:_MENTION_CAPS["kind_guess"]] or None,
             "rule_id": _mention_rule(surface, rule_id),
             "reason": reason}
 
@@ -12370,6 +12493,36 @@ _MENTION_FIELDS: tuple[str, ...] = (
 #: line, so an unarmed run copies no channel entry at all (the earlier comment
 #: here claimed the opposite — a docstring describing behaviour the code does not
 #: have, review P2).
+#: ⛔ EVERY cap either mention builder applies, and the ONLY place they read one
+#: from (#11368 — a builder-local `200`/`60` is how the two builders drifted while a
+#: green suite reported parity).
+#:
+#: ⛔ These ceilings are ``commit_schema.Mention``'s, NOT the Point's. The schema
+#: pins them independently (`surface`/`quote` max_length 200, `kind_guess` 60) and a
+#: value above one 422s the WHOLE payload, so `quote` is deliberately NOT derived
+#: from `_MAX_QUOTE`: deriving it made a legitimate raise of the POINT's cap
+#: (`tests/test_extractor_v2.py::test_point_quote_cap_matches_its_mirrors` tells a
+#: lane to move `_MAX_QUOTE` and `Point.quote.max_length` together) drag this
+#: builder past `Mention.quote`'s own 200 and lose the session (review at
+#: `d02ed2ccc`, P3 — measured: that raise left the clamp emitting a 250-char quote
+#: `Mention` rejects; the old 200 was the CLAMP's alone — `_mention_record` cut
+#: at the Point's `_MAX_QUOTE` and was over-cap too). Both caps are EQUAL, and
+#: `tests/test_referentiality_11021.py::test_both_builders_read_every_cap_from_ONE_source`
+#: pins `quote <= _MAX_QUOTE` — a mention never stores more of the quote than the
+#: point it anchors to, so NOT equality (that red-ed an instructed raise of the
+#: POINT's cap) — and `<= Mention.<field>.max_length`, the payload's real relation.
+#:
+#: ⚠️ Equal CEILINGS are not the same string: this module holds the mention's `quote`
+#: VERBATIM (`str(q)[:_MENTION_CAPS["quote"]]`) while the point stores
+#: `_write_span(str(q).strip(), _MAX_QUOTE)` — STRIPPED. So for a padded carrier
+#: quote the two cuts are the same length and different strings, and a `"quote"` pair
+#: verified here resolves to other bytes in the point's quote. **Pre-existing** (both
+#: builders cut it that way before #11368) and out of scope HERE: it is tracked as
+#: **#11303**, whose fix is this module's own — cut the mention's quote through
+#: `_write_span(str(q).strip(), _MAX_QUOTE)` so both sides index ONE haystack. It is
+#: NOT #11239's slice: #11239 is the Point-side persistence of `mentions` (DM1's home
+#: declared and unfulfilled), and a reader sent there for THIS defect would find the
+#: write doors, not the haystack (review at #11376, P2).
 _MENTION_CAPS: dict[str, int] = {"surface": 200, "quote": 200, "kind_guess": 60}
 #: The only values ``commit_schema.Mention.span_source`` accepts.
 _MENTION_SPAN_SOURCES = ("quote", "narrative", "model")
@@ -12527,31 +12680,28 @@ def _clamped_mention(m: dict, *, narrative: str = "") -> dict | None:
     if declared not in _MENTION_SPAN_SOURCES:
         record.pop("span_source", None)
     elif declared in ("quote", "narrative") and "span_start" in record:
-        haystack = (str(record.get("quote") or "") if declared == "quote"
-                    else str(narrative or ""))
-        # ⛔ THE AMNESTY IS `narrative`-ONLY. An absent NARRATIVE is not a failed
-        # verification: `execute_embed`'s `story_arc` defaults to `""`, so a
-        # caller that omits it (every test, any seam) otherwise DEMOTED a
-        # genuinely cue-derived `narrative` address to `"model"` — telling a
-        # consumer that resolves the span per `span_source` that the cue invented
-        # offsets it derived (review at `5da3575b7a`, P2).
-        # ⛔ An absent QUOTE is the opposite: `"quote": null` is IN the output
-        # contract, and `Mention.quote` defaults to `""`, so an empty quote is a
-        # definite MISMATCH, never an unknown. Exempting it (the first cut of this
-        # guard did) shipped a `quote`-labelled address into a record that has no
-        # quote — the caller resolves `quote[start:end]` to bytes that do not
-        # exist, which is the forgery this branch is (review at `1a7072e22`, P2).
-        want = (record["span_start"], record["span_end"])
-        # A `quote` address is ALWAYS checkable (an empty quote is a definite
-        # mismatch); a `narrative` one only when a haystack was supplied — the
-        # offsets cannot be checked here, so that declaration stands. `narrative`
-        # defaults to `""` in BOTH builders, so this is not an exemption this
-        # side makes and the record builder declines: :func:`_mention_record`
-        # applies the SAME rule (review at `40a0a81e6`, P2 — the earlier note here
-        # described the divergence as known and this side as the correct one).
-        checkable = declared == "quote" or bool(haystack)
-        if checkable and _mention_span(haystack, surface) != want:
-            record["span_source"] = "model"
+        # ⛔ ONE VERDICT, ONE HOME (#11368): the declared-space rule lives in
+        # :func:`_verified_span_source` and `_mention_record` calls the SAME
+        # function. This block used to be a second copy of it — the same rule in two
+        # places, agreeing only while `_MAX_QUOTE ==` the record builder's `[:200]`
+        # literal `== _MENTION_CAPS["quote"]`. That equality was coincidence, not a
+        # pin: moving one spelling left the two builders publishing DIFFERENT quotes
+        # and different verdicts for the same entry with a green suite.
+        #
+        # The rule the helper carries, stated here because this is where it is
+        # consumed: an absent NARRATIVE is an UNKNOWABLE haystack, not a failed
+        # verification (`execute_embed`'s `story_arc` defaults to `""`, so a caller
+        # that omits it otherwise DEMOTED a genuinely cue-derived `narrative` address
+        # to `"model"` — review at `5da3575b7a`, P2), while an absent QUOTE is a
+        # definite MISMATCH (`"quote": null` is IN the output contract and
+        # `Mention.quote` defaults to `""`, so there are no bytes to address —
+        # exempting it shipped a `quote`-labelled address into a record with no quote,
+        # review at `1a7072e22`, P2).
+        record["span_source"] = _verified_span_source(
+            declared=declared, surface=surface,
+            quote=str(record.get("quote") or ""),
+            narrative=str(narrative or ""),
+            span_start=record["span_start"], span_end=record["span_end"])
     # ⛔ A SPACE LABEL AND ITS OFFSET PAIR ARE ONE ADDRESS, and this clamp used to
     # publish either half alone (review at `d785f3da8`, P2): a surviving pair with
     # no declared space shipped with NO `span_source` — and `Mention`'s own field

@@ -322,3 +322,125 @@ def test_an_identifier_only_entity_name_is_gated_on_the_projection_seam(
     assert sdk._get_proj().g.query(
         "MATCH (o:Object {id:$id}) RETURN o.name", params={"id": "obj-pathed"},
     ).result_set, "the Object must still be written"
+
+
+# ── the shipped surface, and the subordination it must NOT claim ──────────
+#
+# `#11086`'s Indicator is *"`TORTOISE_EMBED_GATE` is set in each shipped config
+# surface that exists"*, and its Target is *"a deployment built from the shipped
+# config rejects identifier-only rows with no operator action"*. Before this
+# change the probe reported `set ON in: none`, so enforcement was opt-in and
+# DoD row 1 stayed PARTIAL on that condition alone.
+#
+# ⚠️ The second half of that sentence is why the pins below exist: the shipped
+# template also carried a claim that BOTH gates are subordinate to VET, which no
+# source records. `docs/epics/2026-11-04-5090-vector-layer/02-research.md` states
+# the opposite and names the mistake — *"a lane that folded it in on the strength
+# of 'one rule set, two enforcement points' would be inventing a subordination no
+# source records"* — so the EMITTER (`vet_enabled`) and the CONSUMER (the
+# submission seam) are both pinned rather than left to prose.
+
+_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _assignment_sources(module: Path, name: str) -> list[str]:
+    """Every `name = …` / `name: … = …` source segment in `module`."""
+    import ast
+
+    src = module.read_text(encoding="utf-8")
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            seg = ast.get_source_segment(src, node)
+            if seg:
+                out.append(seg)
+    return out
+
+
+def _function_source(module: Path, name: str) -> str:
+    import ast
+
+    src = module.read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return ast.get_source_segment(src, node) or ""
+    raise AssertionError(f"no function {name!r} in {module}")
+
+
+def test_the_shipped_template_arms_both_gates():
+    """`#11086`: the default is STATED in the shipped surface, not left to `unset`.
+
+    ⛔ Non-vacuity — this reds on the head it repairs. At the pre-fix head
+    `.env.example` set NEITHER flag (`set ON in: none`), so a deployment built
+    from the shipped config had the gate off with no operator action: the
+    failure `TEST-DESIGN-surface-map.md` calls **SF1** (*"A deployment built from
+    the shipped config still has the gate off and CI is green"*).
+
+    Only uncommented lines count — a `# TORTOISE_EMBED_GATE=1` comment is not a
+    default, which is the same shape `tools/dod_5090_probe.py` refuses.
+    """
+    template = (_ROOT / ".env.example").read_text(encoding="utf-8")
+    live = [line.strip() for line in template.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")]
+    assert f"{_FLAG}=1" in live, (
+        "the shipped template does not arm the EMBED gate, so a deployment "
+        "built from it keeps the gate off with no operator action (SF1)")
+    assert f"{value_gate.ENV_FLAG}=1" in live, (
+        f"the shipped template does not state {value_gate.ENV_FLAG}, so "
+        f"`set ON in` cannot name the surface the DoD condition reads", live)
+
+
+def test_the_VET_pass_folds_the_VALUE_gate_and_never_the_EMBED_gate():
+    """v4 §S2.2 subordinates the VALUE predicate to VET — and only that one.
+
+    `EXTRACTOR-V4-ARCHITECTURE.md` §S2.2 says the *mechanical half* —
+    `tortoise/value_gate.py` (`#4899`) — *"must default ON and stay subordinate
+    to VET"*, because the predicate runs **inside** `vet_gate.vet_candidates`:
+    armed on its own it would be inert. `extractor_v2.py` realises that as
+    `vet_enabled = (vet_arbiter is not None or _vet_enabled() or
+    _value_gate_enabled())`.
+
+    ⚠️ The EMBED gate is a different question at a different step, and folding
+    it in would be a *behaviour* change dressed as consistency: `02-research.md`
+    records it as the invented subordination. Pinned here so the prose cannot
+    drift back — a doc claim is only as good as the code that agrees with it.
+    """
+    segs = _assignment_sources(_ROOT / "tortoise" / "extractor_v2.py", "vet_enabled")
+    assert segs, "no `vet_enabled = …` assignment found — did the pass move?"
+    for seg in segs:
+        assert "_value_gate_enabled" in seg, (
+            "the VALUE gate is no longer folded into `vet_enabled`; v4 §S2.2 "
+            "requires it to be (on its own it would be inert):\n" + seg)
+        assert "embed_gate" not in seg, (
+            "`vet_enabled` now folds the EMBED gate. EXTRACTOR-V4-ARCHITECTURE.md "
+            "§S2.2 subordinates the VALUE predicate (#4899) only; the EMBED gate "
+            "answers a different question at the submission seam, and "
+            "02-research.md records that folding it in 'would be inventing a "
+            "subordination no source records':\n" + seg)
+
+
+def test_the_EMBED_flag_is_read_at_the_submission_seam_only():
+    """ONE read site, and it is `encode_for_row` — not the VET pass, not a writer.
+
+    The population, not a spot check: if a second module starts reading
+    `embed_gate_enabled()`, either the gate gained a second enforcement point
+    (which §12.2a's "one seam" contract forbids) or something folded it into a
+    pass that was never subordinated to it.
+    """
+    readers = sorted(
+        p.relative_to(_ROOT).as_posix()
+        for p in (_ROOT / "tortoise").rglob("*.py")
+        if "embed_gate_enabled" in p.read_text(encoding="utf-8", errors="ignore")
+    )
+    assert readers == ["tortoise/embed_gate.py", "tortoise/embeddings.py"], (
+        "`embed_gate_enabled` is read outside the submission seam: " + repr(readers))
+    seam = _function_source(_ROOT / "tortoise" / "embeddings.py", "encode_for_row")
+    assert "embed_gate.embed_gate_enabled()" in seam, (
+        "`encode_for_row` no longer consults the gate, so the predicate is "
+        "enforced nowhere even though the flag is armed")

@@ -92,7 +92,11 @@ from tortoise.projection import (
 # measurement gate's raw reader_refusal marker uses EXACTLY the vocabulary
 # the tortoise reader abstains with (never the _abs question-id marker).
 from tortoise.reader import _looks_abstained as _reader_abstained
-from tortoise.sdk import TortoiseSDK
+
+# C2 (#2518 indicator 2): the ONE resolver for the dense half's switch — the
+# read path calls the same function, so the fingerprint cannot record an arm
+# different from the one the retrieval ran.
+from tortoise.sdk import TortoiseSDK, _entity_key_dense_enabled
 
 # #8488: the lexical-arm DECLINE key. Imported from its ONE home (the module
 # that writes it) rather than re-spelled here — the whole point of the key is
@@ -1575,6 +1579,20 @@ def _model_id(model: Any) -> str | None:
     return _adapter_fingerprint(model)
 
 
+def _resolved_dense_arm(entity_key_expansion: bool | None) -> bool | None:
+    """The C2 dense half's fingerprint value (#2518 indicator 2).
+
+    ``True`` only when the arm could actually have FIRED — i.e. the dense
+    switch is armed AND the sparse lever it is a parity of is on. Stamping an
+    armed-but-inert env var recorded an arm the retrieval did not run and
+    refused an equivalent resume over it (``CheckpointStaleError``; review
+    finding, PR #11459). ``None`` otherwise, so a disarmed run's fingerprint
+    stays byte-identical to a pre-feature checkpoint's.
+    """
+    return (True if (entity_key_expansion and _entity_key_dense_enabled())
+            else None)
+
+
 def _build_fingerprint(*, reader_model: str, judge_model: str,
                        ks: tuple[int, ...], top_k: int, split: str,
                        ingest_mode: str, extractor_model: Any,
@@ -1594,6 +1612,16 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # C2 knob (a boosted/expanded checkpoint resumed
                        # without the arm is refused by the fingerprint gate).
                        entity_key_expansion: bool | None = None,
+                       # C2 (#2518 indicator 2): the DENSE half's arm, resolved
+                       # from ``TORTOISE_ENTITY_KEY_DENSE``. CONDITIONAL presence
+                       # like the sibling C2 knobs: absent (``None``) while the
+                       # half is disarmed, so an existing checkpoint's
+                       # fingerprint stays byte-identical; an ARMED run stamps
+                       # ``True``, so a dense-armed checkpoint can never be
+                       # resumed by a dense-disarmed run (whose per-question
+                       # retrieval would silently be the sparse-only arm — the
+                       # A/B arm-blending class the fingerprint gate exists for).
+                       entity_key_dense: bool | None = None,
                        # C6 (#2520, #2513): the time-aware query expansion
                        # arm — conditional presence like the sibling C-arm
                        # knobs (an armed checkpoint resumed without the arm
@@ -1840,6 +1868,12 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
+            # C2 (#2518 indicator 2): the DENSE half's arm. Conditional presence
+            # (``None`` unless it is actually armed) so a dense-off run keeps
+            # the byte-identical fingerprint its checkpoints already carry, and
+            # a dense-armed run cannot be resumed as (or blended into) the
+            # measured sparse-only arm.
+            ("entity_key_dense", entity_key_dense),
             ("time_aware_qe", time_aware_qe),
             ("coverage_loop", coverage_loop),
             # #2513 (#10629 review): the guard's cap — conditional presence
@@ -4560,6 +4594,20 @@ def run_evaluation(
         # fingerprint — an expanded checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         entity_key_expansion=bool(entity_key_expansion),
+        # C2 (#2518 indicator 2): the RESOLVED dense-half arm. Conditional by
+        # construction — ``_resolved_dense_arm`` is the ONE resolver, and it asks
+        # the same ``_entity_key_dense_enabled()`` the read path asks, so the
+        # checkpoint fingerprint cannot record an arm the gate could not have
+        # run. Reported as ``None`` while disarmed so a pre-feature checkpoint's
+        # fingerprint is unchanged. The REPORT's methodology block carries the
+        # same value under its own key (``entity_key_dense`` in ``r1_knobs``).
+        # BOTH levers must be on: the dense half is a PARITY of the sparse one,
+        # so with ``entity_key_expansion`` off the read path provably cannot run
+        # it (the gate short-circuits) and stamping it would record an arm the
+        # retrieval did not run — and refuse an equivalent resume
+        # (``CheckpointStaleError``) over an inert env var (review finding,
+        # PR #11459). Only an arm that could have fired is fingerprinted.
+        entity_key_dense=_resolved_dense_arm(entity_key_expansion),
         # #8486: the resolved belief-layer arm — an armed checkpoint can never
         # be resumed without it (the resumed outcomes would carry no activation
         # manifest and the run would be EP-inert for exactly those questions).
@@ -5905,6 +5953,20 @@ def run_evaluation(
             # arm — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them).
             "entity_key_expansion": bool(entity_key_expansion),
+            # C2 (#2518 indicator 2): the DENSE half's arm. Its own key, and
+            # not folded into the line above, because the two halves are
+            # separable in an A/B: without this the published methodology block
+            # of a dense-armed run is BYTE-IDENTICAL to the measured
+            # sparse-only arm's, and an adoption decision reads the delta as
+            # belonging to an arm whose dense lever was off (review round 2,
+            # PR #11459). ``None`` when it could not have fired — stated
+            # explicitly rather than omitted, so the methodology always answers
+            # "which dense arm" while the FINGERPRINT omits the key entirely
+            # (its conditional-presence convention keeps a disarmed
+            # checkpoint's fingerprint byte-identical). The two are not
+            # symmetric on purpose: a report must be unambiguous, a fingerprint
+            # must not drift.
+            "entity_key_dense": _resolved_dense_arm(entity_key_expansion),
             # C6 (#2520, #2513): the time-aware query expansion arm —
             # recorded verbatim in the methodology (published numbers carry
             # which A/B arm produced them).

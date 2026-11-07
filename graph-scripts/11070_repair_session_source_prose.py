@@ -349,6 +349,13 @@ def main() -> int:
             # not reach stdout or `--json` (`candidate_detail` is printed). A
             # whitelist is what keeps a FUTURE internal key from leaking by
             # default; a blacklist of today's two names does not.
+            #
+            # ⛔ `duplicate_session_rows` IS ON THE LIST ON PURPOSE (#11176). The
+            # census dedupes a `:Source` reached by two `:Session` rows, and a
+            # dedupe that is not REPORTED hides the graph-health signal in the
+            # one instrument that scans every Source — it is an int, so it
+            # carries no utterance, and the operator's verification run is the
+            # only place a duplicate-`:Session` population would ever be seen.
             found = find_session_sources_carrying_prose(proj.g)
             report = reconcile_session_source_prose(
                 proj.g, read_transcript=read_transcript, dry_run=True,
@@ -356,7 +363,8 @@ def main() -> int:
             report["candidate_detail"] = [
                 {key: node.get(key) for key in (
                     "url", "session_id", "turn_max_index",
-                    "summary_bytes", "search_text_bytes")}
+                    "summary_bytes", "search_text_bytes",
+                    "duplicate_session_rows")}
                 for node in found]
     finally:
         if proj is not None:
@@ -461,8 +469,15 @@ def main() -> int:
                   f"re-derive, or with --clear-without-record to take the "
                   f"clear-only arm deliberately.", file=sys.stderr)
     for node in report.get("candidate_detail") or []:
+        # A duplicate `:Session` at one `sessionId` (#11176) is graph-health, not
+        # noise: it is what made the node count twice, and the census is the only
+        # surface that sees it. Printed ONLY when non-zero, so a clean run's
+        # report is unchanged.
+        dupes = node.get("duplicate_session_rows") or 0
+        extra = f" duplicate_session_rows={dupes}" if dupes else ""
         print(f"          {node['url']}: summary={node['summary_bytes']}B "
-              f"_searchText={node['search_text_bytes']}B session={node['session_id']}")
+              f"_searchText={node['search_text_bytes']}B session={node['session_id']}"
+              f"{extra}")
     for url, note in (report.get("notes") or {}).items():
         print(f"          ⚠️ {url}: {note}")
     if args.repair:

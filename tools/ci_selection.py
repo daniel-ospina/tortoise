@@ -2521,6 +2521,26 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::test_journal_growth_guard_runs_on_a_tool_or_probe_change.
              "tools/journal_growth.py",
              "docs/evidence/5612-journal-growth/probes/",
+             # #11385 (review P1): the S4 re-emit tax's instrument
+             # (`tools/s4_reeemit_tax.py`) owns `tests/test_s4_reeemit_tax.py`,
+             # registered `core`, and the shape is the same one directly above:
+             # `tools/` and `docs/` are flat NON_PYTHON_PREFIXES entries and
+             # neither path matches a SOURCE_PATTERNS row, so before these
+             # entries a tool-only diff came back with `changed == []`, took the
+             # docs-only early return, and the pins (a vacuous A/B, a PARTIAL
+             # cost total published as a total, a corrections channel an
+             # items-not-in-S2 filter silently drops) never ran on the file they
+             # guard — the #1349/#3332/#3616 silent-drop class. The BUNDLE path
+             # is here for a different reason than #5612's probe: `tests/
+             # test_s4_reeemit_tax.py::test_every_committed_artifact_reconciles_
+             # with_its_own_rows` reads the committed `ab-*.json` artifacts and
+             # re-derives each published summary from its own rows, so an
+             # artifact-only edit must select the pin that reads it. (That pin
+             # asserts internal consistency, not a literal figure, because a
+             # re-taken measurement replaces the artifacts.) Pinned by
+             # tests/test_ci_selection.py::test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change.
+             "tools/s4_reeemit_tax.py",
+             "docs/evidence/1789-s4-reeemit-tax/",
              # ⛔ NO `docs/evidence/7949-capstone/probes/` ROW. #9080 did add
              # one, and it was DEAD: `"docs/evidence/7949-capstone/"` above is
              # the whole bundle prefix and matching is `path.startswith()`, so
@@ -3033,6 +3053,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # TOOL_CARVEOUTS) because the gate is hermetic (a committed JSON snapshot, no
              # graph, no URI, no network) and `core` is where its suite is registered.
              "tools/ci_runner_labels.py",
+             # #11435 review P1: the topology/reconcile tool, the same shape one file over.
+             # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches
+             # `tools/ci_runner_topology.py`, so `select(["tools/ci_runner_topology.py"],
+             # "pull_request", load_manifest())` returns `surfaces: []` and
+             # `tests/test_ci_runner_topology.py` is ABSENT from `test_files` — the
+             # `config/ci-surfaces.yml` row is CLASSIFICATION only and does not select the arm.
+             # MEASURED at this head: surfaces=[], the suite absent. Consequence: a PR reverting
+             # the engage-capacity gate, the dry-run projection or the fixture refusal would merge
+             # GREEN with none of its own pins executed — the #1349/#3332/#3616 silent-drop class.
+             # CORE_ALSO (not TOOL_CARVEOUTS) because the suite is hermetic (a committed fixture,
+             # a stubbed transport; no graph, no URI, no network) and `core` is where it is
+             # registered. Pinned by
+             # tests/test_ci_selection.py::test_runner_topology_tool_change_selects_core_not_tier1.
+             "tools/ci_runner_topology.py",
              # #11047: `tools/gh_read_cache.py` is the SAME shape — a hermetic tool whose entire
              # guard (`tests/test_gh_read_cache.py`) lives in `core`. ⛔ No case count is stated:
              # this note said "241 collected cases" while the suite already collected 276 at

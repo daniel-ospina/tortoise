@@ -981,6 +981,75 @@ def test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs():
         "predicate is never asked (default `success()` skips the red ones)")
 
 
+def test_the_docs_point_the_aggregates_needs_citation_at_the_needs_line():
+    """Two docs cite the required aggregate's `needs:` BY LINE; both must land on it.
+
+    `needs:` here IS the required-check surface (#5215 I5): a lane editing that list
+    from a doc's anchor edits whatever line the anchor names. PR #11429 inserted 24
+    lines above the aggregate, and only ONE of the two cites was re-cut —
+    `docs/ops/ci-runner-x64.md` moved to `:4975`, while `docs/00_index.md`'s #5215 row
+    stayed on `:4951`, which is the `python-ci-gate:` JOB HEADER. Nothing parses that
+    row's number, so no check red, and the next reader is landed 24 lines early.
+
+    Both cites are therefore pinned against the workflow itself — and against EACH
+    OTHER, since one re-cut without the other is exactly how this went stale.
+
+    Non-vacuity (measured at the pre-fix head, #11429 review cycle 5): the index row
+    cited `:4951`, whose content is `python-ci-gate:` rather than `needs:` — the
+    landing check reds on that line alone, before agreement is even considered.
+
+    Mutation: add or remove a line above the aggregate in `python-ci.yml` without
+    re-cutting the docs -> RED, naming each doc, the line it cites, what is actually
+    there, and where the list really is.
+    """
+    import re
+
+    workflow_lines = (REPO / ".github" / "workflows" / "python-ci.yml").read_text(
+        encoding="utf-8").splitlines()
+
+    # Located by CONTENT, not by a literal: a pin that knew the number already could
+    # agree with a stale doc by accident, which is the defect this test exists for.
+    header = next((i for i, line in enumerate(workflow_lines)
+                   if re.fullmatch(r"\s*python-ci-gate:\s*", line)), None)
+    assert header is not None, (
+        "`python-ci-gate` is no longer a job in python-ci.yml — this pin's anchor is "
+        "gone, so re-anchor it rather than deleting it")
+    needs_at = next((i + 1 for i, line in enumerate(workflow_lines[header:], start=header)
+                     if re.match(r"\s+needs:", line)), None)
+    assert needs_at is not None, (
+        "the aggregate carries no `needs:` under its header — the required-check "
+        "surface this test locates no longer exists in the shape it reads")
+
+    # doc -> a phrase on the SAME line that the cited number is there to support.
+    claims = {
+        "docs/00_index.md": r"python-ci-gate\.needs",
+        "docs/ops/ci-runner-x64.md": r"required aggregate's `needs:`",
+    }
+    cite = re.compile(r"python-ci\.yml:(\d+)")
+    wrong: list[str] = []
+    for rel, claim in claims.items():
+        lines = (REPO / rel).read_text(encoding="utf-8").splitlines()
+        found = [(n, int(m.group(1)))
+                 for n, line in enumerate(lines, start=1) if re.search(claim, line)
+                 for m in cite.finditer(line)]
+        assert found, (
+            f"{rel} no longer carries the claim this pin anchors ({claim!r}) — re-anchor "
+            "the pin onto wherever the claim moved; deleting it leaves the number "
+            "unchecked, which is the staleness #11429 review cycle 5 found")
+        for doc_line, cited in found:
+            landed = (workflow_lines[cited - 1].strip()
+                      if 1 <= cited <= len(workflow_lines) else "")
+            if not landed.startswith("needs:"):
+                wrong.append(f"{rel}:{doc_line} cites python-ci.yml:{cited} "
+                             f"({landed or 'past EOF'!r})")
+
+    assert not wrong, (
+        "the required aggregate's `needs:` list is at "
+        f"python-ci.yml:{needs_at} on this head, but " + "; ".join(wrong) +
+        f". Re-cut every cite to :{needs_at} — `needs:` is the required-check surface, "
+        "so a lane editing the list from a stale anchor edits the wrong line (#11429).")
+
+
 # --- #10911: the cancelled-run wedge, and why the obvious fix is a FALSE PASS ----
 
 def _condition_holds(expr, *, run_cancelled: bool, legs_failed: bool) -> bool:
