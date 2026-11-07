@@ -5615,8 +5615,8 @@ def test_a_PHANTOM_leaf_block_does_not_EXEMPT_the_strict_arm():
 
         `-` + `    code` + `<br />` + `     -     Closes #100`
             renderer `<ul><li>code<br /><ul><li><pre><code>Closes #100` -> CODE
-            `[]` at the branch point `origin/main` `80c912244`, `[100]` from #11186 (`1177c6708`,
-            still at the tip `3861f0a10`) — a FALSE PASS `main` carried until #11330 fixed `strict`.
+            `[]` in `strict` at the branch point `origin/main` `80c912244`; `[100]` from #11186
+            (`1177c6708`) — a FALSE PASS `main` carried until #11330 fixed `strict`.
 
     The mechanism is the strict arm's own declared over-blank feeding the guess: `strict` blanks
     `    code`, so no paragraph looks open, so `<br />` is read as a legal type-7 opener (§4.6: type
@@ -5931,6 +5931,64 @@ def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
     blank = "x\n- 1.\n  2.     Closes #100\n"
     assert keyword_types(blank) == {"code_block"}, blank
     assert answers(blank) == [False, False, False, False], blank
+
+
+def test_the_INDENT_pops_DECLARED_strict_false_PASS_is_PINNED():
+    """Round-59 review, P2 — a DECLARED residual that had NO pin, so it could move silently.
+
+    The indent-pop note at `_leaves_no_paragraph` declares this family as STILL a false PASS at
+    this head, and names the owning issue — but no test built the body, so the declaration was
+    prose only, and the file's own convention (`⚠️ DECLARED RESIDUAL`, and the
+    `test_the_TYPE_7_neighbour…` above) is that a known gap is PINNED so it cannot move silently:
+
+        `- 2.` + `    - x` + `x` + `2.     Closes #100`
+            renderer `<pre><code>` -> CODE, so GitHub does NOT fire the keyword
+            `origin/main` `fc3f0e687`: `[]` lenient / `[100]` in BOTH `strict` arms
+            THIS HEAD: IDENTICAL (`[False, False, True, True]`) — `claims()` `[100]`
+
+    ⛔ THIS IS A SHARED DECLARED TRADE WITH `main`, NOT A REGRESSION FROM IT, and pinning both sides'
+    SHA is the point. `strict` is the arm `issue_process_lint` reads a carrier body through, so
+    `[100]` there is a CLASS-A false PASS in that gate — the SAME answer `main` gives.
+    `tools/closes_landing.py` declares the mechanism and its cost (the record would have to survive
+    the one-line clearing at the top of the loop, and both candidate terms measured ~110 lost closes
+    each in the arm `in_flight_markers` and the comment-body read go through); **#11369** owns it and
+    is OPEN. This pin does not decide that fix.
+
+    ⚠️ MEASURED WHILE WRITING THIS PIN, RECORDED BECAUSE IT IS WHAT THE #11369 FIXER NEEDS: this body
+    is NOT on the path that the declarations' own candidate terms govern. Six mutations were run
+    against the module and EVERY ONE left this answer at `[F, F, T, T]` — un-gating the indent pop's
+    `prev_prose` (declared INERT), narrowing the round-55 gate to `if lazy_marker:`, disabling the
+    top-of-loop clearing, `prev_para_depth` → `prev_quote_depth`, dropping the indent pop's record
+    assignment, and removing the `not _html_opened_here` exemption. So this is a REGRESSION LOCK on a
+    measured answer, NOT a detector for those fixes: a green here is not evidence that a candidate
+    term works. The answer IS body-sensitive (dropping the `x` line blanks all four arms; dropping
+    `    - x` credits all four), and that is what keeps the assertion about the computed answer
+    rather than about a constant. `keyword_types` keeps the fixture honest — if the body drifts out
+    of the rendered CODE shape, this reddens here instead of pinning a mutation.
+    """
+    cl = _load_module()
+    md = MarkdownIt("commonmark")
+
+    def keyword_types(body: str) -> set[str]:
+        return {t.type for t in md.parse(body) if "Closes #100" in getattr(t, "content", "")}
+
+    def answers(body: str) -> list[bool]:
+        """All four arms: lenient, lenient+`indented_code`, `strict`, `strict`+`indented_code`."""
+        return [100 in cl.parse_closing_refs(cl.strip_code(body, **kw))
+                for kw in ({}, {"indented_code": True},
+                           {"strict": True}, {"strict": True, "indented_code": True})]
+
+    sys.path.insert(0, str(ROOT))
+    from tools import issue_process_lint as ipl
+
+    body = "- 2.\n    - x\nx\n2.     Closes #100\n"
+    assert keyword_types(body) == {"code_block"}, body
+    assert answers(body) == [False, False, True, True], body   # DECLARED: should be [] x 4
+    assert ipl.claims(body)["closing"] == [100], body          # DECLARED: the arm-1 false PASS
+    # …and the `strict`-only shape is the discriminator: the LENIENT arms are already blank. A fix
+    # that moved only one of the two columns would otherwise be indistinguishable here.
+    assert cl.parse_closing_refs(body) == [], body
+    assert cl.parse_closing_refs(body, None, strict=True) == [100], body
 
 
 def test_the_leaf_veto_reads_the_PARAGRAPHS_depth_not_the_last_lines():

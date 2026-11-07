@@ -2571,8 +2571,10 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 # with NOTHING open is an indented block, and its pop moves no paragraph.
                 # ⛔ THE RECORD IS STILL GATED ON `prev_prose` AT BOTH POPS, AND THAT IS THE STATE
                 # THIS HEAD SHIPS — the `- 2.` family below is NOT fixed here. What the round-52 fix
-                # changed was WHERE the fact is recorded (from the POP, so the indent-pop no longer
-                # needs `prev_prose` to have been true at the previous line), not the gate itself:
+                # changed was WHERE the fact is recorded (at the POP that owns the paragraph), NOT
+                # the gate itself: both pops are still gated on `prev_prose`, and for THIS one that
+                # gate is measured INERT (un-gating it changed 0 of 60,000 fuzz bodies — see the
+                # note at the end of this block):
                 #     `- 2.` + `    - x` + `x` + `2.     Closes #100`
                 #         renderer `<pre><code>` -> CODE; `[]` lenient / `[100]` in `strict` at this
                 #         head, and `issue_process_lint.claims()` returns `closing: [100]` — STILL a
@@ -2582,6 +2584,11 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 #         fixes cost ~110 lost closes in the arm `in_flight_markers` and the
                 #         comment-body read go through (measured on a 15,000-body grid: −6 fail-opens
                 #         for +116 lost closes, and −5 / +112).
+                #         PINNED at `tests/test_closes_landing.py::test_the_INDENT_pops_DECLARED_
+                #         strict_false_PASS_is_PINNED`, so it cannot move silently. That pin also
+                #         records the measurement that NONE of the candidate terms above moves this
+                #         body (six mutations, all left `[F, F, T, T]`) — the fixer of #11369 should
+                #         re-derive rather than assume a green there.
                 # ⚠️ BOTH TERMS ARE GATED ON `prev_prose`, MEASURED: un-gating this one changes 0 of
                 # 60,000 fuzz bodies (it is unobservable — the record only matters when a paragraph
                 # was open above, which is what the gate says), and un-gating the DEDENT pop at the
