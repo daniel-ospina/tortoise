@@ -2777,10 +2777,12 @@ undone.
   is required for the exception to exist at all. Here the write is `flyctl secrets
   set`, so that is where the filter lives.
 - **The ordering is part of the contract, not style.** A tail-only filter is not
-  enough: the payload COMPOSES values from the environment — `BACKUP_SWEEP_ENABLED`
-  only when a conjunction of nine secrets is present, and the versioned LLM-model
-  default chosen from whether `OPENROUTER_API_KEY` is set — so filtering the finished
-  argv left those computed from the unfiltered values. A ledger entry for
+  enough: the payload COMPOSES from the environment — `BACKUP_SWEEP_ENABLED` only
+  when a conjunction of nine secrets is present, and the `::warning::` emitted when
+  `OPENROUTER_API_KEY` is unset — so filtering the finished argv left both computed
+  from the unfiltered values. (The versioned model default is selected by
+  `TORTOISE_SESSION_LLM_MODEL`, not by the key; it is the WARNING that a tail-only
+  filter suppressed.) A ledger entry for
   `TORTOISE_BACKUP_KEY` then shipped `BACKUP_SWEEP_ENABLED=true` in the same argv
   that omitted the key, and the app booted into a `ConfigError` asserting an
   invariant that payload had just broken (the sweep and the staleness watcher start
@@ -2808,6 +2810,13 @@ undone.
   deploy-hosted.yml", and the only reading of that remedy is to make the assignment
   unconditional — destroying the fail-closed default. The gate instead classifies the
   same payload against an EMPTY ledger and reports the name as `LEDGER-EMPTIED`.
+  ⛔ **Unless the derived flag is already LIVE on Fly.** `flyctl secrets set` is
+  ADDITIVE, so omitting a name does not clear the value already there: a persisted
+  `BACKUP_SWEEP_ENABLED=true` survives the omission, the app boots
+  enabled-with-missing-secrets, and the sweep plus the staleness watcher start
+  disabled. That is not "the mitigation working", so it is reported as
+  `MITIGATION NOT IN EFFECT` (exit 1) with the one-command remedy — unset the flag on
+  Fly so the fail-closed value is what the next boot reads.
 - **The gate's half is the reverse check**, so the two cannot rot apart: a ledger
   entry the payload still carries is `LEDGER NOT HONOURED` (dropping the filter
   would otherwise re-arm every mitigation while the ledger kept reading as a
@@ -2823,9 +2832,10 @@ undone.
   `STRIPE_WEBHOOK_SECRET`, plus `SUPABASE_ACCESS_TOKEN` and `FLY_API_TOKEN`, which
   the manifest-declaration rule refuses first because they are never Fly secrets
   (removing any of them is an outage, not a mitigation) —
-  names a Fly variable `fly.toml [env]` also assigns (the deploy would apply that
-  value whatever the secret list says), **or records a name the deploy's payload
-  still stages (`LEDGER NOT HONOURED`)**. Exit 1 (incident-bypassable): expired,
+  names a Fly variable `fly.toml [env]` assigns a **NON-EMPTY** value (the deploy
+  would apply that value whatever the secret list says; an `[env] = ""` placeholder
+  does not block, because a Fly secret shadows it), **or records a name the deploy's
+  payload still stages (`LEDGER NOT HONOURED`)**. Exit 1 (incident-bypassable): expired,
   or not in effect because the name is on Fly.
   ⛔ `LEDGER NOT HONOURED` is exit 2 on purpose, and it is the one distinction in
   this block that matters operationally: exit 1 is the `skip-fly-secret-provenance`
