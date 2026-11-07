@@ -77,7 +77,7 @@ from html import unescape
 from html.parser import HTMLParser
 from itertools import pairwise
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 # `pytest` is deliberately not imported (#8066): this file's only use was the
 # `pytest.skip` that made the tortoise-decide gate green-while-blind.
@@ -4453,14 +4453,21 @@ class TestSiteIconAndSocialPreviewContract:
         `rel` the same way: a regex over the raw markup is case-sensitive,
         double-quote-only and order-sensitive, so `rel="shortcut icon"` — which the
         trio assertion deliberately accepts — walked straight past it.
+
+        The href is resolved against a root URL before it is compared, because every
+        page here is served at a root-level path: on `/faq`, `href="logo.png"` IS
+        `/logo.png`, and a substring test on the attribute sees neither. Matching on
+        `"icon" in token` rather than on two exact tokens is what covers
+        `apple-touch-icon-precomposed`, which iOS still honours.
         """
         for page in self._pages():
             head = self._head(page.read_text())
             for ln in self._links(head):
                 rel = ln.get("rel", "").lower().split()
-                if "icon" not in rel and "apple-touch-icon" not in rel:
+                if not any("icon" in token for token in rel):
                     continue
-                assert "/logo.png" not in ln.get("href", ""), (
+                href = urljoin("https://site.invalid/", ln.get("href", ""))
+                assert "/logo.png" not in urlsplit(href).path, (
                     f"{page.name} uses the wordmark as an icon: rel={ln.get('rel')!r} "
                     f"href={ln.get('href')!r}")
 
