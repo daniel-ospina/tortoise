@@ -1291,6 +1291,12 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
         raise RuntimeError(f"journal write failed for {name!r}")
 
     monkeypatch.setattr(embedded, "_journal_append", _journal_fails)
+    # ⛔ AND the namespace binding. The module attribute covers an in-function
+    # `from tests._embedded import _journal_append` (read at CALL time), but a fixture that
+    # hoists that import to module level froze the HAPPY-path stub into the exec'd
+    # namespace, so patching only the module left this drive calling the stub — and a
+    # correct fixture was then accused of minting after a failed journal (measured).
+    monkeypatch.setitem(namespace, "_journal_append", _journal_fails)
     del events[:], deletes[:]
     try:
         gen = namespace["lane"]()
