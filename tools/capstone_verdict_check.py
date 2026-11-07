@@ -195,6 +195,24 @@ _MEASUREMENT_RUN_KEYS = (
     "a_row_census",
 )
 
+#: The RUN-block keys that carry NO measureMENT: the run's identity, its graph name,
+#: the step DECLARATION it was gated over, and the reasons for steps it did not take.
+#: Declared so that a NEW measurement key on the emitter reds
+#: ``tests/test_7949_capstone_verdict_check.py``'s drift arm INSTEAD of silently
+#: escaping the set above — which is exactly how ``a_row_census`` (#10982) reopened
+#: the construction #10601 review round 2 closed. A hand-listed pin cannot see a key
+#: nobody hand-listed; this list is the other half of that pin.
+_NON_MEASUREMENT_RUN_KEYS = (
+    "status",
+    "kind",
+    "probe",
+    "graph",
+    "arm",
+    "steps_required",
+    "steps_conditional",
+    "steps_unobserved",
+)
+
 #: The nested blocks ``check()`` reads as OBJECTS. Declared so the type guard is
 #: derived from one list rather than repeated per call site.
 _BLOCK_KEYS = ("run", "prereg", "corpus")

@@ -3710,6 +3710,49 @@ def test_a_refused_run_whose_RECORD_still_carries_a_measurement_is_not_exempt():
         "— its five rows would red V12 on historical causes")
 
 
+def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
+    """A NEW emitter measureMENT key must red HERE, not fail open (#10982 review round 4, F1).
+
+    ⛔ WHY THE HAND-WRITTEN LOOP ABOVE IS NOT ENOUGH, and why this is a separate arm:
+    the construction has now been reopened TWICE by the same defect. #10601 round 2
+    found a fail-open because the set named two keys and the emitter wrote nine;
+    #10982 then added ``a_row_census`` to the emitter's run block and the set did not
+    grow, so a record whose only surviving measurement was the A-row census read as
+    "measured nothing" and V12 EXEMPTED it from its CLOSED-blocker refusal. A
+    hand-listed pin can only pin the keys somebody remembered to list. This arm reads
+    the emitter's own ``"run": {`` literal and demands every key in it is EITHER a
+    registered measurement (fail closed) or a declared non-measurement, so the next
+    added key reds HERE instead of reopening V12 a third time.
+    """
+    measure = _load_measure_probe()
+    source = Path(measure.__file__).read_text().splitlines()
+    start = next(i for i, line in enumerate(source) if line.strip() == '"run": {')
+    emitter_keys: list[str] = []
+    for line in source[start + 1:]:
+        if line.strip() and (len(line) - len(line.lstrip())) <= 8:
+            break
+        match = re.match(r'^ {12}"([a-z0-9_]+)":', line)
+        if match:
+            emitter_keys.append(match.group(1))
+    assert emitter_keys, "the emitter's run-block literal was not found — re-derive this scan"
+    unregistered = sorted(
+        key for key in emitter_keys
+        if key not in cvc._MEASUREMENT_RUN_KEYS
+        and key not in cvc._NON_MEASUREMENT_RUN_KEYS)
+    assert not unregistered, (
+        f"the emitter writes run-block key(s) {unregistered} that the V12 exemption does not "
+        "know about — a record carrying only one of them is read as 'measured nothing' and "
+        "EXEMPTED from the CLOSED-blocker refusal. Register it in _MEASUREMENT_RUN_KEYS "
+        "(the fail-closed direction) unless it genuinely carries no number")
+    # …and the other direction, so a RENAME cannot hide behind a stale entry: a key the
+    # set defends but the emitter can no longer write is a key no run produces.
+    phantom = sorted((set(cvc._MEASUREMENT_RUN_KEYS) - set(emitter_keys))
+                     - {"errors", "corpus_sha256"})
+    assert not phantom, (
+        f"{phantom} are registered as measurement keys but the emitter never writes them — a "
+        "stale entry masks the moment the emitter's real key is renamed")
+
+
 def test_the_blocker_record_was_refreshed_with_the_log_it_covers():
     """`checked_at` older than the log it judges is the same decay, one level up.
 

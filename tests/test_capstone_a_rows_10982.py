@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -190,6 +191,16 @@ def test_the_amendment_quotes_the_superseded_pins_line_verbatim():
         "the superseded pins line is not quoted — a reader cannot see what changed")
     assert "required_criteria_rows" in section, (
         "the section does not say the required set is unchanged")
+    # ⛔ §10.9 is where the next child reads its FLOORS from, and it said **Seven** while listing
+    # seven plus two and while §3.7 and the record both carried nine (#10982 review round 4, F3).
+    # Checked against the ACTUAL count, not against a word: a re-wording that restores the
+    # understatement reds here rather than going stale beside `test_every_pinned_A_floor_…`,
+    # which pins the VALUES and cannot see the prose.
+    a_floors = [k for k in check.parse_pins(text)["denominator_floors"] if k.startswith("a")]
+    assert len(a_floors) == 9, a_floors
+    assert re.sub(r"\s+", " ", "**Nine** floors are pinned") in re.sub(r"\s+", " ", section), (
+        "§10.9 understates how many A-floors the record pins — a reader scoring A1 from this "
+        "section would miss two of them")
 
 
 def test_the_amendment_entry_names_the_issue_and_the_required_set_is_unmoved():
