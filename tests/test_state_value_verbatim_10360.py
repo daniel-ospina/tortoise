@@ -1933,12 +1933,23 @@ def _match_is_honest_spelling_disclosure(sentence: str, match) -> bool:
     `the SPELLING gap is open, and the half has yet to be closed, per the ADJACENCY
     row` reds.
 
-    ⛔ IT WAS ONE-SIDED FOR A REVISION, and that was a FAIL-OPEN: the old test looked
-    BACKWARDS for `spelling` and only for an anchor before the match, so a verdict
-    whose anchor sat AFTER it read as an honest disclosure — one clause re-ordered,
-    `the half has yet to be closed, per the ADJACENCY row`, escaped the only guard
-    on "the row must not describe a CLOSED gap as open" (#11258 review round 7
-    `P1`, measured).
+    ⛔ IT WAS ONE-SIDED FOR A REVISION: the old test looked BACKWARDS for
+    `spelling` and only for an anchor before the match, so a verdict whose anchor
+    sat AFTER it read as an honest disclosure.
+
+    ⛔ AND THE FAIL-OPEN THAT JUSTIFIED THE FIX IS NOT WHAT IT BUYS — measured at
+    `474435d658`: with this helper defeated to `return True` (every match called an
+    honest disclosure) `the half has yet to be closed, per the ADJACENCY row` is
+    STILL RED, because `_RESIDUAL_OPENNESS` matches it independently; the helper's
+    claim only ever DUPLICATES a claim those arms already make (2 claims → 1 for
+    every closed-verdict shape probed), and all 103 tests stay green. So do not
+    read this as the guard that closes that hole.
+    What it IS load-bearing for is the OTHER direction, also measured: defeated to
+    always-`False`, `the SPELLING gap has yet to be closed, while the carve-out's
+    ADJACENCY half is CLOSED` goes from GREEN to RED — a FALSE BLOCK on a
+    disclosure that is true by this row's own text, `_RESIDUAL_TRUTHFUL_STATEMENTS`
+    catches it, and the suite reds. The clause-containment rule below is what keeps
+    the two verdicts apart; the fail-open reading of it is history, not coverage.
     """
     start = 0
     for part in re.split(f"({_RESIDUAL_CLAUSE_SPLIT})", sentence):
@@ -2292,6 +2303,14 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the ADJACENCY half doesn't close the gap.",
     "the ADJACENCY half does not close the gap.",
     "the ADJACENCY result is unclosed",
+    # ⛔ THE EXCLUSIVE PROOF FOR THE FLOOR'S `\bunclosed\b` (#11258 review round 15,
+    # MEASURED at `474435d658`): `the ADJACENCY result is unclosed` above is caught
+    # by `_RESIDUAL_OPENNESS`'s own `\bunclosed\b` — a class-anchored sentence never
+    # reaches `_SPELLING_FLOOR` — so deleting the floor's arm left `103 passed`.
+    # The floor is the ONLY tuple a WAIVED sentence runs, so the shape that pins it
+    # has to be the SPELLING-subject one; with this entry the same deletion is
+    # `1 failed`.
+    "the SPELLING gap is unclosed.",
     # the SPELLING clause is honest; a `;`/`, and`-joined second clause is not
     "the SPELLING gap is not closed and `minute` no longer fuses",
     "The SPELLING gap is open, and the carve-out is still open.",
@@ -2834,10 +2853,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 125, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 126, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (125), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (126), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
@@ -2951,9 +2970,19 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
             # proof, `\bunclosed\b` and the bare opening verb one each, so each
             # could be deleted WITH its proof inside the floor's slack — and the
             # first of those silently restores the round-3 `P1` (the honest waiver
-            # skipping the whole openness arm). All three measured GREEN/GREEN
-            # before these three lines (#11258 review round 7 `P1`).
+            # skipping the whole openness arm). Measured GREEN/GREEN before these
+            # lines (#11258 review round 7 `P1`).
             "the SPELLING gap is open again.",
+            # ⛔ `the ADJACENCY result is unclosed` DOES NOT PIN THE FLOOR'S ARM —
+            # measured at `474435d658`: delete the floor's `\bunclosed\b` and the
+            # suite is `103 passed`, because that sentence is caught by
+            # `_RESIDUAL_OPENNESS`'s OWN `\bunclosed\b` (a class-anchored sentence
+            # never reaches the floor). The floor is the ONLY tuple a WAIVED sentence
+            # runs, so its exclusive proof has to carry `spelling`. ⚠️ BUT IT IS NOT
+            # FREE TO DROP: that entry is the only membership pin on `_RESIDUAL_OPENNESS`'s
+            # arm, and `_RESIDUAL_OPENNESS` has NO length floor of its own, so it is
+            # named here AND below — one entry per arm, not one entry per shape.
+            "the SPELLING gap is unclosed.",
             "the ADJACENCY result is unclosed",
             "the carve-out reopens.",
             # ⛔ THE OTHER DIRECTION NEEDS MEMBERSHIP TOO: without it every proof of
