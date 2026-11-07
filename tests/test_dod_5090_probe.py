@@ -3223,6 +3223,19 @@ def _byref_sdk_source() -> str:
         "    def mentions_inside_a_nested_CLASS(self):\n"
         "        class K:\n"
         "            cb = _safe(self._review_pool)\n"
+        "        return K\n"
+        # ⛔ A CALL in a class body, not a mention: it must be MEASURED by the
+        # closure, not left in neither channel (#11389 review, P3).
+        "    def calls_directly_inside_a_nested_CLASS(self):\n"
+        "        class K:\n"
+        "            hit = self._review_pool('point')\n"
+        "        return K\n"
+        # The shape that pins `_scan` specifically: the leg called DIRECTLY, with
+        # a literal `entity_type`, inside a class body. Membership comes from the
+        # closure edge, so only the TYPE SET can distinguish the walks.
+        "    def calls_the_leg_directly_inside_a_nested_CLASS(self):\n"
+        "        class K:\n"
+        "            hit = self.tortoise_fts_query('q', entity_type='object')\n"
         "        return K\n")
 
 
@@ -3317,6 +3330,41 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
         assert resolved not in declared, (
             f"a NAME-RESOLVED call was declared as an unresolved reference: "
             f"{resolved} in {declared}")
+    # ⛔ A CALL in a nested class body is the CLOSURE's, not this channel's, and
+    # it must actually be measured there (#11389 review, P3): the call walks
+    # skipped `ClassDef` while the mention walk descended into it, so such a
+    # call was in NEITHER artifact — not an edge, and excluded here as a call
+    # the closure "owns". Asserted as MEASURED, because "not declared" alone is
+    # satisfied by the silent hole.
+    assert "calls_directly_inside_a_nested_CLASS" in methods, (
+        "a leg call in a nested class body was measured by neither channel: "
+        f"the caller list reads short with nothing saying so: {methods}")
+    assert "calls_directly_inside_a_nested_CLASS" not in declared, declared
+    # …and its ENTITY TYPE, because membership alone is supplied by the closure
+    # edge while the type set comes from the `_scan` walk: mutating only the
+    # latter left this test green (measured), which is how a short type set ships
+    # under a correct caller list.
+    assert (methods["calls_directly_inside_a_nested_CLASS"]
+            == methods["calls_it_normally"]), (
+        "a class-body call was measured DIFFERENTLY from the same call in the "
+        "plain body, so its entity-type set is short: "
+        f"{methods['calls_directly_inside_a_nested_CLASS']} != "
+        f"{methods['calls_it_normally']}")
+    # A DIRECT leg call in a class body is where the `_scan` walk is load-bearing:
+    # membership is the closure edge either way, so only the type set can tell
+    # whether the walk descended (#11389 review, P3 — measured: mutating only
+    # `_scan` left a membership-only assertion green).
+    assert (methods.get("calls_the_leg_directly_inside_a_nested_CLASS")
+            == {"object"}), (
+        "a direct leg call in a nested class body was not measured, so its "
+        "entity-type set is short or absent: "
+        f"{methods.get('calls_the_leg_directly_inside_a_nested_CLASS')}")
+    # …and it is a RESOLVED call, so it must never be declared a second time: a
+    # caveat on a table the closure already covers (measured: without this the
+    # `_scan` mutation was pinned by the type set alone and a resolved
+    # class-body leg call could be declared with the suite green).
+    assert "calls_the_leg_directly_inside_a_nested_CLASS" not in declared, declared
+
     # A LOCAL that reuses an entrant's name is not a reach: `_review_pool = 5`
     # binds the NAME without referring to the method, and declaring it would
     # caveat a complete table — the same cry-wolf failure as the resolved call.

@@ -2360,11 +2360,15 @@ def _sdk_methods_on_vector_leg(
         found: set[str] = set()
         # Only THIS function's own body: a nested `def` is its own method, and
         # attributing its call to the enclosing scope would name the wrong one.
+        # ⛔ But a nested `class` BODY IS this function's body (#11389 review,
+        # P3): it executes when the method does, so a leg call sitting in it is
+        # a real fixed-type use — the same doctrine the mention walk follows.
+        # Skipping it here left such a call in NEITHER channel: not measured by
+        # this walk, and excluded from the mention walk as a call it "owns".
         stack: list[ast.AST] = list(fn.body)
         while stack:
             node = stack.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if isinstance(node, ast.Call) and _is_target(node.func):
                 found.update(_types_for(node))
@@ -2406,8 +2410,9 @@ def _sdk_methods_on_vector_leg(
         stack = list(fn.body)
         while stack:
             node = stack.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
+            # Same doctrine as `_scan`: a nested class body runs with this
+            # function, so its calls are this function's edges.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if isinstance(node, ast.Call):
                 func = node.func
@@ -2657,11 +2662,11 @@ def _handlers_forwarding_entity_type() -> tuple[set[str], str | None]:
     def _calls_with_entity_type(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
         # Only THIS function's own body — a nested `def` is its own handler and
         # attributing its call to the outer scope would name the wrong tool.
+        # A nested CLASS body is this handler's body (same doctrine as `_scan`).
         stack: list[ast.AST] = list(fn.body)
         while stack:
             node = stack.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if isinstance(node, ast.Call):
                 passes_entity_type = any(k.arg == "entity_type"
