@@ -707,8 +707,8 @@ def session_key_of(hit: dict) -> str:
       falsy but not identity-less), and an explicit ``-1`` is an explicit
       sentinel rather than indistinguishability — which is why it keeps the
       historical key and is NOT rerouted to the per-hit bucket below;
-    * else ``sessionId`` (the CAMEL wire spelling) when truthy ⇒ that id
-      (**#10540**). This is the spelling the product's own point fetch
+    * else ``sessionId`` (the CAMEL wire spelling) when a non-blank ``str`` ⇒
+      that id (**#10540**). This is the spelling the product's own point fetch
       emits: ``tortoise_fts_query`` resolves a Point's session from
       ``n.sessionId`` / the snake prop / the ``:Session`` ``CONTAINS`` edge
       and then POPs the snake key — for EVERY point hit it returns, turn and
