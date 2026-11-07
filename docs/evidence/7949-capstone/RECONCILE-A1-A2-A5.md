@@ -72,9 +72,9 @@ nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:10815`, 
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⚠️ **The scope is `tortoise/`, and it is
 load-bearing:** tree-wide the channel HAS a reader — `tests/test_10999_batch_story_relations.py` names
-`result["relations"]` **56 times**, pinning the contract against model output — so "no consumer at all"
-would be false of the tree. What is missing is a producer, not a reader; the two greps in §5 print both
-sides. What it *does* change is this record's
+`result["relations"]` on **56 lines** (59 occurrences, three lines naming it twice), pinning the contract
+against model output — so "no consumer at all" would be false of the tree. What is missing is a producer,
+not a reader; the two greps in §5 print both sides. What it *does* change is this record's
 evidence surface: the bare token count of the three edge-creating verbs prints **4** on `origin/main`
 and **0** at the base, because #11205's own explanation names `sdk.create_operator` in four comments —
 `git grep -n 'create_operator' -- tortoise/extractor_v2.py` prints exactly four, and none of them is a
@@ -469,7 +469,9 @@ git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment a
                                                           # scope is the claim: unscoped it also matches the
                                                           # reader below)
 git grep -c 'result\["relations"\]' -- tests/          # tree-wide reader: tests/test_10999_batch_story_
-                                                          # relations.py — 56, a contract pin, not a producer
+                                                          # relations.py — 56 LINES (`-c` counts lines; 59
+                                                          # occurrences over 3 doubly-named lines), a
+                                                          # contract pin, not a producer
 grep -c '^  - id:' config/v4-mechanisms.yml                 # 13 — and none for the hierarchy mechanism
 tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete answer (2 holders on a
                                                           # clean checkout); exit 2 = a surface could not
