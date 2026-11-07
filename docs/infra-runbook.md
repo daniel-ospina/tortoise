@@ -2868,8 +2868,12 @@ undone.
   the mitigation with **no deploy and no run**, before any gate sees it — this is the
   one path the ledger header records as NOT closed. **What the gate settles** (the
   header's open question): `fly secrets list --json` — the source this gate reads —
-  lists a staged secret by name (the `Staged` deployment status is what the CLI's own
-  table shows), so the NEXT run's presence check SEES it and an entry for that name
+  lists a staged secret by name, and the [`fly secrets list`
+  reference](https://docs.fly.io/flyctl/cmd/fly_secrets_list) documents the deployment
+  status reported beside it (`Staged` = "staged but not deployed to any machines"; the
+  app-level [fly secrets](https://fly.io/docs/apps/secrets/) page shows only
+  `NAME | DIGEST | DATE`, so it is not the source for the status), so the NEXT run's
+  presence check SEES it and an entry for that name
   fails the run with `MITIGATION NOT IN EFFECT`, ahead of that run's `flyctl deploy`
   and ahead of the `Set all app secrets on Fly.io` staging step. ⛔ That red is on the
   next run, and it is **exit 1**, the `skip-fly-secret-provenance` class: an operator
