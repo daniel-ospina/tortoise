@@ -4624,7 +4624,12 @@ def _residual_sentences(s3: str) -> list[str]:
     * a statement whose coverage verb is outside the `walk/visit/reach/report`
       list — measured, `"…are never TOUCHED by the walk"` reds, because the
       negation must reach one of those four verbs to be read as governing it
-      (#11437 review, round 3, P1).
+      (#11437 review, round 3, P1);
+    * a PARTIAL exclusion stated as a HEDGE — `"…are not always visited"` reds,
+      because the pseudo-negation termset exists to refuse exactly that modal.
+      The price is stated rather than hidden: a doc that honestly NARROWS the
+      exclusion has to say so as a clause (`"…except when the outer method
+      runs"`, which stays green) rather than as a hedge
 
     ⛔ The false-GREEN direction is the one that matters: a missed inverse is a
     false PASS in the file whose purpose is to be false-PASS-free, while a false
