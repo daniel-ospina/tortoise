@@ -981,15 +981,17 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # and `tools/sdk_surface.py` among them; that residue predates this PR and is
     # not pinned here.
     #
-    # The status is DERIVED, not read off `.code`: `SystemExit()`, `SystemExit(None)`
-    # and `SystemExit(False)` all exit 0 while `.code` is `None`/`None`/`False`, so
-    # `code != 0` is True for every one of them (measured). CPython turns `.code` into
-    # a status with `0 if code is None else (code if isinstance(code, int) else 1)` and
-    # the OS then keeps the low 8 bits — so `SystemExit(256)`, `(512)`, `(-256)` and
-    # `(768)` leave the process at **0** while the derived value is not (measured).
-    # Both steps are applied here, so this assertion is a true statement about the
-    # process status rather than an approximation of it — which is the distinction the
-    # rest of this census exists to enforce.
+    # The status is DERIVED, not read off `.code`, and it is a statement about the
+    # PROCESS. `SystemExit()` and `SystemExit(None)` leave `.code` as `None` and exit
+    # 0 while `None != 0` is True, so a bare `code != 0` passes them (measured).
+    # `SystemExit(False)` also exits 0 and `False != 0` happens to red it, but only
+    # because `bool` is an `int`, not because `False` is a status. CPython turns
+    # `.code` into a status with `0 if code is None else (code if isinstance(code, int)
+    # else 1)` and the OS then keeps the low 8 bits — so `SystemExit(256)`, `(512)`,
+    # `(-256)` and `(768)` leave the process at **0** while the derived value is not
+    # (measured). Both steps are applied here, so this assertion is a true statement
+    # about the process status rather than an approximation of it — which is the
+    # distinction the rest of this census exists to enforce.
     _code = refusal.value.code
     _status = 0 if _code is None else ((_code & 0xFF) if isinstance(_code, int) else 1)
     assert _status != 0, (
@@ -1028,7 +1030,8 @@ REFUSAL_CODES: dict[str, int] = {
 REFUSAL_WHY: dict[str, str] = {
     "tools/gen_placement_table.py": (
         "1 is `--check`'s STALE (main() returns 0/1), so an environment refusal "
-        "must not wear it; 2 is spare"
+        "must not wear it; 2 is never RETURNED by main() (argparse takes it for a "
+        "bad flag), so it cannot collide with a verdict"
     ),
     "tools/test_design_map_check.py": (
         "1 is \"violations found\", so an environment refusal must not wear it; "
