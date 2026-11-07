@@ -17,7 +17,7 @@ aboutObjects: tortoise
    (`#4997` / `STORAGE-ARCHITECTURE.md` §14.3): the vector index does **not** live in FalkorDB.
 2. **The text index stays in FalkorDB for now.** Moving it to a Postgres ranker is a *measured*
    regression (§6.2), so it is deferred behind a measurement, not adopted on a hunch.
-3. **Traversal, writes and EP stay in FalkorDB.** The Cypher surface (~1,900 statements) is untouched.
+3. **Traversal, writes and EP stay in FalkorDB.** The Cypher surface — an order-of-magnitude **~1,900 statements**, an estimate rather than a census — is untouched.
 4. **The graph stays complete for private-beta and becomes a bounded window only after M2 measures it**, sized by the tier's cost budget — §1.5, §7. The cost during private-beta is **knowingly above** the 30 % target (§8).
 
 **The product goal:** *"a high quality search system with manageable cost, speed matters but is not the
@@ -126,7 +126,7 @@ shows a RAM-resident index returning better answers at this scale.
 are all Postgres tables, and Postgres is their authority (§4). What the graph holds is a **derived copy**
 of that structure, and it keeps holding one — because the walk, the operator mediation and EP all run over
 it. **This decision moves the vectors and *nothing else***: the structural copy is retained (complete for
-private-beta, then windowed), which is exactly why the ~1,900-statement Cypher surface is untouched.
+private-beta, then windowed), which is exactly why the Cypher surface — an order-of-magnitude estimate, see the decision bullet — is untouched.
 
 **The executing surface of the vector move is small and that is why it is tractable:** two
 `db.idx.vector.queryNodes` calls (both argument orders), the vector-index creation, and the ranking code
@@ -270,8 +270,15 @@ Postgres disk $0.125/GB; plan $25 + compute $60 per project.
 | | complete graph (private-beta, §1.5) | windowed (post-measurement, §1.5) |
 |---|---|---|
 | graph per solo tenant | ~150 MB ⇒ **$8.75** | ~77 MB ⇒ **$4.49** |
-| Postgres storage | negligible | **dominant line** (multi-GB, still cents) |
+| Postgres storage | **not counted here** — the payload lands here | **dominant line at PROJECT scale** (multi-GB across tenants; ~0.19 GB/tenant measured, `STORAGE-ARCHITECTURE.md` §17.4.6 — still cents) |
 | vs the $5.70 budget | **154 %** — above, and known | **79 %** — inside |
+
+⚠️ **The basis, because the two columns do not count the same components.** The 150 MB and 77 MB are the measured
+`GRAPH.MEMORY USAGE` stock — the instrument §1 says under-reports the vector bytes — so they are the footprint of a
+FalkorDB graph **before** the payload and its index move out. The private-beta figure is therefore a **worst case** for
+the graph line: after the move that line falls by the ~50 MB of payload plus the index, and the payload arrives in the
+Postgres line, which this table marks as not counted rather than as negligible. The window (79 % of target) is what
+makes the pricing work; the move is what reduces both the RAM multiple and the bytes it applies to.
 
 ⚠️ **The Postgres side is not free of unknowns, only of cost:** under both states the dominant unmeasured
 lines are **compute tier, provisioned IOPS and egress**, driven by the **miss rate** — which nobody has
