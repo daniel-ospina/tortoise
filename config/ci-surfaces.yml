@@ -8235,6 +8235,12 @@ tier1:
 # is the one it covers. The `core` half is what `--integrity` reads.
 - test_7949_capstone_measure.py
 - test_7949_capstone_verdict_check.py
+# #10982 review F2: the A-row registration's arms, beside the two siblings above and for their
+# reason. `core` is their home (`tools/capstone_preregistration_check.py` is the subject, and a
+# gate-only diff reaches it through that tool's `CORE_ALSO` row); this arm is the one that runs
+# on a docs-only PR, which is the change class that can edit a threshold after the numbers
+# landed. Hermetic — markdown/JSON/YAML parses and a fake projection, no DB, no network.
+- test_capstone_a_rows_10982.py
 # #10108 review (P1): the SAME document's E5 *write-back* pin (`core` above) —
 # `test_7949_e5_section10_writeback.py` binds §10's replicated-run table to a
 # fresh run of the registered scorer (`tests/eval/write_path/score_qualifiers.py`).
