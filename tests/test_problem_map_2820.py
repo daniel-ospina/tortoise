@@ -364,6 +364,48 @@ def test_a_workstream_count_that_disagrees_with_its_rows_is_drift(tmp_path):
     assert any("WS-B" in e and "8 of 8" in e for e in errors), errors
 
 
+def test_a_mislabelled_workstream_row_cannot_pass_on_position(tmp_path):
+    """Fails if a count is bound to a workstream by POSITION instead of its label.
+
+    Reachable, measured at the post-merge head: swap only the two labels
+    (`| WS-A …` ↔ `| WS-C …`) and leave every count where it is — the edit a
+    re-cut makes — and a positional bind returned NO errors while §2 attributed
+    WS-A's `5 of 5` to WS-C. The label is read from the row and the count is
+    bound to it by name.
+    """
+    copy = _doc_copy(tmp_path)
+    text = copy.read_text(encoding="utf-8")
+    swapped = (
+        text.replace("| WS-A write-path integrity", "| WS-X write-path integrity", 1)
+        .replace("| WS-C state & value model", "| WS-A state & value model", 1)
+        .replace("| WS-X write-path integrity", "| WS-C write-path integrity", 1)
+    )
+    assert swapped != text and swapped.count("| WS-C write-path") == 1
+    copy.write_text(swapped, encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("WS-C" in e or "workstream labels" in e for e in errors), errors
+
+
+def test_two_abstract_headlines_are_reported_as_ambiguous(tmp_path):
+    """Fails if a decoy headline above the real one is silently preferred.
+
+    Reachable: the abstract is ordinary prose. A first-match read (the defect the
+    summary parser already carried) would compare the DECOY, so the guard reports
+    two claim-carrying headlines as ambiguous instead of choosing one.
+    """
+    copy = _doc_copy(tmp_path)
+    text = copy.read_text(encoding="utf-8")
+    mutated = text.replace(
+        "> **21 fixed and 5 open**.",
+        "> **20 fixed and 6 open**.\n> **21 fixed and 5 open**.",
+        1,
+    )
+    assert mutated != text, "fixture no longer finds the abstract"
+    copy.write_text(mutated, encoding="utf-8")
+    errors = pmc.run(REPO, copy).errors
+    assert any("ambiguous" in e for e in errors), errors
+
+
 def test_the_frontmatter_headline_must_agree_with_the_tables(tmp_path):
     """Fails when the page's own "**21 fixed and 5 open**" headline goes stale.
 
