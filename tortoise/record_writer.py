@@ -945,8 +945,10 @@ def _default_connect(dsn: str) -> Any:
 
     ⛔ IT MAY RETURN A REUSED CONNECTION (#9558 / R10). The live door calls the
     seam once per journal record, and each call used to pay a full TCP connect
-    and auth handshake — measured at 18.93 ms per record with `connect()` once
-    per record. Pooling lives HERE, behind the one function whose job is "give me
+    and auth handshake — the BEFORE tree measured **18.9–20.1 ms** per record
+    (`per_record_ms` means across the four committed runs in
+    `docs/evidence/9558-record-write-cost/runs/`) with `connect()` once per
+    record. Pooling lives HERE, behind the one function whose job is "give me
     a connection", rather than at a call site, for one reason: it changes the
     cost of a connection and NOTHING about who owns one. `RecordWriter.write`
     still neither commits nor rolls back, `RecordWrite.connection` is still the
