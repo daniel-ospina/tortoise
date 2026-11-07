@@ -163,7 +163,9 @@ required CI job whose leg gate fails on ANY skip.
 bucket, and `record_dsn()` re-reads the environment on every call, so a rotating
 credential or a per-tenant DSN would have left two live sockets behind for every
 value the process ever saw. `RECORD_POOL_MAX_IDLE_KEYS = 4` drains the oldest
-buckets, the same eviction the schema cache does, and the pin parks
+buckets one at a time — ⛔ the schema cache does the OPPOSITE on overflow (it
+clears wholesale, a tiny population of cheap-to-rebuild entries, so the two
+bounds are deliberately not the same shape) — and the pin parks
 `MAX_IDLE_KEYS + 2` distinct keys to prove it.
 
 **The read door pays one rollback per borrow, and that is now stated.** The
