@@ -2116,8 +2116,9 @@ for THIS class. Measured at the tool, `tools/purge_legacy_turns.py`'s single des
 episodic turn `:Point`s (`MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) WHERE t.is_episodic = true AND t.id IN $ids
 DETACH DELETE t`), never matches `:Source`/`:Event`, and contains no `story_arc` token — so a copy on either anchor
 survives it, and an operator following the sentence reads the sweep's unchanged `graph_only` as "the repair did not
-work". ⚠️ This stamp scopes itself to the REPAIR claim, which is corrected IN PLACE above (a changelog's repair
-instruction sends an operator to a tool, so it is fixed where it sits); the entry's earlier DURABILITY sentences
+work". ⚠️ This stamp scopes itself to the REPAIR claim: the entry above is left as RECORDED, because a changelog is a
+historical record — the corrected instruction is this stamp's own, and no instrument ships a targeted
+`REMOVE n.story_arc` (`#11325`). The entry's earlier DURABILITY sentences
 ("`#10017`'s graph-side purge was undone by the next routine recovery", "what makes `#10017`'s purge durable") are
 left as recorded — but they carry the SAME assumption this stamp retracts, that the purge clears THIS class. What the restore undid was `#10000`'s write deletions, and the acceptance
 they name (`purge → restore → sum(size(n.story_arc))` = 0) holds because the restore now writes no

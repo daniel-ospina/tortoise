@@ -671,9 +671,8 @@ def reconcile_record_and_cache(
     it never matches ``:Source``/``:Event``; what it contributes is durability
     for those ``:Point`` copies (its journaled turn removals stop a replay
     resurrecting them), not the clearing of this class. Never a destructive one
-    for the ``:Point`` half — it has a non-destructive route — which is one sense
-    in which the class differs from the declined pair. Nothing here performs
-    either. ⚠️ **What the exclusion CAN and
+    for the ``:Point`` half — it has the non-destructive route named above.
+    Nothing here performs either. ⚠️ **What the exclusion CAN and
     CANNOT hide, stated precisely**: `keep` includes ``record_props``, so a name
     the RECORD side carries is always compared — the exclusion cannot suppress a
     divergence in a caller-supplied ``props``-tail property. ⚠️ For `summary`,
