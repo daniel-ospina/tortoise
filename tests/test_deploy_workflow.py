@@ -4983,11 +4983,14 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # already cuts at). ⛔ `:` IS **NOT** ONE OF THEM (#11191 review r8, P2 — the two
         # sentences here and below said it was, and `_CLAUSE_DELIM` at `:4739` has no `:`
         # member: verified by reading the pattern, and by mutation — dropping `:` from the
-        # tail below flips the two `:` aside rows ADMITTED->REFUSED while the coordinated
-        # rows stay ADMITTED, which an inert `:` could not do). A `:` ends the reporting frame
-        # through THIS pattern's excluded set, not through clause cutting. `\u2014`/`\u2013`
-        # stay excluded for the reason the r34 comment gives: the em-dash aside is a CLAUSE
-        # break, not an incise.
+        # tail below flips a `:`-bearing aside (e.g. "The note never says (as the row
+        # records: nothing) that the tree immediately before #9548 was wrong.") from ADMITTED
+        # to REFUSED, while the coordinated asides stay ADMITTED, which an inert `:` could not
+        # do; `111 passed` either way, so that pair is a MANUAL demonstration, not a pinned
+        # control — the `:` rows are prose-only, as the disclosure block records). A `:` ends
+        # the reporting frame through THIS pattern's excluded set, not through clause cutting.
+        # `\u2014`/`\u2013` stay excluded for the reason the r34 comment gives: the em-dash
+        # aside is a CLAUSE break, not an incise.
         # ⛔ THE `$` ANCHOR — VERIFIED, THEN RE-MEASURED AS INERT (#11191 review r6, P3). The
         # review reported it load-bearing (dropping it flipped a parenthetical sentence
         # ADMIT->REFUSE). That was true while `(`/`)` were excluded; AFTER the parenthetical
@@ -5791,6 +5794,41 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
                 from it: "It is not the case that the row is a census, and that the note
                 never says the tree immediately before #9548 was wrong." is a truthful
                 denial of the conjunction and stays admitted here (measured).
+
+            ⛔ WHAT THAT TRADE COSTS, STATED RATHER THAN LEFT IN THE WORD "EITHER" (#11191
+            review r9, P2 — measured at `be09daf2d4`, this head and `origin/main`; the
+            paragraph above defends the TRUTHFUL twin and does not cover this row, and no pin
+            or comment named it). Because the window is the whole SENTENCE, a reversal that
+            governs a DIFFERENT proposition in a preceding coordinated clause still exempts
+            the veto:
+
+              "It is not true that the census is 5 lines, and the note never says the tree
+               immediately before #9548 was wrong."
+                 -> ADMITTED here; REFUSED by `origin/main` and by the pre-r6 head
+                    `b37a6c24abb`. A KNOWN-OPEN FAIL-OPEN, against main, in the direction this
+                    file calls worse. It is NOT pinned: pinning it needs the window narrowed
+                    to the phrase's own CLAUSE, and the r8 attempt at exactly that
+                    (pushing `_clause_before_phrase` here) was REVERTED because
+                    `_CLAUSE_DELIM` cuts at every coordinator with no grammatical role test,
+                    so `"It is not true that the note and the row never say … was wrong."` —
+                    which `origin/main` ADMITS — became a FALSE RED. The closing rule is
+                    grammatical, not punctuation: a coordinator that STARTS a new clause ends
+                    the frame's window; one INSIDE its complement does not. Until a window
+                    can tell those apart, the file keeps the stated fail-open.
+
+            ⛔ TWO SPELLINGS OF THE FRAME ITSELF ARE KNOWN-OPEN FALSE REDs (#11191 review r9,
+            P3 — measured here vs `origin/main`, unpinned). `_REVERSING_FRAME` requires a
+            `that` immediately after the frame, and this window cuts at an em dash, so both of
+            these are REFUSED here while `origin/main` ADMITS them (each is the same double
+            negation, differently punctuated):
+
+              "It is not true the note never says the tree immediately before #9548 was wrong."
+              "It is not true — the note never says the tree immediately before #9548 was
+               wrong."
+
+            Not pinned either way, and recorded here for the same reason as the row above: a
+            control that cannot red is not a control, and an unstated divergence is the defect
+            class this predicate exists to grade.
 
             `;` and the dashes ARE boundaries: `_CLAUSE_DELIM` already treats them as
             clause breaks, and a reversal across one is a different proposition. The full
@@ -10055,9 +10093,17 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # ⚠️ DISCLOSED, NOT CLOSED (#11191 review r6, P2; SCOPE CORRECTED by review r7, P2 —
         # the r6 text claimed the surviving class was ONE shape, `and`-coordinated, "a clause,
         # not an aside". Measured, that is false, so the disclosure is stated as it is: the
-        # class is EVERY ASIDE WHOSE OWN TEXT ENDS THE REPORTING FRAME, and the mechanism is
-        # `_CLAUSE_DELIM`, not coordination. Each row below is ADMITTED here and REFUSED by
-        # `origin/main`, and each was ADMITTED at the pre-r6 head `b37a6c24abb` too:
+        # class is EVERY ASIDE WHOSE OWN TEXT ENDS THE REPORTING FRAME, and it has TWO deciding
+        # arms (#11191 review r8, P2 — this sentence said "the mechanism is `_CLAUSE_DELIM`, not
+        # coordination", which is true for the coordinated/`;`/dash members and FALSE for `:`,
+        # because `_CLAUSE_DELIM` has no `:` member): a coordinator or `;`/dash inside the
+        # aside is cut by `_CLAUSE_DELIM`, while a `:` inside the aside is stopped by THIS
+        # pattern's own excluded `:` in the gap tail (`:4993`) — proved by dropping `:` from
+        # that tail, which flips the `:` spellings and nothing else. Each row below is ADMITTED
+        # here and REFUSED by `origin/main`, and each was ADMITTED at the pre-r6 head
+        # `b37a6c24abb` too, and the `:` spellings are that class too
+        # ("The note never says (as the row records: nothing) that the tree immediately before
+        # #9548 was wrong." -> ADMITTED here, main REFUSES):
         #   "The note never says (and the row agrees) that the tree immediately before #9548
         #    was wrong."                                      -> ADMITTED here, main REFUSES
         #   "The note never says (but the row agrees) that the tree immediately before #9548
@@ -10070,10 +10116,16 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # `_clause_before_phrase` cuts at `;` regardless of paren depth, so the aside's own
         # interior ends the reporting frame. Closing the class needs clause cutting to be
         # paren-depth aware — a change to the primitive every arm in this predicate reads
-        # measured denominator: `_clause_before_phrase(` appears FOUR times in this file (1
-        # definition + 3 call sites) and `_CLAUSE_DELIM` 25 times, four of them in code — the
-        # r8 review measured both counts at `be09daf2d4`, `e3dc1d9ce9` and the r8 head alike.
-        # Filed with its measurement on #11304, which owns the surviving-prose-families list;
+        # measured denominator, re-measured at four trees (#11191 review r9, P2 — the first
+        # cut of this sentence said `_CLAUSE_DELIM` "25 times" and that three named trees
+        # agreed; BOTH were false, and of exactly the class this block exists to remove):
+        # `_clause_before_phrase(` appears in FOUR places in code (1 definition + 3 call
+        # sites — `grep -c` reads higher only because this prose quotes the name), and
+        # `_CLAUSE_DELIM` greps as 24 at `be09daf2d4`, `e3dc1d9ce9` and `93566c6de`, 27 at
+        # `21bc66c46`, and more again with these lines — the number counts comment MENTIONS,
+        # so it grows whenever the prose does and is not a stable denominator for "call
+        # sites". Reproduce with `git show <tree>:tests/test_deploy_workflow.py | grep -c
+        # _CLAUSE_DELIM`. Filed with its measurement on #11304, which owns the surviving-prose-families list;
         # #11301 owns the structural fix. Widening this veto without that measurement is how
         # the next round gets a truth-RED.
         # ⛔ THE CONTRACTION FAMILY (#11191 review r33-R3, P2 — MEASURED inert leg). The
