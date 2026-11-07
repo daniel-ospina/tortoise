@@ -1091,6 +1091,26 @@ place a machine reads it.
   block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
   is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
+### 10.9 — the §11 cite block re-pointed after `main`'s S5 inserts moved `extractor_v2.py` (2026-11-07, `#11205`/`#11242`/`#11264`)
+
+- **Original value (as §10.8 left it):** `_collect_classify_items` at
+  `tortoise/extractor_v2.py:10397`, its extent `:10397-10419`, the two `if items:` gates at
+  `:11849`/`:11998`, and the two fail-open `except` arms at `:11862`/`:12009`.
+- **New value:** the same symbols at `:11098`, `:11098-11120`, `:12908`/`:13057` and
+  `:12921`/`:13068`.
+- **Why:** `main` landed five changes to `extractor_v2.py` while this branch was open —
+  `#11205` (S5 Job 1, the entity↔entity channel), `#11242`, `#11264`, `#11288` and `#11361` —
+  inserting **631** lines and re-cutting **118** above every one of these cites (749 changed
+  lines in total, measured `04deeaacda..origin/main`). The symbols are unchanged: the collector
+  grew no item and lost none, and both passes are still gated on `if items:`. Each number was
+  verified by CONTENT at this head (the `def`, the `return items` that ends it, the two `if items:`
+  gates, the two `except` arms), never by adding an offset — the failure this section has already
+  recorded twice, and this round it was the whole bundle's cites (README, both probes, the E-row
+  audit, `docs/00_index.md` and the architecture doc) that had to be re-derived the same way.
+- **What moved: nothing else.** No metric, denominator, threshold, class set, corpus pin or `steps`
+  block is touched; the numbers this record exists to freeze are byte-identical. `document_sha256`
+  is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5

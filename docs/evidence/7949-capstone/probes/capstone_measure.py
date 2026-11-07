@@ -1294,7 +1294,7 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
         "tortoise/extractor_v2.py:12748 (and set False when its classifier cannot "
-        "be constructed, :11718), the `if not edus:` early return emits "
+        "be constructed, :12773), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
         "'restamp_overrides': 0, 'slot_rekeys': 0} (:12799-12802), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
