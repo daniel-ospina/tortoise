@@ -101,6 +101,10 @@ def test_the_issue_probe_pool_is_net_zero_unguarded_and_additive_guarded():
     assert all(r["reason"] == "evicts:sC" for r in g_trace["rejected"]), (
         g_trace["rejected"])
     assert g_trace["applied"] is True and g_trace["targeting"] == "window"
+    assert g_trace["on"] is True, (
+        "the ENFORCING path must report the rule ON — a trace saying OFF while "
+        f"it refuses picks is the conflation applied's docstring forbids: "
+        f"{g_trace}")
 
 
 # ── 2. condition (1) DEDUPE TO UNIQUE SESSIONS — discriminating ─────────────
@@ -1250,15 +1254,38 @@ def test_the_trace_holder_is_an_empty_dict_not_None():
         "_tl_guard_trace must be bound exactly ONCE in "
         f"retrieve_for_question; found {len(bindings)} — a later rebind erases "
         "the guard's receipt (#10538)")
-    clears = [
-        node for node in ast.walk(ast.Module(body=body, type_ignores=[]))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "clear"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "_tl_guard_trace"
-    ]
-    assert not clears, "_tl_guard_trace.clear() would erase the guard's receipt"
+    # ⚠️ NOT JUST rebind/clear (cycle 13, finding 1): `|=`, `.update(...)`,
+    # `.pop(...)`, `del trace[...]` and `.setdefault(...)` all mutate the same
+    # object after the leg call and every one of them kept the suite green. The
+    # holder is the WHOLE receipt's storage, so the rule is stated positively:
+    # after its single binding, `_tl_guard_trace` may only be READ — i.e. appear
+    # as ``_tl_guard_trace.get(...)``, as a bare name argument (``applied``,
+    # ``guard_trace=``, ``non_eviction_applied``), or inside ``len(...)``.
+    def _root_name(node: ast.AST) -> str | None:
+        while True:
+            if isinstance(node, ast.Name):
+                return node.id
+            if isinstance(node, (ast.Attribute, ast.Subscript)):
+                node = node.value
+            elif isinstance(node, ast.Call):
+                node = node.func
+            else:
+                return None
+
+    writes = []
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if (isinstance(node, ast.AugAssign) and _root_name(node.target) == \
+                "_tl_guard_trace") or (isinstance(node, ast.Delete) and any(
+                _root_name(t) == "_tl_guard_trace" for t in node.targets)):
+            writes.append(ast.unparse(node))
+        elif isinstance(node, ast.Call) and _root_name(node) == "_tl_guard_trace":
+            fn = node.func
+            attr = fn.attr if isinstance(fn, ast.Attribute) else None
+            if attr not in ("get",):
+                writes.append(ast.unparse(node))
+    assert not writes, (
+        "_tl_guard_trace may only be READ after its single binding; these "
+        f"mutate the guard's receipt: {writes} (#10538)")
 
 
 def test_the_shipped_call_arms_the_guard_with_the_QUESTION_WINDOW():
@@ -1299,6 +1326,12 @@ def test_the_inert_leg_reports_the_target_it_actually_had():
     assert trace["targeting"] == "window", (
         "an inert but WINDOW-targeted row must not report 'none' — it had a "
         f"target: {trace}")
+    # ⚠️ `on` is the RESOLVED SWITCH on every branch (cycle 13, finding 3): the
+    # enforcing path's write was unpinned and had no shipped consumer, so
+    # ``"on": False`` there survived — a trace reporting the rule OFF on the one
+    # path where it is ENFORCING, which is the conflation `applied`'s docstring
+    # forbids.
+    assert trace["on"] is True, trace
     assert trace["rejected"] == [] and trace["accepted"] == []
 
 
@@ -1354,3 +1387,46 @@ def test_a_REDUNDANT_slot_may_be_traded_but_a_deleted_session_may_not():
     g = tl.window_arm_retention(pool, g_order, window=6,
                                 max_chunks_per_session=None)
     assert g["deleted_sessions"] == [] and g["net"] >= 0
+
+
+# ── 14. the refusal reason names EVERY session a pick would have deleted ───
+
+def test_the_reason_names_EVERY_deleted_session_not_just_the_first(monkeypatch):
+    """#10538 (cycle 13, finding 2): ``",".join(deleted_sessions)`` →
+    ``deleted_sessions[0]`` survived every suite, because every existing case
+    has exactly ONE deleted session per trial.
+
+    No randomised pool reached two (a trial adds one pick, so the shipped
+    geometry rarely frees two sessions at once), so this pins the JOIN directly:
+    the retention verdict is stubbed to report two deleted sessions and the
+    emitted reason is asserted in full. That is the field the receipt calls its
+    evidence of WHICH session would have been lost — under-reporting it makes an
+    operator read a two-session risk as a one-session risk.
+    """
+    real = tl.window_arm_retention
+
+    def _fake(*args, **kwargs):
+        return {"deleted_sessions": ["sB", "sC"], "evicted_sessions": ["sB", "sC"],
+                "net": 0, "pick_ranks": [], "additive": False}
+
+    # one deep candidate in the window range, so condition (3) is what fires
+    pool = (
+        [{"id": f"a{i}", "session_id": "sA", "session_date": "2023-04-01",
+          "content": "alpha"} for i in range(6)]
+        + [{"id": "x0", "session_id": "sX", "session_date": "2023-04-02",
+            "content": "alpha"}]
+    )
+    trace: dict = {}
+    try:
+        monkeypatch.setattr(tl, "window_arm_retention", _fake)
+        tl.temporal_leg_fusion_order(
+            pool, anchors=(), window=6, limit=1,
+            date_window=("2023-04-01", "2023-04-30"), guard_trace=trace,
+            max_chunks_per_session=None)
+    finally:
+        monkeypatch.setattr(tl, "window_arm_retention", real)
+
+    reasons = [r["reason"] for r in trace["rejected"]]
+    assert reasons, trace
+    assert all(r == "evicts:sB,sC" for r in reasons), (
+        f"the reason must name EVERY deleted session: {reasons}")
