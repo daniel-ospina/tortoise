@@ -32,18 +32,10 @@ declaration of the schema.
 
 from __future__ import annotations
 
-import sys
-
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
-        f"tools/gen_placement_table.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/gen_placement_table.py …`"
-    )
-
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
