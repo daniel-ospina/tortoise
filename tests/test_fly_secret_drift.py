@@ -2897,7 +2897,9 @@ class TestTheMitigationLedger:
         refuses it), so telling the reader to record it would be wrong advice."""
         proc = _ledger_run(_ledger("# empty\n"))
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        warning = [l for l in proc.stdout.splitlines() if "will CREATE" in l]
+        warning = [
+            line for line in proc.stdout.splitlines() if "will CREATE" in line
+        ]
         assert len(warning) == 1, "exactly one aggregated warning line, not N annotations"
         assert "SENTRY_DSN" in warning[0]
         assert "GIT_SHA" not in warning[0], "a `workflow` name is not the ledger's to record"

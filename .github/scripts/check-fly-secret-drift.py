@@ -741,7 +741,7 @@ def read_mitigation_ledger(
                 "manifest, so there is no managing source for the ledger to suppress "
                 "(declare it gh-secret:<GH_NAME> first, or drop the entry)"
             )
-        kind, _, gh_name = source.partition(":")
+        kind = source.partition(":")[0]
         if kind != "gh-secret":
             raise ValueError(
                 f"{path.name}:{lineno}: {name} is declared {kind}, and the ledger only "
