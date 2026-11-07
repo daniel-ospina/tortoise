@@ -2466,10 +2466,13 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # cost total published as a total, a corrections channel an
              # items-not-in-S2 filter silently drops) never ran on the file they
              # guard — the #1349/#3332/#3616 silent-drop class. The BUNDLE path
-             # is here for a different reason than #5612's probe: the suite
-             # re-derives the two committed `ab-*.json` artifacts' headline
-             # figures, so an artifact-only edit must select the pins that read
-             # it. Pinned by
+             # is here for a different reason than #5612's probe: `tests/
+             # test_s4_reeemit_tax.py::test_every_committed_artifact_reconciles_
+             # with_its_own_rows` reads the committed `ab-*.json` artifacts and
+             # re-derives each published summary from its own rows, so an
+             # artifact-only edit must select the pin that reads it. (That pin
+             # asserts internal consistency, not a literal figure, because a
+             # re-taken measurement replaces the artifacts.) Pinned by
              # tests/test_ci_selection.py::test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change.
              "tools/s4_reeemit_tax.py",
              "docs/evidence/1789-s4-reeemit-tax/",

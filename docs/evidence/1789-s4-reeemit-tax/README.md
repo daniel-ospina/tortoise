@@ -15,7 +15,13 @@ aboutObjects: "#1789, PR #8041, #4917, #2408, plan docs/plans/2026-08-27-1789-s4
 `origin/main` @ `23d227c53`), model **requested** `deepseek-v4-flash` via the
 direct DeepSeek adapter, 7 real recorded sessions, **2 recorded runs, both
 produced by the committed instrument**: `ab-20261107T023958Z` (primary) and
-`ab-20261107T024226Z` (re-run, same code, same inputs). The filenames are each
+`ab-20261107T024226Z` (re-run, same code, same inputs). ⚠️ One field of BOTH artifacts was
+corrected AFTER the runs: `caveats[2]` still carried the refuted "S2 has already been
+written, so S4 sees it" reading, so that one string was replaced with the instrument's
+current caveat (#11385 review). **No measured field was touched** — every token count,
+composition channel and reduction is byte-identical to what the runs emitted; re-running
+needs a paid key and would move the numbers for reasons unrelated to the correction. The
+filenames are each
 run's START time; `measured_at` inside is its measured end. The model is not
 deterministic even at `temperature=0.0`, which is why two runs are recorded and
 the spread (`−93.78 %` / `−93.96 %`) is stated rather than hidden.
@@ -36,7 +42,7 @@ Task 10 (fresh 50-question E2E) was never run, so the delta contract's
 
 | issue target | measured | verdict |
 |---|---|---|
-| **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 787 → 2 038 output tokens over 7 sessions); median **−96.9 %**, worst session **−85.16 %**, best **−98.3 %** | **MET**, 2.3× the threshold; each of the 7 sessions clears 40 % on its own |
+| **S4 output size per chunk drops ≥ 40 %** | **−93.8 %** token-weighted (32 787 → 2 038 output tokens over 7 sessions); median **−96.9 %**, worst session **−85.16 %**, best **−98.3 %** | **MET**, 2.3× the threshold; each of the 7 sessions clears 40 % on its own. ⛔ **Read this as a CEILING, not as production's saving** — see *What this does not measure*: the reconstructed S3 block tells the delta arm that the session's own items already exist, which is the input under which a delta contract has the least to emit, so the real saving can only be smaller |
 | truncation rate → near 0 | `truncated=False` on **14/14** arm calls, `attempts=1` | ⚠️ **NOT EVIDENCED.** The largest output either arm produced is 7 814 tokens against a 16 000-token cap (`_S2_S4_MAX_TOKENS`), so this geometry cannot truncate and a null here is an artefact of the harness, not a measurement of the truncation rate. That target needs the eval lane's geometry. |
 | accuracy ≥ 0.826 / chunk@20 ≥ 0.738 | **not measured here** — the eval lane's gates | see *What this does not measure* |
 
@@ -193,7 +199,7 @@ corrected items with the cap/census accounting above, composition totals, and th
 per-arm `s4_delta_empty` / `s4_delta_reemit_suspect` flags derived with
 production's own predicates) and `ab-20261107T024226Z.json` (the re-run).
 
-Instrument tests: `tests/test_s4_reeemit_tax.py` (24 tests, offline, fake model)
+Instrument tests: `tests/test_s4_reeemit_tax.py` (offline, fake model)
 — they pin the ways a number like this goes wrong silently: a vacuous A/B, the
 two arms receiving different inputs, a mis-attributed cost (a per-call total
 rather than the final call; `null` rather than 0 when the provider reports

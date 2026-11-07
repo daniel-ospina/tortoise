@@ -19108,7 +19108,7 @@ def test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change():
     # an artifact-only edit must select the pins that read it.
     for changed in ("tools/s4_reeemit_tax.py",
                     "docs/evidence/1789-s4-reeemit-tax/README.md",
-                    "docs/evidence/1789-s4-reeemit-tax/ab-20261107T020837Z.json"):
+                    "docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json"):
         r = _sel([changed])
         assert r["full"] is False, (changed, r)
         assert r["surfaces"] == ["core"], (changed, r)

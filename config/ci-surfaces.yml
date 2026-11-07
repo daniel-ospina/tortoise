@@ -3879,7 +3879,7 @@ surfaces:
   # measurement artifact whose pins ARE its credibility — and it landed with NO
   # row here, so `tools/ci_selection.py --integrity` redded (`manifest drift:
   # ['test_s4_reeemit_tax.py']`, and `manifest-integrity` is in
-  # `python-ci-gate.needs`) while the 23 fail-closed pins never ran in ANY lane.
+  # `python-ci-gate.needs`) while the fail-closed pins never ran in ANY lane.
   # `tools/` and `docs/` are flat NON_PYTHON_PREFIXES entries, so a tool-only or
   # artifact-only diff came back `changed == []` and took the docs-only early
   # return — the #1349/#3332/#3616 silent-drop class, which `CORE_ALSO` in
