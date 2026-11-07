@@ -16780,9 +16780,9 @@ def test_real_manifest_has_no_duplicate_entries():
     # (via `_manifest_contract_issues` -> `duplicate_entries`) — because `main()`
     # composes all of them into `problems`, and that element is not last in the
     # composition (`carve_shard_issues`, `slow_shard_issues` and
-    # `watchdog_headroom_issues` follow it, then `wf_issues`). (`integrity()` ITSELF
-    # does not: it
-    # returns only the `missing` list, which is why that distinction is spelled
+    # `watchdog_headroom_issues` follow it, then `wf_issues`, then
+    # `workflow_halves_issues` on both branches). (`integrity()` ITSELF does not:
+    # it returns only the `missing` list, which is why that distinction is spelled
     # out here. The same job's separate `registry_integrity` step reports the
     # duplicate-entry form as well, so neither step is the only place it appears.)
     # See `duplicate_entries`' own docstring (#5373), the authority here. Pin
