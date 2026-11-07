@@ -2576,8 +2576,11 @@ def _sdk_methods_on_vector_leg(
         stack = list(fn.body)
         while stack:
             node = stack.pop()
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                 ast.ClassDef)):
+            # ⛔ A nested `class` BODY IS WALKED (#11389 review, P3): it executes
+            # when the enclosing method does, and `self` inside it resolves to that
+            # method's — so `class K: cb = _safe(self._review_pool)` is a real
+            # by-reference reach. Only nested FUNCTIONS are their own scope here.
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if id(node) not in call_funcs:
                 reached = _reachable_by_name(node, mentionable, shadowed)

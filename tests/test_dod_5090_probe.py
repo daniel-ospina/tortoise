@@ -3219,7 +3219,11 @@ def _byref_sdk_source() -> str:
         "    def augments_the_attr(self, v):\n"
         "        self._review_pool += v\n"
         "    def deletes_the_attr(self):\n"
-        "        del self._review_pool\n")
+        "        del self._review_pool\n"
+        "    def mentions_inside_a_nested_CLASS(self):\n"
+        "        class K:\n"
+        "            cb = _safe(self._review_pool)\n"
+        "        return K\n")
 
 
 def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
@@ -3273,7 +3277,10 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               "CALLS_a_getattr", "passes_from_super",
               # A comprehension target is its own scope, so it must NOT suppress
               # the body's genuine mention (#11389 review).
-              "mention_past_a_COMPREHENSION_shadow")
+              "mention_past_a_COMPREHENSION_shadow",
+              # A nested class BODY runs with the enclosing method, so a mention
+              # there is a real reach (#11389 review, P3).
+              "mentions_inside_a_nested_CLASS")
     for name in shapes:
         assert name not in methods, (
             f"{name} reaches the leg through a reference this scan cannot "
