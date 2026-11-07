@@ -1614,8 +1614,9 @@ def _migrations_fingerprint(base: Path) -> tuple:
     0.160–0.169), and the cached read it
     would guard saves ~1.2 ms PER CONSULT (uncached `table_columns()` 1.546–1.588
     ms → warm cached 0.332–0.353 ms, medians from the committed run set), so a
-    digest ADDS 0.374–0.432 ms net of the pass it replaces — **~31–36 % of the
-    win**. The ratio is stated PER CONSULT on purpose and holds at the per-record
+    digest ADDS 0.374–0.432 ms net of the pass it replaces — **~30–36 % of the
+    win** (cross-paired: 0.374/1.256 = 29.8 %, 0.432/1.193 = 36.2 %). The ratio is
+    stated PER CONSULT on purpose and holds at the per-record
     scale: `replay_plan` drives BOTH cached readers, so a record pays two consults
     and therefore two digests, and both sides of the fraction double. ⚠️ Read that
     against the artifact's bullet (a), which charges the column half as 2 × this
