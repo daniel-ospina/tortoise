@@ -7614,19 +7614,29 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # alternation has no possessive form (`its parent`, `the tree's parent`) — so neither
     # the veto nor `_tail_reasserts_equivalence` can see the co-reference.
     # ⛔ THE OBVIOUS FIX IS A MEASURED TRADE, NOT A FIX (r26): adding the possessive forms
-    # closes this row AND turns the TRUTHFUL
+    # closes this row AND turns this sentence into a REFUSAL, which `origin/main` accepts:
     #   "The tree before #9548 is `047c91f7a`; its parent is `ff6379eb2`."
-    # into a REFUSAL, which `origin/main` accepts. Whether `its` refers to the denied false
-    # mention or to the true tree is a fact about the repository, not a shape a regex reads —
-    # so the class is pinned here as open instead of being half-fixed into a new false RED.
+    # ⚠️ THAT SENTENCE IS **NOT** TRUTHFUL, and this comment called it TRUTHFUL until r29
+    # (corrected from measurement, #11191 review r28 F1's neighbouring defect — a false
+    # "truthful" label is the same class as a false verdict, one level up). Measured in
+    # this clone: `047c91f7a`'s parent is `9f4cccce0439ccde8dae27247a0470b06aee57bf`, and
+    # `ff6379eb2` is **12 commits behind** it (`git rev-list --count ff6379eb2..047c91f7a`
+    # -> 12), so the SECOND clause is false. What is true is the narrower thing this
+    # predicate is contracted to decide: the PHRASE's own referent in that sentence is
+    # `047c91f7a`, which is `_TRUE_TREE` — so `origin/main` accepting it is correct for that
+    # contract (it grades the phrase's referent and stops). Whether `its` refers to the
+    # denied false mention or to the phrase's referent is a fact about the repository, not a
+    # shape a regex reads, and the class is recorded rather than half-fixed into a false RED.
     # Open family 4 — the possessive-relation subject (#11191 review r25 F1 / r26;
     # ACCEPTED here, main REFUSES): `_COREF_ASSERTS_FALSE` has no possessive form (`its
     # parent`, `the tree's parent`), so neither the veto nor `_tail_reasserts_equivalence`
     # sees the co-reference. ⛔ THE OBVIOUS FIX IS A MEASURED TRADE, NOT A FIX: adding the
-    # possessives closes this row and turns the TRUTHFUL "The tree before #9548 is
-    # `047c91f7a`; its parent is `ff6379eb2`." — which main ACCEPTS — into a REFUSAL.
-    # Whether `its` refers to the denied false mention or to the true tree is a fact about
-    # the repository, not a shape a regex reads.
+    # possessives closes this row and turns this sentence — whose PHRASE is correctly
+    # attributed to `047c91f7a`, and which main ACCEPTS — into a REFUSAL. It is NOT a
+    # truthful sentence and must not be labelled one (its second clause is false, measured
+    # above); it is the narrow never-red-the-referent case. Whether `its` refers to the
+    # denied false mention or to the phrase's referent is a fact about the repository, not a
+    # shape a regex reads.
     #     "The claim that the tree before #9548 is `ff6379eb2` is false; its parent is
     #      `ff6379eb2`."                                          ACCEPTED · main REFUSES
     # ⚠️ …AND AN UNLISTED ABBREVIATION IS A FIFTH OPEN SHAPE, created by the shape of the
