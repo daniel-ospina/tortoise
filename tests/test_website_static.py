@@ -4018,6 +4018,9 @@ class TestSiteIconAndSocialPreviewContract:
     # The two hosts this site is served from. Declared once because every page's
     # preview URL is checked against it — see the og:image assertions.
     SITE_ORIGINS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
+    # Every page is served at `/` from one of those hosts, so this is the base an
+    # icon href is resolved against before it is compared with a file's path.
+    SITE_ROOT = "https://tortoise.premiselabs.co/"
     # The encoded-size floor a link-preview card must clear. MEASURED, not guessed:
     # a FLAT 1200x630 JPEG at maximum quality is 22,016 B (`sips -s formatOptions
     # best`), so the first cut's 20 KB floor passed the very image it was written to
@@ -4181,7 +4184,8 @@ class TestSiteIconAndSocialPreviewContract:
                 + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
     @classmethod
-    def _icon_mark_violations(cls, name: str, data: bytes) -> list[str]:
+    def _icon_mark_violations(cls, name: str, data: bytes, *,
+                              in_tree: bool = True) -> list[str]:
         """Every reason a decoded icon is not a mark; empty means it carries art.
 
         Split out of the guard so the SAME predicate can be run against a blank
@@ -4189,21 +4193,25 @@ class TestSiteIconAndSocialPreviewContract:
         measured_floors`). A check whose failure path is never executed cannot be
         told apart from a no-op.
 
-        `name` is a BARE name: the `website/` prefix is added here, so a caller that
-        passes one produces `website/website/…` in the only message that matters.
+        `name` is a BARE name of a file in the served tree: the `website/` prefix is
+        added here, so a caller that passes one produces `website/website/…` in the
+        only message that matters. A SYNTHETIC fixture is not in the tree, so it
+        passes `in_tree=False` — otherwise its message names a path that does not
+        exist, and the reader is sent looking for a file that was never there.
         """
         counts = cls._png_palette(data)
         pixels = sum(counts.values())
+        where = f"website/{name}" if in_tree else name
         problems: list[str] = []
         if len(counts) < cls.ICON_MIN_COLOURS:
             problems.append(
-                f"website/{name} holds {len(counts)} distinct colour(s) over "
+                f"{where} holds {len(counts)} distinct colour(s) over "
                 f"{pixels} pixels — that is a flat rectangle, not a mark; every size "
                 "assertion would pass on it")
         dominant = max(counts.values()) / pixels
         if dominant >= cls.ICON_MAX_DOMINANT:
             problems.append(
-                f"website/{name} is {dominant:.1%} a single colour — a mark needs to "
+                f"{where} is {dominant:.1%} a single colour — a mark needs to "
                 "carry something the background does not")
         return problems
 
@@ -4385,66 +4393,228 @@ class TestSiteIconAndSocialPreviewContract:
             for i in self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())
         }
 
-        def ref(href: str) -> str:
-            """The PATH an icon href names — the query is not part of what is served.
-
-            `?v=2` on a favicon href is standard cache-busting, changes no file and is
-            honoured by every browser, so comparing raw hrefs reports "declares no
-            rel=icon" about a page that is correct. That is the same false red
-            `_og_asset_path` exists to avoid for `og:image`, applied to the other
-            surface that links a static file.
-            """
-            return urlsplit(href).path
-
-        def declared_sizes(token: str) -> set[int]:
-            assert token, "the tag declares no sizes= — a renderer then guesses"
-            pairs = re.findall(r"(\d+)x(\d+)", token)
-            assert pairs, f"sizes={token!r} is not a '<w>x<h>' list"
-            assert all(a == b for a, b in pairs), (
-                f"sizes={token!r} declares a non-square slot; a tab icon is square")
-            return {int(a) for a, _ in pairs}
-
+        png = (png_w, png_h)
+        apple = (apple_w, _apple_h)
         for page in self._pages():
             links = self._links(self._head(page.read_text()))
-            for href in (f"/{self.ICON_ICO}", f"/{self.ICON_PNG}"):
-                assert any(ref(ln.get("href", "")) == href
-                           and "icon" in ln.get("rel", "").split() for ln in links), (
-                    f"{page.name} does not declare {href} as a rel=icon — a page with no "
-                    "icon shows a blank tab and, on a share, no avatar")
-            for ln in links:
-                # ⛔ DISPATCH ON THE `rel`, and on `apple-touch-icon` BY NAME. A
-                # `"icon" in rel.split()` filter reaches neither branch for the apple
-                # link (`"apple-touch-icon".split()` is `["apple-touch-icon"]`), so an
-                # earlier cut silently skipped it — a page could declare any `sizes`
-                # for the apple icon and nothing reded.
-                rels = ln.get("rel", "").split()
-                if "icon" in rels and ref(ln.get("href", "")) == f"/{self.ICON_PNG}":
-                    assert declared_sizes(ln.get("sizes", "")) == {png_w}, (
-                        f"{page.name} declares sizes={ln.get('sizes')!r} for "
-                        f"{self.ICON_PNG}, whose IHDR is {png_w}x{png_h} — the tag and "
-                        "the bytes must agree, or the tab reserves the wrong box")
-                elif "icon" in rels and ref(ln.get("href", "")) == f"/{self.ICON_ICO}":
-                    assert declared_sizes(ln.get("sizes", "")) == ico_sizes, (
-                        f"{page.name} declares sizes={ln.get('sizes')!r} for "
-                        f"{self.ICON_ICO}, whose directory holds {sorted(ico_sizes)} — "
-                        "the tag and the container must agree")
-                elif ("apple-touch-icon" in rels
-                      and ref(ln.get("href", "")) == f"/{self.ICON_APPLE}"
-                      # `sizes` is OPTIONAL on this link — the href alone is what iOS
-                      # needs — so absent is not a defect. But when it IS declared it is
-                      # a promise like the others (MDN's own example is
-                      # `rel="apple-touch-icon" sizes="114x114"`), and this guard knows
-                      # the file's real geometry, so a wrong one must not pass silently
-                      # the way it did while this branch did not exist.
-                      and ln.get("sizes")):
-                    assert declared_sizes(ln["sizes"]) == {apple_w}, (
-                        f"{page.name} declares sizes={ln['sizes']!r} for "
-                        f"{self.ICON_APPLE}, whose IHDR is {apple_w}x{_apple_h} — "
-                        "the tag and the bytes must agree")
-            assert any(ref(ln.get("href", "")) == f"/{self.ICON_APPLE}"
-                       and ln.get("rel") == "apple-touch-icon" for ln in links), (
-                f"{page.name} does not declare {self.ICON_APPLE} as rel=apple-touch-icon; "
-                "iOS then renders a screenshot of the page instead of the mark")
+            # `rel` is split CASE-INSENSITIVELY: HTML lowercases attribute NAMES, never
+            # values, so `rel="ICON"` is the same relation — comparing the raw value
+            # reded a correct page with a message that blamed it for having no icon.
+            missing = self._missing_icon_links(links)
+            assert not missing, (
+                f"{page.name} does not declare {', '.join(missing)} with the rel that "
+                "makes it an icon — a page with no icon shows a blank tab and, on a "
+                "share, no avatar; iOS draws a screenshot instead of the mark")
+            # ⛔ EVERY link is audited, and the apple-touch branch is dispatched BY NAME:
+            # `"apple-touch-icon".split()` is `["apple-touch-icon"]`, so a `"icon" in
+            # rel` filter reaches neither of its branches and the apple link's `sizes`
+            # went unchecked while this guard reported the page correct.
+            for link in links:
+                violation = self._declared_sizes_violation(
+                    page.name, link, png, ico_sizes, apple)
+                assert violation is None, violation
+
+    @classmethod
+    def _missing_icon_links(cls, links: list[dict]) -> list[str]:
+        """The icon files this `<link>` set fails to declare with the rel that makes it one.
+
+        Split out of the trio guard so the SAME predicate can be run against a synthetic
+        link set (`test_the_declared_sizes_guard_refuses_a_wrong_apple_slot`): every page
+        in this tree spells `rel` in lower case, so the case-INSENSITIVE read is
+        unobservable on the real population — a regression to `.split()` alone leaves
+        every page-level assertion green while `rel="ICON"` (valid HTML) reds a correct
+        page. A check whose failure path never runs cannot be told apart from a no-op.
+        """
+        declared = {(cls._icon_ref(ln.get("href", "")), token)
+                    for ln in links
+                    for token in ln.get("rel", "").lower().split()}
+        missing: list[str] = []
+        for href in (f"/{cls.ICON_ICO}", f"/{cls.ICON_PNG}"):
+            if (href, "icon") not in declared:
+                missing.append(href)
+        if (f"/{cls.ICON_APPLE}", "apple-touch-icon") not in declared:
+            missing.append(f"/{cls.ICON_APPLE}")
+        return missing
+
+
+    @classmethod
+    def _icon_ref(cls, href: str) -> str:
+        """The PATH an icon href names when it is THIS site's; "" when it is not.
+
+        The query is not part of what is served: `?v=2` on a favicon href is standard
+        cache-busting, changes no file and is honoured by every browser, so comparing
+        raw hrefs reports "declares no rel=icon" about a page that is correct — the
+        same false red `_og_asset_path` avoids for `og:image`.
+
+        ⛔ AND THE ORIGIN IS CHECKED, NOT DROPPED. `urlsplit("//evil.example/
+        favicon.ico").path` is `/favicon.ico` — the netloc is discarded — so a
+        protocol-relative href "declared" the icon by path while the browser fetched
+        it from ANOTHER HOST, and the guard reported green on a tab that has no icon
+        (or someone else's). Only an href that resolves to one of `SITE_ORIGINS`
+        yields a path; anything else yields "" and matches no icon assertion.
+        """
+        url = urlsplit(urljoin(cls.SITE_ROOT, href))
+        if url.hostname not in cls.SITE_ORIGINS:
+            return ""
+        return url.path
+
+    @staticmethod
+    def _parse_declared_sizes(token: str) -> set[int]:
+        """The square, single-slot sizes a `sizes="32x32 48x48"` token promises."""
+        assert token, "the tag declares no sizes= — a renderer then guesses"
+        pairs = re.findall(r"(\d+)x(\d+)", token)
+        assert pairs, f"sizes={token!r} is not a '<w>x<h>' list"
+        assert all(a == b for a, b in pairs), (
+            f"sizes={token!r} declares a non-square slot; a tab icon is square")
+        return {int(a) for a, _ in pairs}
+
+    @classmethod
+    def _declared_sizes_violation(cls, page_name: str, link: dict,
+                                  png: tuple[int, int], ico_sizes: set[int],
+                                  apple: tuple[int, int]) -> str | None:
+        """Why a `<link>`'s declared `sizes=` disagrees with the file's bytes; None = agrees.
+
+        ⛔ SPLIT OUT OF THE TRIO GUARD for the reason `_icon_mark_violations` is: the
+        apple-touch branch fires only when a page declares `sizes=` on that link, and
+        NO page does — measured at this head, 14 pages carry 14 apple links and 0 of
+        them declare one. Inline it was therefore unreachable, and a check whose
+        failure path never runs cannot be told apart from a no-op.
+        `test_the_declared_sizes_guard_refuses_a_wrong_apple_slot` now feeds it the
+        link the branch is written for, in both directions.
+
+        `sizes` is OPTIONAL on the apple link — the href alone is what iOS needs — so
+        absent is not a defect. When it IS declared it is a promise like the others
+        (MDN's own example is `rel="apple-touch-icon" sizes="114x114"`), and this
+        guard knows the file's real geometry, so a wrong one must not pass silently.
+        """
+        rels = link.get("rel", "").lower().split()
+        path = cls._icon_ref(link.get("href", ""))
+        declared = link.get("sizes")
+        if "icon" in rels and path == f"/{cls.ICON_PNG}":
+            if cls._parse_declared_sizes(declared or "") == {png[0]}:
+                return None
+            return (f"{page_name} declares sizes={declared!r} for {cls.ICON_PNG}, whose "
+                    f"IHDR is {png[0]}x{png[1]} — the tag and the bytes must agree, or "
+                    "the tab reserves the wrong box")
+        if "icon" in rels and path == f"/{cls.ICON_ICO}":
+            if cls._parse_declared_sizes(declared or "") == ico_sizes:
+                return None
+            return (f"{page_name} declares sizes={declared!r} for {cls.ICON_ICO}, whose "
+                    f"directory holds {sorted(ico_sizes)} — the tag and the container "
+                    "must agree")
+        if ("apple-touch-icon" in rels and path == f"/{cls.ICON_APPLE}"
+                and declared):
+            if cls._parse_declared_sizes(declared) == {apple[0]}:
+                return None
+            return (f"{page_name} declares sizes={declared!r} for {cls.ICON_APPLE}, "
+                    f"whose IHDR is {apple[0]}x{apple[1]} — the tag and the bytes must agree")
+        return None
+
+    def test_the_declared_sizes_guard_refuses_a_wrong_apple_slot(self):
+        """NON-VACUITY: the branches no page in this tree drives must still be able to RED.
+
+        ⛔ WHY. The apple-touch `sizes` branch fires only when a page declares `sizes=` on
+        that link, and none does (14 apple links, 0 declaring one, measured at this
+        head), so inline it was dead code. The trio's `icon`/rel membership is the same
+        class of hole from the other side: every page here spells `rel` in lower case,
+        so the case-insensitive read is unobservable on the real population.
+
+        Each edge is pinned in BOTH directions — the wrong slot reds, the right one does
+        not — so none of these assertions is either dead or a constant.
+        """
+        png = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        apple = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
+        ico_sizes = {i["declared"][0]
+                     for i in self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())}
+        apple_link = {"rel": "apple-touch-icon", "href": f"/{self.ICON_APPLE}"}
+
+        wrong = dict(apple_link, sizes="114x114")
+        assert apple[0] != 114, (
+            "the fixture's wrong size (114) is the file's real width, so it isolates "
+            "nothing")
+        assert self._declared_sizes_violation("page.html", wrong, png, ico_sizes, apple), (
+            f"declaring sizes=114x114 for a {apple[0]}x{apple[1]} apple-touch icon was not "
+            "reded — the branch that exists to catch it is dead")
+
+        right = dict(apple_link, sizes=f"{apple[0]}x{apple[1]}")
+        assert self._declared_sizes_violation(
+            "page.html", right, png, ico_sizes, apple) is None, (
+            "the correct apple-touch size was reded, so the branch is not a check")
+
+        assert self._declared_sizes_violation(
+            "page.html", apple_link, png, ico_sizes, apple) is None, (
+            "omitting the OPTIONAL sizes= on the apple link was reded — the href alone "
+            "is what iOS needs")
+
+        # The ICO branch: the directory holds [32, 48], so a single-slot declaration
+        # must red. Killing this branch outright left the suite green, which is the
+        # only reason it needs an edge of its own here.
+        ico_link = {"rel": "icon", "href": f"/{self.ICON_ICO}",
+                    "sizes": " ".join(f"{n}x{n}" for n in sorted(ico_sizes))}
+        assert self._declared_sizes_violation(
+            "page.html", ico_link, png, ico_sizes, apple) is None, (
+            "the ICO's own directory sizes were reded")
+        ico_wrong = dict(ico_link, sizes=f"{sorted(ico_sizes)[0]}x{sorted(ico_sizes)[0]}")
+        assert self._declared_sizes_violation(
+            "page.html", ico_wrong, png, ico_sizes, apple), (
+            f"declaring sizes={ico_wrong['sizes']!r} for an ICO whose directory holds "
+            f"{sorted(ico_sizes)} was not reded — the ICO branch is dead")
+
+        upper = {"rel": "ICON", "href": f"/{self.ICON_PNG}", "sizes": "1x1"}
+        assert self._declared_sizes_violation(
+            "page.html", upper, png, ico_sizes, apple), (
+            'rel="ICON" with a wrong sizes= was not reded — a case-sensitive read '
+            "skips the link entirely, which is how a correct page reds and a wrong "
+            "one passes)")
+
+        off_host = {"rel": "icon", "href": "//evil.example/favicon.ico",
+                    "sizes": f"{png[0]}x{png[1]}"}
+        assert self._icon_ref(off_host["href"]) == "", (
+            "a protocol-relative href was resolved to this site's path — the netloc was "
+            "dropped, so an off-host icon reads as declared")
+
+        # ...and the trio's own membership predicate, driven with a synthetic link set:
+        # the real pages all spell `rel` in lower case, so this is the only place the
+        # case-insensitive read is observable.
+        complete = [{"rel": "icon", "href": f"/{self.ICON_ICO}"},
+                    {"rel": "icon", "href": f"/{self.ICON_PNG}"},
+                    dict(apple_link)]
+        assert self._missing_icon_links(complete) == [], (
+            "a complete, correctly-spelled icon trio was reported as missing links")
+        assert self._missing_icon_links(
+            [dict(ln, rel=ln["rel"].upper()) for ln in complete]) == [], (
+            "an upper-case rel was reported as missing — HTML lowercases attribute "
+            "NAMES, never values, so rel=\"ICON\" is the same relation")
+        assert self._missing_icon_links(complete[:2]) == [f"/{self.ICON_APPLE}"], (
+            "dropping the apple-touch link was not reported as a missing icon")
+        assert self._missing_icon_links([complete[0], complete[2]]) == [f"/{self.ICON_PNG}"], (
+            "dropping the PNG rel=icon was not reported as a missing icon")
+        # ⛔ THE REL TOKEN, NOT JUST THE HREF. `<link rel="preload" href="/favicon.ico">`
+        # mentions the file and gives the tab no icon at all — an href-only reduction of
+        # this predicate reports all three as declared, which is the exact earlier cut's
+        # defect, and it is silent unless this case drives it.
+        assert self._missing_icon_links(
+            [dict(ln, rel="preload") for ln in complete]
+        ) == [f"/{self.ICON_ICO}", f"/{self.ICON_PNG}", f"/{self.ICON_APPLE}"], (
+            "an icon file mentioned by a non-icon relation satisfied the trio — the rel "
+            "token, not just the href, is what makes the link an icon")
+        # ...and a NON-SQUARE `sizes=` token is rejected, not merely parsed: `32x32 48x16`
+        # parses to {32, 48}, which EQUALS the ICO's directory, so without this the same
+        # declaration is ACCEPTED. The file does not import `pytest` (#8066), so the
+        # rejection is asserted by hand.
+        try:
+            self._parse_declared_sizes("32x32 48x16")
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError(
+                'a non-square sizes= token was accepted — "48x16" is not a slot a tab can '
+                "draw, and it parses to the same set as the ICO's directory")
+        assert self._missing_icon_links(
+            [dict(ln, href="//evil.example/favicon.ico")
+             if ln["href"] == f"/{self.ICON_ICO}" else ln for ln in complete]
+        ) == [f"/{self.ICON_ICO}"], (
+            "an off-host href was accepted as this site's ICO — the origin was dropped")
 
     def test_the_icon_files_exist_and_are_usable(self):
         """Every icon a page points at exists, and has the shape the tag implies."""
@@ -4782,6 +4952,13 @@ class TestSiteIconAndSocialPreviewContract:
             "a blank icon must trip BOTH content floors (distinct colours and dominant "
             f"colour); it tripped {len(problems)}: {problems}")
 
+        # A SYNTHETIC fixture is not in the served tree, so its message must not name a
+        # `website/…` path — that sends the reader looking for a file that never existed.
+        synthetic = self._icon_mark_violations("a synthetic fixture", blank, in_tree=False)
+        assert synthetic and not any(p.startswith("website/") for p in synthetic), (
+            "a synthetic fixture's message claims a `website/…` path: "
+            f"{synthetic}")
+
         # ...and the OTHER direction, which nothing measured: a legitimate TWO-COLOUR
         # mark must not red. Without this fixture `ICON_MIN_COLOURS` can go back to 8 —
         # the review-1 defect, red on a `crispEdges`/pixel-art mark — and every test in
@@ -4795,9 +4972,11 @@ class TestSiteIconAndSocialPreviewContract:
         assert max(mark_counts.values()) / sum(mark_counts.values()) < self.ICON_MAX_DOMINANT, (
             "the fixture's accent covers too little of the canvas to isolate the "
             "colour-count floor from the dominant-colour one")
-        assert self._icon_mark_violations("two-colour.png", mark) == [], (
+        assert self._icon_mark_violations(
+            "the two-colour fixture", mark, in_tree=False) == [], (
             "a hard-edged two-colour mark reded "
-            f"({self._icon_mark_violations('two-colour.png', mark)}) — ICON_MIN_COLOURS "
+            f"({self._icon_mark_violations('the two-colour fixture', mark, in_tree=False)}) "
+            f"— ICON_MIN_COLOURS "
             f"is {self.ICON_MIN_COLOURS}, and a mark without antialiasing is art the "
             "next person might choose, not a blank rectangle")
 
