@@ -12432,9 +12432,9 @@ _MENTION_FIELDS: tuple[str, ...] = (
 #: `Mention` rejects; the old 200 was the CLAMP's alone — `_mention_record` cut
 #: at the Point's `_MAX_QUOTE` and was over-cap too). Both caps are EQUAL, and
 #: `tests/test_referentiality_11021.py::test_both_builders_read_every_cap_from_ONE_source`
-#: pins BOTH halves — the equality (so moving one is a loud diagnosis, never silent
-#: cross-record drift) and `<= Mention.<field>.max_length` (the relation the payload
-#: actually needs).
+#: pins `quote <= _MAX_QUOTE` — a mention never stores more of the quote than the
+#: point it anchors to, so NOT equality (that red-ed an instructed raise of the
+#: POINT's cap) — and `<= Mention.<field>.max_length`, the payload's real relation.
 #:
 #: ⚠️ Equal CEILINGS are not the same string: this module holds the mention's `quote`
 #: VERBATIM (`str(q)[:_MENTION_CAPS["quote"]]`) while the point stores

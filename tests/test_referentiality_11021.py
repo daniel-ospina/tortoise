@@ -2320,20 +2320,38 @@ def test_both_builders_read_every_cap_from_ONE_source(monkeypatch):
     ⛔ AND the ceilings are the SCHEMA's, not the Point's. `Mention.quote`'s 200 is
     an independent literal, so a cap that follows `_MAX_QUOTE` can be dragged past
     it by a legitimate raise of the POINT's cap — and a Quote over the schema's cap
-    422s the whole payload. Both halves are pinned here (review at `d02ed2ccc`, P3):
-    the EQUALITY with `_MAX_QUOTE` (today's invariant, so moving one is a loud
-    diagnosis instead of silent cross-record drift) and the relation that actually
-    keeps the payload valid (`<= Mention.<field>.max_length`).
+    422s the whole payload. So the two relations pinned here are the ones the
+    payload and the offsets actually need (review at `d02ed2ccc`, P3; corrected
+    after review — see below): a mention never stores MORE of the quote than the
+    point does (`<= _MAX_QUOTE`), and no cap exceeds the schema's ceiling
+    (`<= Mention.<field>.max_length`).
+
+    ⛔ NOT equality with `_MAX_QUOTE`. It held on the day it was written and the
+    direction it fires in is the wrong one: `test_point_quote_cap_matches_its_mirrors`
+    tells a lane raising the POINT's quote cap to "raise both" (`_MAX_QUOTE` and
+    `Point.quote.max_length`) — a change that has nothing to do with mentions — and
+    an equality pin reds that legitimate, instructed change, while the remediation
+    its own message gives ("move them together") trips the schema ceiling in the
+    very next assertion. Two caps that measure different things must not be pinned
+    equal; the `<=` in the mention-never-outgrows-the-point direction is the
+    invariant the offset argument actually rests on.
     """
     from tortoise.commit_schema import Mention
     from tortoise.extractor_v2 import _MAX_QUOTE, _MENTION_CAPS
 
-    # A mention's quote cut should mean the same thing as the point's, or the same
-    # offsets index two different strings.
-    assert _MENTION_CAPS["quote"] == _MAX_QUOTE, (
-        "`_MENTION_CAPS['quote']` has drifted from `_MAX_QUOTE`, the cut a point's "
-        "quote is stored with — move them together, and keep the mention's no "
-        "larger than `commit_schema.Mention.quote.max_length`")
+    # A mention's quote cut must not be LARGER than the point's, or the same
+    # offsets index two different strings. NOT equality: raising the point's cap is
+    # a legitimate change of an unrelated record (`Point.quote`), and the mention's
+    # ceiling is the schema's, so it must not have to move with it.
+    assert _MENTION_CAPS["quote"] <= _MAX_QUOTE, (
+        "`_MENTION_CAPS['quote']` is larger than `_MAX_QUOTE`, the cut a point's "
+        "quote is stored with — the mention would then hold more of the quote than "
+        "the point it is anchored to, and the same offsets index two different "
+        "strings; lower the mention's cap or raise `_MAX_QUOTE` (with "
+        "`Point.quote.max_length`, per "
+        "`test_point_quote_cap_matches_its_mirrors`). ⛔ Do NOT widen "
+        "`commit_schema.Mention.quote.max_length` to make them equal — the "
+        "mention's ceiling is the schema's own, not the point's")
 
     # ⛔ The real ceiling: the schema owns it, and exceeding it 422s the payload.
     for name in ("surface", "quote", "kind_guess"):
