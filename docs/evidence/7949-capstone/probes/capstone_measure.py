@@ -2488,7 +2488,7 @@ def _a4_pointkind(projection) -> dict:
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
     with no kind — `tortoise/projection/__init__.py:13588-13590`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
-    `projection/entities.py:2577`, which leaves the property ABSENT instead) is ABSENT, not typed;
+    `projection/entities.py:2578`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
     not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
     and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2455`)
