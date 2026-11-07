@@ -5379,7 +5379,7 @@ def test_a_type_6_block_on_a_LAZY_line_belongs_to_the_item_it_is_still_inside():
             that block ends WITH THE ITEM, so the last line is a NEW blockquote whose wide-gap
             content is `<pre><code>` -> CODE. `[]` at the branch point `origin/main` `80c912244`
             (closing-tag spelling; the opening-tag spellings give `[100]` there) and `[100]` at the
-            pre-fix head `1bbc16ce5^` — `([100], [100], blanked)`, a false PASS in the
+            pre-fix head `1bbc16ce5^` — `([100], [100], [100])`, a false PASS in the
             `issue_process_lint` arm.
 
     The same root is why the `<div>` spelling has always leaked on `origin/main`
@@ -5559,7 +5559,7 @@ def test_the_CONTENT_ladder_runs_AFTER_the_lazy_and_S4_4_guards():
 
     ⚠️ The gate protected exactly ONE body, and the fix for the sibling finding CLOSES it instead:
         `- Text` + `> <br />` + `> <span>` + `> - *` + `>   2.     Closes #100`
-            renderer ONE `html_block` whose raw text is the marker line -> PROSE; `[100]` at the
+            renderer ONE `html_block` whose raw text ENDS WITH the marker line -> PROSE; `[100]` at the
             branch point `origin/main` `80c912244`, `[]` at `1177c6708` and at the tip `3861f0a10`,
             and `[100]` HERE — a line that adds a `>` interrupts the paragraph, so the type-7 veto
             has nothing to protect (round-54).
@@ -5685,6 +5685,15 @@ def test_a_QUOTED_indented_block_never_reads_as_a_CLAIM_in_the_indented_code_arm
     restores. ⚠️ `main` has since moved: at `1177c6708` it still carries the `>=` term and KEEPS all
     three, so this is a DIVERGENCE from the current tip in the renderer-correct direction, not
     parity with it — measure the baseline, do not assume the name still means the same tree.
+
+    ⚠️ "RENDERER-CORRECT" IS TRUE OF THESE THREE, NOT OF THE TERM (review of this PR, P3): the
+    equality also LOSES a close the renderer keeps readable, in the `indented_code` arm only —
+    `> - *` + `  </ul>` + `Notes` + `>     Closes #100` renders one top-level `html_block`, whose
+    raw text this file READS (`test_an_HTML_blocks_own_text_is_READ_not_hidden`), so every arm owes
+    `[100]`: measured `lenient [100]`, `indented_code []` here, where `main` (`d69faaf38`) answers
+    `[100]` in both. No gate impact — the arm's only consumers (`in_flight_markers`,
+    `has_satisfies_checklist`) cannot see a `Closes` keyword — and the branch point `80c912244`
+    blanks it too, so this is branch-point parity rather than a new class.
 
     ⛔ WHAT THIS FIX IS NOT (measured, not assumed — fresh-context review of this very change).
     The two `issue_process_lint` consumers do NOT see these bodies: `IN_FLIGHT_RE` and `CHECKBOX_RE`
