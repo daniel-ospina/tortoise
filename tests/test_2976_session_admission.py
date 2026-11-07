@@ -536,3 +536,59 @@ def test_a_breadth_refusal_that_depth_recovers_is_not_a_drop():
     assert len(out2) < len(pool)
     assert tight["dropped_by_breadth_bound"] > 0, tight
     assert tight["stopped_by"] == "token_cap", tight
+
+
+def test_tr_complete_sessions_splices_on_the_wire_identity_10540(monkeypatch):
+    """#10540: the SPLICE must key the pool the same way the SEED does.
+
+    ``seeded_sessions`` keys through ``retrieval.session_key_of``, which
+    resolves a product turn hit from its wire ``sessionId``. The splice used
+    to read ``h.get("session_id")`` directly, so on a camel-only pool — the
+    exact population #10540 exists for — the seed fired, the graph fetch ran,
+    and nothing was spliced: the report read ``seeded: 1`` with ``injected:
+    0``. Measured with the snake-only splice restored: ``(['a0','a1'],
+    sessions=0, injected=0)``; with this fix ``sessions=1, injected=1``.
+
+    This is the ONE assertion that makes the snake-only splice red — the
+    snake-keyed sibling above exercises the leg that did not change.
+    """
+    from tools.longmem_eval import retrieve as R
+    from tortoise import session_reinjection as SR
+
+    def _wire(content: str, sid: str, idx: int) -> dict:
+        # a PRODUCT turn hit: the point fetch POPS the snake prop, so the only
+        # identity is the camel wire key (see tests/test_d3_session_identity.py)
+        return {"id": f"lme:q:s0:t{idx}", "content": content,
+                "sessionId": sid, "session_date": "2023-01-08",
+                "match_source": "fts"}
+
+    base = [_wire("a0", "sess-a", 0), _wire("b0", "sess-b", 0),
+            _wire("a1", "sess-a", 1)]
+    injected = {"lme:q:s0:t9": {"content": "a2-injected", "sessionId": "sess-a"}}
+
+    class _Seed:
+        session_id = "sess-a"
+        point_id = "lme:q:s0:t0"
+
+    monkeypatch.setattr(SR, "seeded_sessions", lambda *a, **k: [_Seed()])
+    monkeypatch.setattr(
+        SR, "source_session_chunk_pass",
+        lambda *a, **k: {"ok": True, "dropped_by_cap": 0, "total_cap_hit": False,
+                         "by_session": {"sess-a": [{"id": "lme:q:s0:t9"}]}})
+    monkeypatch.setattr(R, "point_props_for_hits",
+                        lambda proj, ids: {i: injected[i] for i in ids})
+    monkeypatch.setattr(R, "_speaker_for_turns", lambda proj, ids: {})
+
+    class _Sdk:
+        def _get_proj(self):
+            return object()
+
+    out, report = R._tr_complete_sessions(
+        _Sdk(), list(base), ["2023-01-01", "2023-01-02"], seed_window=2,
+        seed_sessions=1, total_cap=5, per_session_cap=5)
+    assert report["ok"] is True
+    # the splice consumed the seeded group at all — the defect is `injected: 0`
+    assert report["sessions"] == 1 and report["injected"] == 1
+    assert report["applied"] is True
+    # ... and landed it after sess-a's LAST base hit, not in a tail
+    assert [h["content"] for h in out] == ["a0", "b0", "a1", "a2-injected"]
