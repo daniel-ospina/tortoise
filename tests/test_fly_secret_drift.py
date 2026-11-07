@@ -2950,17 +2950,19 @@ def _names_the_ledger_empties(ledger: Path, gh_present: set[str]) -> set[str]:
     with tempfile.TemporaryDirectory(prefix="ledger-effect-") as tmp:
         empty = Path(tmp) / "empty-ledger.txt"
         empty.write_text("# no entries\n")
-        a0, _u0, _live0, _ = module.payload_partition(
+        a0, _u0, live0, _ = module.payload_partition(
             blocks, gh_present, ledger_override=empty
         )
-        assigned, _, _, _ = module.payload_partition(
+        assigned, _, live, _ = module.payload_partition(
             blocks, gh_present, ledger_override=ledger
         )
-    # ⛔ `a0` ALONE, matching the gate's own `unmitigated`. Unioning the no-secrets
-    # sample would subtract `-z`-guarded names the ledger never emptied, i.e. model an
-    # app state the ledger does not require — the same over-wide subtraction the gate
-    # had to stop doing (#11332 round 10, P2).
-    return a0 - assigned
+    # ⛔ EXACTLY the gate's own `unmitigated`: the all-present world plus what THIS
+    # run carried before the ledger and no longer does. Unioning the NO-SECRETS sample
+    # would subtract `-z`-guarded names the ledger never emptied, i.e. model an app
+    # state the ledger does not require — the over-wide subtraction the gate had to
+    # stop doing (#11332 round 10, P2). Dropping `live0 - live` instead loses names a
+    # mixed guard (`A present AND B absent`) really does empty (#11332 round 11, P3).
+    return (a0 | (live0 - live)) - assigned
 
 
 class TestTheMitigationLedger:
@@ -3585,6 +3587,58 @@ class TestTheMitigationLedger:
             assert "SENTRY_DSN (owner daniel" in proc.stdout, proc.stdout
         else:
             assert proc.returncode == 2, proc.stdout + proc.stderr
+            assert "LEDGER NOT HONOURED" in proc.stdout, proc.stdout
+            assert "assigns it a NON-EMPTY value" in proc.stdout, proc.stdout
+
+    def test_a_QUOTED_fly_toml_env_key_is_the_same_key(self):
+        """#11332 round 11 (P2) — TOML quoting must not hide a real `[env]` value.
+
+        TOML defines `"SENTRY_DSN" = "x"` and `'SENTRY_DSN' = "x"` as the SAME key as
+        the bare form (`tomllib` agrees), and `["env"]` as the same table as `[env]`.
+        The gate's reader matched a BARE IDENTIFIER only, so a quoted key parsed as NO
+        assignment — check (0b-ii) skipped the name and the ledger certified a
+        mitigation while `fly.toml [env]` kept supplying the value. Measured end to
+        end: `rc=2 LEDGER NOT HONOURED` for the bare spelling and `rc=0 MITIGATED` for
+        the quoted one, on identical semantics — a false PASS on this gate's own
+        subject, in the arm round 2 added for exactly this second delivery path.
+
+        Every row must produce the SAME verdict as the bare spelling, so the
+        parametrization is a statement about the quoting and nothing else.
+        """
+        spellings = {
+            # The control: the spelling the reader always handled.
+            "bare": ("[env]\n", '  SENTRY_DSN = "https://real.invalid/dsn"\n'),
+            "quoted-key": ("[env]\n", '  "SENTRY_DSN" = "https://real.invalid/dsn"\n'),
+            "literal-key": ("[env]\n", "  'SENTRY_DSN' = 'https://real.invalid/dsn'\n"),
+            "quoted-header": ('["env"]\n', '  SENTRY_DSN = "https://real.invalid/dsn"\n'),
+        }
+        for label, (header, assignment) in spellings.items():
+            toml = _fixture(
+                f"ledger-env-{label}.toml",
+                _FLY_TOML.replace("[env]\n", header + assignment, 1),
+            )
+            assert assignment in toml.read_text(), (
+                f"the {label} fixture did not take — the assertion below would be "
+                "about the unmodified file"
+            )
+            proc = _run(
+                _secrets_file(
+                    ["FASTAPI_INTERNAL_KEY", "GIT_SHA"], f"quoted-env-{label}.json"
+                ),
+                manifest=LEDGER_MANIFEST,
+                workflow=LEDGER_WORKFLOW,
+                toml=toml,
+                present={"SENTRY_DSN", "FASTAPI_INTERNAL_KEY", "OPT_SECRET"},
+                extra_env={
+                    "FLY_MITIGATION_LEDGER": str(_ledger(_entry())),
+                    "FLY_MITIGATION_TODAY": "2026-11-07",
+                },
+            )
+            assert proc.returncode == 2, (
+                f"the {label} spelling was read as NO [env] assignment — `fly.toml` "
+                "still supplies SENTRY_DSN, so the gate certified a mitigation that "
+                "is not in effect: " + proc.stdout + proc.stderr
+            )
             assert "LEDGER NOT HONOURED" in proc.stdout, proc.stdout
             assert "assigns it a NON-EMPTY value" in proc.stdout, proc.stdout
 
@@ -4216,6 +4270,88 @@ class TestTheMitigationLedger:
             "`-z` guard is being reported as 'the ledger emptied it'. " + unrelated.stdout
         )
         assert "LEDGER-EMPTIED" not in unrelated.stdout, unrelated.stdout
+
+    def test_a_MIXED_guard_name_the_ledger_empties_is_explained_not_refused(self):
+        """#11332 round 11 (P3) — the `unmitigated` set must include THIS run's world.
+
+        Round 10 narrowed `unmitigated` to the all-present sample to stop an unrelated
+        entry silencing a `-z`-guarded declaration. That is correct for a name whose
+        guard variable is PRESENT this run (it is in neither sample) — but too narrow
+        for the shape `payload_partition`'s own docstring calls real: a guard NEITHER
+        synthetic sample reproduces (`A present AND B absent`), which shows up only in
+        the run sample. With `A` ledgered, such a name is gone from `live` BECAUSE OF
+        THE LEDGER, and reporting that as a `STALE DECLARATION` hands the operator a
+        remedy ("declare the managing source … or manage it from deploy-hosted.yml")
+        whose only reading makes the assignment unconditional — destroying the
+        fail-closed guard the composition exists for.
+
+        So the set is `a0 | (live0 - live)`: the all-present world, plus what this run
+        carried before the ledger and no longer does. Both halves are pinned here and
+        in the sibling `-z` test, which must keep refusing.
+        """
+        workflow = _fixture(
+            "mixed-guard-workflow.yml",
+            "name: Deploy Hosted API\n"
+            "jobs:\n"
+            "  deploy:\n"
+            "    steps:\n"
+            "      - name: Set all app secrets on Fly.io\n"
+            "        env:\n"
+            "          OPT_SECRET: ${{ secrets.OPT_SECRET }}\n"
+            "          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}\n"
+            "        run: |\n"
+            # The shipped regions FIRST, in their shipped order: the environment
+            # blank is what makes the composition read the deliberate absence.
+            f"{_LEDGER_FILTER}"
+            '          ARGS=(FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}")\n'
+            '          ARGS+=(GIT_SHA="${GITHUB_SHA}")\n'
+            '          [ -n "$OPT_SECRET" ] && ARGS+=(OPT_SECRET="$OPT_SECRET")\n'
+            '          [ -n "$OPT_SECRET" ] && [ -z "$SENTRY_DSN" ] && ARGS+=(MIXED_FLAG="on")\n'
+            '          flyctl secrets set --stage "${ARGS[@]}"\n',
+        )
+        manifest = _fixture(
+            "mixed-guard-manifest.txt",
+            "FASTAPI_INTERNAL_KEY  gh-secret:FASTAPI_INTERNAL_KEY\n"
+            "OPT_SECRET            gh-secret:OPT_SECRET\n"
+            "GIT_SHA               workflow\n"
+            "MIXED_FLAG            workflow\n",
+        )
+
+        def drive(ledger_text: str) -> subprocess.CompletedProcess[str]:
+            return _run(
+                _secrets_file(["FASTAPI_INTERNAL_KEY"], "mixed-guard-secrets.json"),
+                manifest=manifest,
+                workflow=workflow,
+                # `SENTRY_DSN` is ABSENT on GitHub this run — that half of the guard is
+                # what no synthetic sample reproduces.
+                present={"FASTAPI_INTERNAL_KEY", "OPT_SECRET"},
+                extra_env={
+                    "FLY_MITIGATION_LEDGER": str(
+                        _ledger(ledger_text, "mixed-guard-ledger.txt")
+                    ),
+                    "FLY_MITIGATION_TODAY": "2026-11-07",
+                },
+            )
+
+        # CONTROL. With no entries the name is a stale declaration — the same rule
+        # that makes a `-z`-guarded declaration stale: the `workflow` arm requires the
+        # payload to assign it in the ALL-PRESENT world, and a condition that needs a
+        # secret ABSENT never does. So this arm is not "the legitimate case already
+        # worked"; it is what makes the arm below a statement about the LEDGER.
+        control = drive("# empty\n")
+        assert control.returncode == 1, control.stdout + control.stderr
+        assert "STALE DECLARATION — 'MIXED_FLAG'" in control.stdout, control.stdout
+        assert "LEDGER-EMPTIED" not in control.stdout, control.stdout
+
+        emptied = drive(_entry("OPT_SECRET"))
+        assert emptied.returncode == 0, (
+            "a mixed-guard name the ledger genuinely empties is being REFUSED as a "
+            "stale declaration — `unmitigated` is missing this run's world "
+            "(`live0 - live`): " + emptied.stdout + emptied.stderr
+        )
+        assert "LEDGER-EMPTIED" in emptied.stdout, emptied.stdout
+        assert "MIXED_FLAG" in emptied.stdout, emptied.stdout
+        assert "STALE DECLARATION — 'MIXED_FLAG'" not in emptied.stdout, emptied.stdout
 
     def test_the_belt_is_SILENT_on_a_run_it_blocks(self):
         """The belt must not announce a CREATE on a run it then refuses.

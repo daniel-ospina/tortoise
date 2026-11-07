@@ -922,6 +922,31 @@ def workflow_secret_refs(text: str) -> set[str]:
     return set(_SECRET_REF_RE.findall(text))
 
 
+#: A ``[env]`` assignment line, with its key as written. The key may be a TOML
+#: BASIC (``"NAME"``) or LITERAL (``'NAME'``) quoted string — TOML defines those
+#: as the same key as the bare form, and a bare-identifier-only pattern silently
+#: read them as no assignment at all (#11332 round 11, P2).
+_ENV_ASSIGNMENT_RE = re.compile(
+    r"""\s*("(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$"""
+)
+
+
+def _toml_key(token: str) -> str:
+    """A TOML key token with its quoting removed (``"env"`` -> ``env``).
+
+    TOML's quoted and bare key forms address the SAME key, so a reader that only
+    accepts the bare form reads a legal spelling as absent — which is a false
+    PASS in a fail-closed gate: `fly.toml [env]` still supplies the value while
+    the ledger certifies the name as deliberately absent.
+    """
+    token = token.strip()
+    if len(token) >= 2 and token[0] == token[-1] == '"':
+        return token[1:-1]
+    if len(token) >= 2 and token[0] == token[-1] == "'":
+        return token[1:-1]
+    return token
+
+
 def fly_toml_env_assignments(text: str) -> dict[str, str]:
     """``[env]`` key -> the value it assigns, as written (comments stripped).
 
@@ -947,12 +972,25 @@ def fly_toml_env_assignments(text: str) -> dict[str, str]:
         code = line.split("#", 1)[0]
         stripped = code.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
-            in_env = stripped == "[env]"
+            # ⛔ A QUOTED HEADER IS THE SAME TABLE. TOML defines `["env"]` and
+            # `[ 'env' ]` as identical to `[env]`, so requiring the bare spelling
+            # left `in_env` False for the whole file — the same false PASS the
+            # comment above describes, one quoting style over (#11332 round 11, P2).
+            header = _toml_key(stripped[1:-1])
+            in_env = header == "env"
             continue
         if not in_env:
             continue
-        match = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$", code)
+        # ⛔ A QUOTED KEY IS THE SAME KEY. `"SENTRY_DSN" = "https://…"` is legal TOML
+        # and maps to exactly the entry the bare form does (`tomllib` agrees), but a
+        # bare-identifier-only pattern read it as NO assignment at all — so check
+        # (0b-ii) skipped the name and the ledger certified a mitigation that
+        # `fly.toml [env]` was still supplying: a green `MITIGATED` over a value the
+        # ledger says is absent. That is a false PASS on this gate's own subject, in
+        # the arm round 2 added for it (#11332 round 11, P2).
+        match = _ENV_ASSIGNMENT_RE.match(code)
         if match:
+            name = _toml_key(match.group(1))
             raw = match.group(2).strip()
             # ⛔ A VALUE THAT DOES NOT START ON THIS LINE IS *NOT* EMPTY. TOML allows
             # `X =` / newline / `"real value"`, and taking only this line's text read
@@ -968,7 +1006,7 @@ def fly_toml_env_assignments(text: str) -> dict[str, str]:
             # unrecordable-mitigation defect the value test exists to fix.
             elif len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
                 raw = raw[1:-1]
-            values[match.group(1)] = raw
+            values[name] = raw
     return values
 
 
@@ -1056,26 +1094,36 @@ def main() -> int:
             with tempfile.TemporaryDirectory(prefix="fly-secret-empty-ledger-") as tmp:
                 empty = Path(tmp) / "empty-ledger.txt"
                 empty.write_text("# no entries\n")
-                a0, _u0, _live0, _ = payload_partition(
+                a0, _u0, live0, _ = payload_partition(
                     blocks, gh_present, ledger_override=empty
                 )
-            # ⛔ `a0` ALONE — the ALL-PRESENT sample — never `a0 | u0 | live0`.
+            # ⛔ `a0 | (live0 - live)` — never `a0 | u0 | live0`.
             # The arm this feeds is "the ledger emptied it", which is only ever true
-            # of a name the payload WOULD have carried in the ordinary world. Unioning
-            # the other two samples makes it true of names the ledger never touched:
-            # `u0` is the NO-SECRETS world, so it holds every `[ -z "$X" ]`-guarded
-            # assignment by construction, and `live0` is the run sample. A
-            # `workflow`-declared name assigned only under a `-z` guard is therefore
-            # in `unmitigated` while being absent from `a0` — and its `STALE
-            # DECLARATION` (exit 1) then turns into an explained-away `LEDGER-EMPTIED`
-            # the moment ANY unrelated entry exists, which is exit 0 when it was the
-            # only violation. Measured on a fixture with `ENV_GATED_FLAG workflow`
-            # assigned under `[ -z "${{ secrets.SENTRY_DSN }}" ]`: an empty ledger
-            # reports the stale declaration; a ledger naming unrelated `OPT_SECRET`
-            # reports `rc=0` and the declaration is gone with a false explanation
-            # (#11332 round 10, P2). The composed case this arm exists for
-            # (`BACKUP_SWEEP_ENABLED`) is in `a0`, so nothing legitimate is lost.
-            unmitigated = frozenset(a0)
+            # of a name the payload WOULD have carried in that same world. Two
+            # worlds qualify, and only two:
+            #
+            #   a0            the ALL-PRESENT world. This is the ordinary case — the
+            #                 composed `BACKUP_SWEEP_ENABLED` is here.
+            #   live0 - live  what THIS run's payload carried BEFORE the ledger and no
+            #                 longer does. `payload_partition`'s own docstring names
+            #                 this shape as real: a guard NEITHER synthetic sample
+            #                 reproduces (`A present AND B absent`) shows up only in
+            #                 the run sample. With `A` ledgered, such a name is gone
+            #                 from `live` BECAUSE OF THE LEDGER, and calling that a
+            #                 STALE DECLARATION hands the operator a remedy ("declare
+            #                 the managing source … or manage it from deploy-hosted.yml")
+            #                 whose only reading makes the assignment unconditional —
+            #                 destroying the fail-closed guard the composition exists
+            #                 for, which is the round-4 P1 this arm was added to stop.
+            #
+            # ⛔ NOT `u0`. It is the NO-SECRETS world, so it holds every `[ -z "$X" ]`
+            # guard by CONSTRUCTION — names the ledger never touched. Unioning it made
+            # "the ledger emptied it" true of any `-z`-guarded `workflow` name, so ONE
+            # true entry silenced an unrelated `STALE DECLARATION` (measured round 10:
+            # `rc=1` with an empty ledger, `rc=0` with an entry for an unrelated name).
+            # A `-z`-guarded name whose guard variable is PRESENT this run is in
+            # neither `a0` nor `live0`, so it stays refused.
+            unmitigated = frozenset(a0) | (frozenset(live0) - frozenset(live))
         except (ValueError, OSError, subprocess.SubprocessError) as exc:
             _err(
                 "cannot determine secret provenance: the payload could not be "
