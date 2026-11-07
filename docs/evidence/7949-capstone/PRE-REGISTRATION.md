@@ -1602,7 +1602,7 @@ exists". A2 is the one genuine absence: no S3 RESOLVE attach/mint census has eve
 `a1_relation_families: [decomposesInto, hasPart]` — the pack's two **declared hierarchy predicates**.
 `decomposesInto` is never a relationship **label**: both hierarchy entries are written `type: hasPart`,
 and the OPERATOR writers fold `composedOf`/`decomposesInto`/`contains`/`wraps` onto that same label
-(`tortoise/projection/edges.py:1513`, `record_projection.py:4572`) while the hierarchy seam writes the
+(`tortoise/projection/edges.py:1513`, `record_projection.py:4771-4779`) while the hierarchy seam writes the
 entry's `type` and REFUSES a `decomposesInto` entry
 (`tortoise/pack_hierarchy.py:215-224`: *"the edge this function would write carries `decomposesInto`,
 which `create_edge` refuses"*); `create_edge`'s own predicate set carries `hasPart` and not

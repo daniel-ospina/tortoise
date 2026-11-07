@@ -1536,7 +1536,7 @@ def test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run(
     # ⚠️ The pin owns the `e`-FAMILY, not the whole map. `#10982` registered the five
     # `A`-rows in the SAME block — `denominator_floors` carries fourteen keys in two
     # families, five `e*` and nine `a*` (PRE-REGISTRATION §3.7 "Floors, in one
-    # place"; §10.10), and the A-floors belong to rows THIS binding never scores. A
+    # place"; §10.11), and the A-floors belong to rows THIS binding never scores. A
     # whole-map equality would red this file every time an A-row floor is added, for
     # a record change that cannot move an E verdict; partitioning by family (the
     # `startswith("a")` partition `tests/test_capstone_a_rows_10982.py` already uses)

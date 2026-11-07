@@ -193,7 +193,7 @@ _MEASUREMENT_RUN_KEYS = (
     "errors",
     "corpus_sha256",
     # #10982: the A-row census is written INTO the run block by the emitter
-    # (`capstone_measure.py:3515`), beside `e3_census`/`e4_receipt`. Omitting it
+    # (`capstone_measure.py:4019`), beside `e3_census`/`e4_receipt`. Omitting it
     # here reopened the exact construction #10601 review round 2 closed: a
     # `REFUSED` table with every other key nulled and a CLOSED blocker named was
     # EXEMPTED from V12 while `a_row_census` still held produced numbers
