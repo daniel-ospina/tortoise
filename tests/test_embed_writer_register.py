@@ -71,6 +71,9 @@ is the product home; this file is its proof.
 | `test_the_three_writers_that_carried_no_declaration_now_carry_one` | **this issue's own objective** (`03-scope.md` S2) | one of the three named writers loses its declaration, or the declaration stops naming `#11085` as the issue that accepted it |
 | `test_every_declaration_cites_a_seam_and_an_owning_issue` | the issue's `{class, reason, owning issue}` shape | an entry carries a claim with no symbol behind it, or an owner that is not an issue |
 | `test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from` | the frozen map is not silently re-derived | `EMBED_WRITER_CLASSES` stops matching `_DECLARATIONS` (a mutation, a second `load()`, a mutable dict slipping in) |
+| `test_a_stores_declaration_that_does_not_answer_is_refused` (`#11492`) | row 2's question — *where does this writer's vector land?* — is ANSWERED by every declaration, never defaulted | a declaration is constructible without `stores`, or `load()` accepts an empty tuple, a mutable list, a non-label string, or a typo'd disposition (any of which would read as an unserved LABEL and hold a correct tree) |
+| `test_every_declared_label_re_derives_at_this_head` (`#11492`) | the declared LABELS are re-derived at HEAD, the `CENSUS_EVIDENCE` discipline one field over | a writer's store clause moves to another label (or the needle stops being in the symbol), so the declaration silently answers about the old one |
+| `test_a_runtime_label_declaration_is_named_not_guessed` (`#11492`) | `LABELS_AT_RUNTIME` is a DECLARED, reviewable statement — `no-live-vector` would be a lie and a guessed label a fabrication | the dump importer (`restore_graph`) is declared as storing nothing or as storing a fixed label |
 
 ⛔ **These tests write no graph and flip no gate.** `#11085` changes no writer's behaviour, no schema,
 and no MCP/SDK surface — the register is a declaration, and its proof is a refusal.
@@ -98,7 +101,10 @@ from tortoise.embed_writer_register import (
     CLASSES,
     EMBED_WRITER_CLASSES,
     EXEMPT,
+    LABELS_AT_RUNTIME,
+    NO_LIVE_VECTOR,
     RECOGNISED_PRODUCER,
+    STORES_DISPOSITIONS,
     DuplicateWriterDeclaration,
     UnclassifiedWriterKey,
     UnknownWriterClass,
@@ -215,8 +221,9 @@ def test_the_register_is_not_a_second_rule_set():
 # ── The refusals (§6.2 / §6.3) ─────────────────────────────────────────────
 
 
-def _record(cls: str = EXEMPT, reason: str = "`tortoise.z::_w` reads one", owner: str = "#11085"):
-    return WriterClass(cls, reason, owner)
+def _record(cls: str = EXEMPT, reason: str = "`tortoise.z::_w` reads one", owner: str = "#11085",
+            stores: tuple[str, ...] | str = NO_LIVE_VECTOR):
+    return WriterClass(cls, reason, owner, stores)
 
 
 def test_a_duplicate_key_raises():
@@ -816,6 +823,125 @@ def test_every_declaration_cites_a_seam_and_an_owning_issue():
     # paths this repo happens to contain adds no killability. (That path cannot be added here in any
     # case: gaining `tortoise/config/__init__.py` fails `tests/conftest.py` at import,
     # `cannot import name 'RELATIVE_PATH_ERROR'`.)
+
+
+def test_a_stores_declaration_that_does_not_answer_is_refused():
+    """`#11492`: every declaration answers row 2's question, and `load()` refuses a shrug.
+
+    Row 2 is *"is every stored vector on a label the query leg can serve?"*, and the one fact it
+    needs — WHERE the vector lands — cannot be derived for most writers (their label lives in the
+    CALLER's `MATCH`), so it is DECLARED. The refusals below are what keeps that declaration from
+    degrading into a default: an empty tuple ("unspecified") and a missing field would both read to
+    the grader as *nothing to compare*, i.e. a silent pass for the one writer nobody checked.
+
+    ⛔ The directions are not symmetric and the message says so: an empty tuple or an
+    out-of-vocabulary string would be compared as a LABEL and land outside the served set — a
+    `NOT MET` on a tree where nothing is wrong, the false-hold direction.
+    """
+    # ⛔ No default: the field is REQUIRED, so a new declaration cannot inherit a safe-looking
+    # answer. This is the same pin `test_the_DECLARATIONS_tuple_…` puts on the frozen map.
+    with pytest.raises(TypeError):
+        WriterClass(EXEMPT, "`tortoise.z::_w` reads one", "#11085")  # type: ignore[call-arg]
+    for stores in ((), [], ["Event"], "Event", "", "exmpt", ("Event", ""), ("Ev ent",),
+                   ("Event", "Event"), ("Event", 3)):
+        with pytest.raises(ValueError):
+            register.load([("tortoise.z::_w", _record(stores=stores))])
+    # …and every admissible shape still loads, so the refusal is not a blanket one.
+    for stores in (("Event",), ("Point", "Subject"), NO_LIVE_VECTOR, LABELS_AT_RUNTIME):
+        assert register.load([("tortoise.z::_w", _record(stores=stores))])[
+            ("tortoise.z::_w")].stores == stores
+    # Every LIVE entry states one of them — the population-wide form of the same pin.
+    for key, entry in EMBED_WRITER_CLASSES.items():
+        if isinstance(entry.stores, str):
+            assert entry.stores in STORES_DISPOSITIONS, (key, entry.stores)
+        else:
+            assert entry.stores and all(register._LABEL.match(l) for l in entry.stores), (
+                key, entry.stores)
+
+
+#: `#11492` — WHERE each declared vector lands, as re-derivable evidence: `(rel_path, symbol,
+#: needle)`. The needle is the store clause itself (or the label constant the clause is built
+#: from), so a writer whose store MOVES to another label must be re-declared or this reds.
+#: ⛔ Only writers declared with a label tuple appear here: a `NO_LIVE_VECTOR` entry cannot be
+#: proven by a needle (that is a claim about ABSENCE, and data flow — `UNDECIDABLE_WRITE_SHAPES`),
+#: and `LABELS_AT_RUNTIME` is precisely the entry with no static label to point at. Both are
+#: product judgements that the register itself owns; the `stores` field is where a reader reviews
+#: them.
+LABEL_EVIDENCE: dict[str, tuple[str, str, str]] = {
+    # The BATCHED clauses: the label is in the MERGE/MATCH, the vector in the clause call.
+    "tortoise.projection.entities::_event_plain_merge": (
+        "tortoise/projection/entities.py", "_event_plain_merge", 'MERGE (e:Event {eventId: $eid})'),
+    "tortoise.sdk::_session_event_write": (
+        "tortoise/sdk.py", "_session_event_write", 'set_embedding_clause("e")'),
+    "tortoise.sdk::ingest_corpus": (
+        "tortoise/sdk.py", "ingest_corpus", 'set_embedding_clause("e")'),
+    "tortoise.sdk::_embedding_repair_attempt": (
+        "tortoise/sdk.py", "_embedding_repair_attempt", 'MATCH (e:Event {eventId:$eid})'),
+    "tortoise.session_indexer::main": (
+        "tortoise/session_indexer.py", "main", '"SET e += $props, " + set_embedding_clause("e")'),
+    # The two where the label is NOT the enclosing word: `Point` in the MATCH of the restore
+    # (`:Batch`/`:Session` appear in the same body but carry no vector — the pre-wipe snapshot),
+    # and the canonical-label loop for the generic update door.
+    "tortoise.projection::_rebuild_all_replay": (
+        "tortoise/projection/__init__.py", "_rebuild_all_replay",
+        '"MATCH (n:Point {id:$pid}) " + restore_guard'),
+    "tortoise.sdk::_update_entity": (
+        "tortoise/sdk.py", "_update_entity", "for label, prop in _CANONICAL_ENTITY_ID_PROPS:"),
+}
+
+
+def test_every_declared_label_re_derives_at_this_head() -> None:
+    """`#11492`: a declared LABEL is re-derived at HEAD — the `CENSUS_EVIDENCE` discipline.
+
+    The `stores` field is what `#5090` DoD row 2 is scored on, so it must rot loudly: a writer
+    re-targeted to another label, or a store clause that stopped being inside the named symbol,
+    reds here instead of silently leaving the declaration answering about the old label. The two
+    populations are pinned in BOTH directions — a label-tuple entry with no evidence, and evidence
+    for an entry that no longer declares labels.
+    """
+    labelled = {key for key, entry in EMBED_WRITER_CLASSES.items()
+                if not isinstance(entry.stores, str)}
+    assert labelled, "no declaration names a label — row 2 would resolve nothing"
+    assert set(LABEL_EVIDENCE) == labelled, (
+        "every label-tuple declaration needs re-derivable evidence, and evidence for a declaration "
+        f"that no longer names labels is stale: missing={sorted(labelled - set(LABEL_EVIDENCE))} "
+        f"stale={sorted(set(LABEL_EVIDENCE) - labelled)}"
+    )
+    for key, (rel, symbol, needle) in sorted(LABEL_EVIDENCE.items()):
+        path = REPO_ROOT / rel
+        assert path.is_file(), (key, rel)
+        source = path.read_text(encoding="utf-8")
+        lines = source.splitlines()
+        bodies = ["\n".join(lines[node.lineno - 1:node.end_lineno])
+                  for node in ast.walk(ast.parse(source))
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and node.name == symbol]
+        assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
+        assert any(needle in body for body in bodies), (
+            f"{key} declares stores={EMBED_WRITER_CLASSES[key].stores} but {rel}::{symbol} no "
+            f"longer carries {needle!r} — the store moved, so the declaration is stale"
+        )
+
+
+def test_a_runtime_label_declaration_is_named_not_guessed() -> None:
+    """`LABELS_AT_RUNTIME` is DECLARED — `no-live-vector` would be a lie here.
+
+    `tortoise.hosted_backup::restore_graph` recreates nodes as `CREATE (n:{safe_labels})` from a
+    DUMP and then restores each vector with a label-FREE `MATCH (n {__dump_id:r.id})`, so the label
+    it stores on is whatever the file carries. Declaring `no-live-vector` (a lie) or a fixed label
+    (a fabrication) would green `#5090` DoD row 2 over a real hole; the honest declaration holds
+    the row, which is what the row is FOR.
+    """
+    key = "tortoise.hosted_backup::restore_graph"
+    assert EMBED_WRITER_CLASSES[key].stores == LABELS_AT_RUNTIME, (
+        f"{key} declares {EMBED_WRITER_CLASSES[key].stores!r}; the dump's labels are read at "
+        "restore time, so no static label set can be true"
+    )
+    body = (REPO_ROOT / "tortoise/hosted_backup.py").read_text(encoding="utf-8")
+    assert 'CREATE (n:{safe_labels})' in body, (
+        "the runtime-label reading rests on the dump's own labels; if the restore stops creating "
+        "from `safe_labels`, re-read this declaration rather than deleting the assertion"
+    )
 
 
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():

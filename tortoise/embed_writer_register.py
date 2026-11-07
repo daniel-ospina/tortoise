@@ -33,13 +33,32 @@ rule exists to close.
   the class AGREEMENT half by `::test_the_instrument_and_the_product_declare_the_same_writers`
   (which reads no `CENSUS_EVIDENCE` at all), and the `CENSUS_EVIDENCE` needles by
   `tests/test_dod_5090_probe.py::test_every_census_citation_re_derives_at_this_head` (via
-  `probe.census_evidence_violations()`).
+  `probe.census_evidence_violations()`). A FOURTH half is `stores` (`#11492`), re-derived by
+  `::test_every_declared_label_re_derives_at_this_head` against its own `LABEL_EVIDENCE` needles.
   ⚠️ Census evidence and this register are **not** one population:
   `tortoise.session_indexer::main` is the one entry with no census row (it is the instrument's ONE
   `ungated` write path, carried in the census's row-1 prose), so its citation is re-derived by the
   symbol test alone. A reader who wants "re-derivable by `CENSUS_EVIDENCE`" to cover 100% of this
   file should read it as "by the three tests that re-derive it, one half each", which is what they
   do.
+
+**A SECOND question, answered here since `#11492`: WHERE the vector lands.** `#5090` DoD row 2
+asks *"is every stored vector on a label the query leg can serve?"* — a fact about a writer that
+its CLASS cannot express (the `EXEMPT` docstring above says so in its own words: *"a consumer that
+needs the difference must carry it"*). Each declaration therefore also carries `stores`: the graph
+labels the writer's vector is stored on, or :data:`NO_LIVE_VECTOR` / :data:`LABELS_AT_RUNTIME`.
+⛔ It is declared here rather than derived by the instrument because the derivation cannot reach it:
+of the twenty outside-gate writers, the writer's own Cypher names a single label for four, two
+conflicting labels for two, and NO label for fourteen — the label usually lives in the caller's
+`MATCH` (`_embedding_repair_attempt` writes `set_embedding_clause("e")` inside
+`MATCH (e:Event {eventId:$eid})`). A second derivation in the grader would be a second owner of one
+fact; the field is that fact, declared once (the policy-as-data shape `#11444` applies to row 1).
+⚠️ **Its residual, stated rather than implied:** a `NO_LIVE_VECTOR` or label-tuple declaration is
+accepted **by name** once `load()` validates it — the instrument cannot re-derive "this writer
+stores nothing" (that is `UNDECIDABLE_WRITE_SHAPES`, data flow, the same limit `exempt` has on row
+1). The register is product code under review, and
+`tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head` re-derives
+every declared label against the writer's own body at HEAD.
 
 **Discovery, and the edge of the guard.** The guard's population comes from
 `tools/dod_5090_probe.py::embedding_writers()`, so the guard is exactly as wide as that discovery —
@@ -232,9 +251,44 @@ EXEMPT = "exempt"
 #: :func:`load` refuses a declaration that asks for it.
 CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 
+#: `#11492`. **WHERE the writer's vector lands** — row 2's question, which a class cannot answer.
+#: A declaration states either the graph labels its vector is stored on (a tuple like
+#: `("Event",)`), or one of the two dispositions below.
+#:
+#: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the
+#: twenty outside-gate writers, the instrument's own label derivation (the `MERGE|CREATE (:Label`
+#: literal in the writer's body) resolves a single label for four, two conflicting labels for two,
+#: and **no label at all for fourteen** — because the label usually lives in the *caller's*
+#: `MATCH`, not in the writer. `_embedding_repair_attempt` writes
+#: `set_embedding_clause("e")` inside `MATCH (e:Event {eventId:$eid})`; `_rebuild_all_replay`'s
+#: vector write is `MATCH (n:Point {id:$pid})` + `set_embedding_clause("n", "$emb")`. A second
+#: derivation in the grading instrument would be a second owner of the same fact; the field below
+#: makes the fact ONE declaration that every consumer reads (the policy-as-data shape `#11444`
+#: already applies to row 1, and the shape OPA's *Philosophy* states: policy is decoupled from the
+#: service so those responsible can read, write, version and distribute it).
+#: ⛔ It is still NOT a rule set: a label is a fact about a writer, not a predicate about what
+#: earns a vector — `value_gate.RULES` stays the one rule set (§12.2a).
+NO_LIVE_VECTOR = "no-live-vector"
+
+#: A writer whose vector IS stored, but on a label chosen at RUNTIME — a dump import
+#: (`hosted_backup::restore_graph` creates `(n:{safe_labels})` from the file) or a store keyed on a
+#: runtime label. Declared rather than guessed, and it HOLDS `#5090` DoD row 2: the row's rule is
+#: *"no vector is stored without a path to query it"*, and a runtime label is precisely the case
+#: where the served-set comparison cannot be made. `no-live-vector` would be a LIE here and a
+#: guessed label would be a fabrication.
+LABELS_AT_RUNTIME = "labels-at-runtime"
+
+#: The two non-label dispositions :attr:`WriterClass.stores` admits.
+STORES_DISPOSITIONS: tuple[str, ...] = (NO_LIVE_VECTOR, LABELS_AT_RUNTIME)
+
 #: An owning issue is a GitHub issue reference — the issue that OWNS the exemption's reason, not
 #: merely the one that recorded it (see the per-entry `owner_issue` notes).
 _OWNER_ISSUE = re.compile(r"^#\d+$")
+
+#: A Cypher label. A `stores` label is interpolated into a query by its consumers, so it is held to
+#: the same shape `tortoise.security.validate_entity_type` allowlists — statically, here, where the
+#: declaration is made (defence in depth: the register is a leaf and cannot import that validator).
+_LABEL = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class UnclassifiedWriterKey(LookupError):
@@ -273,7 +327,7 @@ class UnknownWriterClass(ValueError):
 
 @dataclass(frozen=True)
 class WriterClass:
-    """One declaration: what the writer is, why, and which issue owns that reading.
+    """One declaration: what the writer is, why, where its vector lands, and who owns that.
 
     ``reason`` cites the **seam** (the symbol and the shape that decides the class), never a line
     number: `tools/dod_5090_probe.py`'s own census learned that the expensive way — a `path:LINE`
@@ -281,11 +335,57 @@ class WriterClass:
     unrelated edit. That module's ``CENSUS_EVIDENCE`` carries the executable form for the rows it
     has (not all of them: `tortoise.session_indexer::main` has no census row), and this module's
     own test re-derives the symbol every entry cites.
+
+    ``stores`` answers the SECOND question a consumer needs (`#11492`, `#5090` DoD row 2 — *is every
+    stored vector on a label the query leg serves?*): a tuple of Cypher labels the writer's vector
+    is stored on, or :data:`NO_LIVE_VECTOR` / :data:`LABELS_AT_RUNTIME`. ⛔ It carries **no default**:
+    a new declaration must ANSWER the question, because a default would be a silent safe-looking
+    answer for exactly the writer nobody checked. Its evidence is re-derived at HEAD by
+    `tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head`
+    (the ``LABEL_EVIDENCE`` needles), the ``CENSUS_EVIDENCE`` discipline one field over.
     """
 
     cls: str
     reason: str
     owner_issue: str
+    stores: tuple[str, ...] | str
+
+
+def _check_stores(key: str, stores: tuple[str, ...] | str) -> None:
+    """Refuse a ``stores`` that does not answer row 2's question.
+
+    ⛔ The refusals all point the SAME way — an undeclared label must never be read as "stores
+    nothing": an empty tuple (a shrug), a mutable list (a frozen declaration must not be editable
+    in place by a consumer), a label that is not a Cypher label, and a bare string that is not one
+    of :data:`STORES_DISPOSITIONS` (a typo'd disposition would otherwise read as a LABEL named
+    `"no-vector"` and quietly pass the served-set comparison as unserved — a `NOT MET` on a
+    correct tree, which is the false-hold direction this module refuses elsewhere).
+    """
+    if isinstance(stores, str):
+        if stores not in STORES_DISPOSITIONS:
+            raise ValueError(
+                f"{key!r} declares stores={stores!r}, which is neither a label tuple nor one of "
+                f"{STORES_DISPOSITIONS} — a declaration must answer WHERE the vector lands"
+            )
+        return
+    if not isinstance(stores, tuple):
+        raise ValueError(
+            f"{key!r} declares stores={stores!r} — a label set is a TUPLE (a frozen declaration "
+            "must not be editable in place by a consumer)"
+        )
+    if not stores:
+        raise ValueError(
+            f"{key!r} declares an EMPTY stores tuple — that is a shrug, not an answer: say "
+            f"{NO_LIVE_VECTOR!r} if the writer stores no live vector"
+        )
+    bad = [label for label in stores if not isinstance(label, str) or not _LABEL.match(label)]
+    if bad:
+        raise ValueError(
+            f"{key!r} declares stores={stores!r} — {bad!r} are not Cypher labels, and a consumer "
+            "compares them against the query leg's served set"
+        )
+    if len(set(stores)) != len(stores):
+        raise ValueError(f"{key!r} declares a label twice in stores={stores!r}")
 
 
 def load(
@@ -296,8 +396,10 @@ def load(
     Raises:
         DuplicateWriterDeclaration: the same ``module::symbol`` key twice.
         UnknownWriterClass: a class outside :data:`CLASSES` (including ``"bypass"``).
-        ValueError: a key that is not ``module::symbol``, an empty ``reason``, or an
-            ``owner_issue`` that is not an issue reference.
+        ValueError: a key that is not ``module::symbol``, an empty ``reason``, an
+            ``owner_issue`` that is not an issue reference, or a ``stores`` that answers neither
+            of row 2's question's admissible ways (an empty tuple, a mutable list, a label that is
+            not a Cypher label, or a bare string outside :data:`STORES_DISPOSITIONS`).
 
     Public because the falsifiers need to drive a malformed register — a guard that can only be
     checked against the tree's current content cannot be checked at all once the content is right.
@@ -328,6 +430,7 @@ def load(
                 f"{key!r} names owner_issue {record.owner_issue!r}, which is not an issue "
                 "reference like '#5008'"
             )
+        _check_stores(key, record.stores)
         frozen[key] = record
     if not frozen:
         raise ValueError("an empty register declares nothing and would classify nobody")
@@ -354,6 +457,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "was computed upstream by the writer that produced the backup, so this function "
             "restores one rather than producing one",
             "#11085",
+            # ⛔ Not a label set: the dump names its own
+            # (`CREATE (n:{safe_labels})`), and the vector restore matches on
+            # `__dump_id`, so no static label exists to compare against the served set.
+            stores=LABELS_AT_RUNTIME,
         ),
     ),
     (
@@ -365,6 +472,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`set_embedding_clause(\"e\")` — over an event whose vector the `#5008` session chain "
             "computed; the fold stores the carrier value",
             "#11085",
+            stores=("Event",),  # `MERGE (e:Event {eventId:$eid})` + `set_embedding_clause("e")`
         ),
     ),
     (
@@ -385,6 +493,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "to the unit: an enforcement point must not whitelist the raw write under a producer "
             "class",
             "#11085",
+            # The vector write is `MATCH (n:Point {id:$pid})` +
+            # `set_embedding_clause("n", "$emb")`; the `Batch`/`Session` strings in the
+            # body belong to the pre-wipe SNAPSHOT, which stores no vector.
+            stores=("Point",),
         ),
     ),
     # ── The #5008 session chain ───────────────────────────────────────────────────────────────
@@ -396,6 +508,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`compute_session_embedding` (the documented `#5008` exemption) + "
             "`set_embedding_clause`",
             "#5008",
+            stores=("Event",),  # `set_embedding_clause("e")` over `MERGE (e:Event …)`
         ),
     ),
     (
@@ -405,6 +518,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
             "`set_embedding_clause(\"e\")`, the same canonical chain",
             "#5008",
+            stores=("Event",),  # `set_embedding_clause("e")` in both of its write arms
         ),
     ),
     (
@@ -418,6 +532,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "'no write to gate' and 'a write gated out by a ruling') would contradict "
             "the class the chain's own seam carries",
             "#5008",
+            stores=("Event",),  # `MATCH (e:Event {eventId:$eid})` + `set_embedding_clause("e")`
         ),
     ),
     (
@@ -432,6 +547,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "vector back from (`#8488`'s enriched text rides the same snapshot), not a store "
             "reached around the gate",
             "#5008",
+            stores=NO_LIVE_VECTOR,  # the vector lands in `_turn_snapshot`, never on a node
         ),
     ),
     # ── The one writer that was exempt only in the instrument's PROSE ─────────────────────────
@@ -448,6 +564,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "exempt\"*) — a declaration in a read-only instrument, which is exactly the shape "
             "`#11085` exists to replace",
             "#5008",
+            stores=("Event",),  # `set_embedding_clause("e")` via `_event_raw_write_door`
         ),
     ),
     # ── Writers discovered when the filter widened to CONTAINER KEYS (#11274) ────────────────
@@ -486,6 +603,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "GATE-side half is a `gated` classification and therefore OUTSIDE this "
             "register's population — see the closure-claim caveat above",
             "#5004",
+            stores=NO_LIVE_VECTOR,  # `p["embedding"]` is the JOURNAL payload, not a graph write
         ),
     ),
     (
@@ -497,6 +615,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "comparison view dict. The target is an in-memory view, never a stored vector: a "
             "READ, the same direction as `tortoise.record_read::turn_prior_vectors`",
             "#11085",
+            stores=NO_LIVE_VECTOR,  # the target is the in-memory comparison view
         ),
     ),
     (
@@ -508,6 +627,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "is a `MATCH … RETURN` and the container it fills is its own `g` dict, so it reads "
             "a vector rather than writing one",
             "#11085",
+            stores=NO_LIVE_VECTOR,  # every statement the body issues is `MATCH … RETURN`
         ),
     ),
     # ── Named exemptions that DO store (a map-merge the instrument cannot see) ────────────────
@@ -521,6 +641,11 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "(`tools/dod_5090_probe.py::UNDECIDABLE_WRITE_SHAPES`), so discovery cannot decide "
             "it. Exempt on the NAMED `#4094` exemption, NOT on absence of a write",
             "#4094",
+            # The per-label loop over `_CANONICAL_ENTITY_ID_PROPS` runs
+            # `MATCH (n:{label}) SET n += $p` for each of these — the closed canonical set
+            # (`Document` IS `:Source`, §4.4), so the labels are nameable even though the
+            # label is a runtime variable.
+            stores=("Point", "Subject", "Object", "Source", "Event"),
         ),
     ),
     # ── Writers that store NO vector: the instrument's false positives and its passthroughs ──
@@ -533,6 +658,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "(`n.embedding=vecf32($embedding)`). It reads `embedding` off both sides and APPENDS "
             "it to a divergence field list",
             "#10541",
+            stores=NO_LIVE_VECTOR,  # no write statement at all; the match is COMMENT prose
         ),
     ),
     (
@@ -545,6 +671,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "(`_upsert_point_props`); the only property this function touches is the TEXT prop — "
             "`p.pop(\"embeddingText\", None)` — on an in-memory dict",
             "#10541",
+            stores=NO_LIVE_VECTOR,  # `p.pop("embeddingText", None)` — a TEXT prop on a dict
         ),
     ),
     (
@@ -555,6 +682,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "inside the scope's DOCSTRING and the statement NULLs the vector "
             "(`SET n.embedding = NULL`); a wipe is not a producer",
             "#10541",
+            stores=NO_LIVE_VECTOR,  # `SET n.embedding = NULL` — a wipe stores no vector
         ),
     ),
     (
@@ -564,6 +692,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`tortoise/record_read.py::turn_prior_vectors` — `embedding=row[2]` populates a "
             "dataclass from a returned row: a READ, with no write clause",
             "#10541",
+            stores=NO_LIVE_VECTOR,  # dataclass fields from a returned row
         ),
     ),
     (
@@ -574,6 +703,9 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "already-computed `embedding` into `query_params` and executes inside "
             "`_live_write_scope` (the §17.1 sanctioned live-write lane); it never computes one",
             "#10541",
+            # The label is its CALLER's — `tortoise.session_indexer::main`, declared here —
+            # so this door stores no vector of its own and names no label of its own.
+            stores=NO_LIVE_VECTOR,
         ),
     ),
     (
@@ -586,6 +718,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`_embedding_repair_attempt`; every callee is a recognised producer, so this function "
             "produces no vector of its own",
             "#10541",
+            stores=NO_LIVE_VECTOR,  # store DELEGATED to `_session_event_write`
         ),
     ),
     (
@@ -599,6 +732,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "IS the sanctioned replay carrier `_upsert_event` consumes — exempt as a carrier, NOT "
             "because no store is reachable through it",
             "#10541",
+            stores=NO_LIVE_VECTOR,  # the record dict is the replay carrier, not a node write
         ),
     ),
     (
@@ -609,6 +743,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "renders the `<alias>.embedding = …` clause and stores no vector. Every "
             "`recognised_producer` entry above reaches a vector THROUGH this function",
             "#10541",
+            stores=NO_LIVE_VECTOR,  # renders the clause; the CALLER's `MERGE` names the label
         ),
     ),
 )

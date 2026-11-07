@@ -96,6 +96,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
 
 import dod_5090_probe as probe
 
+from tortoise.embed_writer_register import LABELS_AT_RUNTIME, NO_LIVE_VECTOR
+
 
 @pytest.fixture(autouse=True)
 def _no_ambient_gate_flags():
@@ -418,6 +420,192 @@ def test_every_embedded_label_has_a_query_path():
     assert resolved <= probe.served_labels(), resolved - probe.served_labels()
     if any(v.startswith("UNKNOWN") for v in probe.written_labels().values()):
         assert row.verdict == "PARTIAL", row.verdict
+
+
+#: ── `#11492`: row 2 resolves labels from the SAME product register row 1 reads ──────────────
+#: The issue required the reading to be DECIDED, not assumed: the register classified writers but
+#: carried NO label (Case B), and the label is not derivable per writer either (14 of the 20
+#: outside-gate writers name none in their own Cypher — it lives in the caller's `MATCH`). So the
+#: product DECLARES it (`WriterClass.stores`) and this row reads that declaration. The tests below
+#: pin the three falsifiers the issue names, and the two guards implementation made necessary.
+def _store_declared(name: str, stores, *, cls: str = probe.CENSUS_EXEMPT) -> dict:
+    """One register entry in the shape row 2 reads — with an explicit `stores`."""
+    return {**_declared(name, cls), "stores": stores}
+
+
+#: A writer map for the row-2 tests: one GATED writer (its label is DERIVED from its Cypher, so the
+#: register must stay a supplement to it) and two outside-gate writers whose label no derivation can
+#: reach — the population the declaration exists for.
+def _row_two_population() -> dict:
+    return {
+        "tortoise.x::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "Point", "callees": frozenset(),
+        },
+        **_unresolved_writer("tortoise.y::_store_event"),
+        **_unresolved_writer("tortoise.z::_reads_a_vector"),
+    }
+
+
+def _row_two_declarations(**overrides) -> dict:
+    declared = {
+        "tortoise.y::_store_event": _store_declared("tortoise.y::_store_event", ("Event",)),
+        "tortoise.z::_reads_a_vector": _store_declared(
+            "tortoise.z::_reads_a_vector", NO_LIVE_VECTOR),
+    }
+    declared.update(overrides)
+    return declared
+
+
+def test_row_two_reads_MET_when_the_register_resolves_every_writer(monkeypatch):
+    """`#11492` — row 2 `MET` once every writer's vector is on a SERVED label.
+
+    Three ways a writer gets there, all present at once: through the gate (label derived), from a
+    declared label, or by a declaration that it stores no live graph vector. ⛔ The third is what
+    makes `stored-without-a-query-path` a statement about STORES rather than about NAMES: twelve of
+    this tree's twenty outside-gate writers never store a node vector at all (reads, carriers, the
+    clause builder), and a row that held them forever was measuring its own vocabulary.
+    """
+    monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
+    monkeypatch.setattr(probe, "declared_writers", _row_two_declarations)
+    row = probe.score_path_bullet()
+    assert row.verdict == "MET", row.observed
+    assert "unresolved writers" not in " ".join(row.notes), row.notes
+    assert "#11492" in " ".join(row.notes), (
+        f"a MET resting on DECLARED labels must say so: {row.notes}")
+
+
+def test_row_two_returns_to_a_hold_when_a_writer_stores_on_an_UNSERVED_label(monkeypatch):
+    """`#11492`'s falsifier — `stored-without-a-query-path` must be able to go non-empty again.
+
+    ⛔ Mutation-proved, and the mutation is INSIDE this test: the same population and the same
+    scoring path read `MET` with `("Event",)` and hold with `("Batch",)` — the ONLY difference is
+    one declared label. That is what a declaration is for, and it means the row cannot be greened
+    by declaring the hole away: a label outside `run_vector_query`'s served set is reported as an
+    ORPHAN, which is `NOT MET` (stronger than `PARTIAL`), and the label is named in the note.
+
+    Proof the test is a real discriminator (run in-lane, recorded on the PR): the same test against
+    `origin/main`'s `score_path_bullet` FAILS — the pre-fix row 2 cannot produce an orphan from a
+    declaration at all, because it never reads one.
+    """
+    monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
+    monkeypatch.setattr(probe, "declared_writers", _row_two_declarations)
+    assert probe.score_path_bullet().verdict == "MET"
+    # MUTATION: one writer's declared label moves off the served set. Nothing else changes.
+    monkeypatch.setattr(
+        probe, "declared_writers",
+        lambda: _row_two_declarations(**{
+            "tortoise.y::_store_event": _store_declared(
+                "tortoise.y::_store_event", ("Batch",))}))
+    row = probe.score_path_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert "stored-without-a-query-path: ['Batch']" in " ".join(row.notes), row.notes
+    assert "Batch" not in probe.served_labels()
+
+
+def test_a_bypass_in_the_register_holds_row_two(monkeypatch):
+    """`#11492` — a non-empty `bypass` holds the row.
+
+    ⛔ Before this change a bypass was only NOTED: `real_bypasses` was computed and printed, and it
+    never reached the verdict, so a row could read `MET` while naming a defect in its own evidence.
+    The class is read from the DECLARATION as well as the census, because the register is where a
+    class is declared — `register.load()` refuses `bypass`, so this shape only reaches the row from
+    an injected or tampered register, which is exactly why the row must not assume it is well-formed.
+    """
+    monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
+    monkeypatch.setattr(
+        probe, "declared_writers",
+        lambda: _row_two_declarations(**{
+            "tortoise.y::_store_event": _store_declared(
+                "tortoise.y::_store_event", ("Event",), cls=probe.CENSUS_BYPASS)}))
+    row = probe.score_path_bullet()
+    assert row.verdict == "PARTIAL", row.observed
+    assert any("REAL BYPASSES" in n for n in row.notes), row.notes
+    assert any("tortoise.y::_store_event" in n for n in row.notes if "BYPASS" in n), row.notes
+
+
+def test_a_runtime_label_declaration_holds_row_two_without_calling_it_unresolved(monkeypatch):
+    """`#11492` — `labels-at-runtime` holds the row, and it is NOT the "unresolved writers" hold.
+
+    This is the measurement's honest outcome on the live tree: `tortoise.hosted_backup::restore_graph`
+    recreates nodes from a DUMP, so its vector's label is decided at restore time. The row cannot
+    claim the served-set comparison, and it must not confuse that with a writer nothing declares —
+    those are two different defects with two different fixes.
+    """
+    monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
+    monkeypatch.setattr(
+        probe, "declared_writers",
+        lambda: _row_two_declarations(**{
+            "tortoise.y::_store_event": _store_declared(
+                "tortoise.y::_store_event", LABELS_AT_RUNTIME)}))
+    row = probe.score_path_bullet()
+    assert row.verdict == "PARTIAL", row.observed
+    assert any("decided at RUNTIME" in n for n in row.notes), row.notes
+    assert not any("unresolved writers" in n for n in row.notes), row.notes
+
+
+def test_a_DERIVED_label_beats_a_declaration(monkeypatch):
+    """The register is a SUPPLEMENT to the measurement, never a replacement for it.
+
+    A `gated` writer's label is derived from its own Cypher, so a declaration that disagreed with
+    it must not be able to move the row: otherwise the register could overwrite what the tree
+    MEASURES, which is the second-rule-set failure §12.2a forbids.
+    """
+    monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
+    monkeypatch.setattr(
+        probe, "declared_writers",
+        lambda: _row_two_declarations(**{
+            # The GATED writer is derived as `Point`; the declaration claims an unserved label.
+            "tortoise.x::_upsert_point": _store_declared(
+                "tortoise.x::_upsert_point", ("Batch",))}))
+    row = probe.score_path_bullet()
+    assert row.verdict == "MET", row.observed
+    assert "Batch" not in " ".join(row.notes), row.notes
+
+
+def test_an_UNREADABLE_register_is_UNMEASURED_not_a_green_row_two(monkeypatch):
+    """A register that cannot be read holds the row — the misattribution row 1 refuses, one row over.
+
+    An empty answer here would render every outside-gate writer `unresolved` and blame the PRODUCT
+    for the instrument's own failure; a `MET` would be worse still, because the one input that can
+    flip the row would be missing. Neither is allowed.
+    """
+    def _unreadable():
+        raise RuntimeError("register exploded")
+
+    monkeypatch.setattr(probe, "embedding_writers", lambda: {
+        "tortoise.x::_upsert_point": {
+            "callee": probe.SEAM_CALL, "at": "tortoise/x.py:1",
+            "kind": "gated", "label": "Point", "callees": frozenset(),
+        },
+    })
+    monkeypatch.setattr(probe, "declared_writers", _unreadable)
+    row = probe.score_path_bullet()
+    assert row.verdict == "PARTIAL", row.observed
+    assert any("UNMEASURED" in n for n in row.notes), row.notes
+    assert any("register exploded" in n for n in row.notes), row.notes
+
+
+def test_a_malformed_stores_declaration_holds_row_two(monkeypatch):
+    """A `stores` that does not answer the question is a NAMED hold, never an unresolved label.
+
+    `register.load()` refuses every shape below, so these reach the row only from an injected or
+    tampered register — and the row must grade the shape itself rather than inherit an invariant it
+    does not test (`declaration_violations`' own discipline, one row over). An empty tuple in
+    particular is the shrug that would otherwise read as "nothing to compare".
+    """
+    for bad in ((), [], "Event", 3, ("",), ("Event", 3)):
+        monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
+        monkeypatch.setattr(
+            probe, "declared_writers",
+            lambda bad=bad: _row_two_declarations(**{
+                "tortoise.y::_store_event": _store_declared(
+                    "tortoise.y::_store_event", bad)}))
+        row = probe.score_path_bullet()
+        assert row.verdict == "PARTIAL", (bad, row.observed)
+        assert any("malformed stores declarations" in n for n in row.notes), (bad, row.notes)
+        assert any("tortoise.y::_store_event" in n for n in row.notes), (bad, row.notes)
+        monkeypatch.undo()
 
 
 # ── Bullet 3 — the fallback announces itself ───────────────────────────────
@@ -2660,6 +2848,12 @@ def test_an_out_of_vocabulary_census_class_is_unclassified_not_invisible(
         probe.WRITER_CENSUS, "tortoise.consistency::_compare_views",
         ("exmpt", "MUTATION: an out-of-vocabulary class"))
     monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    # ⛔ `#11492`: row 2 now resolves an unresolved writer from the PRODUCT register, and
+    # `_compare_views` IS declared there (no live vector) — so without this the injected
+    # writer is resolved and the census note this test is about never prints. The register
+    # is neutralised for the same reason the file's `_no_register` exists: a test that
+    # injects a tiny writer map must not silently inherit this tree's declarations.
+    _no_register(monkeypatch)
     row = probe.score_path_bullet()
     unclassified = [n for n in row.notes if "UNCLASSIFIED" in n]
     assert unclassified, (
@@ -2705,13 +2899,19 @@ def test_the_census_note_names_the_population_it_counted(monkeypatch):
         },
     }
     monkeypatch.setattr(probe, "embedding_writers", lambda: writers)
+    # ⛔ `#11492`: `_compare_views` IS declared in the live register, so row 2 would resolve it
+    # and the population this test is about would be empty. Neutralised for the reason
+    # `_no_register` states — an injected writer map must not inherit the tree's declarations.
+    _no_register(monkeypatch)
     row = probe.score_path_bullet()
     census = [n for n in row.notes if n.startswith("#10541 census")]
     assert len(census) == 1, row.notes
     # It states how many of the UNKNOWN-labelled writers it actually counted.
     assert "1 of 2 UNKNOWN-labelled" in census[0], census[0]
     # ...and names the population by the LABEL, not by a class it cannot hold.
-    assert "writers labelled UNKNOWN(unresolved producer)" in census[0], census[0]
+    # `#11492`: the header now says STILL — row 2 resolves writers from the product register, so
+    # the census covers the ones whose label neither the derivation NOR a declaration resolved.
+    assert "writers STILL labelled UNKNOWN(unresolved producer)" in census[0], census[0]
     assert "PRODUCERS" not in census[0], (
         "the note claims a population the same line contradicts: `exempt` is "
         f"defined as NOT being a producer of a stored vector: {census[0]}")
