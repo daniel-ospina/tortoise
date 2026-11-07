@@ -2118,32 +2118,34 @@ can put a value back — ⛔ though a targeted `REMOVE` IS in place, it is destr
 `session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
 repairs it in place. The classes differ in both why and which lane.
 
+⚠️ **CORRECTED (`#11325`, review of the `#10394` follow-up)**: this entry named `#10017`'s purge as the targeted repair
+for THIS class. Measured at the tool, `tools/purge_legacy_turns.py`'s single destructive statement deletes legacy
+episodic turn `:Point`s (`MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) WHERE t.is_episodic = true AND t.id IN $ids
+DETACH DELETE t`), never matches `:Source`/`:Event`, and contains no `story_arc` token — so a copy on either anchor
+survives it, and an operator following the sentence reads the sweep's unchanged `graph_only` as "the repair did not
+work". ⚠️ This stamp scopes itself to the REPAIR claim, which is corrected IN PLACE above (a changelog's repair
+instruction sends an operator to a tool, so it is fixed where it sits); the entry's earlier DURABILITY sentences
+("`#10017`'s graph-side purge was undone by the next routine recovery", "what makes `#10017`'s purge durable") are
+left as recorded — but they carry the SAME assumption this stamp retracts, that the purge clears THIS class. What the restore undid was `#10000`'s write deletions, and the acceptance
+they name (`purge → restore → sum(size(n.story_arc))` = 0) holds because the restore now writes no
+`story_arc` on either ANCHOR and its whole-graph wipe clears a legacy copy — not because a purge ran.
+
 ⚠️ **CORRECTED AGAIN (`#11325` review cycle 2)**: the sentence above says the class "lacks … a non-destructive"
 repair. That is true on the two ANCHORS this constant keys (`source`/`event`: `update_entity(…, story_arc=None)` is
 REFUSED as server-managed on BOTH anchors — `_SOURCE_SERVER_MANAGED_PROPS` / `_EVENT_SERVER_MANAGED_PROPS`, each raising
 with the stored value untouched) and **false on a
 `:Point`**, which has a non-destructive in-place one: `update_point(<id>, story_arc=None)` clears the property and KEEPS
 the node (measured — the `None` passes `sdk._refuse_unpaired_narrative`, whose refusal is on a NON-EMPTY narrative, and
-`update_point`'s `SET n += $props` removes a `None`-valued key). ⚠️ It is a LIVE clear, not a durable one: the journal
-records the `None`, but the `PointRevised` fold has no `story_arc` clause and the one open-set passthrough
-(`projection.entities._persist_extra_props`) SKIPS a `None` value, so a journal rebuild of a legacy copy whose creation
-record carried the prose re-materialises it — that replay half is `#10429`'s. The same live door is bound by the MCP
-tool `tortoise_update_point`. A `:Point` carrying the
+`update_point`'s `SET n += $props` removes a `None`-valued key). ⚠️ Its durability is JOURNAL-bound only: the journal
+records the `None`, but the `PointRevised` fold has no `story_arc` clause and the creation fold's open-set passthrough
+(`projection.entities._persist_extra_props`) SKIPS a `None` value, so a `rebuild_all` over a journal whose creation
+record carried the prose re-materialises it — that replay half is `#10429`'s. ⚠️ The RECORD→CACHE rebuild is the other
+way round: the patch stores `props.story_arc = null`, `_props_from_row` returns it, and `node_statement`'s
+`SET n += $props` REMOVES the key, so a record-sourced rebuild keeps the copy clear. The same live door is bound by
+the MCP tool `tortoise_update_point`. A `:Point` carrying the
 prose is a `graph_only` occurrence of THIS count (`:Point`'s placeable set omits `story_arc`, §17.2), so the sentence's
 unscoped "the PROPERTY" sent that operator to `tortoise_delete` — which REMOVES the node and journals the delete that
 drops its record row — when a clear-and-keep route shipped.
-
-⚠️ **CORRECTED (`#11325`, review of the `#10394` follow-up)**: this entry named `#10017`'s purge as the targeted repair
-for THIS class. Measured at the tool, `tools/purge_legacy_turns.py`'s single destructive statement deletes legacy
-episodic turn `:Point`s (`MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) WHERE t.is_episodic = true AND t.id IN $ids
-DETACH DELETE t`), never matches `:Source`/`:Event`, and contains no `story_arc` token — so a copy on either anchor
-survives it, and an operator following the sentence reads the sweep's unchanged `graph_only` as "the repair did not
-work". ⚠️ This stamp scopes itself to the REPAIR claim; the entry's earlier durability sentences ("`#10017`'s
-graph-side purge was undone by the next routine recovery", "what makes `#10017`'s purge durable") are left as
-recorded, because a changelog is a historical record — but they carry the SAME assumption this stamp retracts,
-that the purge clears THIS class. What the restore undid was `#10000`'s write deletions, and the acceptance
-they name (`purge → restore → sum(size(n.story_arc))` = 0) holds because the restore now writes no
-`story_arc` on either ANCHOR and its whole-graph wipe clears a legacy copy — not because a purge ran.
 
 **What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
 `tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED
