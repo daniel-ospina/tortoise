@@ -5429,7 +5429,7 @@ def test_the_sync_step_honours_the_mitigation_ledger():
     # must anchor on the leading AND trailing space: the `case` matches by the
     # ARG's name, so without the delimiters an ENTRY for the LONGER name also
     # matches the SHORTER arg. This payload really carries `TORTOISE_BACKUP_KEY`
-    # next to `TORTOISE_BACKUP_KEY_PREVIOUS` (deploy-hosted.yml:1197 / :1202, pinned
+    # next to `TORTOISE_BACKUP_KEY_PREVIOUS` (deploy-hosted.yml:1212 / :1217, pinned
     # by `test_every_citation_of_the_backup_key_pair_resolves`), and
     # `TORTOISE_BACKUP_KEY_PREVIOUS` is the entry an operator is most likely to
     # write after a rotation — so the LIVE key would silently stop syncing on every
@@ -5613,9 +5613,27 @@ def test_every_citation_of_the_backup_key_pair_resolves():
     citations too, in the same windows and by the same rule: if it is cited as the
     thing that pins the pair, it has to exist.
     """
-    expected = {1197: "TORTOISE_BACKUP_KEY", 1202: "TORTOISE_BACKUP_KEY_PREVIOUS"}
-    pair = tuple(expected.values())
+    # ⛔ DERIVED, not a hardcoded tuple (#11332 review r8). The map was
+    # `{1197: …, 1202: …}` and it was a SECOND owner of the same two numbers: any
+    # payload block above the pair shifts both lines, the map then disagrees with the
+    # workflow it describes, and the failure it reports is misattributed — the
+    # citation is blamed with a `pair is at [1197, 1202]` that is itself stale
+    # (measured: the ledger block grew 15 lines and this test blamed a CORRECT
+    # citation). Deriving makes the workflow the only owner, and the assert below is
+    # what keeps the derive from passing vacuously.
+    pair_names = ("TORTOISE_BACKUP_KEY", "TORTOISE_BACKUP_KEY_PREVIOUS")
     lines = _WORKFLOW.read_text().splitlines()
+    expected: dict[int, str] = {}
+    for index, line in enumerate(lines, start=1):
+        for name in pair_names:
+            if f"ARGS+=({name}=" in line:
+                expected[index] = name
+    assert sorted(expected.values()) == sorted(pair_names), (
+        "the backup-key pair is not where the derivation looks for it — expected one "
+        f"`ARGS+=(<name>=` line per name {list(pair_names)}, found {expected}. A "
+        "derivation that finds nothing resolves every citation as wrong."
+    )
+    pair = tuple(expected.values())
     citation = re.compile(r"deploy-hosted\.yml:(\d+)(?:\s*/\s*:(\d+))?")
     name_citation = re.compile(r"`(?:[\w/]+\.py::)?(test_[A-Za-z0-9_]+)`")
     defined = _test_function_names_in_the_tracked_tree()
