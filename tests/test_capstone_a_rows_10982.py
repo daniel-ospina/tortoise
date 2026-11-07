@@ -561,9 +561,10 @@ def test_a_REQUIRED_row_cannot_declare_itself_a_non_bar():
 
     ⛔ The exemption `continue`s past BOTH numeric arms, so an UNSCOPED branch let `E1`–`E5` declare
     themselves bar-less and the gate still printed OK — a false PASS introduced by the arm meant to
-    close one, and a direct contradiction of §3.7's "every criteria row names a metric, a denominator
-    and a numeric threshold" (#10982 review round 5). Two directions are pinned: a required row that
-    claims the exemption is REFUSED, and the exemption set can never intersect `REQUIRED_CRITERIA`.
+    close one, and a direct contradiction of §7 item 1's "every criteria row names a metric, a
+    denominator and a numeric threshold" (#10982 review round 5). Two directions are pinned: a
+    non-registered row that claims the exemption is REFUSED, and the exemption set can never
+    intersect `REQUIRED_CRITERIA`.
     """
     assert not (check.REGISTERED_NON_BAR_ROWS & set(check.REQUIRED_CRITERIA)), (
         "a required row must never be registered as a non-bar")
@@ -576,12 +577,37 @@ def test_a_REQUIRED_row_cannot_declare_itself_a_non_bar():
     ):
         failures = check.check_completeness(
             [dict(r, threshold=cell) if r is e1 else r for r in rows])
-        assert any("is not registered as a non-bar" in f for f in failures), (cell, failures)
+        assert any("registers as a non-bar" in f for f in failures), (cell, failures)
     # …and the reverse direction: a row the code exempts must still BE bar-less in the record.
     a4 = next(r for r in rows if r["id"] == "A4")
     failures = check.check_completeness(
         [dict(r, threshold="`>= 0.5` typed_share") if r is a4 else r for r in rows])
     assert any("registered as a non-bar" in f for f in failures), failures
+
+
+def test_the_registered_non_bar_register_is_CLOSED_and_disclosed():
+    """FAILS IF the non-bar exemption can be widened by a record-only edit, or is undisclosed.
+
+    ⛔ The exemption skips BOTH numeric arms, so which rows may claim it is a TOOL pin, not a free
+    permission: a lane amending §3.1 under §8 gets refused until it edits the constant in the same
+    PR. That is only fair if the record SAYS so, which is what the second half of this arm checks
+    (#10982 review round 6).
+    """
+    assert {"A4"} == check.REGISTERED_NON_BAR_ROWS, (
+        "the closed register changed — this test is the record of what the record discloses")
+    md = PREREG.read_text()
+    assert "REGISTERED_NON_BAR_ROWS" in md, (
+        "§7 item 1 must name the register, or a lane discovers the rule by failing")
+    # …and a non-required A-row is refused with a message that does not pretend it is `E`-row-shaped:
+    rows = check.parse_criteria_rows(md)
+    a5 = next(r for r in rows if r["id"] == "A5")
+    failures = check.check_completeness(
+        [dict(r, threshold="UNMEASURED(`#10988` decides)") if r is a5 else r for r in rows])
+    msg = " ".join(failures)
+    assert "registers as a non-bar" in msg, failures
+    assert "required row" not in msg, (
+        "A5 is NOT a required row — the message must not tell it to write a bar it may not own")
+    assert "REGISTERED_NON_BAR_ROWS" in msg, failures
 
 
 def _full_census(probe) -> dict:

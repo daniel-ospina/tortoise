@@ -3790,16 +3790,16 @@ def check_completeness(rows: list[dict[str, str]]) -> list[str]:
             # ⛔ SCOPED TO THE ROWS THE RECORD REGISTERS AS NON-BARS — never "any row that says
             # UNMEASURED". The branch below `continue`s past BOTH numeric arms, so an unscoped
             # branch let a REQUIRED row (`E1`–`E5`) declare itself bar-less and still leave the gate
-            # at OK, contradicting §3.7's "every criteria row names a numeric threshold" — a
+            # at OK, contradicting §7 item 1's "every criteria row names a numeric threshold" — a
             # false PASS added by the very arm meant to close one (#10982 review round 5). The
             # allowed set is pinned and asserted DISJOINT from REQUIRED_CRITERIA, so a required row
             # cannot enter it by editing the record alone.
             if row["id"] not in REGISTERED_NON_BAR_ROWS:
                 failures.append(
                     f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
-                    f"declares UNMEASURED(...) but this row is not registered as a non-bar "
-                    f"(registered: {sorted(REGISTERED_NON_BAR_ROWS)}) — a required row must "
-                    "carry a numeric threshold"
+                    f"declares UNMEASURED(...) but this row is not one the record registers as a "
+                    f"non-bar (registered: {sorted(REGISTERED_NON_BAR_ROWS)}) — either give it a "
+                    "numeric threshold or add it to REGISTERED_NON_BAR_ROWS in this tool (§7 item 1)"
                 )
                 continue
             # ⛔ A REGISTERED non-bar is not a bar, and its FLOOR clause may never stand in for one.

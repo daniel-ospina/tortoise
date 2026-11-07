@@ -507,18 +507,22 @@ one (`#7949` §2 R7).
   number **26**, so it cannot be satisfied by writing one Subject per run. `#10987` (C6) owns the
   scoring and the `#4889` verdict.
 
-**Floors, in one place.** `pins.denominator_floors` carries **nine** keys, and they are not all the
-same kind of thing. Seven are count floors — `a1_objects`, `a2_candidates`, `a2_decided_candidates`,
-`a3_statements`, `a4_typed_statements`, `a5_points` and `a5_actors`, all **30** — the `E1` object
-floor, applied uniformly, because a per-row floor chosen after seeing a
-population is a floor fitted to its own result. ⚠️ Two of them (`a2_decided_candidates`, `a5_actors`)
-are floors under the **rate's** own denominator, not merely under the population it is drawn from: a
-floor that guards a population the bar does not divide by is a floor a one-of-one decision clears. The
-other two are **not counts** and are therefore not `30`: `a1_rollup_queries: 1` and
-`a3_event_root_coverage: 0.5` are refusal boundaries `#10984`/`#10986` must clear before their bars are
+**Floors, in one place.** `pins.denominator_floors` carries **fourteen** keys, in two
+families. **Five are the `E`-rows'**: `e1_objects: 30`, `e1_min_before_share: 0.20`,
+`e2b_surviving_units: 30`, `e3_derived_nodes: 30`, `e5_rate_min_sentences: 10`. **Nine are the
+`A`-rows'**, and they are not all the same kind of thing. Seven are population count floors —
+`a1_objects`, `a2_candidates`, `a2_decided_candidates`, `a3_statements`, `a4_typed_statements`,
+`a5_points` and `a5_actors`, all **30** — the `E1` object floor applied uniformly, because a per-row
+floor chosen after seeing a population is a floor fitted to its own result. ⚠️ Two of them
+(`a2_decided_candidates`, `a5_actors`) are floors under the **rate's** own denominator, not merely
+under the population it is drawn from: a floor that guards a population the bar does not divide by
+is a floor a one-of-one decision clears. The other two are **not population counts**, which is why
+they are not `30`: `a1_rollup_queries: 1` and `a3_event_root_coverage: 0.5` are the second refusal
+boundary each of those rows registers, and `#10984`/`#10986` must clear them before their bars are
 meaningful (§10.9). They live in the same block on purpose — they were prose-only until `#10982`
-round 2, and a child reading the pins missed them. Below a floor a row is **REFUSED**, which §3 defines
-as neither a pass nor a fail.
+round 2, and a child reading the pins missed them, scoring `A1` with zero rollup queries and `A3`
+at 0.05 coverage: rows the record REFUSES. Below a floor a row is **REFUSED**, which §3 defines as
+neither a pass nor a fail.
 
 **A zero denominator is REFUSED, and it is never `0/0`.** Two bars divide by a population the floor
 does not itself guarantee: `A2`'s is **decided** candidates (a run that holds all 30 candidates clears
@@ -624,6 +628,14 @@ Exit 0 only when **all** of these hold:
      (§3.7), so a row that has no bar must not pass the "has a bar" check on the floor's number.
      `tools/capstone_preregistration_check.py` enforces both halves: it strips the comparator THE
      FLOOR OWNS and refuses any comparator left outside it, and it requires a `#NNNN` reference.
+     ⛔ **The exemption is a CLOSED register, and registering a new bar-less row is a TOOL change.**
+     The gate tests membership in `REGISTERED_NON_BAR_ROWS` (a pinned `frozenset({"A4"})`, asserted
+     disjoint from the required `E`-rows), not the mere presence of `UNMEASURED(`. So adding a
+     sixth bar-less row to §3.1 is **not** a record-only edit under §8: the row must also be added
+     to that constant in the same PR, or the gate refuses it — which is deliberate, because the
+     branch skips both numeric arms and an unscoped version let a required row declare itself
+     bar-less and still read `OK` (`#10982` review round 5). The reason is disclosure, not
+     secrecy: a reader who finds the register named here does not have to discover it by failing.
 2. **The registration precedes every scored evidence log, and every log it does not precede must
    prove it was never scored.** The commit that **adds** this file is **strictly older** than the
    commit that adds each `*.log` in this directory (`git log --diff-filter=A --format=%ct`). An
@@ -1355,7 +1367,9 @@ means the five new §3.1 cells and the five `criteria[]` entries agree character
 floors agree between pins and record in both directions, a threshold that declares `UNMEASURED(...)`
 names an issue (`#NNNN`) gating the row rather than borrowing a number from its own floor clause
 (§7 item 1 — the check is "names an issue", it is **not** "names the registered decision" that
-decides the row), and `document_sha256` is re-cut in this same commit (§8). `tools/capstone_verdict_check.py` — a table that
+decides the row), the `UNMEASURED(...)` exemption is a **closed register** in the tool
+(`REGISTERED_NON_BAR_ROWS`), so registering a further bar-less row is a tool change and not a
+record-only edit (§7 item 1), and `document_sha256` is re-cut in this same commit (§8). `tools/capstone_verdict_check.py` — a table that
 carries an `A`-row is checked by the same `V1`–`V12` rules as an `E`-row, including `V12`'s refusal of
 a row whose `blocked_by` has **CLOSED**.
 
