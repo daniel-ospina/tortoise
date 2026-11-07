@@ -378,11 +378,15 @@ def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
         pool, anchors=(), window=window, limit=limit,
         date_window=DATE_WINDOW, placement=placement,
         # ⛔ #10538 (owner ruling 2026-11-07): the non-eviction guard is now the
-        # SHIPPED default, and it makes the tail arm inert on every pool where
-        # a pick would cost the reader window a session — including all of
-        # this instrument's pools. That is the ruling working, not a
-        # measurement defect, but it means this receipt measures the
-        # PRE-RULING splice. The switch is passed EXPLICITLY (never inherited
+        # SHIPPED default, so this receipt — whose SUBJECT is the PRE-RULING
+        # splice — must ask for the unguarded arm explicitly. ⚠️ Do NOT read
+        # this as "the guard is inert on this instrument": it is not, and
+        # flipping :data:`NON_EVICTION` to ``True`` does NOT reproduce these
+        # rows. Measured on THIS instrument (review cycle 4, both arms run with
+        # everything else unchanged): the guarded TAIL arm still fires on 25 of
+        # the 85 rows, and ``picks``/``net``/``pick_ranks`` differ on 33 of
+        # them — e.g. a ``w=13`` row goes from ``['se13','sf14'] net 1`` to
+        # ``[] net 0``. The switch is passed EXPLICITLY (never inherited
         # from the environment) so the committed receipt stays a build
         # artifact that reproduces byte-for-byte on any box; the GUARDED arm's
         # behaviour is pinned mechanism-level in

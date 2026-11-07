@@ -427,6 +427,17 @@ to tell them apart without re-implementing this function's targeting logic.
 An out-parameter, because the ``list[str]`` return is unpacked by a large
 pinned test surface.
     """
+    # ⚠️ #10538 (review cycle 4): stamp the trace's INERT value up front, not
+    # only on the successful exit below. Every "no target existed" path returns
+    # before the end of this function (no limit, no dated candidate, nothing
+    # promotable), so a trace written only at the end left the documented
+    # ``"none"`` variant with NO producer: the receipt's
+    # ``non_eviction_targeting`` came out JSON ``null`` and a consumer keying on
+    # ``"none"`` missed every anchor-less row — the one field that makes
+    # ``applied: False`` legible. Writing it here covers those returns AND any
+    # future one; the end-of-function write still names the arm that fired.
+    if targeting_trace is not None:
+        targeting_trace["targeting"] = "none"
     if limit <= 0 or bucket_cap <= 0:
         return []
     dated = [c for c in candidates if c.get("session_date")]

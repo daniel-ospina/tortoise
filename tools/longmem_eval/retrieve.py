@@ -2305,7 +2305,12 @@ def retrieve_for_question(
             # decision) or ``"none"``. It is what makes ``applied: False``
             # legible: without it a scoped-out row and a row whose guard ran
             # and admitted everything look the same in the receipt.
-            "non_eviction_targeting": _tl_guard_trace.get("targeting"),
+            # ``or "none"`` keeps the DOCUMENTED three-value domain true at this
+            # surface even if a future caller builds the trace itself without
+            # stamping the inert value (``temporal_leg_order`` now always
+            # stamps it — review cycle 4).
+            "non_eviction_targeting": (_tl_guard_trace.get("targeting")
+                                       or "none"),
             "non_eviction_rejected": list(
                 _tl_guard_trace.get("rejected") or []),
         }
@@ -2316,7 +2321,7 @@ def retrieve_for_question(
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": None, "count": len(_tl_picks)})
         else:
-            # honest trace reason — the six distinct empty-leg causes
+            # honest trace reason — the seven distinct empty-leg causes
             # (``no_window_candidates`` is the #10538 windowed miss)
             # (never launder a budget/anchor/weight miss as "no dates").
             legs.append({"leg": "temporal", "ran": True, "degraded": False,

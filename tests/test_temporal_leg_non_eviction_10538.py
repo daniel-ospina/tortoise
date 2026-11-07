@@ -519,19 +519,42 @@ def test_the_receipt_carries_the_guard_and_its_refusals():
     # admitted everything.
     assert {"non_eviction", "non_eviction_applied", "non_eviction_targeting",
             "non_eviction_rejected"} <= keys, keys
-    # ...and the targeting field is BOUND to the guard's trace, not re-derived
-    bound_to_trace = False
-    for node in stats:
-        for value in node.values:
-            if (isinstance(value, ast.Call)
-                    and isinstance(value.func, ast.Attribute)
-                    and value.func.attr == "get"
-                    and value.args
-                    and isinstance(value.args[0], ast.Constant)
-                    and value.args[0].value == "targeting"):
-                bound_to_trace = True
-    assert bound_to_trace, (
+    # ...and the targeting field is BOUND to the guard's trace, not re-derived.
+    # ⚠️ KEY-level, not dict-level (cycle 4, finding 3): asking only whether
+    # SOME value in SOME stats dict calls ``.get("targeting")`` stayed green
+    # under the swap ``"non_eviction_targeting": non_eviction_applied(...)`` /
+    # ``"non_eviction_applied": trace.get("targeting")`` — i.e. under exactly
+    # the collapse of the field pair that this pin exists to prevent. So the
+    # check pairs each dict's keys with its values POSITIONALLY and inspects the
+    # value sitting at the ``non_eviction_targeting`` key itself.
+    def _binds(node: ast.Dict) -> bool:
+        for key, value in zip(node.keys, node.values, strict=True):
+            if not (isinstance(key, ast.Constant)
+                    and key.value == "non_eviction_targeting"):
+                continue
+            # the value may be wrapped (``trace.get("targeting") or "none"``),
+            # so search ITS subtree — still key-scoped, which is the point.
+            return any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and bool(node.args)
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "targeting"
+                for node in ast.walk(value))
+        return False
+
+    assert any(_binds(node) for node in stats), (
         "non_eviction_targeting must come from guard_trace.get('targeting')")
+    # and it must NOT be the applied-predicate's slot (the swap above)
+    for node in stats:
+        for key, value in zip(node.keys, node.values, strict=True):
+            if (isinstance(key, ast.Constant)
+                    and key.value == "non_eviction_applied"):
+                assert not (isinstance(value, ast.Call)
+                            and isinstance(value.func, ast.Name)
+                            and value.func.id == "_non_eviction_targeting"), (
+                    "non_eviction_applied must not carry the targeting value")
 
 
 def test_the_leg_trace_passes_the_refusal_count_to_the_empty_reason():
@@ -743,10 +766,16 @@ def test_the_replay_switch_is_forwarded_AND_stamped():
     # (i) the stamp: each row names the guard state that produced it
     assert guarded["non_eviction"] is True, guarded
     assert unguarded["non_eviction"] is False, unguarded
-    # (ii) the forward: the switch really changes the measurement
-    assert guarded["leg_fired"] != unguarded["leg_fired"], (
-        "the fixture must expose the arm's effect, or the forward is unproven: "
-        f"guarded={guarded['leg_fired']} unguarded={unguarded['leg_fired']}")
+    # (ii) the forward, WITH ITS DIRECTION. ⚠️ `!=` alone was direction-blind
+    # (cycle 4, finding 2): inverting the kwarg at the fusion call
+    # (`non_eviction=not non_eviction`) merely SWAPPED the two counts, so a pin
+    # that only asked "different?" stayed green while the shipped default ran
+    # the unguarded splice and every row still attested to the resolved switch
+    # — a false attestation of the ruling. The exact counts are pinned, so an
+    # inversion reds here no matter which way the fixture's numbers fall.
+    assert unguarded["leg_fired"] == 1, unguarded          # the arm DOES fire
+    assert guarded["leg_fired"] == 0, guarded              # ...and is refused
+    assert guarded["non_eviction"] is True and unguarded["non_eviction"] is False
 
 
 def test_the_replay_cli_exposes_the_switch_and_normalises_it():
@@ -785,3 +814,66 @@ def test_the_replay_cli_exposes_the_switch_and_normalises_it():
         rep.replay = real_replay
         rep._subset_questions = real_subset
         sys.modules.pop("__main__", None)
+
+
+# ── 12. the inert targeting value has a producer ───────────────────────────
+
+def test_an_anchorless_leg_stamps_the_documented_none_target():
+    """#10538 (cycle 4, finding 4): ``targeting_trace`` documents
+    ``"anchor" | "window" | "none"``, but every "no target existed" path
+    RETURNED before the end-of-function write, so ``"none"`` had no producer and
+    the receipt's ``non_eviction_targeting`` came out JSON ``null``. A consumer
+    keying on ``"none"`` therefore missed every anchor-less row — and that field
+    is the only thing that makes ``applied: False`` legible.
+
+    Each early return is exercised, because each was a separate way out.
+    """
+    from tortoise.temporal_leg import temporal_leg_order
+
+    def _trace(pool, **kw):
+        trace: dict = {}
+        temporal_leg_order(pool, targeting_trace=trace, **kw)
+        return trace
+
+    dated = [{"id": f"c{i}", "content": "alpha beta", "session_date": "2023-04-15"}
+             for i in range(3)]
+
+    # (a) no dated candidate at all
+    pool = [{"id": "c0", "content": "alpha beta"}]
+    assert _trace(pool, anchors=(), window=3, limit=2)["targeting"] == "none"
+    # (b) nothing promotable — every dated candidate sits inside the head slice
+    assert _trace(dated, anchors=(), window=3, limit=2, head=99)["targeting"] == "none"
+    # (c) a degenerate budget returns before any targeting work
+    assert _trace(dated, anchors=(), window=3, limit=0)["targeting"] == "none"
+    # The FIRING arms keep naming themselves — ``"anchor"`` and ``"window"``
+    # already have their own discriminating pins (this file:103/:461 and
+    # ``test_temporal_leg_placement_10538.py:154``), so this case only has to
+    # prove the up-front stamp does not CLOBBER them.
+    assert _trace(ISSUE_POOL, anchors=(), window=WINDOW, limit=LIMIT,
+                  head=WINDOW - LIMIT, date_window=RANGE)["targeting"] == "window"
+
+
+def test_the_receipt_normalises_a_traceless_target_to_the_documented_none():
+    """The RECEIPT surface, not just the producer: the stats block must spell
+    ``"none"`` even when the trace it was handed carries no ``targeting`` key at
+    all — the documented domain, never ``null``. Pinned on the emitted expression
+    because that is the only place the normalisation lives, and pinned to the
+    ``non_eviction_targeting`` KEY (cycle 4, finding 3's lesson)."""
+    src = Path(r.__file__).read_text()
+    tree = ast.parse(src)
+    found = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values, strict=True):
+            if not (isinstance(key, ast.Constant)
+                    and key.value == "non_eviction_targeting"):
+                continue
+            found = True
+            # the value is a BoolOp/`or` chain ending in the literal "none"
+            literals = [n.value for n in ast.walk(value)
+                        if isinstance(n, ast.Constant)
+                        and isinstance(n.value, str)]
+            assert "none" in literals, (
+                f"non_eviction_targeting must normalise to 'none': {ast.dump(value)}")
+    assert found, "the receipt lost the non_eviction_targeting field"
