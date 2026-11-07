@@ -13,15 +13,19 @@ governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.14; STORAGE-ARCHITECTURE.md
 ---
 
 > **Provenance.** The scope-stage research below is the durable copy posted on `#2281` on 2026-09-05
-> (owner scope-stage decisions, human gate passed). It is committed verbatim as `#11461` because it was
-> promised here in that comment — *"Will be committed as `docs/epics/2281-*` during the epic Plan stage"* —
+> (owner scope-stage decisions, human gate passed). It is committed by `#11461` because it was
+> promised in that comment — *"Will be committed as `docs/epics/2281-*` during the epic Plan stage"* —
 > and never was: on `main = dbbf5d874` (2026-11-07) `git ls-tree -r origin/main docs/epics/ | grep -c 2281`
 > returned **0**, so every governing fact about this epic lived only in 19 comments and
 > `gh api …/issues/2281/sub_issues` returned `[]`.
 >
-> Sections **§7** and **§8** are appended by `#11461`: the decision-state table re-measured on
-> `main = dbbf5d874`, and the workstream → child map. Everything above §7 is the 2026-09-05 record and
-> is **not** re-edited — where it has drifted from the tree, §7 says so explicitly.
+> `#11461` committed the 2026-09-05 text with two mechanical changes only — a rewritten frontmatter
+> and `markdownlint` fixes (bullet markers, blank lines, one escaped `|`) — and appended **§7** and
+> **§8**: the decision-state table re-measured on `main = dbbf5d874`, and the workstream → child map.
+>
+> ⚠️ **§1's `path:line` citations are as-of 2026-09-05 and have drifted since.** Read them as
+> historical; §7 carries the re-measured ones (e.g. `_validity_marker` is `retrieval.py:1289`, not
+> `:398`; `invalidate_point` is `sdk.py:20024`, not `:3458`).
 
 # Scope research — Epic #2281
 
@@ -87,7 +91,7 @@ the tail is dropped, and the supersession + facts in the tail never reach the gr
 
 ### 1.3 WRITE side — provenance / EP-on-ingest / REPHRASE dedup / write verb (#2104) — largely MERGED
 
-#2080 W5 (issue #2104) is **mostly merged** via the `feat/2080-w5-*` PR wave:
+Workstream **#2080 W5** (issue #2104) is **mostly merged** via the `feat/2080-w5-*` PR wave:
 
 | Phase | Content | PR | Status |
 |---|---|---|---|
@@ -98,7 +102,7 @@ the tail is dropped, and the supersession + facts in the tail never reach the gr
 | D | (phase-D: id-ingest-calibrate list, `tortoise/sdk.py:847`) | worktree `feat/2080-w5-phase-d` | **unmerged** |
 
 REPHRASE-linked dedup (a paraphrase links via REPHRASE and counts as survival, not a new point) is
-#2104 indicator (4) — the consolidation classification already distinguishes `identical` vs
+indicator **(4)** of #2104 — the consolidation classification already distinguishes `identical` vs
 `paraphrase` in `classify_consolidation` (the `NOOP` decision folds both, `tortoise/extractor_v2.py:3120-3150`).
 
 ### 1.4 WRITE side — the ask measurement fixtures seed RAW TURNS, not distilled points (the confound)
@@ -114,6 +118,7 @@ this fixture (or add a parallel distilled-corpus fixture) to measure the write p
 ### 1.5 Harness — Ingest → Search → Evaluate (mem0 shape) ALREADY EXISTS
 
 `tools/longmem_eval/` is a full Ingest→retrieve→judge pipeline:
+
 - **Ingest:** deterministic leg (`ingest.py`) and v2 production extractor leg (`ingest_v2.py`, the
   production `extract_session_v2` with supersession).
 - **Search:** hybrid retrieval (FTS + vector + structural) with RRF, evidence marks (`has_answer`,
@@ -203,6 +208,7 @@ markers (`retrieval.py:398`). So the reader *can* see current state — it just 
 raw chunks, and (in the spot-check fixture) the distilled points don't exist at all (raw-turn seeding).
 
 **What's missing:**
+
 1. **A distilled-first ordering signal** — no code today boosts `statement` Points (typed/dated/entity-linked/validFrom-bearing) over raw `session-transcript` chunks / episodic turn Points in the ask pool. (There *is* a raw-chunk cap `dedup_pool` `retrieval.py:288-318` and evidence-mark boost `apply_evidence_boost`, but neither expresses "prefer current-state distilled knowledge".)
 2. **The ingest enabler** — the distilled leg is only as good as the v2 extractor, which #2134 shows truncates on large multi-session haystacks. WS1's read-side ordering is unmeasurable-against-real-distilled-graphs until #2134 lands.
 
@@ -219,6 +225,7 @@ runner + blind judges + CI-gated baseline + first published number (**#2183**, M
 already the gbrain Cat-35 port: salient-unit survival, junk leakage, provenance, quote fidelity.
 
 **What's missing (the #2281 delta):**
+
 1. **Supersession survival as a first-class W2 metric** — planted *value-change* golds (same entity,
    later session asserts a new value) must assert the OLD point becomes `outdated`/`superseded` with a
    `CORRECTS` edge + `validTo`/`expiredAt`, and the NEW point survives. This is the exact `830ce83f`
@@ -235,11 +242,12 @@ distilled-corpus ask measurement until write-path survival/supersession is CI-gr
 ### WS3 — "Ask measurement over the real pipeline (Ingest→Search→Evaluate)" → **REFINE: the harness exists; the ask-surface leg is the delta**
 
 **What exists:** `tools/longmem_eval/` already runs Ingest→Search→Evaluate for the *benchmark* lane,
-including a v2 production-extractor ingest (`ingest_v2.py`) with supersession since #1394. `w7_publish.py`
-- `run_protocol.py` cover the benchmark discipline. `tools/ask_spotcheck.py` runs the *product* `sdk.ask`
+including a v2 production-extractor ingest (`ingest_v2.py`) with supersession since #1394.
+`w7_publish.py` and `run_protocol.py` cover the benchmark discipline. `tools/ask_spotcheck.py` runs the *product* `sdk.ask`
 lane but seeds **raw turns** (see 1.4).
 
 **What's missing:** an **ask-surface measurement over a distilled corpus**:
+
 1. A `--ingest-mode v2` (or new distilled-fixture) mode in `ask_spotcheck.py` that seeds the v2
    extractor's output (typed/dated/entity-linked `statement` Points + state Objects + `CORRECTS`
    supersession chains), then runs the product `sdk.ask` and asserts the reader commits **current**
@@ -322,42 +330,50 @@ sealed-key publication + erratum (`w7_publish.py`), CI smoke (`--mock` + `longme
 ## 6. Open decisions for the human gate
 
 **D1 — WS1 delivery shape: how to make the ask lane "distilled-first"?**
+
 - (a) Additive **ranking boost** for `statement` Points (typed/dated/entity-linked/validFrom-bearing) over raw chunks in the ask pool.
 - (b) Additive **"current state" header block**: render the latest `statement` Point per matched entity above the raw context (no ranking change).
 - (c) **Route by question_type** (verbatim → raw-first, else distilled-first) — *blocked by #2009* (0.284 detector agreement).
 - **Recommendation:** (b) now (least risk, no retrieval regression, directly expresses "latest wins" via `CORRECTS`/`validFrom`), with (a) as a measured follow-up. Avoid (c) until #2009 is real.
 
 **D2 — Raw-turn fallback: one pass or two-pass (abstain-then-fallback)?**
+
 - (a) **Single pass** with both legs in context (current), plus the D1 ordering.
 - (b) **Two-pass**: answer from distilled only; on abstain, re-run with raw turns appended.
 - **Recommendation:** (a). Two-pass doubles reader cost and risks violating the #2280 invariant (empty output is a *fail-loud* escalation, not an abstention signal to re-query). The raw leg stays in-context as the verbatim fallback.
 
 **D3 — Ontologically, what does "distilled" prefer over what?**
+
 - (a) `statement` Points (entity-linked, dated, validFrom-stamped) **> episodic turn Points > raw `session-transcript` chunks**.
 - (b) `statement` Points **> raw chunks only** (turn Points treated as raw).
 - **Recommendation:** (a) — matches `retrieval.py:280-284` (`is_raw_chunk` already separates `session-transcript` from "extracted statements, episodic turn points"); keeps the episodic layer as the mid-tier verbatim evidence, not a fallback we lose.
 
 **D4 — WS2 supersession eval: extend W2-b or build a parallel benchmark?**
+
 - (a) **Extend W2-b** with a supersession-survival metric + value-change golds.
 - (b) Build a separate planted-supersession benchmark.
 - **Recommendation:** (a) — W2-a/W2-b are merged and CI-gated (#2155/#2183); a parallel benchmark violates "inventory first" and forks the sealed-gold discipline.
 
 **D5 — #2134 truncation: hard blocker for WS1/WS3, or parallel?**
+
 - (a) **Hard blocker** — land #2134 before measuring WS1/WS3 over a distilled corpus.
 - (b) Parallel — build WS1 read-side code + fixtures now, run the *raw-turn* fixture; flip to distilled corpus when #2134 lands.
 - **Recommendation:** (b) for the *code* (ordering is a pure read-side change), (a) for the *measurement* (a truncated distilled corpus invalidates the WS3 number). I.e., code parallel, measurement gated.
 
 **D6 — Routing for verbatim-vs-current-state: depend on `detect_question_type`?**
+
 - (a) Use `detect_question_type` (OPEN #2009, 0.284 agreement).
 - (b) Route on **retrieval composition** (are there dated/entity-linked `statement` Points matching the question?) — no detector dependency.
 - **Recommendation:** (b). #2009 stays parked; a question that resolves to a current-state Point gets the distilled story, everything else keeps the raw leg. Deterministic, testable, no detector.
 
 **D7 — WS3 harness placement: extend `ask_spotcheck.py` or add a `run_protocol` step?**
+
 - (a) Extend `tools/ask_spotcheck.py` with a `--ingest-mode v2` / distilled-corpus mode + planted-supersession fixture.
 - (b) Add a step to `tools/longmem_eval/run_protocol.py` (the 500-Q benchmark lane).
 - **Recommendation:** (a) for the *product* ask-lane measurement (smallest, already the product-lane harness); (b) only if/when a *published* ask-over-distilled benchmark number is wanted (then it inherits `w7_publish.py` sealed-key discipline).
 
 **D8 — What number gates the ask surface on ingest quality?**
+
 - (a) W2-b salient-unit survival baseline (existing CI gate) + **supersession correctness ≥ X** (new, set from first run).
 - (b) Reuse the product-success-eval §7 "**0% superseded points appear as live answers**" as the hard gate, plus a planted-supersession "reader picks current state" pass ≥ threshold.
 - **Recommendation:** (b) as the *product* gate (it's the honest customer-facing invariant already in the launch spec), with (a)'s survival/supersession numbers as the *benchmark* gate feeding it. Do not pre-set X before the first W2-b supersession run (benchmark-first, per the 2026-09-01 #2080 decision).
@@ -376,7 +392,7 @@ wave by reading the tree, not inherited from a prior comment.
 | **D3** | 3-tier read ordering: statement > turn Point > raw chunk | **LANDED** (#9092) ✔ | `tortoise/retrieval.py:3311-3313` (`_PACKAGE_TYPE_STATEMENT/_TURN/_CHUNK = 0/1/2`), `_package_type_tier()` `:3316-3336`, `_package_tier()` `:3339`, which returns `(_package_type_tier(h), marked, _pkg_rank)` at `:3353` so hit type is the primary key. The 2026-10-19 comment's `:1948` citation has drifted; the behaviour has not |
 | **D4** | extend W2-b (sealed-gold discipline); no parallel benchmark | **SATISFIED BY SCOPE** | the sealed-benchmark discipline is `tests/eval/ask/` (20 tracked files) + `w7_publish.py`; no parallel benchmark was built |
 | **D5** | code parallel, measurement gated on #2134 | **SATISFIED** ✔ | #2134 **CLOSED** 2026-09-06 — the measurement gate is clear |
-| **D6** | route on retrieval composition; #2009 detector stays parked (0.284) | **HONOURED** | the D3 ordering keys on **hit type**, never on the detector (`_package_type_tier` takes only the hit, `retrieval.py:3316`); the lane still picks its reader prompt by `detect_question_type` (`ask_lane.py:685`/`:934`, `reader.py:531`), which D6 did not forbid. **#2009 is now CLOSED 2026-09-28** — the 2026-09-05 record above calls it OPEN; that is historical text, not a claim about today |
+| **D6** | route on retrieval composition; #2009 detector stays parked (0.284) | **HONOURED** | the D3 ordering keys on **hit type**, never on the detector (`_package_type_tier` takes only the hit, `retrieval.py:3316`); the lane still picks its reader prompt by `detect_question_type` (`ask_lane.py:685`/`:934`, `reader.py:532`), which D6 did not forbid. **#2009 is now CLOSED 2026-09-28** — the 2026-09-05 record above calls it OPEN; that is historical text, not a claim about today |
 | **D7** | build the distilled-corpus ask measurement, then promote to the sealed benchmark | **LANDED** (#9095) ✔ | `tools/longmem_eval/measure_ask_distilled.py` + `tests/eval/ask/` (pre-registration, sealed gold, manifest, fixtures) |
 | **D8** | product gate = launch spec §7 "0% superseded points appear as live answers" + planted-supersession current-state pass; benchmark-side bar from the first published run | **PARTLY UNMET** | the benchmark half is *built and sealed* (`tests/eval/ask/preregistration.json` regression clauses) but **no publication exists** — see §8 |
 | **Q3 exit bar** | a **published**, sealed-benchmark measurement of the ask lane over a distilled + planted-supersession corpus | **UNMET** ✔ | `git ls-tree -r origin/main docs/benchmarks/` → 4 entries, **no `ask-distilled/`** |
@@ -399,8 +415,9 @@ status, so it does not touch §4.4/§4.5.
 
 ## 8. Decomposition — workstream → child, and the exit bar as a predicate
 
-Children are **real GitHub sub-issues** of `#2281` (`gh api …/issues/2281/sub_issues` →
-`9092 closed · 9095 closed · 9097 open · 11460 open · 11461 open`; `subIssuesSummary: total 5, completed 2`).
+Children are **real GitHub sub-issues** of `#2281` (`gh api …/issues/2281/sub_issues` returns the five:
+`9092 closed · 9095 closed · 9097 open · 11460 open · 11461 open`; the counts come from the issue
+object — `gh api …/issues/2281 --jq .sub_issues_summary` → `total 5, completed 2`).
 
 | epic workstream | home | state |
 |---|---|---|
