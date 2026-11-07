@@ -951,6 +951,49 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
             f"{_thousands(prs['sum_delta_out_tokens'])} tokens, **−"
             f"{prs['token_weighted_reduction'] * 100:.2f} %**") in flat_all
 
+    # ⛔ THE INPUT SIDE (#11385 post-rebase review P2). The artifacts record
+    # `prompt_tokens` per arm and the delta template is LONGER, so the switch
+    # buys its output saving by paying a small, positive input cost. The README
+    # published only the output drop — the one asymmetry a reader cannot recover
+    # from the document (−93.8 % in the title, −20.5 % in reality) — while the
+    # dry-run pin's own comment already asserted "the input-side cost of the
+    # switch is small and POSITIVE … a reader must be able to see that the prompt
+    # did not get cheaper". Every figure below is DERIVED from the artifacts, so
+    # the prose stays a computed claim rather than a typed one, and the
+    # per-session constant is pinned because it is what makes the cost checkable.
+    _per = {a["delta"]["prompt_tokens"] - a["legacy"]["prompt_tokens"]
+            for a in pri["arms"]}
+    assert _per == {a["delta"]["prompt_tokens"] - a["legacy"]["prompt_tokens"]
+                    for a in rer["arms"]}, "the input cost is not a constant"
+    assert len(_per) == 1, f"the per-session input cost is not one value: {_per}"
+    _per = _per.pop()
+    _plg_p = sum(a["legacy"]["prompt_tokens"] for a in pri["arms"])
+    _pdl_p = _plg_p + _per * len(pri["arms"])
+    assert _pdl_p == sum(a["delta"]["prompt_tokens"] for a in pri["arms"])
+    assert (f"every one of the 7 sessions pays exactly +{_per} input tokens, in "
+            "both runs") in flat_all, _per
+    assert (f"{_thousands(_plg_p)} → {_thousands(_pdl_p)} prompt tokens, "
+            f"+{_thousands(_pdl_p - _plg_p)}") in flat_all
+    # …and the TOTAL, derived from the same two artifacts: the figure the
+    # 4.6× and both percentages rest on.
+    _plg_t = sum(a["legacy"]["prompt_tokens"] + a["legacy"]["out_tokens"]
+                 for a in pri["arms"])
+    _pdl_t = sum(a["delta"]["prompt_tokens"] + a["delta"]["out_tokens"]
+                 for a in pri["arms"])
+    _rlg_t = sum(a["legacy"]["prompt_tokens"] + a["legacy"]["out_tokens"]
+                 for a in rer["arms"])
+    _rdl_t = sum(a["delta"]["prompt_tokens"] + a["delta"]["out_tokens"]
+                 for a in rer["arms"])
+    assert (f"{_thousands(_plg_t)} → {_thousands(_pdl_t)} = "
+            f"−{(1 - _pdl_t / _plg_t) * 100:.1f} %") in flat_all
+    assert (f"{_thousands(_rlg_t)} → {_thousands(_rdl_t)} = "
+            f"−{(1 - _rdl_t / _rlg_t) * 100:.1f} %") in flat_all
+    assert (f"**{(ps['token_weighted_reduction'] / (1 - _pdl_t / _plg_t)):.1f}×** "
+            "smaller") in flat_all
+    # ⛔ both directions: the output-only reading must not come back as the
+    # unqualified number it was ("not −93.8 %" is the sentence that names it).
+    assert "not −93.8 %" in flat_all
+
     # ⛔ the truncation cell quotes "the largest output in either arm of either run"
     # — so BOTH runs' maxima must be in the document, each attributed. A
     # primary-scoped cell quoting the re-run's maximum mixes runs, which is the
@@ -1490,6 +1533,20 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
     _ps = _pri["summary"]
     _plg = _ps["composition"]["legacy"]
     _pdl = _ps["composition"]["delta"]
+    # ⛔ THE INPUT SIDE, the same class one column further out (#11385
+    # post-rebase review P2): the row published `−93.78 %` with no hint that the
+    # prompt got dearer, so the routing surface — read FIRST and by more lanes
+    # than the document — carried the output-only reading. Derived, not typed.
+    _per = {a["delta"]["prompt_tokens"] - a["legacy"]["prompt_tokens"]
+            for a in _pri["arms"]}
+    assert len(_per) == 1, f"the per-session input cost is not one value: {_per}"
+    _per = _per.pop()
+    _plg_p = sum(a["legacy"]["prompt_tokens"] for a in _pri["arms"])
+    _pdl_p = _plg_p + _per * len(_pri["arms"])
+    _plg_t = sum(a["legacy"]["prompt_tokens"] + a["legacy"]["out_tokens"]
+                 for a in _pri["arms"])
+    _pdl_t = sum(a["delta"]["prompt_tokens"] + a["delta"]["out_tokens"]
+                 for a in _pri["arms"])
     for _fig in (
         f"`verbatim_reemissions` (items re-typed unchanged — the tax itself) "
         f"**{_plg['verbatim_reemissions']} → 0**",
@@ -1512,6 +1569,15 @@ def test_the_index_row_does_not_restate_the_refuted_all_266_claim():
         f"a 16 k cap with a {_max_out / 1000:.1f} k max output",
         f"−{_rs['token_weighted_reduction'] * 100:.2f} %",
         "266 of the 311 items the receipts record",
+        # ⛔ the input-side clause this row now carries: the per-session cost,
+        # the prompt pair and the TOTAL, so the row cannot publish the output
+        # drop alone again (#11385 post-rebase review P2).
+        f"+{_per} prompt tokens on every session",
+        f"({_thousands(_plg_p)} → {_thousands(_pdl_p)}, "
+        f"+{_thousands(_pdl_p - _plg_p)})",
+        f"{_thousands(_plg_t)} → {_thousands(_pdl_t)} = "
+        f"−{(1 - _pdl_t / _plg_t) * 100:.1f} %",
+        "4.6× smaller than the output drop",
         "0 content/name rewrites",
         "62 lifecycle (61 `created`→`unchanged` + 1 `changed`→`unchanged`), "
         "1 `slots` (`core:code`→`dev:code`), 1 `supersedes`",

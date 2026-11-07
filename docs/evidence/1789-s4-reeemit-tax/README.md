@@ -65,6 +65,19 @@ Re-run (`ab-20261107T024226Z`): 33 912 → 2 047 tokens, **−93.96 %**, median
 the worst session in either run is −85.16 %, so the effect is not carried by
 outliers.
 
+**The other half of the bill, which a reader would otherwise never see.** Both
+artifacts record `prompt_tokens` per arm, and the switch made the prompt
+*slightly dearer* — the delta template is longer, so **every one of the 7
+sessions pays exactly +242 input tokens, in both runs**:
+**109 201 → 110 895 prompt tokens, +1 694** over the seven. Total tokens
+(input + output) therefore fall **141 988 → 112 933 = −20.5 %** in the primary
+run and **143 113 → 112 942 = −21.1 %** in the re-run — not −93.8 %. The issue's
+target is the **output** side (*S4 output size per chunk*), which is what the
+verdict row above measures and what the index row routes on; the saving a
+production operator would book is the **total**, and it is **4.6×** smaller.
+Stated here because it is the one number this document could have been read
+without: −93.8 % is the figure in the title.
+
 ## The method — one variable
 
 The tax is a property of the **output contract**, not of the pipeline, so it can
