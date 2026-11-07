@@ -221,6 +221,14 @@ def test_served_liveness_reports_a_counter_only_a_served_request_can_produce(mon
     first-request ``null`` is asserted separately because "no sample" must not
     be spelled as ``0.0`` — that would make an unread age indistinguishable from
     a very fast one.
+
+    And the age itself is pinned against a DELIBERATE interval, from both sides:
+    a bare ``age >= 0`` is satisfied by a constant ``0.0``, which is what the
+    plausible mutation of the handler produces — compute the field from the
+    JUST-STAMPED ``_LIVENESS_LAST_SERVED_AT`` instead of from ``previous`` and
+    every age after the first collapses to ``(now - now)``, leaving the field's
+    documented contract quietly meaningless while the test stayed green
+    (measured: the pre-fix assertion passed that mutant, 1 passed).
     """
     import tortoise.hosted_api as ha
 
@@ -230,7 +238,17 @@ def test_served_liveness_reports_a_counter_only_a_served_request_can_produce(mon
     with _live_hosted_service(monkeypatch) as captured:
         base = captured["base_url"]
         first, first_elapsed = _get(base, "/liveness", timeout=PROBE_BUDGET_S)
+        # A DELIBERATE, measured interval between the two probes, so the age is
+        # a property of the schedule rather than of incidental local latency.
+        # The clock cannot be injected across the socket (the app runs under
+        # uvicorn here, and patching `time.monotonic` would patch the client's
+        # clock too), so 50 ms — 500x the µs-scale noise of two loopback
+        # requests — is made explicit instead of hoped for, and both bounds
+        # below are derived from it.
+        gap_started = time.monotonic()
+        time.sleep(0.05)
         second, second_elapsed = _get(base, "/liveness", timeout=PROBE_BUDGET_S)
+        gap_ms = (time.monotonic() - gap_started) * 1000.0
 
     assert not isinstance(first, str), (
         f"/liveness did not answer ({first}) — this endpoint must be answerable "
@@ -258,8 +276,17 @@ def test_served_liveness_reports_a_counter_only_a_served_request_can_produce(mon
         f"the second request carried served={body2['served']!r}, expected 2 — a "
         "counter that does not move is a value cached, not served")
     age = body2["last_served_age_ms"]
-    assert isinstance(age, (int, float)) and age >= 0, (
-        f"last_served_age_ms={age!r} is not a non-negative number")
+    assert isinstance(age, (int, float)) and 40.0 <= age <= gap_ms + 25.0, (
+        f"the second request reported last_served_age_ms={age!r}, but the two "
+        f"probes are separated by a deliberate 50 ms interval and the client "
+        f"measured {gap_ms:.1f} ms between them — so the age of the PREVIOUS "
+        "request is bounded below by the interval and above by the round trip. "
+        "The lower bound reds computing the field from the just-stamped "
+        "_LIVENESS_LAST_SERVED_AT instead of from `previous` — every age after "
+        "the first collapses to 0.0 and the field no longer means 'age of the "
+        "PREVIOUS request'; the upper bound reds one that measures from "
+        "PROCESS START instead of from the previous request. "
+        "Between them the field means what its docstring says it means")
     assert first_elapsed < PROBE_BUDGET_S and second_elapsed < PROBE_BUDGET_S, (
         f"/liveness took {first_elapsed:.2f}s/{second_elapsed:.2f}s — the prober "
         f"bounds this at {PROBE_BUDGET_S:.0f}s")
