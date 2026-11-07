@@ -959,6 +959,13 @@ def test_recency_latest_selecting_an_interval_anchor_still_rejects():
         # narrative but NOT in a relative clause — still main's abstain
         "How many days passed between the day I saw the latest Marvel film "
         "and my birthday?",
+        # #8775 review 4: an opener earlier in the anchor does not cover a
+        # `latest` in a LATER conjunct — the clause boundary is what keeps it a
+        # selecting referent
+        "How many days had passed since I attended the fair where I met her "
+        "and took my latest exam when I moved?",
+        "How many days passed between the school where I studied and then my "
+        "latest exam and my graduation?",
     ]:
         assert classify_question(q) is None, q
     # …while the issue's row fires: its `latest` sits inside the anchor's

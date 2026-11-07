@@ -801,6 +801,11 @@ _RE_WH_LOOKUP = re.compile(r"\b(?:what|which|who|whom|whose|where|when)\b",
 _RE_RELATIVE_CLAUSE = re.compile(r"\b(?:where|which|who|whom|whose)\b",
                                  re.IGNORECASE)
 
+#: A clause boundary: the token after one of these is in a DIFFERENT clause from
+#: the relative opener before it (#8775 review 4 — "the fair where I met her
+#: **and** took my latest exam" is a selecting referent, not narrative text).
+_RE_CLAUSE_BOUNDARY = re.compile(r";|\b(?:and|but|then)\b", re.IGNORECASE)
+
 
 def recency_narrative_latest_enabled() -> bool:
     """Is #8775's narrowed recency guard armed? (default ON).
@@ -842,6 +847,13 @@ def _latest_sits_in_a_relative_clause(match) -> bool:
     WHICH one (the name-FTS leg is an OR-union, so it matches any object
     containing "exam"). Main abstained on all of those and still does; the arms
     never re-read an anchor's narrative extension, so text there is harmless.
+
+    #8775 review 4: the opener must belong to the CLAUSE the token sits in. "…the
+    fair where I met her **and** took my latest exam" has an opener earlier in
+    the anchor, but the `latest` is in the NEXT conjunct — a selecting referent
+    again. A clause-boundary separator between the last opener and the token
+    also vetoes (accepted trade-off: a comma-and inside the clause then abstains,
+    which is the safe direction — the arms fall back to legacy).
     """
     if match is None:
         return False
@@ -852,8 +864,13 @@ def _latest_sits_in_a_relative_clause(match) -> bool:
             continue
         for m in _RE_RECENCY_LATEST.finditer(anchor):
             seen = True
-            if not _RE_RELATIVE_CLAUSE.search(anchor[:m.start()]):
+            prefix = anchor[:m.start()]
+            openers = list(_RE_RELATIVE_CLAUSE.finditer(prefix))
+            if not openers:
                 # a selecting `latest` — main's reject applies
+                return False
+            if _RE_CLAUSE_BOUNDARY.search(prefix[openers[-1].end():]):
+                # the opener belongs to an EARLIER clause — still selecting
                 return False
     return seen
 
