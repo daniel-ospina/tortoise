@@ -2218,9 +2218,13 @@ def test_a_deduped_address_must_INDEX_the_text_the_record_carries():
 # to agree, so changing one left the two builders publishing different quotes and
 # different `span_source` labels for the SAME entry with a GREEN suite. The failure
 # mode is a false PASS on provenance: a `span_source` asserting a verification the
-# sibling builder would not perform (#11368, measured at `ad8022205` and again at
-# `23d227c53`: quote 200/100, surface 200/100, kind_guess 60/10 — every one a drift
-# the suites did not see).
+# sibling builder would not perform (#11368). ⛔ The caps were EQUAL at `ad8022205` and
+# again at `23d227c53` (`_mention_record`'s own `[:200]`/`_MAX_QUOTE`/`[:60]` happened
+# to match `_MENTION_CAPS` 200/200/60), so nothing reddened — that is LUCK, not a pin,
+# and the cap row below is what separates the two: with `_MENTION_CAPS` patched to
+# `quote=100, surface=100, kind_guess=10` on `23d227c53`'s tree, the record builder
+# still stored 200/200/60 while the clamp stored 100/100/10 — one failed row, no other
+# test in the file moving.
 
 
 def _build_pair(*, surface, quote, kind_guess=None):
