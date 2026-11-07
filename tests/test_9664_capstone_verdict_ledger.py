@@ -538,6 +538,13 @@ def test_an_unresolvable_evidence_entry_is_invalid_not_a_traceback(tmp_path):
         # `is_file()` stats the path, so an over-long component raises OSError from
         # OUTSIDE a guard that wraps only `resolve()`.
         "tools/" + "a" * 400 + ".py",
+        # ⛔ The two shapes below are what pin `_names_artifact`'s OWN guard. The
+        # bare-path over-long entry above exercises `_evidence_is_real`'s path arm,
+        # never this one, and the NUL entry only covers the ValueError half — so
+        # narrowing that `except` to `(ValueError,)` (or dropping the shlex
+        # `except ValueError`) left the whole suite green while the CLI tracebacked.
+        "cmd:sh tools/" + "a" * 400 + ".py",
+        "cmd:sh docs/*  'unclosed",
     ):
         proc = _run_cli(tmp_path, _ledger([_row("A", evidence=[entry])]))
         assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
@@ -552,13 +559,21 @@ def test_a_glob_whose_only_match_resolves_outside_the_tree_is_invalid(tmp_path):
     to the literal-prefix check, but it is the ONLY thing refusing a glob whose
     PREFIX is a genuine in-tree directory while every match under it is a symlink
     pointing outside. MEASURED: deleting that one clause left the suite 102/102
-    green and let `cmd:sh pure/*` (a directory holding one symlink to
-    /etc/hostname) validate as `verified` with an EMPTY uncovered list — a false
-    PASS on a citation that names no artifact of this tree.
+    green and let `cmd:sh pure/*` (a directory holding one symlink pointing out of
+    the tree) validate as `verified` with an EMPTY uncovered list — a false PASS on
+    a citation that names no artifact of this tree.
+
+    ⛔ The link target is part of the FIXTURE, not `/etc/hostname`: a dangling
+    target is refused whether or not the containment clause is present (measured),
+    so a host-shaped target would make this test pass vacuously on any box that
+    lacks it — including the box a developer runs the suite on.
     """
     tree = tmp_path / "tree"
     (tree / "pure").mkdir(parents=True)
-    os.symlink("/etc/hostname", tree / "pure" / "evil.md")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("x", encoding="utf-8")
+    os.symlink(outside / "secret.md", tree / "pure" / "evil.md")
 
     with pytest.raises(cl.InvalidLedger) as glob_excinfo:
         cl.validate(_ledger([_row("A", evidence=["cmd:sh pure/*"])]), repo_root=tree)
