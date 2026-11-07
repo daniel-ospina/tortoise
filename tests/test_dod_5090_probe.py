@@ -3117,8 +3117,8 @@ def test_a_tool_whose_SDK_method_fixes_entity_type_is_named():
     # `_search_fn`), so only the marker SPELLING is pinned here. The declared
     # PASSERS are pinned by NAME, not by count, in
     # `test_the_census_doc_states_the_same_probe_bound_the_report_does`: a
-    # declared passer the census doc does not name reds it, while a second
-    # passer whose name already appears in that doc would pass — the recorded
+    # declared passer that §3 of the census doc does not name reds it, while a
+    # second passer whose name already appears IN §3 would pass — the recorded
     # residual of the `#11397` class, and the reason the census doc states the
     # pin's shape instead of claiming the population is pinned.
     assert declared is not None and declared.startswith(
@@ -3690,18 +3690,34 @@ def test_the_width_probe_report_says_the_rows_were_ENGINE_CHOSEN():
 
 
 def _doc_section(text: str, start: str, end: str) -> str:
-    """The slice of a markdown doc between two headings, both halves required.
+    """The slice of a markdown doc between two H2 headings, both halves required.
 
     A pin that claims "the doc's §3 states this" must read §3, not the whole
     file: every string in a pasted transcript is also "in the document", so a
     whole-file search cannot falsify a deleted statement (#11389 review, P2).
-    Fails LOUDLY when either heading is gone, rather than silently slicing from
-    the wrong place — a renamed heading must red the pin, never widen it.
+
+    ⛔ ANCHORED TO A LINE, AND UNIQUE (#11389 review, P2). A bare substring
+    boundary is not a heading: `"## 4."` is INSIDE `"### 4.1"`, so renaming the
+    §4 H2 — a one-character edit that leaves `### 4.1` alone — kept the slice
+    running past §4's provenance note and the pasted transcript, i.e. widened
+    the pin back to precisely the mentions this slice exists to exclude.
+    Measured: `## 4. The measurement taken here` -> `## 4 The measurement…`
+    kept a DELETED §3 statement green. `^## 3\.` cannot match `### 3.1` (it
+    wants a space where the third `#` sits), and requiring exactly ONE match
+    makes a heading that is gone, renamed, or repeated inside a pasted block
+    red the pin loudly instead of silently moving the boundary.
     """
-    assert start in text, f"the census doc lost its {start!r} heading"
-    assert end in text, f"the census doc lost its {end!r} heading"
-    begin = text.index(start)
-    stop = text.index(end, begin)
+    def _boundary(heading: str) -> int:
+        found = [m.start()
+                 for m in re.finditer(rf"(?m)^{re.escape(heading)}", text)]
+        assert len(found) == 1, (
+            f"the census doc has {len(found)} line-anchored {heading!r} "
+            "heading(s), so the §-slice boundary is not unique — a renamed or "
+            "duplicated heading must red this pin, never widen it")
+        return found[0]
+
+    begin = _boundary(start)
+    stop = _boundary(end)
     assert stop > begin, f"{end!r} precedes {start!r} in the census doc"
     return text[begin:stop]
 
@@ -3752,15 +3768,24 @@ def test_the_census_doc_states_the_same_probe_bound_the_report_does():
         # ("nested `def`'s decorators and parameter defaults"), so any
         # legitimate rewording of that clause red a doc+code pair that still
         # agreed — the very failure the comment four lines up names. Assert the
-        # CLAIM instead: some SENTENCE of §3 must say the walk does not visit a
-        # nested function's decorators or defaults. Same-sentence is the binding
-        # that keeps it falsifiable — a whole-document "nested" + "default"
-        # search stays green with the clause deleted, because both words appear
-        # elsewhere in the document.
+        # CLAIM instead: some SENTENCE of §3 names both a `decorator` and a
+        # `default`, which is what "the walk does not visit a nested def's
+        # decorators/defaults" reduces to once the wording is free.
+        #  · same-sentence keeps it falsifiable — a whole-document word search
+        #    stays green with the clause deleted, because both words appear
+        #    elsewhere in the document;
+        #  · NOT `"nested" in sentence` either: pinning that ADJECTIVE still red
+        #    a rewording to "an **inner** `def`'s decorators and parameter
+        #    defaults", which states the same claim (#11389 review, P2);
+        #  · and NOT a loosened `(def|function) + (decorator|default)`:
+        #    measured, that false-GREENS with the clause deleted — two other §3
+        #    sentences hit it ("…runs the SDK's own default …", "…`:Object` on
+        #    its default path").
+        # Measured on this doc: 1 hit with the clause, 1 with the `inner def`
+        # rewording, 0 with the clause deleted.
         s3 = _doc_section(text, "## 3.", "## 4.").lower()
         residual = [sentence for sentence in s3.split(". ")
-                    if "nested" in sentence
-                    and ("decorator" in sentence or "default" in sentence)]
+                    if "decorator" in sentence and "default" in sentence]
         assert residual, (
             "the doc claims the declaration is total; the walk does not visit a "
             "nested def's defaults/decorators, and no sentence of §3 says so")
