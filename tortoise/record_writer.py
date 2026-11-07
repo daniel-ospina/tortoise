@@ -1021,8 +1021,14 @@ def _default_connect(dsn: str) -> Any:
     # (needs no percent-encoding, passes `_DSN_SCHEMES`) would otherwise take
     # the "already bounded" branch and restore libpq's wait-forever default on
     # the per-record connect this constant exists to cap (#9231 review P2).
+    # ⛔ `urlsplit().query` — never the whole `dsn` — is the surface EVERY one of
+    # these questions is asked against: the parked-handle bound below repeated
+    # the substring mistake for one cycle, and a password that merely ENDS in
+    # `idle_in_transaction_session_timeout` silently removed the bound (#9558
+    # review cycle 5).
+    query = parse_qs(urlsplit(dsn).query)
     connect_kwargs: dict[str, Any] = {}
-    if "connect_timeout" in parse_qs(urlsplit(dsn).query):
+    if "connect_timeout" in query:
         # The operator bounded it already; do not replace their number.
         pass
     else:
@@ -1032,11 +1038,21 @@ def _default_connect(dsn: str) -> Any:
     # be on the session, not on the call that happened to create it. `options`
     # is a STARTUP parameter, so this adds no round trip and cannot be lost on
     # reuse. An operator's own value wins, same rule as `connect_timeout`.
-    if "idle_in_transaction_session_timeout" not in dsn:
+    # ⛔ And `options` is ONE STARTUP field: psycopg2's keyword REPLACES a value
+    # the DSN already carries (`extensions.make_dsn` — verified, not assumed), so
+    # passing only our `-c` would silently drop the operator's own startup
+    # options (`-c statement_timeout=…`, `-c search_path=…`, `application_name`)
+    # on every connect. Theirs is PRESERVED and the bound APPENDED.
+    operator_options = " ".join(query.get("options", []))
+    already_bounded = (
+        "idle_in_transaction_session_timeout" in query
+        or "idle_in_transaction_session_timeout" in operator_options
+    )
+    if not already_bounded:
         connect_kwargs["options"] = (
-            "-c idle_in_transaction_session_timeout="
+            f"{operator_options} -c idle_in_transaction_session_timeout="
             f"{IDLE_IN_TRANSACTION_TIMEOUT_SECONDS * 1000}"
-        )
+        ).strip()
     raw = psycopg2.connect(dsn, **connect_kwargs)
     return _pooled_connection(raw, dsn)
 

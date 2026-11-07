@@ -740,7 +740,7 @@ def test_an_operator_idle_timeout_is_not_replaced(monkeypatch):
     `connect_timeout` branch already guards against (#9231 review P2); the new
     bound must not reintroduce it.
 
-    FALSIFIER: drop the `not in dsn` guard and this reds.
+    FALSIFIER: drop the `already_bounded` guard and this reds.
     """
     made = _fake_driver(monkeypatch)
     rw._default_connect(
@@ -749,6 +749,76 @@ def test_an_operator_idle_timeout_is_not_replaced(monkeypatch):
     assert "options" not in made["kwargs"][0], (
         "the pool overrode an idle-in-transaction bound the operator named "
         f"(kwargs={made['kwargs'][0]!r})")
+
+
+def test_an_operator_idle_timeout_in_their_options_is_not_replaced(monkeypatch):
+    """The same rule when the operator expressed it as a STARTUP `options` `-c`.
+
+    `-c idle_in_transaction_session_timeout=…` inside `options` is the only form
+    libpq actually accepts for this setting, so this is the operator-noted-it
+    case that can really happen. Their value must reach the server untouched.
+
+    FALSIFIER: drop the `operator_options` half of `already_bounded` and this
+    reds — the pool would append a second `-c` for the same setting.
+    """
+    made = _fake_driver(monkeypatch)
+    rw._default_connect(
+        "postgresql://record@127.0.0.1/db"
+        "?options=-c%20idle_in_transaction_session_timeout%3D900000")
+    assert "options" not in made["kwargs"][0], (
+        "the pool replaced a bound the operator put in their STARTUP options "
+        f"(kwargs={made['kwargs'][0]!r})")
+
+
+def test_a_password_that_mentions_the_bound_does_not_disable_it(monkeypatch):
+    """The bound is decided by a QUERY KEY, never by a substring of the DSN.
+
+    `#9231`'s `connect_timeout` fix closed exactly this trap two lines above the
+    new bound (a password needs no percent-encoding and sits in the netloc, so
+    `"…" not in dsn` matched it) — and the parked-handle bound reintroduced it:
+    a password ending in `idle_in_transaction_session_timeout` silently removed
+    the bound, restoring the unbounded `AccessShareLock` the bound exists to
+    cap. ⛔ Removing a safety bound because of a CREDENTIAL is the failure mode,
+    not a false positive to live with.
+
+    FALSIFIER: restore `"idle_in_transaction_session_timeout" not in dsn` (the
+    whole-DSN substring test) and this reds with no `options` at all.
+    """
+    made = _fake_driver(monkeypatch)
+    rw._default_connect(
+        "postgresql://svc:idle_in_transaction_session_timeout_2024@127.0.0.1/db")
+    options = made["kwargs"][0].get("options", "")
+    assert "idle_in_transaction_session_timeout" in options, (
+        "a password that merely CONTAINS the setting's name removed the "
+        f"parked-handle bound (kwargs={made['kwargs'][0]!r})")
+
+
+def test_an_operators_other_startup_options_survive_the_bound(monkeypatch):
+    """Adding the bound must not DELETE the operator's own startup options.
+
+    `options` is one STARTUP field, and psycopg2's keyword REPLACES a value the
+    DSN already carries (`psycopg2.extensions.make_dsn`: asked for
+    `?options=-c statement_timeout=5000` with `options=…` added, it returns ONLY
+    the keyword's value — verified, not assumed). So passing the bound alone
+    dropped `statement_timeout`, `search_path` and `application_name` on every
+    connect: a silent session-configuration regression, and the same class of
+    silent override the `connect_timeout` branch above exists to prevent.
+
+    FALSIFIER: pass the bound without prefixing `operator_options` and this reds
+    on the missing `statement_timeout`.
+    """
+    made = _fake_driver(monkeypatch)
+    rw._default_connect(
+        "postgresql://record@127.0.0.1/db"
+        "?options=-c%20statement_timeout%3D5000")
+    options = made["kwargs"][0].get("options", "")
+    assert "statement_timeout=5000" in options, (
+        "the pool DROPPED a startup option the operator set "
+        f"(options={options!r})")
+    assert (
+        f"-c idle_in_transaction_session_timeout="
+        f"{rw.IDLE_IN_TRANSACTION_TIMEOUT_SECONDS * 1000}" in options
+    ), f"the bound did not ride along (options={options!r})"
 
 
 def test_the_idle_set_is_bounded_and_overflow_is_closed():
