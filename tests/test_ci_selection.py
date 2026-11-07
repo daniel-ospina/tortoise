@@ -986,6 +986,33 @@ def _site_assets_the_icon_guard_reads() -> set[str]:
     return found
 
 
+def _in_tree_files_the_site_guard_opens() -> set[str]:
+    """The `website/` files the site guard OPENS, DERIVED from the guard's own source.
+
+    `_site_assets_the_icon_guard_reads` covers one half of the guard's population: the
+    files a PAGE points at. This covers the other half — the fixtures it reads straight
+    off disk by literal path, `(self.WEB / "logo.png").read_bytes()`. A file the guard
+    OPENS is a subject exactly as a linked one is: if editing its bytes cannot select
+    the guard, the assertion that reads it is unowned (the #1349/#3332/#3616 class).
+
+    `website/logo.png` is why this exists. It is the PNG whose IDAT carries `FF D9`,
+    the witness that isolates "the JPEG walk was applied to a PNG", and NO page links
+    it as an icon — `test_the_wordmark_is_never_used_as_an_icon` requires that no page
+    does — so the page-derived population structurally cannot include it. Deriving it
+    from the source rather than from a hand-list is the same reason the linked set is
+    derived: a seventh fixture read by a future guard is covered the day it lands.
+    """
+    src = (REPO / "tests" / "test_website_static.py").read_text()
+    found: set[str] = set()
+    for match in re.finditer(
+            r'\.WEB\s*/\s*((?:"[^"\n]+"\s*/\s*)*"[^"\n]+")\s*\)\s*\.read_bytes\(\)',
+            src):
+        rel = "/".join(re.findall(r'"([^"\n]+)"', match.group(1)))
+        if rel and (REPO / "website" / rel).is_file():
+            found.add(f"website/{rel}")
+    return found
+
+
 def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     """#11318: the ICON SET and the shared CARD are binaries, and they must select.
 
@@ -1029,7 +1056,23 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     assert derived >= KNOWN, (
         f"the derived population lost {sorted(KNOWN - derived)} — the guard reads a "
         "file no page links any more, so this test's floor and the tree disagree")
-    for changed in sorted(derived):
+    # ⛔ AND THE WITNESSES — a file the guard OPENS is a subject even when no page links
+    # it. MEASURED before the entry this covers: `select(["website/logo.png"])` ->
+    # `surfaces: []`, so a wordmark re-encode merged green with the guard absent and
+    # REDed the next diff that selected it. The FLOOR below is the derivation's own
+    # tripwire: if the guard stops opening `logo.png` by literal path, this reds and the
+    # next author re-derives instead of silently losing the coverage.
+    opened = _in_tree_files_the_site_guard_opens()
+    assert "website/logo.png" in opened, (
+        f"the guard's opened-file derivation lost `website/logo.png` (derived: "
+        f"{sorted(opened)}) — either the guard no longer opens that witness by a "
+        "literal `(self.WEB / \"…\").read_bytes()` path (re-derive the entries in "
+        "this test and in SOURCE_PATTERNS['onboarding'], keeping the coverage), or the "
+        "derivation's regex stopped matching the guard's expression shape")
+    assert opened - derived, (
+        "every file the guard opens is also linked by a page, so the witness half of "
+        "this ratchet is testing nothing — keep the assertion, but re-derive it")
+    for changed in sorted(derived | opened):
         assert (REPO / changed).is_file(), f"the asset this test guards is gone: {changed}"
         r = _sel([changed])
         assert r["surfaces"] == ["onboarding"], (

@@ -429,6 +429,24 @@ SOURCE_PATTERNS = {
                    "website/assets/og-tortoise.jpg",
                    "website/assets/investors-og.jpg",
                    "website/assets/design-partners-intro-og.jpg",
+                   # #11387: the WORDMARK is a WITNESS, not a linked asset — no page
+                   # uses it as an icon (that is precisely what
+                   # `test_the_wordmark_is_never_used_as_an_icon` forbids), so the
+                   # page-derived population above cannot see it. The card/icon guard
+                   # nonetheless OPENS its bytes: it is the real PNG whose IDAT carries
+                   # `FF D9`, the witness that isolates "the JPEG walk is applied to a
+                   # PNG" — a JPEG-only scan reads it 6,280 B short — and
+                   # `test_the_content_guards_reject_a_blank_image_and_keep_their_
+                   # measured_floors` asserts on its full length. Measured before this
+                   # entry: `select(["website/logo.png"])` -> `surfaces: []`, so
+                   # re-compressing the wordmark (an unrelated, plausible diff) merged
+                   # green with the guard ABSENT, and then REDed the NEXT diff that
+                   # selected the guard — billing its author for a file they never
+                   # touched. Same #1349/#3332/#3616 silent-drop class as the six
+                   # binaries above, one file over, and the same pair of failures
+                   # (guard never runs on its own subject; a red that arrives after the
+                   # merge) those entries were added to end.
+                   "website/logo.png",
                    # #3673: the served skill documents and the installer belong to
                    # this surface. The parity contract between
                    # `tortoise/onboarding/SKILL.md` and its served mirror is
