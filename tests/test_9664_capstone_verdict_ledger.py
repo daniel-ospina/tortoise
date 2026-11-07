@@ -142,6 +142,9 @@ def _ledger(rows, **overrides):
     data = {
         "version": 1,
         "issue": 9664,
+        # The denominator is REQUIRED by the tool, so the fixture declares it to
+        # match the rows it builds; a test that wants a MISMATCH sets it explicitly.
+        "criteria_expected": len(rows),
         "measured_at": {"ref": "origin/main", "sha": SHA, "date": "2026-11-07"},
         "criteria": rows,
     }
@@ -347,6 +350,18 @@ def test_advisory_reports_but_does_not_enforce_with_its_OWN_exit_code(tmp_path):
         "cmd:verified manually by reading pyproject.toml",
         "cmd:NOT RUN - see tools/capstone_ledger.py for the intended command",
         "cmd:we did not run this; the suite lives in tests/test_9664_capstone_verdict_ledger.py",
+        # Cycle-3 attack (measured, all exited 0 before the argument-position rule):
+        # prepend ONE runner word to the cycle-2 prose and the token scan found the
+        # named file again. The decision now happens at the first argument.
+        "cmd:sh NOT RUN - see tools/capstone_ledger.py",
+        "cmd:env NOT RUN - see tools/capstone_ledger.py",
+        "cmd:timeout 1 NOT RUN - see tools/capstone_ledger.py",
+        "cmd:make I did not run anything, see docs/evidence/9664-capstone/README.md",
+        "cmd:bash not executed, ref tools/capstone_ledger.py",
+        # The vacuous glob: names the repo root, therefore no artifact in particular.
+        "cmd:sh *",
+        "cmd:git *",
+        "cmd:uv run pytest *.yml",
     ],
 )
 def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
@@ -370,6 +385,10 @@ def test_a_cmd_entry_must_name_an_artifact_of_this_tree(tmp_path, prose):
         # The most precise citation shape must not be a false block.
         "cmd:uv run python -m pytest tests/test_9664_capstone_verdict_ledger.py::TestX::test_y -q",
         "cmd:uv run pytest tests/test_9664_capstone_*.py",
+        # A runner's own literal argument (a duration / an env assignment) must not
+        # be mistaken for the target, or `timeout`/`env` become false blocks.
+        "cmd:timeout 300 uv run python tools/capstone_ledger.py check",
+        "cmd:env TORTOISE_CAPSTONE_LEDGER=off uv run python tools/capstone_ledger.py check",
     ],
 )
 def test_a_cmd_entry_that_names_a_real_artifact_is_accepted(tmp_path, command):
@@ -428,7 +447,7 @@ def test_a_sha_that_names_no_commit_is_invalid(monkeypatch):
     arm genuinely cannot fire here, and a test that pretended otherwise would be
     green for the wrong reason.
     """
-    monkeypatch.setattr(cl, "_commit_state", lambda sha: "absent")
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "absent")
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "deadbeef" * 5
     with pytest.raises(cl.InvalidLedger) as excinfo:
@@ -449,7 +468,7 @@ def test_an_unprovable_sha_is_not_a_defect(monkeypatch):
     the wiring, for the same reason the `absent` arm is: a shallow clone cannot
     produce the input that decides it.
     """
-    monkeypatch.setattr(cl, "_commit_state", lambda sha: "unprovable")
+    monkeypatch.setattr(cl, "_commit_state", lambda sha, repo_root: "unprovable")
     data = _ledger([_row("A")])
     data["measured_at"]["sha"] = "0" * 40
     # `validate` RAISES on a problem and returns the normalized rows otherwise, so
@@ -477,18 +496,84 @@ def test_the_committed_ledger_pins_its_denominator():
     assert len(data["criteria"]) == 22
 
 
-def test_a_shallow_checkout_is_unprovable_never_absent(monkeypatch):
+def test_an_omitted_denominator_pin_is_invalid(tmp_path):
+    """The pin must be enforced by the TOOL, not only by one test on one file.
+
+    Measured before this: a ledger that simply left the key out exited 0, so
+    "drop the uncovered rows AND delete the block" reached a clean exit — the
+    committed artifact was protected by a property of itself, not of the check.
+    """
+    data = _ledger([_row("A")])
+    del data["criteria_expected"]
+    proc = _run_cli(tmp_path, data)
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "criteria_expected" in proc.stderr
+
+
+@pytest.mark.parametrize("coerced", [True, False, 1.9, "1"])
+def test_a_non_integer_denominator_is_invalid_not_coerced(tmp_path, coerced):
+    """`True` IS an int in Python and `int(1.9)` truncates to 1: either would pass
+    as a one-row pin against a one-row ledger, which is the shrink this pins."""
+    data = _ledger([_row("A")], criteria_expected=coerced)
+    proc = _run_cli(tmp_path, data)
+    assert proc.returncode == cl.EXIT_INVALID, proc.stdout + proc.stderr
+    assert "INTEGER" in proc.stderr
+
+
+def test_a_shallow_checkout_is_unprovable_never_absent(tmp_path):
     """CI test jobs check out at `fetch-depth: 1`, where an ANCESTOR sha is not in
-    the object database. Blaming the record for that reds the required check on a
-    legitimate ledger (#9075 r4 P1), so the third outcome must exist."""
-    monkeypatch.setattr(cl, "_commit_state", cl._commit_state)  # real impl, no stub
-    assert cl._commit_state("0" * 40) in {"absent", "unprovable"}
-    # The shallow probe is what decides: a missing object in a shallow clone is
-    # `unprovable`, and only a full clone may say `absent`.
-    shallow = cl._commit_state("0" * 40)
-    if shallow == "absent":
-        pytest.skip("this checkout is not shallow, so `absent` is the correct answer here")
-    assert shallow == "unprovable"
+    the object database. Blaming the record reds the required check on a legitimate
+    ledger (#9075 r4 P1), so the third outcome has to exist.
+
+    Built as a REAL depth-1 clone rather than skipped. The previous version ran
+    against the live checkout and skipped whenever it was not shallow — which is
+    every developer box and most CI legs — so it asserted nothing on the path that
+    decides. This also pins `_commit_state`'s `repo_root` argument: the same sha is
+    `unprovable` in the shallow clone and `exists` in the full one, so a function
+    that ignored the tree it was asked about could not return both.
+    """
+
+    def git(*args: str, cwd: Path) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git("init", "-q", cwd=origin)
+    git("config", "user.email", "pins@example.com", cwd=origin)
+    git("config", "user.name", "pins", cwd=origin)
+    git("config", "commit.gpgsign", "false", cwd=origin)
+    (origin / "f.txt").write_text("one", encoding="utf-8")
+    git("add", "f.txt", cwd=origin)
+    git("commit", "-qm", "one", cwd=origin)
+    ancestor = git("rev-parse", "HEAD", cwd=origin)
+    (origin / "f.txt").write_text("two", encoding="utf-8")
+    git("commit", "-qam", "two", cwd=origin)
+
+    # `file://` forces the real transport; a plain local-path clone silently
+    # ignores `--depth` and would make this test pass for the wrong reason.
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "-q", "--depth", "1", f"file://{origin}", str(shallow)],
+        check=True,
+        capture_output=True,
+    )
+    full = tmp_path / "full"
+    subprocess.run(
+        ["git", "clone", "-q", f"file://{origin}", str(full)], check=True, capture_output=True
+    )
+
+    assert cl._commit_state("0" * 40, repo_root=shallow) == "unprovable"
+    assert cl._commit_state("0" * 40, repo_root=full) == "absent"
+    # The ancestor the ledger legitimately cites: unprovable where history is
+    # truncated, and NOT blamed there — which is the whole fix.
+    assert cl._commit_state(ancestor, repo_root=shallow) == "unprovable"
+    assert cl._commit_state(ancestor, repo_root=full) == "exists"
 
 
 # ── the REAL committed ledger ──────────────────────────────────────────────

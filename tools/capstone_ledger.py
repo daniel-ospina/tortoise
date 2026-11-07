@@ -46,6 +46,7 @@ Record format (committed at `docs/evidence/9664-capstone/verdict-ledger.yml`):
 
     version: 1
     issue: 9664
+    criteria_expected: 22          # the DENOMINATOR, pinned in the record itself
     measured_at: {ref: origin/main, sha: <40 hex>, date: YYYY-MM-DD}
     criteria:
       - id: C1
@@ -60,6 +61,15 @@ there is REFUSED rather than counted, so a ledger cannot be made green by
 describing evidence instead of holding it. `evidence_kind: server-observation`
 carries an explicit waiver (it is the shape of step 5, which is a server-side
 observation with no screenshot by nature, #9664 comment 6692766222 §D).
+
+⛔ `criteria_expected` is REQUIRED. The ledger's denominator is pinned IN THE
+RECORD, not derived from it, because a tool that computes the denominator from
+the file it is auditing will faithfully report `uncovered: 0` for a file someone
+trimmed — the 14/18/22 drift this tool exists to end, reproduced by the tool.
+Without the key the check was silently absent, so "drop the rows AND delete this
+block" was a second route to a clean exit; it now takes a deliberate, visible
+edit. A non-integer (`true`, `1.9`) is refused rather than coerced, since Python
+would truncate both to a passing one-row pin.
 
 Exit codes (a CLOSED set — a caller may branch on them):
     0  CLEAN       the uncovered list is empty; every row valid
@@ -81,6 +91,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -203,7 +214,65 @@ RUNNERS: Final[frozenset[str]] = frozenset(
 )
 
 
-def _commit_state(sha: str) -> str:
+#: Words that may sit BETWEEN a runner and its target: a runner CHAIN
+#: (`uv run python …`, `poetry run pytest …`) or a subcommand of one. Skipping these
+#: is what keeps `uv run python -m pytest tests/x.py` accepted without letting a
+#: scanner wander off into the rest of a sentence.
+_CHAIN_WORDS: Final[frozenset[str]] = frozenset({"run", "exec", "x", "uvx"})
+
+#: A runner's own non-artifact arguments, which must not be mistaken for the target:
+#: a bare duration (`timeout 300 …`) and an environment assignment (`env FOO=1 …`).
+#: Both are literal by construction, so allowing them costs no strictness.
+_NUMBER_ARG: Final = re.compile(r"^[0-9]+(?:\.[0-9]+)?[smhd]?$")
+_ENV_ASSIGNMENT: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+_WILDCARDS: Final = "*?["
+
+
+def _glob_names_a_directory(text: str) -> bool:
+    """A glob may only count if it names a literal DIRECTORY to search.
+
+    `*` and `*.yml` resolve against the repo root, so they name *everything* and
+    therefore nothing: `cmd:sh *` emptied a 22-row uncovered list to a clean exit.
+    Requiring a `/` plus at least one wildcard-free directory component keeps the
+    precise shapes (`tests/test_9664_capstone_*.py`) and refuses the vacuous ones.
+    """
+    parts = text.split("/")
+    if len(parts) < 2:
+        return False
+    return any(not any(w in part for w in _WILDCARDS) for part in parts[:-1])
+
+
+def _names_artifact(token: str, root: Path) -> tuple[bool, str]:
+    """Does this ONE token name a file of the tree? A bare path, a pytest node-id,
+    or a glob over a named directory.
+
+    A pytest node-id names the file MORE precisely than a bare path, so
+    `tests/x.py::TestY::test_z` counts as naming `tests/x.py`; refusing it would be
+    a false block on the most precise citation shape there is.
+    """
+    text = token.split("::", 1)[0]
+    if not text:
+        return False, "it names nothing"
+    if any(wildcard in text for wildcard in _WILDCARDS):
+        if not _glob_names_a_directory(text):
+            return False, (
+                f"the glob {text!r} names no literal directory to search, so it names "
+                "everything and therefore no artifact (a bare `*`/`*.yml` is not a citation)"
+            )
+        for match in root.glob(text):
+            resolved_match = match.resolve()
+            if resolved_match.is_file() and resolved_match.is_relative_to(root):
+                return True, ""
+        return False, f"no file of this tree matches the glob {text!r}"
+    candidate = Path(text)
+    resolved = (candidate if candidate.is_absolute() else root / text).resolve()
+    if resolved.is_file() and resolved.is_relative_to(root):
+        return True, ""
+    return False, f"{text!r} is not a file in this tree"
+
+
+def _commit_state(sha: str, repo_root: Path = REPO_ROOT) -> str:
     """`exists` | `absent` | `unprovable` for a measured-at sha.
 
     The 40-hex shape check alone lets `measured_at.sha: deadbeef…` through, and
@@ -217,11 +286,14 @@ def _commit_state(sha: str) -> str:
     the sibling capstone's (`tools/capstone_preregistration_check.py`: "a verdict it
     cannot support is never given", #9075 r4 P1): a shallow checkout CANNOT answer,
     so it answers `unprovable` and the record is not blamed.
+
+    `repo_root` is honoured for the same reason `_evidence_is_real` honours it: a
+    validator asked to judge a DIFFERENT tree must not answer against this one.
     """
     try:
         proc = subprocess.run(
             ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
-            cwd=str(REPO_ROOT),
+            cwd=str(repo_root),
             capture_output=True,
             text=True,
             check=False,
@@ -230,7 +302,7 @@ def _commit_state(sha: str) -> str:
             return "exists"
         shallow = subprocess.run(
             ["git", "rev-parse", "--is-shallow-repository"],
-            cwd=str(REPO_ROOT),
+            cwd=str(repo_root),
             capture_output=True,
             text=True,
             check=False,
@@ -282,25 +354,36 @@ def _evidence_is_real(entry: str, repo_root: Path = REPO_ROOT) -> tuple[bool, st
             )
         for token in tokens[1:]:
             if token.startswith("-"):
+                # A flag (and the `--` separator). A flag's VALUE may still be the
+                # artifact; it is reached on the next iteration.
                 continue
-            # A pytest node-id names the file MORE precisely than a bare path, so
-            # `tests/x.py::TestY::test_z` has to count as naming `tests/x.py`
-            # (refusing it is a false block on the most precise citation shape).
-            candidate_text = token.split("::", 1)[0]
-            if not candidate_text:
+            if token in _CHAIN_WORDS or Path(token).name in RUNNERS:
+                # Still inside the runner chain: `uv` `run` `python` `-m` `pytest`.
                 continue
-            candidate = Path(candidate_text)
-            resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
-            if resolved.is_file() and resolved.is_relative_to(root):
+            if _NUMBER_ARG.match(token) or _ENV_ASSIGNMENT.match(token):
+                # `timeout 300 …`, `env FOO=1 …` — a runner's own literal argument.
+                continue
+            # ⛔ THE DECISION IS MADE HERE, at the FIRST artifact position, and is
+            # never deferred to a later token. Scanning the whole sentence for
+            # "any token that happens to resolve" is what let
+            # `cmd:sh NOT RUN - see tools/capstone_ledger.py` satisfy `verified`
+            # and empty the uncovered list: one runner word prepended to a sentence
+            # that merely NAMES a file. A command's target is its argument, so the
+            # first thing in argument position either IS the artifact or the entry
+            # is a claim.
+            ok, why = _names_artifact(token, root)
+            if ok:
                 return True, ""
-            if any(wildcard in candidate_text for wildcard in "*?["):
-                for match in root.glob(candidate_text):
-                    if match.resolve().is_file() and match.resolve().is_relative_to(root):
-                        return True, ""
+            return False, (
+                f"`cmd:` evidence names no artifact of this tree: {command!r} — the first "
+                f"argument after the runner must be the script or test file it ran "
+                f"(a bare path, a pytest node-id, or a glob over a named directory), and "
+                f"{why}. A command entry must NAME an artifact; prose names nothing."
+            )
         return False, (
-            f"`cmd:` evidence names no artifact of this tree: {command!r} — a command "
-            "entry must name the script or test file it ran (a bare path, a pytest "
-            "node-id, or a glob inside the tree), so prose cannot stand in for held evidence"
+            f"`cmd:` evidence names no artifact of this tree: {command!r} — it is a "
+            "runner with no target at all (no script or test file it ran), so prose "
+            "cannot stand in for held evidence"
         )
     candidate = Path(entry)
     resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
@@ -335,7 +418,7 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
         if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
             problems.append(f"`measured_at.sha` must be a 40-hex sha, got {sha!r}")
         else:
-            state = _commit_state(sha)
+            state = _commit_state(sha, repo_root)
             if state == "absent":
                 # Shape is not existence: a fabricated sha renders as provenance.
                 problems.append(f"`measured_at.sha` names no commit in this repository: {sha}")
@@ -353,13 +436,26 @@ def validate(data: dict[str, Any], repo_root: Path = REPO_ROOT) -> list[dict[str
     # would compute the denominator from the very record it is auditing. Shrinking
     # the set now takes TWO visible edits (drop the row AND move the count), which is
     # what makes it a decision instead of an accident.
+    #
+    # ⛔ REQUIRED, not optional. While it could be omitted, "drop the uncovered rows
+    # AND delete this block" was a second, invisible route to a clean exit: the pin
+    # held only because the committed artifact happens to carry the key, which is a
+    # property of that file rather than of the tool.
     declared = data.get("criteria_expected")
     declared_count: int | None = None
-    if declared is not None:
-        try:
-            declared_count = int(declared)
-        except (TypeError, ValueError):
-            problems.append(f"`criteria_expected` must be an integer, got {declared!r}")
+    if declared is None:
+        problems.append(
+            "`criteria_expected` must be declared — the denominator is pinned IN the "
+            "record, or the tool derives it from the file it is auditing"
+        )
+    elif isinstance(declared, bool) or not isinstance(declared, int):
+        # `True` IS an int in Python, and `int(1.9)` truncates to 1, so a coercion
+        # would accept a boolean and a float as a passing one-row pin.
+        problems.append(
+            f"`criteria_expected` must be an INTEGER, got {type(declared).__name__} {declared!r}"
+        )
+    else:
+        declared_count = declared
     if (
         declared_count is not None
         and isinstance(raw_rows, list)
