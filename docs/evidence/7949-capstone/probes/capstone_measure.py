@@ -2855,7 +2855,7 @@ def _a1_object_edges(projection) -> dict:
          "edges": int(row[3] or 0)}
         for row in projection.g.query(
             # ⛔ `objectKind`, NOT `kind`: the writer stamps `o.objectKind=coalesce($ok,'other')`
-            # (tortoise/projection/entities.py:4675) and the pack declares `fromKind`/`toKind`
+            # (tortoise/projection/entities.py:4699) and the pack declares `fromKind`/`toKind`
             # (packs/dev/manifest.yaml:144-149). Reading `a.kind` returned NULL on every real graph
             # — the "by endpoint kind" half reported as measured while measuring nothing (#10982
             # review, finding 3).
@@ -2863,8 +2863,16 @@ def _a1_object_edges(projection) -> dict:
             "b.objectKind AS bk, count(*) AS n ORDER BY n DESC, t, ak, bk").result_set
     ]
     counts = {entry["relation"]: entry["edges"] for entry in by_type}
+    # ⛔ A1's registered denominator is *"`:Object` nodes in the scored graph (floor 30)"*, and the
+    # floor `a1_objects` is pinned — so the block must CARRY that population. It did not, which
+    # left the floor consumed by no field and no arm: a floor nothing can be checked against is a
+    # floor that cannot refuse. This is the rule A5's block already states for `a5_points` /
+    # `a2_candidates` (#11331 review, P2-4b), applied to the row that was left out of it.
+    objects = projection.g.query("MATCH (n:Object) RETURN count(n)").result_set
+    objects = int(objects[0][0] or 0) if objects else 0
     return {"by_type": by_type,
             "by_endpoint_kind": by_kind,
+            "objects": objects,
             "edges_total": sum(entry["edges"] for entry in by_type),
             # per PINNED family, so the logged numbers map onto the registered bar. The keys are
             # WRITTEN labels (`type(r)`), which is what the two queries above count.
@@ -2944,9 +2952,9 @@ def _a4_pointkind(projection) -> dict:
 
     ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
-    with no kind — `tortoise/projection/__init__.py:13588-13590`, `# Ensure pointKind is present
+    with no kind — `tortoise/projection/__init__.py:13591-13593`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
-    `projection/entities.py:2578`, which leaves the property ABSENT instead) is ABSENT, not typed;
+    `projection/entities.py:2602`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
     not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
     and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2455`)
@@ -2956,7 +2964,7 @@ def _a4_pointkind(projection) -> dict:
     and reported, never silently dropped.
     """
     # ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
-    # (`projection/entities.py:2715-2717`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
+    # (`projection/entities.py:2740`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
     # from the denominator while the capture count reported it as a turn row it is not. The same
     # predicate the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1133`,
     # which tests `is_episodic` ALONE and would count an operator Point as a claim (#10982 review
@@ -2991,10 +2999,14 @@ def _a4_pointkind(projection) -> dict:
 def _a5_subjects(projection) -> dict:
     """`A5`: the `:Subject` count and the four subject-edge families, PER FAMILY.
 
-    ⛔ Both queries are UNDIRECTED and both filter on the claim class, so the family count and the
-    "statements carrying one" count cannot disagree about the same edges (#10982 review, finding
-    7): a forwards-only family count beside a direction-agnostic point count let a turn row satisfy
-    the registered bar while zero statements carried an edge.
+    ⛔ Both queries are UNDIRECTED, but only the CARRYING leg is claim-filtered — and that is the
+    registered shape, not an oversight: §3.1 A5 pins the four subject-edge families as
+    `count(DISTINCT r)` over the graph with no claim filter, so the family count and the
+    "statements carrying one" count are NOT required to agree about the same edges, and adding a
+    filter to the family query would silently move the pinned denominator. What the direction
+    clause buys (#10982 review, finding 7) is that a forwards-only family count beside a
+    direction-agnostic point count cannot let a turn row satisfy the registered bar while zero
+    statements carried an edge.
     """
     subjects = projection.g.query("MATCH (n:Subject) RETURN count(n)").result_set
     subjects = int(subjects[0][0] or 0) if subjects else 0
@@ -3082,6 +3094,7 @@ def a_row_census(uri: str) -> dict:
     # A1 — the object→object graph, plus the rollup half.
     result["A1"] = row("A1", _a1_object_edges,
                        {"by_type": [], "by_endpoint_kind": [], "edges_total": 0,
+                        "objects": 0,
                         "by_pinned_family": {name: 0 for name in A1_RELATION_FAMILIES},
                         "pinned_family_declared_spellings": {
                             name: list(A1_RELATION_FAMILY_FOLD.get(name, (name,)))
@@ -3168,7 +3181,8 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
         "gate's, and no A-row has a scored run yet (#10984-#10988 own those)")
 
     a1 = census_a["A1"]
-    add(f"a1 object_object_edges={a1['edges_total']} by_type={a1['by_type'] or '[]'} "
+    add(f"a1 objects={a1['objects']} object_object_edges={a1['edges_total']} "
+        f"by_type={a1['by_type'] or '[]'} "
         f"by_pinned_family={a1['by_pinned_family']}"
         + (f" error={a1['error']}" if a1.get("error") else ""))
     add(f"a1 by_endpoint_kind={a1['by_endpoint_kind'] or '[]'}")

@@ -513,7 +513,7 @@ def test_the_four_subject_families_are_counted_per_family_and_only_statements_ca
 def test_object_object_edges_are_reported_by_type_and_by_objectKind():
     """FAILS IF the census reports a bare count, or reads a property the writer never stamps.
 
-    ⛔ `:Object` carries `objectKind` (`tortoise/projection/entities.py:4675`); reading `kind`
+    ⛔ `:Object` carries `objectKind` (`tortoise/projection/entities.py:4699`); reading `kind`
     returned NULL on every real graph while the row reported the "by endpoint kind" half as
     measured (#10982 review, finding 3).
     """
@@ -521,9 +521,13 @@ def test_object_object_edges_are_reported_by_type_and_by_objectKind():
     projection = _FakeProjection({
         "RETURN type(r) AS t, count(*) AS n ORDER BY n DESC, t": [["hasPart", 7]],
         "a.objectKind AS ak": [["hasPart", "dev:epic", "dev:issue", 7]],
+        "MATCH (n:Object) RETURN count(n)": [[3]],
     })
     out = probe._a1_object_edges(projection)
     assert out["edges_total"] == 7
+    assert out["objects"] == 3, (
+        "A1's registered floor `a1_objects` divides by the `:Object` population, so the block must "
+        "carry it — a floor consumed by no field cannot refuse")
     assert out["by_type"] == [{"relation": "hasPart", "edges": 7}]
     assert out["by_endpoint_kind"][0]["from_kind"] == "dev:epic"
     assert "a.kind AS ak" not in "".join(projection.g.queries), (
@@ -573,6 +577,7 @@ def test_the_pinned_a1_family_is_a_WRITTEN_label_not_a_declared_spelling():
     projection = _FakeProjection({
         "RETURN type(r) AS t, count(*) AS n ORDER BY n DESC, t": [["decomposesInto", 7]],
         "a.objectKind AS ak": [["decomposesInto", "dev:epic", "dev:issue", 7]],
+        "MATCH (n:Object) RETURN count(n)": [[3]],
     })
     out = probe._a1_object_edges(projection)
     assert out["by_pinned_family"] == {"hasPart": 0}, out["by_pinned_family"]
@@ -895,7 +900,7 @@ def test_the_registered_non_bar_register_is_CLOSED_and_disclosed():
 def _full_census(probe) -> dict:
     return {
         "criteria": list(probe.A_CRITERIA),
-        "A1": {"by_type": [], "by_endpoint_kind": [], "edges_total": 0,
+        "A1": {"by_type": [], "by_endpoint_kind": [], "edges_total": 0, "objects": 0,
                "by_pinned_family": {name: 0 for name in probe.A1_RELATION_FAMILIES},
                "rollup_queries": probe.unmeasured("a rollup query")},
         "A2": {"attach": probe.unmeasured("a counter"),
@@ -1019,6 +1024,7 @@ CREDENTIALED_URI = "docker://:hunter2@live-v4.internal:6379/capstone_measure_abc
 _EMPTY_ROWS: dict = {
     "MATCH (a:Object)-[r]->(b:Object) RETURN type(r) AS t, a.objectKind AS ak": [],
     "MATCH (a:Object)-[r]->(b:Object) RETURN type(r) AS t, count(*) AS n": [],
+    "MATCH (n:Object) RETURN count(n)": [[0]],
     "WHERE n.pointKind = 'statement' RETURN count(n)": [[0]],
     "AND n.eventId IS NOT NULL RETURN count(n)": [[0]],
     "WHERE n.pointKind = 'statement' RETURN count(DISTINCT n)": [[0]],
