@@ -91,9 +91,13 @@ rejected — see the floor test):
   ago", "the first … in June", "the most in March and April") stay here
   too;
 * nary-ordering — 3+ named options ("Mark and Sarah or Tom"), sibling
-  #2653; and bare "latest" as an ORDERING INSTRUCTION ("from earliest to
-  latest"). The census's nary-ordering class is RE-MEASURED to 2
-  named-subject rows (#2653; the census stored 160-char question
+  #2653; and "latest" as an ORDERING INSTRUCTION — #8775 narrowed this from
+  the BARE token to the token ANCHORED to an ordering frame ("from earliest
+  to latest", "the order of …", the binary "which … first … or" head), so an
+  attributive "latest" inside a narrative clause ("her latest thriller
+  novel") no longer vetoes a genuine shape. The census's nary-ordering
+  class is RE-MEASURED to 2 named-subject rows (#2653; the census stored
+  160-char question
   TRUNCATIONS at the time, which is why the class was filed as 4 — #8055
   replaced them with the verbatim dataset questions): the 2 genuine N-ary
   rows (gpt4_f49edff3 / gpt4_18c2b244) now FIRE as ORDERING with 3 terms;
@@ -142,6 +146,7 @@ from tortoise.calendar_anchors import (  # #2655 calendar-anchor resolution
     CalendarAnchorKind, find_anchor_spans, resolve_calendar_anchor)
 from tortoise.entity_identity import (  # #3633 route-then-refuse
     display_holder_ids, record_non_folded)
+from tortoise.env_truthy import env_flag  # #8775 off-switch (#4097 contract)
 from tortoise.fanout import PER_ENTITY_FANOUT_CAP, bounded_fanout
 
 __all__ = ["AssemblyShape", "ClassWindow", "RelativeAnchor",
@@ -189,13 +194,20 @@ class AssemblyShape(StrEnum):
 #       * 'yesterday'/'tomorrow'/'last <weekday|week|month>'/holidays — the
 #         CALENDAR-ANCHOR family of sibling #2655 (census
 #         relative-date-lookup: Valentine's / last Saturday)
-#       * bare 'latest' / 'the last one' — an ORDERING INSTRUCTION
-#         ('from earliest to latest'), sibling #2653's discovery family
-#       * the ATTRIBUTIVE 'most recent' — the SAME ordering instruction
-#         spelled the other way ('from earliest to most recent'): it is
-#         deliberately NOT promoted, so it falls through to the legacy
-#         lane exactly as it did before #2652. Only the adverbial
-#         'most recently' names a time.
+#       * 'latest' INSIDE AN ORDERING FRAME — an ORDERING INSTRUCTION
+#         ('from earliest to latest'), sibling #2653's discovery family.
+#         ⛔ #8775 narrowed this one: an ATTRIBUTIVE 'latest' in a narrative
+#         clause is no longer a guard (that was the `0db4c65d` false
+#         positive), and the DATE-LOOKUP residual site below still asks the
+#         STRICT question (``_recency_guard(..., strict=True)``) because
+#         there 'latest' is a competing RECENCY SELECTOR, not an order
+#         endpoint.
+#       * 'the last one' / the ATTRIBUTIVE 'most recent' — an ordering
+#         instruction ('from earliest to most recent'): deliberately NOT
+#         promoted, so it falls through to the legacy lane exactly as it did
+#         before #2652. Only the adverbial 'most recently' names a time. This
+#         arm is UNCONDITIONAL — #8775 narrowed the `latest` arm only, and
+#         #2652's main-parity pin for the attributive 'most recent' stands.
 #     Keeping (b) as a guard is what holds the R13 reject and the
 #     precision floor while (a) becomes a shape.
 _RE_AGO_OTHER = re.compile(
@@ -217,8 +229,9 @@ _RE_AGO_OFFSET = re.compile(
     re.IGNORECASE)
 # the ADVERBIAL recency only. 'most recent' is NOT promoted: as an
 # attributive it is the ordering bound in 'from earliest to most recent',
-# the semantic twin of the guarded bare 'latest' (sibling #2653) — the
-# 2 census recency rows both use 'most recently'.
+# the semantic twin of `latest` INSIDE AN ORDERING FRAME (#8775 narrowed
+# that arm from the bare token to the frame; this one is unchanged, sibling
+# #2653) — the 2 census recency rows both use 'most recently'.
 _RE_MOST_RECENT = re.compile(r"\bmost\s+recently\b", re.IGNORECASE)
 # the UN-PROMOTED residue: a bare 'ago' the promoted forms above do not
 # consume (minutes/hours/centuries, 'a long time ago'). Checked only AFTER
@@ -522,11 +535,57 @@ _RE_FREQUENCY = re.compile(
 # instruction — the class the sibling compound guard was hardened for — and
 # `\W+` still cannot match the adverbial, because it must be followed by
 # `recent` and then `\b`, and 'recently' has no boundary after 'recent'.
-# The guard is checked BEFORE the shape templates, so an attributive
-# recency question can never fall through and fire
-# ORDERING/CURRENT_STATE/INTERVAL.
-_RE_RECENCY = re.compile(
-    r"\bmost\W+recent\b|\blatest\b|\bthe\s+last\s+one\b", re.IGNORECASE)
+# The guard is checked BEFORE the shape templates, so a recency question
+# cannot fall through and fire ORDERING/CURRENT_STATE/INTERVAL — the
+# `most\W+recent` / `the last one` arms veto UNCONDITIONALLY, and the
+# `latest` arm vetoes wherever it is an ordering endpoint (#8775; an
+# ATTRIBUTIVE `latest` no longer vetoes, which is why the date-lookup
+# residual site asks the STRICT question instead).
+#
+# #8775 — the bare `latest` arm is ANCHORED to an ORDERING FRAME. The token
+# alone was the guard's whole rule, and it fires on an attributive `latest`
+# inside a narrative subordinate clause — the census's `0db4c65d` ("…the
+# author of 'The Silent Patient' is discussing her latest thriller novel") is
+# a clean two-anchor interval-since row that the interval template matches and
+# only this token vetoed. Measured over the census's own 133-Q temporal
+# corpus: 5 rows carry a `_RE_RECENCY` surface, 4 are genuine ordering
+# instructions (all of the `from earliest to latest` range form, which the
+# frame below still catches) and exactly 1 is the narrative attributive. So
+# the `latest` arm moves from `token` to `token INSIDE an ordering frame`:
+# a range with two ordering endpoints, an explicit order request, or the
+# binary `which/who/what … first … or` ordering head (`_RE_ORDERING`, which
+# keeps this arm at parity with the pinned attributive-'most recent' twins in
+# `tests/test_assembly_pure.py`). The `most\W+recent` and `the last one` arms
+# are UNCHANGED — #2652 pinned the attributive 'most recent' as an
+# ORDERING-INSTRUCTION guard on main parity, and narrowing it would regress
+# that pin; #8775 narrows the `latest` arm only.
+_RE_RECENCY = re.compile(r"\bmost\W+recent\b|\bthe\s+last\s+one\b",
+                         re.IGNORECASE)
+
+#: #8775 off-switch: `=0` restores the pre-#8775 BARE-token arm verbatim (any
+#: `latest` vetoes a shape, as on main) and leaves the `most\W+recent` /
+#: `the last one` arms untouched either way. Default ON (the narrowed arm).
+_RECENCY_FRAME_ENV = "TORTOISE_ASSEMBLY_RECENCY_ORDERING_FRAME"
+
+_LATEST = re.compile(r"\blatest\b", re.IGNORECASE)
+
+#: An ORDERING FRAME — the co-text that makes a `latest` an ordering endpoint
+#: rather than an attributive adjective. Deliberately NOT the general
+#: vocabulary of ``_RE_ORDERING``/``_RE_ORDERING_LIST``: this answers only
+#: "is a `latest` HERE an order endpoint?", and it must not re-admit the
+#: narrative clause that #8775 freed.
+_RE_ORDERING_FRAME = re.compile(
+    # the RANGE form: 'from earliest to latest' / 'from latest to earliest'
+    r"\bfrom\s+(?:the\s+)?(?:earliest|oldest|first|latest|most\W+recent)\b"
+    r"\s+to\s+(?:the\s+)?(?:earliest|oldest|first|last|latest|most\W+recent)\b"
+    # an EXPLICIT order request ('the order of …', 'in reverse order',
+    # 'chronologically', 'ordered by …'). The bare 'in order' spelling is
+    # deliberately excluded: 'in order to …' is a PURPOSE clause.
+    r"|\bthe\s+order\s+of\b"
+    r"|\bin\s+(?:reverse\s+|chronological\s+|descending\s+|ascending\s+)"
+    r"order\b"
+    r"|\bordered\s+(?:from|by)\b|\bchronological(?:ly)?\b",
+    re.IGNORECASE)
 # advice / preference / recommendation (R16 misfire): "which SHOULD I do
 # first, A or B" carries ordering morphology but is preference, not fact —
 # firing would REPLACE the working pool with a shape block. Modal + advice
@@ -571,9 +630,10 @@ _RE_OR_CHAIN = re.compile(r"\sor\s.+?\sor\s", re.IGNORECASE | re.DOTALL)
 # 'A', 'B', and 'C'"). The colon is the strong signal: the two head forms
 # carry no " or " at all, so _RE_ORDERING cannot see them.
 # The "earliest to latest" head form is deliberately NOT an alternative here:
-# a question containing it always matches ``_RE_RECENCY`` ("\blatest\b") and
-# is rejected by the R13 guard before this pattern is ever tried, so the
-# alternative was dead code that contradicted that guard.
+# a question containing it is an ORDERING FRAME, so ``_recency_guard`` vetoes
+# it ahead of the shape templates and this pattern is never tried, so the
+# alternative was dead code that contradicted that guard (#8775 keeps that
+# veto: the frame arm matches 'from earliest to latest').
 _RE_ORDERING_LIST = re.compile(
     r"^\s*(?:which|who|what)\b[^?:]*?"
     r"(?:\border\b|\bsequence\b|\bfirst\s+to\s+last\b)"
@@ -616,6 +676,48 @@ _RE_ORDERING = re.compile(
     r"^\s*(?:which|who|what)\b[^?]*?\bfirst\b[^?]*?\b(?P<a>.+?)\s+or\s+"
     r"(?P<b>[^?]+?)\??\s*$",
     re.IGNORECASE | re.DOTALL)
+
+
+def _recency_guard(text: str, *, strict: bool = False) -> bool:
+    """Does ``text`` carry an R13 recency surface that must veto a shape?
+
+    Three arms, in the order the vocabulary was measured:
+
+    * ``_RE_RECENCY`` — the ATTRIBUTIVE 'most recent' / 'the last one'. Main
+      parity (#2652): only the ADVERBIAL 'most recently' names a time, so the
+      attributive stays a guard and is not promoted. UNCONDITIONAL.
+    * bare ``latest`` ANCHORED to an ORDERING FRAME (#8775) — an ordering
+      endpoint ('from earliest to latest'), an explicit order request ('the
+      order of …'), or the binary ordering head (``_RE_ORDERING``). An
+      attributive 'latest' in a narrative clause is NOT a veto: that was the
+      `0db4c65d` false positive.
+    * the SAME bare token with the #8775 narrowing switched OFF —
+      ``TORTOISE_ASSEMBLY_RECENCY_ORDERING_FRAME=0`` restores the pre-#8775
+      arm verbatim (any ``latest`` vetoes, as on main).
+
+    ``strict=True`` asks the PRE-#8775 question — "does this text carry ANY
+    `latest` at all?" — and ignores the switch. It exists for the ONE site
+    whose contract is "every guard-rejected phrasing stays rejected": the
+    anchor-stripped RESIDUAL of the calendar DATE-LOOKUP surface
+    (``_date_lookup_surface``). There an attributive 'latest' is a competing
+    RECENCY SELECTOR ("What did I do last Saturday with my latest
+    purchase?"), not an order endpoint, so it must keep vetoing the day
+    lookup: that shape fires on the day's rows alone (no subject gate) and
+    would DROP the question's own recency constraint while REPLACING the
+    legacy pool main fell back to. The shape-router call site in
+    ``classify_question`` is the one that asks the narrowed question.
+
+    Defined here rather than in the guard block above because the ordering
+    frame is asked of the same templates the guard runs ahead of.
+    """
+    if _RE_RECENCY.search(text):
+        return True
+    if not _LATEST.search(text):
+        return False
+    if strict or not env_flag(_RECENCY_FRAME_ENV, True):  # #8775 off-switch
+        return True
+    return (_RE_ORDERING_FRAME.search(text) is not None
+            or _RE_ORDERING.match(text) is not None)
 
 # ── #8056 class-plural temporal ENUMERATION ─────────────────────────────
 # "What is the order of the concerts and musical events I attended in the
@@ -813,7 +915,8 @@ def _date_lookup_surface(question: str, residual: str, spans) -> bool:
         or _relative_match(residual) is not None
         or _RE_AGO_RESIDUAL.search(residual)
         or _RE_DURATION.search(residual)
-        or _RE_FREQUENCY.search(residual) or _RE_RECENCY.search(residual)
+        or _RE_FREQUENCY.search(residual)
+        or _recency_guard(residual, strict=True)
         or _RE_ADVICE.search(residual) or _RE_OR_CHAIN.search(residual))
 # duration-state (#2654): "how long had I been <state> when <event>?" — the
 # past-elapsed-state form that needs a state's ENTRY date and the question's
@@ -949,8 +1052,10 @@ def classify_question(question: str) -> AssemblyShape | None:
             return None
     # #8056 — class-plural temporal ENUMERATION (a class of events over a
     # relative window, no named subjects). Checked BEFORE the blanket R13
-    # guard block below, because that block's RECENCY arm (`_RE_RECENCY`,
-    # "bare `latest` is an ORDERING INSTRUCTION, not a time") rejects the
+    # guard block below, because that block's RECENCY arm (`_recency_guard`,
+    # "`latest` in an ORDERING FRAME is an ORDERING INSTRUCTION, not a
+    # time" — #8775 narrowed the arm from the bare token to the frame, and
+    # 'from earliest to latest' IS a frame) rejects the
     # `from earliest to latest` spelling of THIS shape's own ordering
     # request while admitting the `starting from the earliest` spelling of
     # the same question — the feature would serve one arbitrary spelling of
@@ -1048,7 +1153,7 @@ def classify_question(question: str) -> AssemblyShape | None:
     # reachable, and `_RE_DURATION` rejects every OTHER duration/count
     # morphology right after it.
     if (_RE_AGO_OTHER.search(q) or _RE_FREQUENCY.search(q)
-            or _RE_RECENCY.search(q) or _RE_ADVICE.search(q)):
+            or _recency_guard(q) or _RE_ADVICE.search(q)):
         return None
     # N-ary (3+ options) is a R13 reject for EVERY shape template that
     # follows — including duration-state — so it stays ahead of all of
