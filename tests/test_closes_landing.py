@@ -5936,10 +5936,11 @@ def test_the_TYPE_7_neighbour_of_the_round_55_gate_is_a_DECLARED_REGRESSION():
 def test_the_INDENT_pops_DECLARED_strict_false_PASS_is_PINNED():
     """Round-59 review, P2 — a DECLARED residual that had NO pin, so it could move silently.
 
-    The indent-pop note at `_leaves_no_paragraph` declares this family as STILL a false PASS at
-    this head, and names the owning issue — but no test built the body, so the declaration was
-    prose only, and the file's own convention (`⚠️ DECLARED RESIDUAL`, and the
-    `test_the_TYPE_7_neighbour…` above) is that a known gap is PINNED so it cannot move silently:
+    The indent-pop note in `strip_code` (the `⛔ THE RECORD IS STILL GATED ON `prev_prose` AT BOTH
+    POPS` block) declares this family as STILL a false PASS at this head — but no test built the
+    body, so the declaration was prose only, and the file's own convention (`⚠️ DECLARED RESIDUAL`,
+    and the `test_the_TYPE_7_neighbour…` above) is that a known gap is PINNED so it cannot move
+    silently:
 
         `- 2.` + `    - x` + `x` + `2.     Closes #100`
             renderer `<pre><code>` -> CODE, so GitHub does NOT fire the keyword
@@ -5951,10 +5952,19 @@ def test_the_INDENT_pops_DECLARED_strict_false_PASS_is_PINNED():
     `[100]` there is a CLASS-A false PASS in that gate — the SAME answer `main` gives.
     `tools/closes_landing.py` declares the mechanism and its cost (the record would have to survive
     the one-line clearing at the top of the loop, and both candidate terms measured ~110 lost closes
-    each in the arm `in_flight_markers` and the comment-body read go through); **#11369** owns it and
-    is OPEN. This pin does not decide that fix.
+    each in the arm `in_flight_markers` and the comment-body read go through); **#11358** owns this
+    body and is OPEN. This pin does not decide that fix.
 
-    ⚠️ MEASURED WHILE WRITING THIS PIN, RECORDED BECAUSE IT IS WHAT THE #11369 FIXER NEEDS: this body
+    ⛔ BUT THE MECHANISM THAT SENTENCE PROPOSES IS FALSIFIED FOR THIS BODY, and recording that is the
+    most useful thing this pin can do. "The record would have to survive the one-line clearing at the
+    top of the loop" does not move this body: disabling that clearing leaves it at `[F, F, T, T]`
+    (mutation M3 below), and **#11358** independently reports that dropping the
+    `dropped_paragraph_item = _popped_by_indent` assignment changes NONE of the three arms on it.
+    #11358 gives the measured root instead — `own_code = own_gap > 4 and not ordered_continuation
+    and not _html_here`, where `ordered_continuation` is True here, so the wide-gap rule never
+    applies. The round-55 lazy gate (**#11369**) is a DIFFERENT issue and does not cover this body.
+
+    ⚠️ MEASURED WHILE WRITING THIS PIN, RECORDED BECAUSE IT IS WHAT THE #11358 FIXER NEEDS: this body
     is NOT on the path that the declarations' own candidate terms govern. Six mutations were run
     against the module and EVERY ONE left this answer at `[F, F, T, T]` — un-gating the indent pop's
     `prev_prose` (declared INERT), narrowing the round-55 gate to `if lazy_marker:`, disabling the

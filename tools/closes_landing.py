@@ -2578,16 +2578,18 @@ def strip_code(body: str, *, strict: bool = False, stats: dict[str, int] | None 
                 #     `- 2.` + `    - x` + `x` + `2.     Closes #100`
                 #         renderer `<pre><code>` -> CODE; `[]` lenient / `[100]` in `strict` at this
                 #         head, and `issue_process_lint.claims()` returns `closing: [100]` — STILL a
-                #         false PASS in the arm-1 gate. It is the residual the PR body declares open
-                #         (`origin/main` carries the same `strict` answer): the record would have to
-                #         survive the one-line clearing at the top of the loop, and both candidate
-                #         fixes cost ~110 lost closes in the arm `in_flight_markers` and the
-                #         comment-body read go through (measured on a 15,000-body grid: −6 fail-opens
-                #         for +116 lost closes, and −5 / +112).
+                #         false PASS in the arm-1 gate. It is the residual #11358 owns (OPEN; its
+                #         repro is this exact body, and it measures the root as `own_code`'s
+                #         `not ordered_continuation` term, not the record), and `origin/main`
+                #         carries the same `strict` answer. ⚠️ THE MECHANISM THIS NOTE USED TO
+                #         PROPOSE — "the record would have to survive the one-line clearing at the
+                #         top of the loop" — is FALSIFIED for this body: disabling that clearing
+                #         leaves it at `[F, F, T, T]` (measured), and #11358 reports the same for
+                #         dropping the record assignment. Do not re-derive from that sentence.
                 #         PINNED at `tests/test_closes_landing.py::test_the_INDENT_pops_DECLARED_
                 #         strict_false_PASS_is_PINNED`, so it cannot move silently. That pin also
                 #         records the measurement that NONE of the candidate terms above moves this
-                #         body (six mutations, all left `[F, F, T, T]`) — the fixer of #11369 should
+                #         body (six mutations, all left `[F, F, T, T]`) — the fixer of #11358 should
                 #         re-derive rather than assume a green there.
                 # ⚠️ BOTH TERMS ARE GATED ON `prev_prose`, MEASURED: un-gating this one changes 0 of
                 # 60,000 fuzz bodies (it is unobservable — the record only matters when a paragraph
