@@ -1257,8 +1257,27 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
         f"`lane`'s teardown deleted {deletes}, not the graph it created "
         f"({minted_name!r}) — deleting a name that was never created leaves the real "
         "graph behind while looking cleaned up (#11373 P1)")
+    # The SET, not just "the minted name is in there": `_sweep_drop` DETACH+DELETEs every
+    # journalled name the vocabulary covers (`unique = dict.fromkeys(names)` → `owned` →
+    # `_drop_one_graph`), so a name this fixture journals but never creates is still
+    # dropped at session end — and if it names a live peer's graph, that peer's graph is
+    # destroyed. Measured green without this arm (an extra `_journal_append("test_…")`
+    # after the mint). A duplicate journal of the SAME name stays legal.
+    journalled_names = {name for kind, name in first_run if kind == "journal"}
+    assert journalled_names == {minted_name}, (
+        f"`lane` journalled {sorted(journalled_names)} but minted only {minted_name!r} — "
+        "the sweep drops EVERY owned name in the journal, so journalling a graph this "
+        "fixture never created can delete a peer's live graph (#11373 P1)")
 
-    assert _run_lane()[0][1] != minted_name, (
+    # Compare MINT to MINT. Reading the second run's first EVENT compared a decoy journal
+    # against the first run's mint, so a FIXED name passed whenever anything else was
+    # journalled first (measured); and an empty second run raised IndexError instead of
+    # asserting. Both are fixed by deriving the second run's mint explicitly.
+    second_mints = [name for kind, name in _run_lane() if kind == "mint"]
+    assert second_mints, (
+        "`lane`'s second invocation minted no graph at all — the per-run arm cannot tell "
+        "a FIXED name from a cached one unless a second run mints (#11373 P1)")
+    assert second_mints[0] != minted_name, (
         f"`lane` minted {minted_name!r} twice — the name is FIXED, not per-run, so two "
         "concurrent sessions DETACH each other's live writes (#11373 P1)")
 
