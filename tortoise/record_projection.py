@@ -1603,14 +1603,17 @@ def _migrations_fingerprint(base: Path) -> tuple:
     instead of hoping a tick boundary falls between two calls.
 
     Closing it completely needs a content digest, and that was MEASURED and
-    rejected: blake2b over the fifteen files (129 KB) costs 0.554 ms per pass
-    against the stat pass's 0.135 ms — several times more than the ~0.5 ms the
-    cache saves relative to a re-parse, so the "fix" would cost most of the win.
-    The trade is therefore explicit: covered for every writer except an archive
-    extraction landing inside one inode-clock tick. The test reds it if the
-    fingerprint stops changing on an edit, an edit-of-an-edit, a same-size
-    rewrite, a same-size rewrite with the mtime RESTORED (it BURNS a tick first,
-    so the arm always runs), or a removal.
+    rejected — with the arithmetic quoted from the SAME measurement, because an
+    earlier revision of this docstring compared the digest against one pass
+    instead of against the win: one fingerprint pass is 0.135–0.164 ms, blake2b
+    over the same fifteen files (129 KB) is 0.42–0.55 ms, and the cached read it
+    would guard saves ~1.2 ms (uncached `table_columns()` 1.65–1.78 ms → cached
+    0.46–0.48 ms). So a digest would spend **~25–30 % of the win** — real but not
+    decisive, and not worth it for a residual that needs an archive extraction
+    landing inside a single inode-clock tick. The trade is therefore explicit:
+    covered for every writer except that one. The test reds it if the fingerprint
+    stops changing on an edit, an edit-of-an-edit, a same-size rewrite with a
+    burned tick, a same-size rewrite with the mtime RESTORED, or a removal.
     """
     entries: list[tuple] = []
     for name in RECORD_MIGRATIONS:
@@ -2077,8 +2080,9 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     (:func:`_migrations_fingerprint`), so an edit, an addition or a removal is a
     cache MISS — the S6 surface's requirement that a cached column map cannot
     diverge from the live schema silently. Refreshing costs one stat pass
-    (≈0.5 ms for the fifteen files on the box this was measured on, versus the
-    read+parse+regex ~1.6 ms it replaces) instead of a re-parse.
+    (0.135–0.164 ms of pure `stat` for the fifteen files; the whole cached call,
+    which also copies the map, measures 0.46–0.48 ms) versus the read+parse+regex
+    ~1.65–1.78 ms it replaces.
 
     ⚠️ The returned dict is a fresh copy on every call, exactly as before: a
     caller that edits the map it was handed mutates its own copy, never the

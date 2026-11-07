@@ -186,8 +186,9 @@ substrate preamble on first use, seeds a tenant, and asserts every write is
 
 ## Falsifiers — what must make each claim red
 
-The mechanism half is pinned in `tests/test_9558_record_write_cost.py` (15
-tests), each naming its own falsifier. **Eight were OBSERVED RED** by breaking the
+The mechanism half is pinned in `tests/test_9558_record_write_cost.py` (20
+tests: 7 for the schema cache, 8 for the pool, and 5 for the wrapper/park/
+read-door contracts the first two review cycles added), each naming its own falsifier. **Eight were OBSERVED RED** by breaking the
 source, running only the named test, and restoring the file byte-identically
 (`/tmp/prove_falsifiers.py`, one pass):
 
@@ -212,15 +213,19 @@ the one result that can quietly pass as coverage:
   real GAP IN THE PIN, not just a bad mutant: every edit in
   `test_an_edited_migration_is_seen_immediately` changed the file's size, so a
   `(name, size, inode)` key passed the whole file. The pin now performs a
-  SAME-SIZE rewrite (one added column renamed for another of equal length) with
-  the mtime forced forward, and dropping `mtime_ns` from the fingerprint reds it
-  (re-measured after the fix).
+  SAME-SIZE rewrite, first with the mtime forced forward and then with the mtime
+  RESTORED (the `cp -p` shape). ⛔ **Corrected in review cycle 3:** dropping
+  `mtime_ns` ALONE no longer reds it — once `ctime_ns` joined the key, ctime
+  changes on the same step and catches it — so the surviving falsifier for the
+  mtime component is the inode-only mutation (`(name, 0, size, inode, …)`), which
+  reds. Keeping the old sentence would have been a falsifier claim no test can
+  fail, which is worse than having none.
 * committing inside the hook's FRESH-connection branch was never reached by a
   single-write test. The pin now performs two writes (fresh, then reused), which
   is the only shape that exercises the branch; re-mutated to the reuse branch, it
   reds.
 
-The remaining three rows are S-surface assertions, not mutations: reuse keeps the
+The S-surface properties are asserted as TESTS rather than as table rows above: reuse keeps the
 prologue and the plan in order (§S2), the same journal position stays one
 `journal_event` row (§S1), and an unarmed write opens nothing (§2.0). A revert
 there means deleting the assertion, which review would catch — stated so the
@@ -230,7 +235,7 @@ difference is visible rather than implied.
 
 ```console
 $ python -m pytest tests/test_9558_record_write_cost.py -q
-15 passed
+20 passed
 
 $ python -m pytest tests/test_9078_record_written_by_production_path.py \
     tests/test_9548_record_arming_health.py tests/test_9558_record_write_cost.py \
