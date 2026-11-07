@@ -5287,9 +5287,11 @@ class Test4051ChargeCoversTheLoopShape:
         and operator lanes, one lane over. Measured: declared 7 / minted 7 for
         three entries on each lane (4 chain nodes + one per entry).
 
-        Mutation this REDs: empty `_COMMIT_FLAT_NODE_LANES` (measured: reds this
-        leg, and outside this class also
+        Mutation this REDs: empty `_COMMIT_FLAT_NODE_LANES` (measured on the
+        whole file: reds this leg, and outside this class
         `TestDeclaredCommitWriteCount::test_each_collection_entry_is_charged_once`
+        and
+        `TestCommitOrgIngestBound::test_used_is_the_declared_node_writes_not_the_metered_net_new`
         — no other leg of this class moves), or let an entry start minting a
         second node without raising the rate.
         """
@@ -5368,7 +5370,11 @@ class Test4051ChargeCoversTheLoopShape:
         number failure this leg exists to prevent.
 
         ⛔ This does not claim the total is bounded — it is not, and that is §4.
-        It states the RATE that is the only bound, in numbers.
+        It states the RATE of the only ORG-LEVEL bound, in numbers. The per-KEY
+        limiter is a separate and, for a single key, TIGHTER bound
+        (`hosted_api.RateLimitMiddleware.PATH_LIMITS` gives the commit lane
+        300 req/min per key ⇒ 1,200 nodes/min per key); do not read this figure
+        as the tenant's achievable ceiling.
         """
         import tortoise.quota as quota_mod
 
