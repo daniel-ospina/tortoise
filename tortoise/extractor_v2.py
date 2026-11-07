@@ -12429,8 +12429,12 @@ _MENTION_FIELDS: tuple[str, ...] = (
 #: lane to move `_MAX_QUOTE` and `Point.quote.max_length` together) drag this
 #: builder past `Mention.quote`'s own 200 and lose the session (review at
 #: `d02ed2ccc`, P3 — measured: that raise left the clamp emitting a 250-char quote
-#: `Mention` rejects, where the pre-refactor independent 200 kept the payload
-#: valid). Today the two caps are EQUAL, and
+#: `Mention` rejects). ⛔ The pre-refactor independent 200 was the CLAMP's, so it
+#: bounded only the clamp's half: `_mention_record` cut with the Point's own
+#: `[:_MAX_QUOTE]` and was ALREADY over `Mention.quote` on that raise, which is why
+#: "the payload" was never safe there — this change closes that half too, by
+#: bounding both builders with the schema's 200 rather than the Point's
+#: (`review at #11376`, P3). Today the two caps are EQUAL, and
 #: `tests/test_referentiality_11021.py::test_both_builders_read_every_cap_from_ONE_source`
 #: pins BOTH halves — the equality (so moving one is a loud diagnosis, never silent
 #: cross-record drift) and `<= Mention.<field>.max_length` (the relation the payload
