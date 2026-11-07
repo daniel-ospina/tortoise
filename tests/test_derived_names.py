@@ -693,6 +693,16 @@ _RAW_CLIENT_IMPORT = re.compile(
     r"(?:[ \t]+as[ \t]+(?P<alias>\w+))?",
     re.MULTILINE | re.DOTALL)
 
+#: `from <ANY module> import …` — the RE-EXPORT shape, parsed so a renamed
+#: re-export resolves to a construction name. `_RAW_CLIENT_IMPORT` only matches
+#: statements naming `falkordb`, so `from tortoise import FalkorDB as C` is
+#: invisible to it and `C(…)` was never a candidate site (#11217 review round-11
+#: P2). Same group shape as the statement above, so the two parse alike.
+_FROM_ANY_IMPORT = re.compile(
+    r"^[ \t]*from[ \t]+[A-Za-z_][\w.]*[ \t]+import[ \t]*"
+    r"(?:\((?P<paren>[^)]*)\)|(?P<bare>[^\n\\]*))",
+    re.MULTILINE | re.DOTALL)
+
 
 def _raw_client_call_positions(source: str) -> list[int]:
     """Offsets of every raw-client CONSTRUCTION CALL in `source`.
@@ -793,6 +803,24 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # `import_module("falkordb").FalkorDB(`) a site, and `FakeFalkorDB(` is still
     # excluded because `e`/`_` are word chars. Cost measured before taking it:
     # over the 1183 non-exempt corpus files this newly judges ZERO sites.
+    # ⛔ A RENAMED RE-EXPORT (#11217 review round-11 P2). `_RAW_CLIENT_IMPORT`
+    # matches only statements naming `falkordb`, so `from tortoise import
+    # FalkorDB` resolved no name (closed below) and `from tortoise import
+    # FalkorDB as C` resolved no name AND left `C(` outside the site pattern —
+    # the same unowned, un-journaled bulk DETACH read CLEAN one spelling over
+    # (measured: `sites=0, violations=[]`). The spelling is real in this tree
+    # (`tests/test_guard.py:108,127`, `tests/test_embedded_lifecycle.py:364`).
+    # Resolved from the statement in the same shape as above; it only EXTENDS
+    # `names`. A name computed at RUN time (`getattr(mod, "Falkor"+"DB")`) is not
+    # statically closable and is deliberately out of scope, stated rather than
+    # silently missed.
+    for m in _FROM_ANY_IMPORT.finditer(masked):
+        group = m.group("paren") if m.group("paren") is not None else m.group("bare")
+        for part in (group or "").split(","):
+            bits = part.split()
+            if not bits or bits[0] != "FalkorDB":
+                continue
+            names.add(bits[2] if len(bits) >= 3 and bits[1] == "as" else "FalkorDB")
     gated = bool(names)
     names.add("FalkorDB")
     # Nothing resolved a name and the file may not touch falkordb at all —
@@ -811,11 +839,19 @@ def _raw_client_call_positions(source: str) -> list[int]:
     # whole file returned `[]`, so every raw-DETACH site in it read CLEAN. That
     # is the file-level switch-off this function's own docstring names as
     # closed, re-opened one spelling over — measured on a fixture: `sites=0`,
-    # `violations=[]`. Naming the CLASS here restores it: measured over the 1428
-    # files under `tests/`, the total site count is unchanged (10) and
-    # `_raw_detach_violations()` stays empty, so the wider gate costs no false
-    # BLOCK. Pinned by `test_no_IMPORT_SPELLING_can_switch_the_census_gate_off`'s
-    # `re-export from tortoise` case.
+    # `violations=[]`. Naming the CLASS here restores it. Cost measured over the
+    # exact population the census JUDGES (`tests/test_*.py`, non-exempt: 1183
+    # files): construction sites **7 -> 7**, unchanged, and
+    # `_raw_detach_violations()` stays EMPTY — so the wider gate costs no false
+    # BLOCK. (Across ALL 1428 `.py` files under `tests/` the count goes 10 -> 51,
+    # 41 previously-invisible sites: 27 `test_embedded_lifecycle.py` + 8
+    # `test_guard.py` — both census-EXEMPT — and 6 in
+    # `tests/repro/reproduce_redislite_leak.py`, which the census does not reach
+    # because it globs top-level `test_*.py` only. Cite the judged 7 -> 7 for
+    # "is this gate safe", the 10 -> 51 for "how blind was it"; they measure
+    # different populations and conflating them is how a cost claim rots.)
+    # Pinned by `test_no_IMPORT_SPELLING_can_switch_the_census_gate_off`'s
+    # `re-export from tortoise` and `re-export from tortoise, aliased` cases.
     if not gated and not re.search(r"\b(?:falkordb|FalkorDB)\b", source):
         return []
     pattern = "|".join(re.escape(n) for n in sorted(names))
@@ -2190,6 +2226,14 @@ def test_no_IMPORT_SPELLING_can_switch_the_census_gate_off(tmp_path):
         # public spelling and `tests/` uses it 28 times.
         "re-export from tortoise": (
             "from tortoise import FalkorDB\n", "FalkorDB"),
+        # ...and the SAME shape under a RENAMED import. Round-11 P2: the plain
+        # re-export was closed while `as C` stayed blind, because the site
+        # pattern is built from `names` and `_RAW_CLIENT_IMPORT` only matches
+        # statements naming `falkordb`. Measured: `sites=0`, `violations=[]`.
+        # The spelling exists in this tree (`tests/test_guard.py:108,127`,
+        # `tests/test_embedded_lifecycle.py:364`).
+        "re-export from tortoise, aliased": (
+            "from tortoise import FalkorDB as C\n", "C"),
     }
     site = tmp_path / "test_spelling.py"
     for label, (header, construct) in spellings.items():
