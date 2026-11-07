@@ -45,9 +45,10 @@ the table below). Earlier revisions quoted a run set whose JSON was not kept,
 which made its numbers unfalsifiable — that is what `runs/` and
 `fingerprint-cost.json` fix, and `fingerprint_cost.py` exists because the first
 fix covered only the probe. ⛔ The same rule is why the re-measurement paragraph
-under "Review cycle 2" carries NO numbers: its four runs' JSON was not kept
-either, so it states the observation and nothing a reader would have to take on
-trust.
+under "Review cycle 2" carries no measured VALUES — only the run count and the
+connect count it observed, the latter corroborated by all four committed AFTER
+runs — because its four runs' JSON was not kept either, so it states the
+observation and nothing a reader would have to take on trust.
 
 ⚠️ **The BEFORE tree is 164 commits behind the AFTER tree's parent**
 (`1730570510` is 2026-11-03; this branch's base is `23d227c534`, 2026-11-06), and
@@ -130,7 +131,10 @@ dict copy), not 2 x the stat pass, so the #11388 fix was overstated **2.6–3.1�
 against the residual it described (0.9–1.0 vs 0.32–0.34 ms), or 5.3–6.3× against
 the one pass #11388 actually saves (0.9–1.0 vs 0.160–0.169 ms)**. Whichever
 denominator the reader picks, it was wrong, and the denominator is named here now.
-The third was corrected here and in the three places that had copied it.
+The third was corrected here and in the three places in this repo that had
+copied it (⛔ #11388's own body still quotes the retired `0.27–0.33` /
+`0.135–0.166` bands as current; that artifact is outside this repo, so it is
+corrected on the issue itself rather than here).
 
 **(b) The column-map half is real but smaller than the issue's "~4 ms" note
 suggests.** At this head `table_columns()` costs ~1.7 ms uncached and ~0.47 ms
