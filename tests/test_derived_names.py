@@ -640,45 +640,6 @@ def test_env_uri_assignment_uses_live_uri_helper(fname):
 # ── raw falkordb-client census (cycle-6 P1-3 / cycle-8 P2-2) ────────────────
 
 
-def _journal_calls(code: str) -> int:
-    """How many `_journal_append(` OCCURRENCES the given text contains.
-
-    The old summary line said "the masked block", which was never true at this
-    head — this helper has never masked, and the census no longer passes it any
-    text at all.
-
-    ⛔ NO LONGER part of the census's PRESENCE decision (#11217 review round 9,
-    ISSUE 4). It is a REGEX and `own` (an AST scope/`Call` scan) subsumes it — a
-    shadow `def _journal_append`, a bare import and a comment produce no call
-    NODE, and a call outside the block is filtered out — while the regex falsely
-    BLOCKS a functionally compliant site that writes a legal space before the
-    paren (`_journal_append (name)`), a site the AST half resolves to a correct
-    OWNED prefix. Measured: such a block read RED off `_journal_calls` alone.
-
-    Kept as a TEXT helper, and its exclusions AND its known spaced-call limitation
-    are pinned in isolation by `test_journal_calls_helper_excludes_non_calls` so
-    they cannot silently go stale. It must NOT be OR-ed back into the failure
-    condition, where it can only add a false BLOCK to what the AST half already
-    decides. It excludes a shadow `def` and a bare import, but it is
-    comment-BLIND: it does not mask, so `# _journal_append(name)` counts as a call.
-    Comment-blindness is why it cannot be put back in the decision — the census
-    resolves ownership through the AST, which excludes all three shapes by
-    construction.
-
-    A `def _journal_append(...)` is a local SHADOW, not the record: it defines
-    the symbol and journals nothing, so counting it as a call lets a block go
-    clean while the graph stays UNOWNED (measured: a block whose only occurrence
-    was `def _journal_append(n): pass` read CLEAN).
-    """
-    calls = 0
-    for m in re.finditer(r"_journal_append\(", code):
-        line_start = code.rfind("\n", 0, m.start()) + 1
-        if re.fullmatch(r"\s*(?:async\s+)?def\s+", code[line_start:m.start()]):
-            continue  # a definition of the symbol, not a use of it
-        calls += 1
-    return calls
-
-
 #: The `falkordb` IMPORT statements — a file-level GATE (`_raw_client_call_positions`),
 #: never the anchor: the census's SITE is the construction CALL.
 #:
@@ -1094,7 +1055,11 @@ def _raw_detach_violations(root=None):
             # masking — the tightening #10170 needed for `from_uri`
             # (`_sites_in_file`) and #11182 measured here. (The old text matcher,
             # `_journal_calls`, was removed from the failure decision in round 9:
-            # it also FALSE-BLOCKED a legal `_journal_append (name)`.)
+            # it also FALSE-BLOCKED a legal `_journal_append (name)`. It is now
+            # DELETED outright, with its isolation pin: with no consumer left its
+            # assertions could not vary under any mutation of this decision, so
+            # they were dead weight rather than coverage — the same shapes are
+            # pinned through `_raw_detach_violations` below.)
             lineno = src.count(chr(10), 0, pos) + 1
             # The journal is an ownership RECORD only for a name the sweep's
             # vocabulary accepts — see `_non_owned_handles`. Resolved over the
@@ -2111,29 +2076,6 @@ def _journal_prefixes(source: str) -> list[tuple[int, str]]:
     `(line, prefix)` spelling of `_journal_sites`, kept for the tests that only
     care which prefix was resolved."""
     return [(line, prefix) for line, _col, prefix in _journal_sites(source)]
-
-
-def test_journal_calls_helper_excludes_non_calls():
-    """The three exclusions `_journal_calls` documents, asserted IN ISOLATION.
-
-    #11217 round-9 review, ISSUE 2: the helper was removed from the census's
-    presence decision (an AST scan subsumes it) and kept, but its docstring
-    claimed the shapes it was added for "are worth asserting in isolation" while
-    NOTHING asserted it — dead code carrying a justification the artifact did not
-    have. These assertions make that claim true.
-    """
-    assert _journal_calls("    _journal_append(name)") == 1
-    # ⛔ The KNOWN limitation, pinned: the regex misses a legal space before the
-    # paren, which is why this helper can add a false BLOCK and must stay out of
-    # the failure condition.
-    assert _journal_calls("    _journal_append (name)") == 0
-    assert _journal_calls("    def _journal_append(n): pass") == 0
-    assert _journal_calls("    async def _journal_append(n): pass") == 0
-    assert _journal_calls("    import _journal_append") == 0
-    # NOTE it is comment-BLIND: it does not mask, so a bare mention counts. That
-    # is one of the reasons it is no longer in the presence decision — the AST
-    # half excludes a comment BY CONSTRUCTION (a comment is not an `ast.Call`).
-    assert _journal_calls("    # _journal_append(name)") == 1
 
 
 def test_raw_falkordb_client_detach_uses_per_test_unique_graph():
