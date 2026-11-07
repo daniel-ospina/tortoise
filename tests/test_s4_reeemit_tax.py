@@ -1124,7 +1124,17 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
         assert (f"cost **{_thousands(_tax_tok)}**" in flat_all), _tax_tok
         assert (f"the other **{_thousands(_zero_tok)}**" in flat_all), _zero_tok
         assert "the delta RESPONSES that carried tax-surface items" in flat_all
-        assert "upper bound on the tax-surface component" in flat_all
+        assert "upper bound on the DELTA ARM's tax-surface component" in flat_all
+        assert "it bounds production" in flat_all
+        # ⛔ and the RE-RUN's half of the same sentence was a TYPED literal with no
+        # assertion at all: a regeneration or a digit edit stating a false partition
+        # stayed green (#11385 review P3). Derived from the re-run artifact.
+        _r_zero = sum(a["delta"]["out_tokens"] for a in rer["arms"]
+                      if (a["delta"].get("s4_items") or 0) == 0)
+        _r_tax = sum(a["delta"]["out_tokens"] for a in rer["arms"]) - _r_zero
+        assert (_r_zero, _r_tax) == (567, 1480), (_r_zero, _r_tax)
+        assert f"**{_thousands(_r_tax)}** (re-run)" in flat_all, _r_tax
+        assert f"**{_thousands(_r_zero)}**" in flat_all, _r_zero
         _wp = {a["session"]: a["delta"] for a in pri["arms"]}
         _a, _b = _wp["wp05_retro_writeup"], _wp["wp07_bluepeak_followup"]
         assert _a["s4_items"] == _b["s4_items"] == 3, "the identical-content case"

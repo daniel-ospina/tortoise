@@ -257,10 +257,10 @@ artifact.
   (primary) / **1 480** (re-run) in whole-output terms. ⚠️ Whole-output terms is all this
   artifact can offer — `out_tokens` is the provider's `completion_tokens` for the whole
   response and the artifact records item COUNTS, never a per-section token split. So that
-  figure is an upper bound on the tax-surface component (the component is at most the
-  response) and a floor only on those responses' total; the residual is visible in the
-  data the artifact does keep: wp05 and wp07 emitted identical channel content (3 gap
-  items, 0 corrections each) and cost 968 vs 530, and the other **540** / **567** tokens
+  figure is an upper bound on the DELTA ARM's tax-surface component — it bounds production
+  from neither side — and a floor only on those responses' total; the residual is visible
+  in the data the artifact does keep: wp05 and wp07 emitted the same channel COUNTS (3
+  gap items, 0 corrections each) and cost 968 vs 530, and the other **540** / **567** tokens
   sit on the 5 rows whose `s4_items` is 0, with `s4_delta_empty` `false` on all 7 delta
   rows — a third channel this instrument does not classify, present on every row and
   therefore not excluded from the figures above. The **legacy** arm carries the SAME gap channel, and it
