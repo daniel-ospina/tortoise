@@ -989,11 +989,14 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # `.code` into a status with `0 if code is None else (code if isinstance(code, int)
     # else 1)` and the OS then keeps the low 8 bits — so `SystemExit(256)`, `(512)`,
     # `(-256)` and `(768)` leave the process at **0** while the derived value is not
-    # (measured). Both steps are applied here, so this assertion and the process
-    # status agree on every spelling measured. One residual, not modelled on
-    # purpose: an int outside C `long` range (`SystemExit(2**63)`, `(2**64)`,
-    # `(-2**64)`) is coerced to -1 by CPython and exits **255**, so such a guard
-    # reds here SPURIOUSLY rather than passing silently — fail-closed (measured).
+    # (measured). Both steps are applied here.
+    #
+    # Declared bound, because the derivation cannot be total: for an int outside C
+    # `long` range CPython passes -1 to exit(), so the PROCESS status is 255 whatever
+    # the derivation says (`SystemExit(2**63)` derives 0, `(2**63 + 1)` derives 1 —
+    # measured). No guard writes such a code, and the property this assertion checks
+    # survives it: a status of 0 is reachable only from `None`, `False`, 0 or an int
+    # ≡ 0 (mod 256), and every one of those derives 0.
     _code = refusal.value.code
     _status = 0 if _code is None else ((_code & 0xFF) if isinstance(_code, int) else 1)
     assert _status != 0, (
