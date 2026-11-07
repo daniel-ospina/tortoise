@@ -10373,7 +10373,8 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # added all five to `_CLAUSE_DELIM` and its comment said "MEASURED both ways",
         # but the row it measured lived ONLY in that comment: dropping `for|or|nor|so`
         # from the set flipped the quoted sentence and changed NONE of this file's rows
-        # (796 literals probed), so a revert left the suite GREEN. Each row below is one
+        # (every string in every row collection in this test body compared, before and
+        # after), so a revert left the suite GREEN. Each row below is one
         # member's own discriminating control, measured one member at a time at this
         # head: REFUSED here, and ADMITTED when THAT member alone is dropped.
         "The note never calls `ff6379eb2` the #9601 merge, for `ff6379eb2` is the tree "
