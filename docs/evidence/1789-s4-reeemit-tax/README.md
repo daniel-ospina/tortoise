@@ -230,18 +230,18 @@ artifact.
 
   So the aggregate's direction is **not** established, and it does not reduce to
   one sign: the measured −93.8 % is the contract's effect under ONE fixed input.
-  The correction channel cannot *shrink* the real saving from here — it is
-  measured at its production maximum (all 266 items offered as existing) and
-  already contributes nothing (0 emitted), so production has no room to add to
-  it. The gap channel can only *shrink* the saving from here: if the input
-  is what suppressed gap emission, production leaves more to find, the delta arm
-  emits more, and the saving is **smaller**; if the contract itself suppresses
-  gap-finding (a defect, not a win), production behaves like this run and the
-  saving barely moves. Neither branch enlarges it. What keeps the aggregate
-  undetermined is therefore not the delta arm but the PAIR: production changes
-  BOTH arms' input, and the legacy arm's cost is a re-emission of the whole item
-  list under that same input, so the ratio can move either way — which is why it
-  is **neither a ceiling nor a floor**. Settling it needs a
+  Take the two arms separately, because the two channels do not share a sign.
+  Inside the **delta** arm the correction channel cannot *shrink its output* —
+  it is measured at its production maximum (all 266 items offered as existing)
+  and already emits nothing (0), so production has no room to add to it — while
+  its gap channel can only *grow it*, since that channel is measured at its
+  **minimum**. So the delta arm's production cost is ≥ the measured 2 038: its
+  output is a **floor**. The **legacy** arm carries the SAME gap channel, and it
+  is the larger one measured here — 12 / 9 gap additions in the primary / re-run
+  against the delta arm's 6 / 6 — so the same production input moves its cost as
+  well. Neither arm's sensitivity to the real geometry is measured, so the
+  ratio, which is the saving, is undetermined in BOTH signs: **neither a ceiling
+  nor a floor**. Settling it needs a
   production-geometry run.
 
   ⚠️ **What the committed artifacts actually say.** Their `caveats[2]` ends
