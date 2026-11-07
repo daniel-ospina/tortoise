@@ -17,8 +17,8 @@ leaves ``tests/test_evidence_assembly.py`` (30 passed) and
 the eval lane silently measures OFF-vs-OFF: ``evidence_assembly_stats`` is still
 computed and recorded (``applied: True``, ``collapsed_duplicates: N``) and the
 run would report "Slice A changed nothing". That is a false null on the very arm
-the affected-set gate (#11081's ruling, 2026-11-07) lists #2683 for — the wasted
-eval the owner forbade.
+the affected-set gate (#8486's ruling, 2026-11-07, comment 6710955512) lists
+#2683 for — the wasted eval the owner forbade.
 
 LAYER
 -----
@@ -119,7 +119,14 @@ def _no_embedder(monkeypatch):
 #: singletons are read at MODULE import (``retrieve.py:3495-3511``), not on this
 #: path, so they are out of scope — a helper-mediated read is IN scope, which is
 #: why the ``TR_SESSION_COMPLETION_*`` sub-knobs below are listed alongside their
-#: own scrub-gated parent.
+#: own parent. Those four are BELT-AND-BRACES, not load-bearing: their reads sit
+#: inside ``if tr_session_completion_on and is_tr and pool``
+#: (``retrieve.py:2962-2983``), and the parent is scrub-gated to unset, so no
+#: extreme value on them can reach a pinned count today (measured: with the four
+#: entries removed AND all four set to ``1``, this module is still 3 green).
+#: ``TORTOISE_LME_RERANK_MODEL`` is the same shape: ``get_scorer`` reads it only
+#: under ``rerank_on`` (``retrieve.py:1814-1815``), and ``TORTOISE_LME_RERANK``
+#: — also scrubbed — is what arms that.
 _ENV_SCRUB = (
     # the arm under test + its boost legs
     "TORTOISE_LME_EVIDENCE_ASSEMBLY",
@@ -149,7 +156,9 @@ _ENV_SCRUB = (
     "TORTOISE_LME_AGGREGATIVE_FLAG",
     "TORTOISE_LME_TR_SESSION_ADMISSION",
     "TORTOISE_LME_TR_SESSION_COMPLETION",
-    # its gated sub-knobs, read through `_env_int` (`retrieve.py:2966-2983`)
+    # its gated sub-knobs, read through `_env_int` (`retrieve.py:2967-2982`),
+    # reachable only once the parent above is armed (belt-and-braces; see scope
+    # note above)
     "TORTOISE_LME_TR_SESSION_COMPLETION_TOTAL",
     "TORTOISE_LME_TR_SESSION_COMPLETION_WINDOW",
     "TORTOISE_LME_TR_SESSION_COMPLETION_SESSIONS",
