@@ -436,6 +436,27 @@ def test_a_sha_that_names_no_commit_is_invalid(monkeypatch):
     assert "names no commit" in str(excinfo.value)
 
 
+def test_an_unprovable_sha_is_not_a_defect(monkeypatch):
+    """The other half of the shallow-clone fix, and the half that had no pin.
+
+    Cycle 2 rejected `_commit_exists` because a `fetch-depth: 1` checkout makes a
+    LEGITIMATE ancestor sha unresolvable, so `python-ci-gate` redded on a good
+    record. `_commit_state`'s third outcome is what stops that — but a pin on the
+    state MACHINE never asserts the DECISION: `validate` could go back to
+    appending a problem for `unprovable` and every other test in this file would
+    still pass, because a full clone resolves the real ledger's sha to `exists`
+    and the shallow test SKIPS here (this checkout is not shallow). Asserted on
+    the wiring, for the same reason the `absent` arm is: a shallow clone cannot
+    produce the input that decides it.
+    """
+    monkeypatch.setattr(cl, "_commit_state", lambda sha: "unprovable")
+    data = _ledger([_row("A")])
+    data["measured_at"]["sha"] = "0" * 40
+    # `validate` RAISES on a problem and returns the normalized rows otherwise, so
+    # "not blamed" is asserted by the call simply not raising.
+    assert [row["id"] for row in cl.validate(data)] == ["A"]
+
+
 def test_dropping_rows_without_moving_the_pin_is_invalid(tmp_path):
     """Deleting the uncovered rows reported CLEAN (`criteria: 9 ... uncovered: 0`).
 
