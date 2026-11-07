@@ -1310,8 +1310,9 @@ mechanisms:
       module's ONE read of it, `_state_value_verbatim_enforced`, through the
       `env_truthy` contract — defaults to **ON**, so unset, blank or unparseable
       resolves ON and a typo can never silently disarm the guarantee. It is read
-      once per `execute_embed` BATCH at the emit site (one batch cannot be judged
-      under two guarantees) and again INSIDE `_refuse_rewritten_value`, so a
+      once per POINT at the emit site and handed to the rule as `armed=` (so the
+      hard-cut disclosure and the refusal cannot read two different answers for
+      one point), and the rule reads it itself when a caller passes none — so a
       future second emit path inherits the switch rather than bypassing it. An
       explicit falsy spelling (`0`/`false`/`no`/`off`) makes the emit site take
       NO judgment: no refusal, no hard-cut disclosure, and no
@@ -1333,8 +1334,11 @@ mechanisms:
       `test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write`,
       `test_the_off_switch_leaves_the_MINT_guard_off_too`,
       `test_the_off_switch_does_not_move_the_JUDGMENT`,
-      `test_the_off_switch_is_read_at_ONE_site` and
-      `test_the_off_switch_is_INTRINSIC_so_a_second_call_site_cannot_bypass_it`.
+      `test_the_off_switch_is_read_at_ONE_site`,
+      `test_the_off_switch_is_INTRINSIC_so_a_second_call_site_cannot_bypass_it` and
+      `test_the_off_switch_is_declared_in_the_env_contract`. It is advertised to
+      operators in `.env.example` (this repo's env contract) with its default,
+      its revert trigger and what a revert does NOT undo.
 
 
   - id: atomic_point_write

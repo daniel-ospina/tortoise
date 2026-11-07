@@ -522,9 +522,18 @@ def test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write(monkeypatch
                        for w in off["warnings"]), (spelling, off["warnings"])
         # …and the WHOLE rule is off, not just its refusal: the hard-cut
         # disclosure is part of the judgment and must not leak into the OFF arm
-        # (a half-disarmed switch reads as "judged and failed open").
+        # (a half-disarmed switch reads as "judged and failed open"). ⚠️ The
+        # plain pair above cannot discriminate this — both predicates are False
+        # for it — so the shape that WOULD disclose is used too (review round 2,
+        # P3: the assertion was unfalsifiable for `the p95 hit 4.0 seconds`).
         assert not any("NOT judged" in w for w in off["warnings"]), (
             spelling, off["warnings"])
+        hard_cut_shape = "z" * 998 + "4.2 seconds"
+        off_cut = _write(hard_cut_shape, "4.2 seconds")
+        assert not any("NOT judged" in w for w in off_cut["warnings"]), (
+            "the hard-cut disclosure leaked into the OFF arm — the switch "
+            "disarmed the refusal but left the judgment's other output on",
+            spelling, off_cut["warnings"])
 
 
 def test_the_off_switch_leaves_the_MINT_guard_off_too(monkeypatch):
@@ -577,6 +586,12 @@ def test_the_off_switch_is_read_at_ONE_site():
     * the module's string literal is **exactly** `TORTOISE_STATE_VALUE_VERBATIM`,
       and it appears as a literal **once** — a second spelling is a second read
       waiting to disagree;
+    * the constant is referenced by NAME **only inside
+      `_state_value_verbatim_enforced`**. That is what catches a second read in
+      ANY spelling — `env_flag`, `is_truthy(os.environ.get(…))`,
+      `os.environ.get(…)` — which a call-count pin alone cannot (review round 2,
+      P3: `is_truthy(os.environ.get(STATE_VALUE_VERBATIM_SWITCH, "1"))` left the
+      count at one and stayed green);
     * the single `env_flag` read of it defaults to ``True``:
       a default-OFF read would silently disarm the guarantee for every
       deployment that never sets the variable.
@@ -585,7 +600,7 @@ def test_the_off_switch_is_read_at_ONE_site():
     source = pathlib.Path(v2.__file__).read_text(encoding="utf-8")
     assert v2.STATE_VALUE_VERBATIM_SWITCH == "TORTOISE_STATE_VALUE_VERBATIM", (
         "the switch's NAME is the operator's interface: it is quoted in the "
-        "registry row and in deployment docs, so a rename is a breaking change "
+        "registry row and in `.env.example`, so a rename is a breaking change "
         "and must not ride on a test that compares the constant to itself")
     tree = ast.parse(source)
     # ONE definition of the name…
@@ -625,6 +640,30 @@ def test_the_off_switch_is_read_at_ONE_site():
         and calls[0].args[1].value is True, (
             "the switch must default ON: a default-OFF read silently disarms "
             "the guarantee for every deployment that never sets the variable")
+    # …and the name is referenced NOWHERE ELSE, in any spelling of a read.
+    helper = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_state_value_verbatim_enforced"), None)
+    assert helper is not None, "the helper is gone — the switch has no ONE read"
+    inside = {id(n) for n in ast.walk(helper)
+              if isinstance(n, ast.Name)
+              and n.id == "STATE_VALUE_VERBATIM_SWITCH"}
+    assert len(inside) == 1, (
+        f"`_state_value_verbatim_enforced` references the switch {len(inside)} "
+        "time(s) — the helper must resolve it ONCE, or two spellings inside it "
+        "can disagree about what 'unset' means (measured: appending "
+        "`return is_truthy(os.environ.get(STATE_VALUE_VERBATIM_SWITCH, \"1\"))` "
+        "left this pin green until the count was added)")
+    outside = [n.lineno for n in ast.walk(tree)
+               if isinstance(n, ast.Name)
+               and n.id == "STATE_VALUE_VERBATIM_SWITCH"
+               and isinstance(n.ctx, ast.Load)
+               and id(n) not in inside]
+    assert not outside, (
+        f"the switch is referenced at line(s) {outside} outside "
+        "`_state_value_verbatim_enforced` — a read in any spelling there can "
+        "disagree with the helper's (env_flag, is_truthy(os.environ.get(...)), "
+        "os.environ.get(...)); route it through the helper")
 
 
 def test_the_off_switch_is_INTRINSIC_so_a_second_call_site_cannot_bypass_it(
@@ -749,6 +788,34 @@ def test_the_registry_row_declares_the_off_switch():
         "the row must state WHAT OFF restores — the rollback target is the "
         "whole point of the switch — and must not overclaim byte-identical "
         "pre-#10513 output (the #10513 mint-site cuts are not behind it)")
+
+
+def test_the_off_switch_is_declared_in_the_env_contract():
+    """`.env.example` IS this repo's env contract, and an operator rolling back an
+    over-blocking refusal in production reads it — not the registry row.
+
+    Review round 2, P2: the switch was named only in the module, the row and this
+    test file, while the test's own message claimed it was in "deployment docs".
+    Mirrors `tests/test_time_aware_2520.py::test_env_example_declares_the_valid_time_kill_switch`
+    and `tests/test_bm25_lexical_8488.py::test_env_example_declares_the_bm25_arm_switch`:
+    the name must be present AND shown as a commented assignment (the form an
+    operator copies), not merely named in prose.
+    """
+    env = (pathlib.Path(__file__).resolve().parent.parent
+           / ".env.example").read_text(encoding="utf-8")
+    name = v2.STATE_VALUE_VERBATIM_SWITCH
+    assert name in env, (
+        f"{name} is the only way to turn the verbatim-value refusal off, and "
+        ".env.example does not declare it")
+    declared = [line for line in env.splitlines()
+                if line.strip().startswith(f"# {name}=")
+                or line.strip().startswith(f"{name}=")]
+    assert declared, (
+        f"{name} must be shown as a commented assignment (the example form an "
+        "operator copies), not just named in prose")
+    block = " ".join(env.split())
+    assert "default-on" in block, (
+        "the declaration must state the default, so 'unset' is unambiguous")
 
 
 def test_a_quote_that_only_fragments_the_point_is_not_a_contradiction():

@@ -5228,17 +5228,20 @@ def _state_value_verbatim_enforced() -> bool:
     the classifier — an operator can flip it, re-measure, and flip it back without
     re-deriving a tolerance battery.
 
-    ⛔ **TWO reads, on purpose, and neither is per-point:** once per
-    `execute_embed` BATCH at the emit site (so one batch cannot be judged under two
-    guarantees), and once INSIDE `_refuse_rewritten_value` — intrinsic, so a future
-    second call site cannot bypass the switch by calling the rule directly. Both go
-    through this helper, which is the module's ONE `env_flag` read of the name.
+    ⛔ **TWO reads, and neither is per-point-blind:** the emit site reads it once
+    per POINT (so the hard-cut disclosure and the refusal cannot disagree about
+    the same point) and hands that answer to `_refuse_rewritten_value`; a caller
+    that does not hand one in makes the rule read it itself. So a future second
+    emit path inherits the switch instead of restoring a refusal nobody can turn
+    off. All reads go through this helper, which is the module's ONE `env_flag`
+    read of the name.
     """
     return env_flag(STATE_VALUE_VERBATIM_SWITCH, True)
 
 
 def _refuse_rewritten_value(content: object, quote: object, *,
-                            warnings: list[str]) -> bool:
+                            warnings: list[str],
+                            armed: bool | None = None) -> bool:
     """#10360: True when this point must NOT be written — its value was rewritten.
 
     The ENFORCEMENT half of the carve-out, in the write path rather than in
@@ -5273,9 +5276,13 @@ def _refuse_rewritten_value(content: object, quote: object, *,
     a second emit path wiring this rule would silently restore a refusal nobody
     can turn off. Intrinsic means every caller inherits the switch; it returns
     `False` with no warning, so the OFF arm collects no refused key and
-    `_mint_endpoint`'s guard stays off with it.
+    `_mint_endpoint`'s guard stays off with it. A caller that has already resolved
+    the switch for THIS point passes it as ``armed`` (the emit site does), so the
+    disclosure and the refusal cannot read two different answers for one point.
     """
-    if not _state_value_verbatim_enforced():
+    if armed is None:
+        armed = _state_value_verbatim_enforced()
+    if not armed:
         return False
     diverged = _value_slot_divergence(content, quote)
     if not diverged:
@@ -9747,11 +9754,6 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # records, deduped against the UPDATE-fold records below.
     point_supersede_refs: list[dict] = []
     pt_record_pairs: set[tuple[str, str]] = set()
-    # #10360: the off-switch, read ONCE for this BATCH (not per point), so one
-    # batch cannot be judged under two different guarantees. `_refuse_rewritten_value`
-    # re-checks it intrinsically as well; this read is what the hard-cut
-    # DISCLOSURE is gated on, and it is the one the emit site uses.
-    _value_fidelity_judged = _state_value_verbatim_enforced()
 
     # #9906: a FOLDED point's ``supersedes`` ref must not die at the fold.
     # Every non-emitting outcome in the loop below resolves a SURVIVOR graph id
@@ -9916,11 +9918,13 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         # cut cycles 14/15/17 removed elsewhere; the S5 site asks for `""`
         # instead of judging). Fail OPEN with the reason NAMED, so the unjudged
         # point is visible in the run rather than silently covered.
-        # #10360: the switch is read ONCE per batch (above). Off → this whole
-        # rule is skipped (`_hard_cut` is forced False so neither the disclosure
-        # nor the refusal below fires, and no refused key is collected, which is
-        # what keeps `_mint_endpoint`'s guard off too — see
-        # `_state_value_verbatim_enforced`).
+        # #10360: the off-switch, read once for THIS POINT and handed to the rule
+        # (`armed=`), so the hard-cut disclosure and the refusal can never read two
+        # different answers for one point. ⛔ NOT a batch-level read: an earlier
+        # revision claimed one and the code did not have it — the rule re-read the
+        # value, so a mid-batch flip suppressed the disclosure and wrote the
+        # divergent value with no warning (review round 2, P3, reproduced).
+        _value_fidelity_judged = _state_value_verbatim_enforced()
         _hard_cut = _value_fidelity_judged and (
             _write_span_is_hard_cut(_raw_content, _MAX_CONTENT)
             or _write_span_is_hard_cut(
@@ -9934,8 +9938,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "NOT judged on this pair (fail-open; the cut can read a value "
                 "short, which is not evidence of a rewrite)"
             )
-        elif (_value_fidelity_judged
-              and _refuse_rewritten_value(content, quote, warnings=warnings)):
+        elif _refuse_rewritten_value(content, quote, warnings=warnings,
+                                     armed=_value_fidelity_judged):
             # ⚠️ BOTH keys are needed, and cycle 5's "only the clamped one"
             # reading was WRONG (cycle 6 measured it): the clamped key matches a
             # ref `_mint_endpoint` truncates, while the unclamped key is what it
