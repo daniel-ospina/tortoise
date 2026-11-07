@@ -56,11 +56,11 @@ claim and a slogan:
   `encode_for_store`, `compute_session_embedding`) — added nothing to the population and this
   register's guard stayed green over it; discovery now decides the shape on the AST. The four live
   instances it had been missing (`api::add_point`, `consistency::_graph_fingerprint`,
-  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here. ⚠️ Live writers hold
-  this shape and are in the population ANYWAY, so none of them is evidence the shape was seen:
-  `sdk::_journal_event_raw_write` (the `embedding=None` in its SIGNATURE matches `_EMBED_WRITE`) and
-  — because the `encode_for_row` branch assigns `gated` WITHOUT consulting the write predicate —
-  every writer that reaches the seam by CALL: `api::_point`, `projection::_revise_point`,
+  `sdk::_index_gate_read`, `sdk::_write_capture_turns`) are declared here. ⚠️ Membership is NOT
+  evidence the shape was seen: a writer can be in this population for another reason. 
+  `sdk::_journal_event_raw_write` holds the shape (`record["embedding"] = …`) and is ALSO matched by
+  `_EMBED_WRITE` on the `embedding=None` in its SIGNATURE, and — because the `encode_for_row` branch
+  assigns `gated` WITHOUT consulting the write predicate OR the shape — every writer that reaches the seam by CALL: `api::_point`, `projection::_revise_point`,
   `projection.entities::_upsert_point_props`, `projection.entities::_upsert_subject`,
   `projection.entities::_upsert_object`, `projection.entities::_upsert_document`,
   `projection.entities::_upsert_event`, `sdk::create_point`, `sdk::update_point`. ⛔ That list is
@@ -68,8 +68,12 @@ claim and a slogan:
   `tests/test_embed_writer_register.py::test_the_seam_CALL_population_is_the_one_the_register_names`,
   which reds when this sentence loses a member or names one discovery does not class that way. It
   had to be re-derived once already: this paragraph named four of the population (the AST pass's own
-  exemplars) while five `projection.entities` writers hold the SAME container-key shape AND reach
-  the seam by the same branch, one file over — so "every" read as a complete extension of a
+  exemplars) while five `projection.entities` writers reach the seam by the `encode_for_row` CALL
+  branch, one file over — and they do NOT hold the container-key shape (`set_embedding_clause(…)`
+  for subject/object/document, a Cypher graph-property SET (`n.embedding=…`) fed from the params
+  dict for `_upsert_point_props`, the CALL itself for `_upsert_event`), which is exactly why the
+  shape-blind branch had to admit them and why a census of
+  that shape cannot count them — so "every" read as a complete extension of a
   population a `#11086` reader would then have under-counted. Membership and visibility are different
   questions; the writers whose membership the AST pass actually bought are the four named just
   above, and nothing else.
