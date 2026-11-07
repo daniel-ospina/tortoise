@@ -11812,7 +11812,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         # `span_start`/`span_end`/`span_source` verbatim, so an entry that guessed
         # the cue's own `rule_id` (the S4 prompt renders the whole embed list, so
         # the shape is visible) shipped a `span_source` naming a text that does not
-        # index it, and skipped the `_MAX_QUOTE` clamp on the way — the exact
+        # index it, and skipped the quote clamp on the way — the exact
         # address defects the two branches above fix (review cycle 5, P2). Routing
         # it through `_mention_record` keeps the cue's `rule_id`/`reason` the carry
         # exists for, while clamping the quote first and demoting an unverified

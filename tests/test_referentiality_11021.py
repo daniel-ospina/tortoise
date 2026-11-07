@@ -2298,6 +2298,13 @@ def _declared_both(surface, quote, *, span, narrative=""):
     # the amnesty must not leak: no narrative AND wrong offsets is still unknown
     ("the problem", "the problem is elsewhere",
      {"span_start": 2, "span_end": 13, "span_source": "narrative"}, ""),
+    # an AMBIGUOUS surface is not an address: the locator refuses it, so a
+    # declaration naming it demotes on BOTH builders. This is the row a re-split
+    # cannot satisfy — a `find`/substring copy returns the FIRST occurrence and
+    # keeps "quote", so it diverges here while every single-occurrence row above
+    # still passes (#11368 R1).
+    ("it", "it was there and it was here",
+     {"span_start": 0, "span_end": 2, "span_source": "quote"}, ""),
 ])
 def test_the_two_mention_builders_give_the_SAME_verdict_on_a_declared_span(
         surface, quote, span, narrative):
