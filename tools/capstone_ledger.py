@@ -81,8 +81,14 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# #5128: refuse a <3.12 interpreter before the imports below — an environment
+# refusal must not be unattributable. This file imports nothing that would fail
+# at IMPORT time on 3.9 (no `datetime`), so the guard is here for the reason the
+# census gives every runnable entry point: a tool that dies on an old
+# interpreter must say which file needs what, not raise a bare SyntaxError or
+# ImportError from a later edit. The status is 1 and that is DELIBERATE: the set
+# 0-4 below is CLOSED and fully spent, so there is no spare code, and
+# `EXIT_INVALID` is the fail-closed neighbour a refusal can share.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/capstone_ledger.py requires Python >= 3.12 (got "

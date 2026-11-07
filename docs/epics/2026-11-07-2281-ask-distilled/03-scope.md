@@ -9,7 +9,7 @@ issues: "#11461 (this commit), #2281 (parent epic)"
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: "#2281, #9092, #9095, #9097, #11460, #11461, #2080, #2294, #1987, #2134, #2009"
-governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.14; STORAGE-ARCHITECTURE.md; EXTRACTOR-V4-ARCHITECTURE.md"
+governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.31; STORAGE-ARCHITECTURE.md; EXTRACTOR-V4-ARCHITECTURE.md"
 ---
 
 > **Provenance.** The scope-stage research below is the durable copy posted on `#2281` on 2026-09-05
@@ -30,7 +30,7 @@ governingAgreement: "epic #2281; docs/ONTOLOGY.md v3.14; STORAGE-ARCHITECTURE.md
 >
 > ⚠️ **§1's `path:line` citations are as-of 2026-09-05 and have drifted since.** Read them as
 > historical. §7 re-measures the **decisions**, not these citations; measured on this head,
-> `_validity_marker` is `retrieval.py:1289` (not `:398`) and `invalidate_point` is `sdk.py:20024`
+> `_validity_marker` is `retrieval.py:1289` (not `:398`) and `invalidate_point` is `sdk.py:20126`
 > (not `:3458`).
 
 # Scope research — Epic #2281
@@ -427,7 +427,7 @@ wave by reading the tree, not inherited from a prior comment.
   superseded by the ruling above and is recorded here as the correction, not quietly replaced. The
   ruling's own measured state at its time of writing: **6** `P0-blocker`, **9** `P1-severe`, **1** `P1`.
 
-Per `docs/ONTOLOGY.md` (v3.14) and the precedence recorded on `#2281`: the ontology outranks
+Per `docs/ONTOLOGY.md` (v3.31) and the precedence recorded on `#2281`: the ontology outranks
 `#5013`/D10, which outranks `STORAGE-ARCHITECTURE.md` + `EXTRACTOR-V4-ARCHITECTURE.md`, which outrank
 this document. D3 is a retrieval-ordering key (`retrieval.py:3339`/`:3353`) — it mints no `pointKind` and no
 status, so it does not touch §4.4/§4.5.
