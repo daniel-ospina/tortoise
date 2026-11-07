@@ -56,9 +56,9 @@ WHY the delta arm is smaller: how many items it omitted (the tax), how many
 it added (gaps) and how many it corrected.
 
     # the measurement (needs DEEPSEEK_API_KEY). Cost, from the two recorded runs
-    # rather than guessed: ~145 s of wall clock and ~4.7k output tokens on the
-    # LEGACY arm and ~0.3k on the delta arm per session, so the 7-session A/B is
-    # ~2.4 min and cents. (An earlier revision said "~6k per arm" — wrong for the
+    # rather than guessed: ~145 s TOTAL for the 7-session A/B (~21 s per session
+    # across both arms), and ~4.7k output tokens on the LEGACY arm vs ~0.3k on
+    # the delta arm per session — so the run is ~2.4 min and cents. (An earlier revision said "~6k per arm" — wrong for the
     # delta arm by ~20x, and a cost hint nobody can check is what a reader plans
     # a re-run against.)
     DEEPSEEK_API_KEY=… uv run python tools/s4_reeemit_tax.py run \
@@ -212,9 +212,13 @@ def arm_out_tokens(stats: dict) -> tuple[int | None, str]:
     malformed list), i.e. it shrinks the legacy arm and flatters the delta.
     ⛔ A call that RAISED is in no total here — `_accumulate_call_cost` runs on
     `_complete`'s success return, so an attempt that failed before returning a
-    response is counted nowhere. That is NOT detectable from this accumulator
-    (`attempts` counts attempts within one logical call and is overwritten on the
-    raise path), so it is recorded rather than classified: every row carries
+    response is counted nowhere. That is NOT detectable from this accumulator:
+    `attempts` is the RUNNING TOTAL of per-call attempt numbers (production
+    re-accumulates it across an arm's logical calls — `#2134`'s running-total
+    accounting, and `escalated_abort` re-adds the base call's), and the raising
+    call's own write CLOBBERS it, so a gap against `cost["calls"]` is neither
+    sound (a healthy single 429-retried call reports `attempts=2`, `calls=1`) nor
+    complete. It is recorded rather than classified: every row carries
     `attempts` and `calls` beside the total.
 
     `stats["cost"]["completion_tokens"]` is the ONE accumulator with that
@@ -318,6 +322,11 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
             "basis": spend_basis,
             "prompt_tokens": int(stats.get("prompt_tokens") or 0),
             "truncated": bool(stats.get("truncated")),
+            # ⛔ the raised-attempt case the docstring's residual describes IS
+            # this branch, so the row that most needs these two numbers is the
+            # one that previously recorded neither (#11385 review P2).
+            "attempts": int(stats.get("attempts") or 0),
+            "calls": int((stats.get("cost") or {}).get("calls") or 0),
             "elapsed_s": round(time.monotonic() - started, 2),
         })
         return row
@@ -347,6 +356,12 @@ def run_arm(model: Any, sess: dict, arm: str) -> dict:
         "truncated": bool(stats.get("truncated")),
         "finish_reason": stats.get("finish_reason"),
         "attempts": int(stats.get("attempts") or 0),
+        # ⛔ the accumulator's own contributed-call count, recorded so the
+        # raised-attempt residual is AUDITABLE rather than merely asserted: a
+        # reader can compare it with `attempts` (see `arm_out_tokens`). Without
+        # this key the docstring's "both numbers are recorded" was false
+        # (#11385 review P2).
+        "calls": int((stats.get("cost") or {}).get("calls") or 0),
         # ⛔ `run_s4` does not write `s4_delta_empty` / `s4_delta_reemit_suspect`
         # — both are `extract_session_v2`-stage keys, so reading them here would
         # be a STRUCTURALLY DEAD field (None on every row, and `False` on rows

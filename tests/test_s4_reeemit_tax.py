@@ -623,7 +623,10 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
                            else round((reductions[mid - 1] + reductions[mid]) / 2, 4))
         assert expected_median == s["median_session_reduction"]
         # each row's own `reduction` agrees with the two numbers it came from
-        for r in rows:
+        # (over MEASURED rows — `compare` writes `reduction: None` for an
+        # unmeasured arm, so dividing here raised the very `TypeError` the
+        # header fix above was supposed to close: #11385 review P2)
+        for r in measured:
             assert round(1 - r["delta_out_tokens"] / r["legacy_out_tokens"],
                          4) == r["reduction"], (path.name, r["session"])
         # the composition channels reconcile: merged = base + added, and the
@@ -641,3 +644,21 @@ def test_every_committed_artifact_reconciles_with_its_own_rows():
                 r = a[arm]
                 if r.get("out_tokens") is not None:
                     assert r.get("basis"), (path.name, a["session"], arm)
+
+
+def test_every_row_records_the_numbers_the_residual_says_it_does(tmp_path):
+    """The docstring's raised-attempt residual says "every row carries `attempts`
+    and `calls` beside the total". Both halves were false — the success row
+    recorded `attempts` only, and the ERROR row (the one shape the residual is
+    about) recorded neither — so deleting the guard on the grounds that the data
+    is "recorded rather than classified" was not delivered (#11385 review P2)."""
+    sess = tool.load_sessions(_receipt(tmp_path / "r"))[0]
+    ok = tool.run_arm(_FakeModel({"entities": [], "events": [], "points": [],
+                                  "operators": []}), sess, "legacy")
+    bad = tool.run_arm(_FakeModel({}, fail="401 Unauthorized"), sess, "legacy")
+    for row in (ok, bad):
+        assert "attempts" in row, row
+        assert "calls" in row, row
+        assert isinstance(row["attempts"], int), row
+        assert isinstance(row["calls"], int), row
+    assert ok["attempts"] >= 1, "the success row made at least one attempt"

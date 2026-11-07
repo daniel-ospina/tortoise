@@ -71,11 +71,13 @@ as 0 — when the provider reported no usage for any call (rejected count, absen
 usage block, or a deadline-aborted call), or when the recovery accumulator cannot
 be shown to be complete. ⚠️ **The one residual this cannot catch:** an attempt that
 RAISED before returning a response is counted nowhere, and the instrument does not
-claim to detect it — `attempts` is written per logical call (a single 429-retried call
-reports `attempts=2` while contributing one count) and is overwritten on the raise
-path, so a gap against `cost["calls"]` is neither sound nor complete. Both numbers
-are recorded on every row so a reader can see a discrepancy; the two recorded runs
-have `attempts=1` on all 14 arm calls.
+claim to detect it — `attempts` is the running total of per-call attempt numbers (a single
+429-retried call reports `attempts=2` while contributing one count) and the raising
+call's own write clobbers it, so a gap against `cost["calls"]` is neither sound nor
+complete. **Both numbers are recorded on every row** — `attempts` and `calls`, on the
+success path AND the error path — so a reader can see a discrepancy even though the
+instrument cannot classify it; the two recorded runs have `attempts=1` and `calls=1`
+on all 14 arm calls.
 
 **Inputs are real, not synthetic.** The sessions come from the recorded
 write-path eval receipts (`tests/eval/write_path/receipts/7947-arms-2026-10-18/`):
