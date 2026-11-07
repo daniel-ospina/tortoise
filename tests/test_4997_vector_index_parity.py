@@ -875,8 +875,13 @@ def test_an_unparseable_port_keeps_the_stable_bucket():
     `("instance", id(self))` — one address-keyed register entry per projection
     object, never evicted (the leak the pair register's own comment names) — for
     no safety gain: a `('server', host, None)` bucket can never equal a real
-    `('server', host, port)` endpoint, so it cannot collide with a different
-    store. Both projections must share the host-only bucket.
+    `('server', host, port)` endpoint, so it cannot collide with a store whose
+    endpoint RESOLVED. (Round-4 review P3: the earlier wording said "cannot
+    collide with a different store", which is false — two DIFFERENT stores on one
+    host whose ports are both unreadable do share this bucket, and their `#4997`
+    latch and `#11087` register merge. That is the accepted degraded-but-stable
+    identity this lane and its parent both take for the portless shape, not a
+    claim that the bucket is unique.) Both projections must share the bucket.
     """
     def _proj_with_pool(raw_port):
         proj = _bare()
