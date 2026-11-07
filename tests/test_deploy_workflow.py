@@ -5812,11 +5812,11 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                     # boundary, so `…, etc. the commit for #9601, is `ff6379eb2`.` and the
                     # `No.`/`resp.`/`al.`/`fig.` spellings are ACCEPTED here while
                     # `90dfbb1a8` and `origin/main` both REFUSE them — 60 generated rows,
-                    # recorded as `_unlisted_abbreviation_known_open` below). The list is a
+                    # recorded in open family 5 below). The list is a
                     # spelling bet like any other; what makes it defensible here is that it
                     # is the SAME five-member list the file already used for
                     # `_sentence_tail_hard`, so this arm adds no NEW spelling surface, and
-                    # the residue is pinned rather than left silent.
+                    # the residue is RECORDED rather than left silent.
                     _opens_clause = bool(
                         not _before.strip()
                         or re.search(
@@ -7223,7 +7223,8 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "dash re-admits the defect one character from the arm's own control "
         "(#11191 review r4, P1)"
     )
-    # ⛔ RESIDUAL, PINNED AS A CHARACTERISATION TEST — NOT AS CORRECT BEHAVIOUR. A tree
+    # ⛔ RESIDUAL, RECORDED AS A DISCLOSURE — NOT AS CORRECT BEHAVIOUR AND NOT AS A PIN
+    # (#11191 review r4 → r6, r28 F1/P1). A tree
     # named in an EARLIER clause still exempts a figure dated to the phrase in the next
     # one, and this is DOCUMENTED rather than guarded because the guard that closed it
     # could not tell the defect from the truth and began refusing truthful sentences
@@ -7231,15 +7232,18 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # one shape). The two sentences below differ in NOTHING but whether the figure is the
     # census's answer, so settling it needs the MEASURED count — the arm already has
     # `_census_count_at` — not another regex. Until that lands, the fail-open is
-    # pre-existing (base and `origin/main` accept all four shapes) and the assertions here
-    # state exactly what the code does today, so a future fix must come with a measurement
-    # and must move these deliberately.
-    _referent_alibi = (
-        "`047c91f7a` is the arming commit; the census returns 3 lines immediately before #9548.",
-        "`047c91f7a` is the arming commit, and the census returns 3 lines immediately before #9548.",
-        "`047c91f7a` is the arming commit \u2014 the census returns 5 lines immediately "
-        "before #9548.",
-    )
+    # pre-existing (base and `origin/main` accept all four shapes). There is no assertion
+    # here because refusing this shape is the GOOD direction and must not red the suite.
+    # Recorded verbatim:
+    #     "`047c91f7a` is the arming commit; the census returns 3 lines immediately before
+    #      #9548."                                                 ACCEPTED · main ACCEPTS
+    #     "`047c91f7a` is the arming commit, and the census returns 3 lines immediately
+    #      before #9548."                                           ACCEPTED · main ACCEPTS
+    #     "`047c91f7a` is the arming commit — the census returns 5 lines immediately before
+    #      #9548."                                                 ACCEPTED · main ACCEPTS
+    # If one of these starts being REFUSED, re-run the `_alibi_truthful_twins` control
+    # directly below — that is the one that catches a re-introduced figure guard refusing a
+    # truthful reading (#11191 review r6, P1).
     # … and its truthful twin, which a figure guard COULD NOT tell it apart from and
     # therefore REFUSED — the false RED that cost the guard its place (#11191 review r6, P1).
     _alibi_truthful_twins = (
@@ -7255,13 +7259,6 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the earlier-clause figure guard refuses a TRUTHFUL reading that differs from the "
         "alibi only in its figure — a false RED on base and `origin/main`-accepted text, "
         "which is how a pin gets deleted (#11191 review r6, P1):\n  " + "\n  ".join(_twin_reds)
-    )
-    assert all(not _refuses_before_9548(s) for s in _referent_alibi), (
-        "the earlier-clause alibi is a KNOWN, DOCUMENTED RESIDUAL (see the note above), not "
-        "a closed class: this assertion pins today's behaviour so the fix that measures the "
-        "census cannot change it silently. If it now refuses, a figure guard came back — "
-        "check that it does not also refuse the truthful twins above "
-        "(#11191 review r6, P1)"
     )
     # … and the sentence-wide referent is NOT withdrawn: a figure AFTER the phrase is a
     # measurement OF it, not an alibi beside it.
@@ -7554,46 +7551,39 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "not shelter a later bare equivalence (#11191 review r21, P2):\n  "
         + "\n  ".join(_refutation_tail_alibi_passed)
     )
-    # ⚠️ CHARACTERISATION OF AN OPEN RESIDUAL (#11191 review r22, P1 — MEASURED, and the
-    # measurement is why it is NOT claimed as fixed). The `…, as #9601 says, is
-    # `ff6379eb2`` spelling of the aside-alibi is ACCEPTED at this head AND at `921238a52`,
-    # where this round's guard did not exist — so the accepting arm is another one, and
-    # `origin/main` refuses the sentence. Pinned so a future fix notices, and recorded on
-    # #11304 with the two-column measurement; if it starts being REFUSED, that residual was
-    # closed and this assertion should be inverted.
-    _aside_meta_alibi_known_open = (
-        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree, as "
-        "#9601 says, is `ff6379eb2`.",
-    )
-    _aside_meta_now_refused = [
-        s for s in _aside_meta_alibi_known_open if _refuses_before_9548(s)
-    ]
-    assert not _aside_meta_now_refused, (
-        "the `as #<n> says` aside-alibi is now REFUSED — if that refusal is correct, this "
-        "residual on #11304 has been CLOSED and this characterisation should be inverted; "
-        "if it is not, the aside is being read as prose by an arm that must not read it "
-        "(#11191 review r22, P1):\n  "
-        + "\n  ".join(_aside_meta_now_refused)
-    )
+    # ⛔ THE RESIDUE BLOCKS IN THIS FILE ARE **DISCLOSURES, NOT PINS** (#11191 review r28
+    # F1, P1 — MEASURED, and the direction is the whole point). Each named shape is a FALSE
+    # statement this predicate currently ACCEPTS (or a TRUE one it currently REFUSES), and
+    # `origin/main` grades it the other way. The reason they carry no assertion any more:
+    # every one of them is already in the BAD state, so the only movement available to a
+    # future fix is toward CORRECT — and an `assert not _refuses(...)` makes that improvement
+    # a RED. That turns a residue into a spec: the next lane that closes the hole cannot
+    # merge the fix without re-baselining the weakness, and the assertion detects nothing in
+    # the other direction (fail-open has nowhere worse to go). The shapes stay named here,
+    # verbatim, so the surface cannot be silently widened by omission; the *enforced*
+    # boundary is the positive-control blocks that assert the near-boundary shapes are
+    # REFUSED (`_refutation_tail_alibi`, the ten false rows, `_restored_corrections`)
+    # together with the truthful controls that assert a correct tree is ACCEPTED.
+    # Closing any recorded row is therefore a GREEN change — do it, move the row, and re-run
+    # the positive controls beside it. Recorded on #11301 (structured claim) and #11304
+    # (aside/appositive family).
+    #
+    # Open family 1 — the `as #<n> says` aside-alibi (#11191 review r22, P1; ACCEPTED here
+    # AND at `921238a52`, where this round's guard did not exist, so the accepting arm is a
+    # different one):
+    #     "The claim that the tree before #9548 is `ff6379eb2` is false; the tree, as
+    #      #9601 says, is `ff6379eb2`."                            ACCEPTED · main REFUSES
     # ⚠️ …AND THE `, the #9601 merge,` APPOSITIVE IS THE SAME OPEN FAMILY (#11191 review
     # r23, P1 — MEASURED: ACCEPTED here AND at `77ea7bc7f`, `origin/main` REFUSES it, and
     # deleting exemption (a) does not change it — a different arm decides it). Pinned as
     # open for the same reason as the row above: the near-boundary shape
     # (`the tree, the commit for #9601, is …`) IS refused here and is pinned in
     # `_refutation_tail_alibi`, so this row marks the residue that remains.
-    _comma_appositive_known_open = (
-        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
-        f"the #9601 merge, is `{_FALSE_TREE}`.",
-    )
-    _comma_appositive_now_refused = [
-        s for s in _comma_appositive_known_open if _refuses_before_9548(s)
-    ]
-    assert not _comma_appositive_now_refused, (
-        "the comma-appositive alibi is now REFUSED — if that refusal is correct this "
-        "residual has been CLOSED and this characterisation should be inverted "
-        "(#11191 review r23, P1):\n  "
-        + "\n  ".join(_comma_appositive_now_refused)
-    )
+    # Open family 2 — the `, the #9601 merge,` appositive (#11191 review r23, P1; ACCEPTED
+    # here AND at `77ea7bc7f`, and deleting exemption (a) does not change it — a different
+    # arm decides it):
+    #     "The claim that the tree before #9548 is `ff6379eb2` is false; the tree,
+    #      the #9601 merge, is `ff6379eb2`."                       ACCEPTED · main REFUSES
     # ⚠️ …AND THE `e.g. the #<n> merge` SPELLING IS A THIRD OPEN SHAPE, for a DIFFERENT
     # reason than the two above (#11191 review r25, P2 — MEASURED, and the diagnosis is
     # why it is recorded rather than silently left): ACCEPTED here AND at `1895c94a7`,
@@ -7605,27 +7595,18 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # passes the sentence. The `i.e. the commit for #9601` spelling next door IS refused
     # (pinned in `_refutation_tail_alibi`) because there the SUBJECT is `the commit`, which
     # the set does see — so this row marks the residue, not a boundary.
-    _abbreviation_appositive_known_open = (
-        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
-        f"e.g. the #9601 merge, is `{_FALSE_TREE}`.",
-        # …and the SAME label spelling behind `i.e.` (#11191 review r26, P2 — MEASURED):
-        # the r25 fix closed the lower-case `i.e. the commit for #9601` spelling (the
-        # subject `_COREF_ASSERTS_FALSE`
-        # can see); the `the #<n> merge` label is invisible to it whatever the abbreviation,
-        # so recording one spelling and not the other would present a partial residue as a
-        # complete one. The mechanism is abbreviation-INDEPENDENT, so the row set is too.
-        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
-        f"i.e. the #9601 merge, is `{_FALSE_TREE}`.",
-    )
-    _abbreviation_appositive_now_refused = [
-        s for s in _abbreviation_appositive_known_open if _refuses_before_9548(s)
-    ]
-    assert not _abbreviation_appositive_now_refused, (
-        "the `e.g.`-appositive alibi is now REFUSED — if that refusal is correct this "
-        "residual has been CLOSED and this characterisation should be inverted "
-        "(#11191 review r25, P2):\n  "
-        + "\n  ".join(_abbreviation_appositive_now_refused)
-    )
+    # Open family 3 — the abbreviation-appositive label (#11191 review r25, P2 / r26;
+    # ACCEPTED here AND at `1895c94a7`, main REFUSES). NOT the opener rule:
+    # `_COREF_ASSERTS_FALSE`'s subject set is `the (tree|parent|commit|sha|branch|merge)`,
+    # and the `the #9601 merge` label is none of those, so no co-reference forms at all and
+    # `_tail_reasserts_equivalence` reports nothing. The mechanism is
+    # abbreviation-INDEPENDENT, so both spellings are recorded — recording one would present
+    # a partial residue as a complete one. (The `i.e. the commit for #9601` spelling next
+    # door IS refused — subject `the commit` — and is pinned in `_refutation_tail_alibi`.)
+    #     "The claim that the tree before #9548 is `ff6379eb2` is false; the tree,
+    #      e.g. the #9601 merge, is `ff6379eb2`."                   ACCEPTED · main REFUSES
+    #     "The claim that the tree before #9548 is `ff6379eb2` is false; the tree,
+    #      i.e. the #9601 merge, is `ff6379eb2`."                   ACCEPTED · main REFUSES
     # ⚠️ …AND A POSSESSIVE-RELATION SUBJECT IS A FOURTH OPEN SHAPE, with a DIFFERENT and
     # harder diagnosis (#11191 review r25 F1 / r26 — MEASURED at `origin/main`,
     # `1895c94a7` and this head): the refutation tail `…its parent is `ff6379eb2`.` is
@@ -7638,20 +7619,16 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # into a REFUSAL, which `origin/main` accepts. Whether `its` refers to the denied false
     # mention or to the true tree is a fact about the repository, not a shape a regex reads —
     # so the class is pinned here as open instead of being half-fixed into a new false RED.
-    _possessive_relation_known_open = (
-        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; its parent is "
-        f"`{_FALSE_TREE}`.",
-    )
-    _possessive_relation_now_refused = [
-        s for s in _possessive_relation_known_open if _refuses_before_9548(s)
-    ]
-    assert not _possessive_relation_now_refused, (
-        "the possessive-relation alibi is now REFUSED — if that refusal is correct, and it "
-        "does not refuse the truthful `…; its parent is `ff6379eb2`.` after a POSITIVE "
-        "first clause, this residual has been CLOSED and this characterisation should be "
-        "inverted (#11191 review r26, P2):\n  "
-        + "\n  ".join(_possessive_relation_now_refused)
-    )
+    # Open family 4 — the possessive-relation subject (#11191 review r25 F1 / r26;
+    # ACCEPTED here, main REFUSES): `_COREF_ASSERTS_FALSE` has no possessive form (`its
+    # parent`, `the tree's parent`), so neither the veto nor `_tail_reasserts_equivalence`
+    # sees the co-reference. ⛔ THE OBVIOUS FIX IS A MEASURED TRADE, NOT A FIX: adding the
+    # possessives closes this row and turns the TRUTHFUL "The tree before #9548 is
+    # `047c91f7a`; its parent is `ff6379eb2`." — which main ACCEPTS — into a REFUSAL.
+    # Whether `its` refers to the denied false mention or to the true tree is a fact about
+    # the repository, not a shape a regex reads.
+    #     "The claim that the tree before #9548 is `ff6379eb2` is false; its parent is
+    #      `ff6379eb2`."                                          ACCEPTED · main REFUSES
     # ⚠️ …AND AN UNLISTED ABBREVIATION IS A FIFTH OPEN SHAPE, created by the shape of the
     # r26 fix itself (#11191 review r27, P2 — MEASURED): `_ends_a_sentence` treats the period
     # as a BOUNDARY unless the abbreviation is in `_ABBREVIATION_PERIOD`'s five members, so a
@@ -7660,45 +7637,31 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # 12 variants). It is recorded rather than closed because closing it means growing a
     # spelling list, which is the bet this predicate keeps losing: the honest statement is
     # that this arm shares `_sentence_tail_hard`'s five-member list and inherits its residue.
-    _unlisted_abbreviation_known_open = (
-        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
-        f"etc. the commit for #9601, is `{_FALSE_TREE}`.",
-        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
-        f"resp. the commit for #9601, is `{_FALSE_TREE}`.",
-    )
-    _unlisted_abbreviation_now_refused = [
-        s for s in _unlisted_abbreviation_known_open if _refuses_before_9548(s)
-    ]
-    assert not _unlisted_abbreviation_now_refused, (
-        "an unlisted-abbreviation alibi is now REFUSED — if that refusal is correct this "
-        "residual has been CLOSED and this characterisation should be inverted "
-        "(#11191 review r27, P2):\n  "
-        + "\n  ".join(_unlisted_abbreviation_now_refused)
-    )
+    # Open family 5 — an UNLISTED abbreviation (#11191 review r27, P2): `_ends_a_sentence`
+    # treats the period as a BOUNDARY unless the abbreviation is in
+    # `_ABBREVIATION_PERIOD`'s five members, so a sixth member followed by a lower-case word
+    # opens the appositive again (ACCEPTED here, REFUSED by `90dfbb1a8` and by main —
+    # measured over 60 generated rows, 5 separators × 12 variants). This arm SHARES
+    # `_sentence_tail_hard`'s five-member list rather than owning a second one, so it adds
+    # no new spelling surface and inherits that list's residue:
+    #     "The claim that the tree before #9548 is `ff6379eb2` is false; the tree,
+    #      etc. the commit for #9601, is `ff6379eb2`."              ACCEPTED · main REFUSES
+    #     "The claim that the tree before #9548 is `ff6379eb2` is false; the tree,
+    #      resp. the commit for #9601, is `ff6379eb2`."             ACCEPTED · main REFUSES
     # ⚠️ …AND A PRE-POSED DENIAL FRAME IS REFUSED, which is a FALSE RED nobody fixed
     # (#11191 review r25 F2 / r26 — MEASURED at every head of this PR): `origin/main`
     # ACCEPTS `It is not the case that the tree before #9548 is `ff6379eb2`.` and the
-    # predicate REFUSES it, at `90dfbb1a8`, at `96043c0fc0` and here. Pinned in the
-    # REFUSED direction — a characterisation of today's behaviour, not a claim of
-    # correctness — because the obvious fix is a MEASURED blank cheque: a frame-keyed
+    # predicate REFUSES it, at `90dfbb1a8`, at `96043c0fc0` and here. Recorded in the
+    # REFUSED direction as a DISCLOSURE, not a pin (same rule as the block above) —
+    # accepting these is the CORRECT outcome, so it must be a green change — because
+    # the obvious fix is a MEASURED blank cheque: a frame-keyed
     # exemption also exempts
     #   "It is not the case that the census is 5; the tree before #9548 is `ff6379eb2`."
     # which `origin/main` ACCEPTS and which must be refused; the frame denies a DIFFERENT
     # proposition there. Closing this class needs proposition binding, not another spelling
     # set. Recorded on #11301 with the rest.
-    _preposed_denial_known_refused = (
-        f"It is not the case that the tree before #9548 is `{_FALSE_TREE}`.",
-        f"It is not true that the tree before #9548 is `{_FALSE_TREE}`.",
-    )
-    _preposed_denial_now_accepted = [
-        s for s in _preposed_denial_known_refused if not _refuses_before_9548(s)
-    ]
-    assert not _preposed_denial_now_accepted, (
-        "a pre-posed denial is now ACCEPTED — if that acceptance is correct this residual "
-        "has been CLOSED and this characterisation should be inverted (#11191 review r27, "
-        "P3):\n  "
-        + "\n  ".join(_preposed_denial_now_accepted)
-    )
+    #     "It is not the case that the tree before #9548 is `ff6379eb2`."  REFUSED · main ACCEPTS
+    #     "It is not true that the tree before #9548 is `ff6379eb2`."       REFUSED · main ACCEPTS
     # ⚠️ …AND THE CORRECTION-VERB / RETRACTION SPELLINGS ARE REFUSED, which is a FALSE RED
     # the r30 reviewer found by fuzzing the correction arms and which NO control carried
     # (#11191 review r31, P2 — MEASURED at `origin/main`, `96043c0fc0` and this head: every
@@ -7709,39 +7672,25 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #   `…is false; the tree, for the commit for #9601, is `ff6379eb2`.`
     # was REFUSED by `origin/main` and becomes ACCEPTED (measured at the same three
     # trees). That is `_CLAUSE_DELIM`-consistency bought with an alibi, i.e. the same
-    # false-RED-for-fail-open trade `_possessive_relation_known_open` records. Two other
+    # false-RED-for-fail-open trade open family 4 records. Two other
     # mechanisms are at work and neither is a spelling gap: a correction verb whose OBJECT
     # is the reported claim (`R1`, `R2`, `R3`) or a passive retraction of it (`R4`, `R5`)
     # is only seen when the verb is bound to the phrase's OWN occurrence, and the cleft
     # (`R6`) predicates the OTHER tree of #9601 before the phrase names the true one.
     # Settling these needs proposition binding — #11301 — not a fifth verb list.
-    _correction_verb_known_refused = (
-        # R1/R2/R3 — the verb takes the reported claim as its object.
-        f"`{_TRUE_TREE}` supersedes the claim that `{_FALSE_TREE}` is the tree before #9548.",
-        f"The heading says `{_FALSE_TREE}` is the tree before #9548; "
-        f"`{_TRUE_TREE}` supersedes that claim.",
-        f"`{_TRUE_TREE}` refutes the claim that `{_FALSE_TREE}` is the tree before #9548.",
-        # R4/R5 — the passive retraction, whose verb `_CORRECTION_VERB` already admits.
-        f"The claim that `{_FALSE_TREE}` is the tree before #9548 has been retracted; "
-        f"the tree is `{_TRUE_TREE}`.",
-        f"The claim that `{_FALSE_TREE}` is the tree before #9548 is falsified; "
-        f"the tree is `{_TRUE_TREE}`.",
-        # R6 — the cleft: the other tree is predicated of #9601, before the phrase.
-        f"It was `{_FALSE_TREE}` that #9601 merged; the tree before #9548 is `{_TRUE_TREE}`.",
-        # R7 — `for` is a connective in `_CLAUSE_DELIM` but not an opener here.
-        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; "
-        f"the true tree is `{_TRUE_TREE}`, for the commit for #9601 is `{_FALSE_TREE}`.",
-    )
-    _correction_verb_now_accepted = [
-        s for s in _correction_verb_known_refused if not _refuses_before_9548(s)
-    ]
-    assert not _correction_verb_now_accepted, (
-        "a truthful correction this pin recorded as REFUSED is now ACCEPTED — if that "
-        "acceptance is correct this residual has been CLOSED and this characterisation "
-        "should be inverted, with the truthful rows beside it re-measured for the "
-        "fail-open the widening bought (#11191 review r31, P2; class #11301):\n  "
-        + "\n  ".join(_correction_verb_now_accepted)
-    )
+    # DISCLOSURE, NOT A PIN (r28 F1; the r31 note below names why closing is green):
+    #     R1 `047c91f7a` supersedes the claim that `ff6379eb2` is the tree before #9548.
+    #     R2 The heading says `ff6379eb2` is the tree before #9548; `047c91f7a` supersedes
+    #        that claim.
+    #     R3 `047c91f7a` refutes the claim that `ff6379eb2` is the tree before #9548.
+    #     R4 The claim that `ff6379eb2` is the tree before #9548 has been retracted; the
+    #        tree is `047c91f7a`.
+    #     R5 The claim that `ff6379eb2` is the tree before #9548 is falsified; the tree is
+    #        `047c91f7a`.
+    #     R6 It was `ff6379eb2` that #9601 merged; the tree before #9548 is `047c91f7a`.
+    #     R7 The claim that the tree before #9548 is `ff6379eb2` is false; the true tree is
+    #        `047c91f7a`, for the commit for #9601 is `ff6379eb2`.
+    #                                          every ROW: REFUSED here · main ACCEPTS
     # ⛔ …AND THE `_CORRECTION_CUE` SCOPE IS A LOAD-BEARING ARM WHOSE CONTROL ARRIVED LATE
     # (#11191 review r31, P2 — MEASURED). The r14 comment above records that reading the cue
     # on `norm` instead of `own` ACCEPTED `row + " The 3-line figure was corrected to 10; the
@@ -8813,30 +8762,20 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             "the TRUE copula — with the arming commit or an aside between it and its object "
             "— is the correction the pin exists to accept (#11191 review r15/r16, P1)"
         )
-    # ⛔ THE ANAPHORA RESIDUAL, PINNED AS A CHARACTERISATION — NOT AS CORRECT BEHAVIOUR
-    # (#11191 review r11, P3 — the PR body states this residual but the CODE did not, and
-    # an unpinned residual cannot red when a future fix moves it). A sentence that names
+    # ⛔ THE ANAPHORA RESIDUAL, RECORDED AS A DISCLOSURE — NOT AS PINNED BEHAVIOUR
+    # (#11191 review r11, P3 / r28 F1, P1). A sentence that names
     # BOTH trees with the false one predicated of the phrase is refused even when anaphora
     # makes it truthful. No word-level rule separates it from the defect, because the
     # defect IS `ff6379eb2` predicated of that phrase; the remedy is a reword, which is
     # what the epic's own §A8 row already does ("that is `047c91f7a`, the arming commit's
     # parent"). `origin/main` accepts it — that is the blunt-substring exemption the rest
     # of this predicate exists to remove, not a behaviour worth restoring.
-    _anaphora_known_refused = (
-        "`047c91f7a` (10 lines) versus `ff6379eb2` (5 lines): the former is the tree "
-        "before #9548.",
-    )
-    _anaphora_moved = [
-        s for s in _anaphora_known_refused if not _refuses_before_9548(s)
-    ]
-    assert not _anaphora_moved, (
-        "the anaphora residual is a KNOWN, DOCUMENTED RESIDUAL (see the note above), not a "
-        "closed class: this assertion pins today's behaviour so a future fix — the one that "
-        "resolves the anaphor to the tree it names — must move it deliberately rather than "
-        "silently. If it now refuses... it already did; if it now PASSES, delete this pin "
-        "and the residual note together (#11191 review r11, P3):\n  "
-        + "\n  ".join(_anaphora_moved)
-    )
+    # DISCLOSURE, NOT A PIN (r28 F1, P1 — same rule as the block above): accepting this row
+    # is the CORRECT outcome (it resolves the anaphor to the tree it names), so it must be a
+    # green change rather than a red one. Recorded verbatim so the surface cannot drift
+    # silently by omission:
+    #     "`047c91f7a` (10 lines) versus `ff6379eb2` (5 lines): the former is the tree
+    #      before #9548."                                         REFUSED · main ACCEPTS
     # ⛔ A1 — A FIGURE DATED TO THE PHRASE WITH NO TREE NAMED IS THE DEFECT (#11191
     # review, A1, P1 — measured: `main` refused 15 of 15 of this family, the previous
     # head refused 0). It is the accidental form: a lane pastes a fresh number and dates
@@ -9201,36 +9140,18 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "the verbal-frame spelling is not decided by `_INVERTED_FALSE`, so the control "
         "above proves nothing about which arm reads it (#11191 review r19)"
     )
-    # ⚠️ CHARACTERISATION, NOT CORRECTNESS (#11191 review r20, P3 — MEASURED). These five
+    # ⚠️ DISCLOSURE, NOT A PIN (#11191 review r20, P3 / r28 F1, P1 — MEASURED). These five
     # spellings of the SAME claim are ACCEPTED at this head **and at `abd6270dda`**: they
-    # are pre-existing residual, not a defect of the widening above, and "parent of #9548"
-    # is the very relation `_TRUE_TREE` is defined by. The productive fix is the structured
-    # claim on **#11301**, not another word in the alternation. Pinned so a future fix
-    # cannot move them silently — if one of these starts being REFUSED, the widening has
-    # grown into the false-RED class and the truthful controls above must be re-checked.
-    _anchor_known_open = (
-        f"The parent of #9548 is `{_FALSE_TREE}`.",
-        f"The tree that precedes #9548 is `{_FALSE_TREE}`.",
-        f"The tree immediately preceding #9548 is `{_FALSE_TREE}`.",
-        f"`{_FALSE_TREE}` precedes #9548.",
-        f"The tree #9548 was armed on top of is `{_FALSE_TREE}`.",
-    )
-    _anchor_now_refused = [s for s in _anchor_known_open if _refuses_before_9548(s)]
-    assert not _anchor_now_refused, (
-        # ⛔ THE MESSAGE IS PART OF THE CONTROL (#11191 review r21, P3 — the r20 wording
-        # called a CORRECT fix a false RED). Every row above is a FALSE claim that is
-        # ACCEPTED today, so one of them becoming REFUSED means this residual was CLOSED —
-        # the good direction — and the block must be re-derived from measurement rather
-        # than "fixed" by restoring the hole.
-        "a spelling of the pre-#9548 attribution that this pin ACCEPTED is now REFUSED — "
-        "if that refusal is correct, a residual on #11301 has been CLOSED and this "
-        "characterisation control should be INVERTED (move the row to the accepted set "
-        "and re-measure the truthful controls beside it); if it is not correct, the "
-        "anchor widened into the false-RED class. Either way do not restore the hole "
-        "to make this assertion pass (#11191 review r20, P3 / r21, P3; the class is "
-        "#11301):\n  "
-        + "\n  ".join(_anchor_now_refused)
-    )
+    # are pre-existing residual, not a defect of the widening above. Every row is a FALSE
+    # claim that is accepted today, so a row becoming REFUSED means the residual was
+    # CLOSED — the good direction — which is why there is no assertion here: an
+    # `assert not _refuses(...)` would red the fix instead of the hole. The productive
+    # fix is the structured claim on **#11301**, not another word in the alternation.
+    #     "The parent of #9548 is `ff6379eb2`."                     ACCEPTED · main ACCEPTS
+    #     "The tree that precedes #9548 is `ff6379eb2`."             ACCEPTED · main ACCEPTS
+    #     "The tree immediately preceding #9548 is `ff6379eb2`."      ACCEPTED · main ACCEPTS
+    #     "`ff6379eb2` precedes #9548."                             ACCEPTED · main ACCEPTS
+    #     "The tree #9548 was armed on top of is `ff6379eb2`."        ACCEPTED · main ACCEPTS
     # …and the TRUTH anchor that makes "closed" distinguishable from "widened into red":
     # if this pair ever disagrees with the block above, the predicate is refusing the
     # truthful attribution too and the residual note is no longer describing it.
@@ -9271,17 +9192,17 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # (`_census_count_at`), not a fourth list. This overrides the F4 expectation ON PURPOSE
     # — see the PR comment; the grammar F4 introduced is kept for the no-referent arm,
     # which asks the same question about a sentence that names NO tree.
-    _alibi_known_open = (
-        "`047c91f7a` is the arming commit; the census returns thirteen lines immediately "
-        "before #9548.",
-        "`047c91f7a` is the arming commit; the census returns 3 lines immediately before "
-        "#9548.",
-    )
-    assert all(not _refuses_before_9548(s) for s in _alibi_known_open), (
-        "the earlier-clause alibi is a DOCUMENTED RESIDUAL: if it now refuses, a figure "
-        "guard came back and the truthful twins (pinned just above) must be re-checked for "
-        "the false RED it produced three rounds running (#11191 review r6, P1 / F4)"
-    )
+    # ⚠️ DISCLOSURE, NOT A PIN (#11191 review r6, P1 / r28 F1, P1 — MEASURED). The
+    # earlier-clause figure alibi is a DOCUMENTED RESIDUAL: it cannot be separated from the
+    # truth, and every spelling of the guard that tried refused TRUTHS main accepts (the
+    # `_alibi_truthful` control below is that measurement, kept). No assertion here for the
+    # reason the block above states — the shape is already accepted, so only improvement is
+    # available, and reding the improvement is how a pin gets deleted. The fix is the
+    # MEASURED census (`_census_count_at`), not a fourth list.
+    #     "`047c91f7a` is the arming commit; the census returns thirteen lines immediately
+    #      before #9548."                                          ACCEPTED · main ACCEPTS
+    #     "`047c91f7a` is the arming commit; the census returns 3 lines immediately before
+    #      #9548."                                                 ACCEPTED · main ACCEPTS
     _alibi_truthful = (
         "`047c91f7a` is the arming commit's parent; it returns 10 lines immediately "
         "before #9548.",
