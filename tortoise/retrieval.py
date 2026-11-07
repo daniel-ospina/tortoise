@@ -716,9 +716,9 @@ def session_key_of(hit: dict) -> str:
       (:func:`hit_session_id` names the same two sources). Before this the
       authority read the snake ``session_id`` only, so every product point
       hit keyed as a phantom and ``seeded_sessions`` dropped it: nothing on
-      the raw product search pool could seed a session, and
-      ``reinjection_merge_order`` could not find a seeded session's own base
-      ranks. What this fixes is the SEED's blindness on the product grain,
+      the raw product search pool could seed a session — and with no seed
+      there was no group to place. What this fixes is the SEED's blindness
+      on the product grain,
       NOT the arm's measured effect: #8713's own receipt
       records the arm FIRING on the EVAL grain (``seeded_sessions: 354``,
       ``injected_total_merged: 617/617 at cap10``), so the arm was never
@@ -2372,8 +2372,10 @@ def _session_admission_key(
     ``.startswith``: ``seeded_sessions``, ``coverage_loop.coverage_gap``
     (``coverage_loop.py``:497) and ``reader_window_displacement``
     (``session_reinjection.py``:750-752) — while ``dedup_pool`` /
-    ``session_diverse_order`` / ``reinjection_merge_order`` only dict-key it
-    and are safe); a whitespace-only snake id (the
+    ``session_diverse_order`` / ``reinjection_merge_order`` only dict-key it,
+    and dict-keying is safe only for a HASHABLE non-``str`` (``5``,
+    ``True``): an UNHASHABLE value (``{}``/``[]``) raises ``TypeError``
+    there too, measured); a whitespace-only snake id (the
     pool keys it RAW because it is truthy, while this grain DISCARDS it
     rather than stripping); a WIRE id that
     spells the ``idx:`` namespace — ``_SAFE_SESSION_TAG_RE`` permits ``:``,
