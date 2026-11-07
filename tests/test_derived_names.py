@@ -947,13 +947,25 @@ def _raw_client_call_positions(source: str) -> list[int]:
     def _bindings(wanted):
         """Targets bound to an expression that REFERENCES one of `wanted`.
 
-        Every binding FORM, not every spelling of one: plain, annotated,
+        Every ASSIGNMENT form, not every spelling of one: plain, annotated,
         chained (`C = D = …`), tuple/list unpacking, and the walrus. `wanted` is
         the class name UNIONED with the file's import-resolved names, and grows
         to the resolved aliases on each pass — the union is what lets a chain
         ROOTED AT AN IMPORT ALIAS resolve (`from falkordb import FalkorDB as
         Client`; `D = Client`), and the growth is what lets `C = D` after
         `D = falkordb.FalkorDB` resolve.
+
+        ⛔ NOT every binding form, and the gap is deliberate rather than closed:
+        a `for`/`with`/`except` target, a parameter default and a comprehension
+        target are all bound from an expression but are skipped by the
+        `else: continue` below, so `for maker in (Client,):` then `maker(...)`
+        reads CLEAN over an unowned, un-journaled bulk DETACH (measured). The
+        file's OTHER binding model already treats exactly those forms as
+        unreadable and fails CLOSED (`a loop/with/except target: nothing
+        readable`, and the UNDECIDABLE list naming `for`/`with`/STARRED tuple
+        targets), so the two halves disagree and this docstring must not be the
+        one that claims otherwise. Recorded with the rest of the family on
+        #11344; do not "fix" it by widening the claim here.
         """
         out = set()
         for node in ast.walk(tree):
