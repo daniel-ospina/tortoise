@@ -1958,9 +1958,45 @@ console.log("the blog's link preview and icon");
   //   authored card ........... 94,066 B
   //   flat one-colour JPEG .... 22,016 B
   //   the deleted placeholder ... 4,595 B
-  // 40 KB sits 1.82x above a flat one and 2.35x below the real card. If a future card is legitimately simple and lands
-  // under this, look at it, then lower the bound with the reason written down.
-  assert(card.length >= 40000, "the fallback card has something drawn on it (>= 40 KB encoded)");
+  // 40 KB sits 1.82x above a flat one and 2.35x below the real card.
+  const CARD_MIN_BYTES = 40000;
+  const FLAT_CARD_BYTES = 22016;
+  // ⛔ THE ENCODED IMAGE, NOT THE FILE. File length can be inflated past any floor
+  // without drawing a pixel: measured on the Python twin, a flat 4,723 B card padded
+  // with trailing zeros cleared a 40 KB file-length floor green. `0xFFD9` inside
+  // entropy-coded data is stuffed (`FF00`), so the last EOI ends the image.
+  const encodedJpegLength = (buf) => {
+    const end = buf.lastIndexOf(Buffer.from([0xff, 0xd9]));
+    return end < 0 ? buf.length : end + 2;
+  };
+  const cardFloorViolation = (buf) =>
+    encodedJpegLength(buf) < CARD_MIN_BYTES
+      ? `the card holds only ${encodedJpegLength(buf)} B of encoded image ` +
+        `(${buf.length} B file), under the ${CARD_MIN_BYTES / 1000} KB floor`
+      : null;
+  assertEq(cardFloorViolation(card), null,
+    "the fallback card has something drawn on it (encoded image >= 40 KB)");
+
+  // ⛔ NON-VACUITY, pinned from BOTH sides — the same three assertions the Python
+  // sibling carries. Without them this floor can be lowered or DELETED with the whole
+  // harness green (measured: `>= 40000` → `>= 4000`, and the line removed entirely,
+  // both passed), while the Python twin reds on the identical edit. A guard whose
+  // failure path never runs cannot be told apart from no guard.
+  assert(FLAT_CARD_BYTES < CARD_MIN_BYTES,
+    `the card floor (${CARD_MIN_BYTES} B) is not above the flat 1200x630 JPEG it exists ` +
+    `to reject (${FLAT_CARD_BYTES} B), so a flat card passes`);
+  const flatCard = Buffer.alloc(FLAT_CARD_BYTES);
+  flatCard[0] = 0xff; flatCard[1] = 0xd8;
+  flatCard[FLAT_CARD_BYTES - 2] = 0xff; flatCard[FLAT_CARD_BYTES - 1] = 0xd9;
+  assert(cardFloorViolation(flatCard) !== null,
+    "a card the size of a measured flat JPEG cleared the floor");
+  // ...and PADDING IS NOT PAINT: the same flat image with trailing bytes past the
+  // floor is still rejected, because the floor reads the encoded image.
+  const paddedFlat = Buffer.concat([flatCard, Buffer.alloc(CARD_MIN_BYTES + 1000 - FLAT_CARD_BYTES)]);
+  assert(paddedFlat.length > CARD_MIN_BYTES, "the padding fixture is not past the floor");
+  assert(cardFloorViolation(paddedFlat) !== null,
+    "a flat card PADDED past the floor cleared it — the floor is measuring the file, " +
+    "not the encoded image, and trailing bytes are not paint");
 
   // The type is declared for the authored card and NOT for a post cover — the same
   // rule as the dimensions, for the same reason: a cover's format is the author's.

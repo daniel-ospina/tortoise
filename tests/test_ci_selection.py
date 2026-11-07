@@ -18,7 +18,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 import pytest
 import yaml
@@ -947,6 +949,43 @@ def test_the_archive_writer_selects_the_surface_that_guards_it():
     )
 
 
+def _site_assets_the_icon_guard_reads() -> set[str]:
+    """The files the site icon/card guard reads, DERIVED from the pages themselves.
+
+    `_pages()` in `tests/test_website_static.py` globs `website/*.html`, and the guard
+    resolves every page's `og:image` and every `rel=…icon` href to a file whose bytes
+    it asserts. So the population is a function of the tree, not a list someone
+    maintains: a seventh card or a new page is in it the day it lands, and this
+    derivation is what makes the SELECTION rule notice.
+    """
+
+    class Collector(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.targets: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs) -> None:
+            a = {k: (v or "") for k, v in attrs}
+            if tag == "meta" and a.get("property", "").startswith("og:image"):
+                if a.get("content"):
+                    self.targets.append(a["content"])
+            elif (tag == "link"
+                  and any("icon" in t for t in a.get("rel", "").lower().split())
+                  and a.get("href")):
+                self.targets.append(a["href"])
+
+    found: set[str] = set()
+    for page in sorted((REPO / "website").glob("*.html")):
+        collector = Collector()
+        collector.feed(page.read_text())
+        collector.close()
+        for target in collector.targets:
+            path = urlsplit(urljoin("https://site.invalid/", target)).path
+            if path and (REPO / "website" / path.lstrip("/")).is_file():
+                found.add(f"website{path}")
+    return found
+
+
 def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
     """#11318: the ICON SET and the shared CARD are binaries, and they must select.
 
@@ -978,7 +1017,19 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
         "website/assets/investors-og.jpg",
         "website/assets/design-partners-intro-og.jpg",
     )
-    for changed in assets:
+    # ⛔ DERIVED, NOT ENUMERATED — the fix's own next generation. The six paths above
+    # were the whole population when #11318 was repaired, and a hand-written list
+    # cannot notice a seventh: MEASURED at that head, `select(["website/assets/
+    # press-og.jpg"])` → `surfaces: []`, so a new card (or a new page) would still
+    # merge green. The population is what the guard READS, so it is derived from the
+    # pages; the six stay as a FLOOR, so a page edit that drops an icon link cannot
+    # silently shrink the guarded set to nothing.
+    KNOWN = set(assets)
+    derived = _site_assets_the_icon_guard_reads()
+    assert derived >= KNOWN, (
+        f"the derived population lost {sorted(KNOWN - derived)} — the guard reads a "
+        "file no page links any more, so this test's floor and the tree disagree")
+    for changed in sorted(derived):
         assert (REPO / changed).is_file(), f"the asset this test guards is gone: {changed}"
         r = _sel([changed])
         assert r["surfaces"] == ["onboarding"], (
@@ -989,6 +1040,23 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
         assert "test_website_static.py" in r["test_files"], (
             f"{changed} does not select test_website_static.py"
         )
+        assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
+
+    # ...and every PAGE, because the guard globs them rather than naming them: a new
+    # page is read the day it lands, so a change to it must select the guard. MEASURED
+    # before this loop: `select(["website/zz-new.html"])` → `surfaces: []`, 79 tier-1
+    # files, guard absent — a page that ships with no icon trio and no og:image merged
+    # green and only a full run reded.
+    pages = sorted(p.name for p in (REPO / "website").glob("*.html"))
+    assert pages, "no pages found — this ratchet would pass vacuously"
+    for page in pages:
+        changed = f"website/{page}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{changed} selects {r['surfaces']} — a page the icon/card guard reads must "
+            "select the guard, or its head can break with nothing running")
+        assert "test_website_static.py" in r["test_files"], (
+            f"{changed} does not select test_website_static.py")
         assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
 
 

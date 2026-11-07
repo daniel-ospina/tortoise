@@ -4100,8 +4100,19 @@ class TestSiteIconAndSocialPreviewContract:
                 return a
             return b if pb <= pc else c
 
-        raw = zlib.decompress(idat)
         stride = width * channels
+        # ⛔ BOUNDED, because an unbounded `zlib.decompress` inflates whatever a
+        # checked-in IDAT expands to (zlib reaches ~1000:1), so a crafted icon could
+        # allocate without limit in CI. The IHDR already states the exact size — one
+        # filter byte per row plus `width * channels` — so the bound is known before a
+        # byte is inflated, and a stream that overruns it is a malformed PNG rather
+        # than something to keep decoding.
+        expected = height * (stride + 1)
+        stream = zlib.decompressobj()
+        raw = stream.decompress(idat, expected + 1)
+        assert len(raw) == expected and not stream.unconsumed_tail, (
+            f"PNG image data does not expand to the {expected} B its IHDR geometry "
+            f"({width}x{height}, {channels} channel(s)) declares — refusing to decode it")
         prev = bytearray(stride)
         counts: dict[tuple[int, ...], int] = {}
         off = 0
@@ -4227,12 +4238,99 @@ class TestSiteIconAndSocialPreviewContract:
         """
         return cls.WEB / urlsplit(image).path.lstrip("/")
 
+    @staticmethod
+    def _filtered_png() -> tuple[bytes, dict[tuple[int, ...], int], list[int]]:
+        """A 5-row RGB PNG whose rows use filter types 0–4, and the histogram it encodes.
+
+        ⛔ WHY THIS FIXTURE EXISTS. Both fixtures around it emit filter type 0
+        (`b"\x00" + row`), so Sub/Up/Average/Paeth reconstruction — the branch every
+        REAL icon in this tree takes (measured: favicon.png rows use filters 1,2,3,4) —
+        was executed by no test. The failure direction is why that matters: a wrong
+        predictor invents extra colours AND lowers the dominant share, i.e. it satisfies
+        both content floors, so a broken decoder would read noise as art while every
+        assertion stayed green.
+
+        The rows are a gradient, not a flat fill, because a flat row makes Sub, Up,
+        Average and Paeth degenerate to the same output and the fixture would prove
+        nothing about any of them.
+
+        Returns `(png, expected histogram, filter types the stream uses)` — the filter
+        list is returned so a future edit cannot quietly collapse it back to type 0 and
+        leave this test passing on the untested path again.
+        """
+        width, height = 8, 5
+        pixels = [
+            [((x * 37 + y * 13) & 0xFF, (x * 53 + y * 29) & 0xFF, (x * 71 + y * 17) & 0xFF)
+             for x in range(width)]
+            for y in range(height)
+        ]
+
+        def paeth(a: int, b: int, c: int) -> int:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            if pa <= pb and pa <= pc:
+                return a
+            return b if pb <= pc else c
+
+        body = bytearray()
+        prev = [0] * (width * 3)
+        filters: list[int] = []
+        for y, row in enumerate(pixels):
+            flat = [c for px in row for c in px]
+            ftype = y % 5
+            filters.append(ftype)
+            encoded = bytearray()
+            for i, value in enumerate(flat):
+                a = flat[i - 3] if i >= 3 else 0
+                b = prev[i]
+                c = prev[i - 3] if i >= 3 else 0
+                predictor = (0, a, b, (a + b) // 2, paeth(a, b, c))[ftype]
+                encoded.append((value - predictor) & 0xFF)
+            body += bytes([ftype]) + bytes(encoded)
+            prev = flat
+
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit RGB
+
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            return (struct.pack(">I", len(payload)) + kind + payload
+                    + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+
+        expected: dict[tuple[int, ...], int] = {}
+        for row in pixels:
+            for px in row:
+                expected[px] = expected.get(px, 0) + 1
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+                + chunk(b"IDAT", zlib.compress(bytes(body))) + chunk(b"IEND", b""),
+                expected, filters)
+
+    @staticmethod
+    def _jpeg_encoded_length(data: bytes) -> int:
+        """The ENCODED image's length — up to the EOI, not the file's length.
+
+        ⛔ A PADDED FILE IS NOT A CARD, and file length cannot tell. Measured: a flat
+        1200x630 JPEG is 4,723 B, and the SAME image padded with ~36 KB of trailing
+        zeros cleared a 40 KB floor with every other assertion — dimensions, type,
+        magic bytes — still green, so a blank card could be shipped past the one check
+        written to reject it. `0xFFD9` inside entropy-coded data is stuffed (`FF00`),
+        so the last EOI is the end of the image and bytes after it are not drawn on.
+
+        Residual, accepted and named: an in-band metadata block (an EXIF thumbnail, a
+        large ICC packet) sits BEFORE the EOI and still counts toward the floor. That is
+        the residual the floor has always had — it bounds encoded bulk, never whether
+        the card DEPICTS the right thing — and closing it would mean decoding the JPEG,
+        which this fast-lane guard deliberately does not do.
+        """
+        end = data.rfind(b"\xff\xd9")
+        return len(data) if end < 0 else end + 2
+
     @classmethod
     def _card_floor_violation(cls, page: str, path: Path, data: bytes) -> str | None:
         """Why an encoded card is too small to BE a card — None when it clears."""
-        if len(data) >= cls.CARD_MIN_BYTES:
+        encoded = cls._jpeg_encoded_length(data)
+        if encoded >= cls.CARD_MIN_BYTES:
             return None
-        return (f"{page}'s card {path.name} is only {len(data)} bytes, under the "
+        return (f"{page}'s card {path.name} holds only {encoded} bytes of encoded image "
+                f"({len(data)} B on disk), under the "
                 f"{cls.CARD_MIN_BYTES // 1000} KB floor — a flat 1200x630 card of one "
                 f"colour measures {cls.FLAT_CARD_BYTES // 1000} KB, so a card this "
                 "small is usually near-uniform and a link preview of it is an empty "
@@ -4775,6 +4873,21 @@ class TestSiteIconAndSocialPreviewContract:
                 assert "/logo.png" not in urlsplit(href).path, (
                     f"{page.name} uses the wordmark as an icon: rel={ln.get('rel')!r} "
                     f"href={ln.get('href')!r}")
+                # ⛔ THE BLACKLIST ABOVE IS ONE FILENAME WIDE. The property it is about
+                # is "a tab icon must be square" — a browser squashes a wide image into
+                # the square slot — and a filename test cannot see
+                # `assets/premiselabs-logo.png`, which is 160x98 and is the same wordmark
+                # by another name (measured: it passed this guard while `logo.png` was
+                # refused). Read the bytes instead, so any non-square PNG used as an
+                # icon reds whatever it is called.
+                path_part = urlsplit(href).path
+                if path_part.endswith(".png"):
+                    target = self.WEB / path_part.lstrip("/")
+                    if target.is_file():
+                        w, h = self._png_size(target.read_bytes())
+                        assert w == h, (
+                            f"{page.name} uses a {w}x{h} non-square image as a tab icon "
+                            f"({path_part}) — the tab squashes it into a square")
 
     # --- 2. the preview resolves and is the size it claims ---------------
 
@@ -5098,6 +5211,31 @@ class TestSiteIconAndSocialPreviewContract:
             f"the card floor ({self.CARD_MIN_BYTES} B) is not above the flat 1200x630 "
             f"JPEG it exists to reject ({self.FLAT_CARD_BYTES} B), so a flat card passes")
         flat_card = b"\xff\xd8" + b"\x00" * (self.FLAT_CARD_BYTES - 2)
+        # ⛔ AND PADDING IS NOT PAINT. Measuring FILE length let a flat image clear the
+        # floor by appending zeros after the EOI — measured: +36 KB of trailing zeros
+        # took a 4,723 B flat card past 40,000 B green. The floor reads the ENCODED
+        # image, so the same bytes padded are still rejected.
+        padded = flat_card[:2] + b"\x00" * (self.FLAT_CARD_BYTES - 4) + b"\xff\xd9"
+        padded += b"\x00" * (self.CARD_MIN_BYTES + 1_000 - len(padded))
+        assert len(padded) > self.CARD_MIN_BYTES, "the padding fixture is not past the floor"
+        assert self._card_floor_violation("page.html", Path("card.jpg"), padded), (
+            "a flat card PADDED past the floor cleared it — the floor is measuring the "
+            "file, not the encoded image, and trailing bytes are not paint")
+
+        # ...and the DECODER itself, on the path every real icon takes. Both fixtures
+        # above emit filter type 0 only, so Sub/Up/Average/Paeth reconstruction was
+        # executed by no test — and a wrong predictor there invents MORE colours and a
+        # LOWER dominant share, i.e. it satisfies both floors while the guard reads
+        # noise as art. The failure direction is a false PASS, so nothing else in this
+        # file would notice; this fixture is patterned row by row so each filter has a
+        # different, non-degenerate predictor.
+        filtered, expected, filters = self._filtered_png()
+        assert filters == [0, 1, 2, 3, 4], (
+            f"the fixture no longer exercises every PNG filter type (got {filters}) — "
+            "then the reconstruction branch is untested again")
+        assert self._png_palette(filtered) == expected, (
+            "the decoder did not reproduce the pixels a filter-type-1..4 PNG encodes — "
+            "every real icon in the tree uses those filters")
         assert self._card_floor_violation("page.html", Path("card.jpg"), flat_card), (
             "a card the size of a measured flat JPEG cleared the floor")
         # ...and the card that ships is what clears it, so the floor is not just
