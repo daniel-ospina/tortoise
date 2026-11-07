@@ -4488,11 +4488,24 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #:   "At `ff6379eb2`, just ahead of #9548, the census reads 5."               -> ACCEPTED
     #: The set below is CLOSED on purpose and bounded by the language, not by taste: the
     #: English spellings of "the tree #9548 was armed on top of" are `before` / `prior to`
-    #: / `ahead of` / `pre-` (the four prepositional spellings), plus the two verbal
-    #: frames in which #9548 is the SUBJECT that replaced it. Anything outside that set is
-    #: a different claim, not a paraphrase of this one — a widening that admits, say,
-    #: "ancestor of #9548" would refuse the TRUE ancestry relation this file pins as
-    #: green elsewhere.
+    #: / `ahead of` / `pre-` (the four prepositional spellings), plus the verbal frames in
+    #: which a TREE NOUN is the subject #9548 replaced.
+    #: ⛔ …AND WHAT THE SET DOES **NOT** COVER IS MEASURED, because the first version of
+    #: this comment claimed "anything outside that set is a different claim" and that was
+    #: FALSE (#11191 review r20, P3 — all five ACCEPTED at this head, and at
+    #: `abd6270dda` too, so they are PRE-EXISTING, not a defect of this widening):
+    #:   "The parent of #9548 is `ff6379eb2`."                    -> ACCEPTED
+    #:   "The tree that precedes #9548 is `ff6379eb2`."           -> ACCEPTED
+    #:   "The tree immediately preceding #9548 is `ff6379eb2`."   -> ACCEPTED
+    #:   "`ff6379eb2` precedes #9548."                            -> ACCEPTED
+    #:   "The tree #9548 was armed on top of is `ff6379eb2`."     -> ACCEPTED
+    #: "parent of #9548" is not even a paraphrase — it is the relation `_TRUE_TREE` is
+    #: DEFINED by. The productive fix is not another word in this alternation (that is the
+    #: list-runs-out pattern this file has closed twice); it is to stop asking a regex to
+    #: read English, and it is recorded with the other residuals on **#11301**. Until then
+    #: these five are pinned as a CHARACTERISATION — today's behaviour, not correctness —
+    #: so a future fix cannot move them silently and a reader cannot mistake the closure
+    #: claim for a measurement.
     #: ⛔ …AND IT IS ONE GROUP, NOT A TOP-LEVEL ALTERNATION. `_PHRASE_RE` is
     #: CONCATENATED into `_INVERTED_FALSE`, `_INVERTED_TRUE` and `_FALSE_SHA_ADJACENT`, and
     #: `|` binds looser than concatenation — so an unwrapped alternation attaches the
@@ -4504,10 +4517,22 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         r"(?:"
         r"\b(?:before|prior\s+to|ahead\s+of)\s+(?:the\s+)?#9548\b"
         r"|\bpre[-\s]?#9548\b"
-        # `\b` CANNOT PRECEDE `#` (it is a non-word character), so the verbal frames use
-        # a lookbehind: measured, `\b#9548` matched nothing and both `#9548 replaced`
-        # controls stayed ACCEPTED while the alternative looked present.
-        r"|(?<!\w)#9548\s+(?:replaced|superseded)\b"
+        # ⛔ THE VERBAL FRAMES ARE TREE CLAUSES, NOT "any sentence in which #9548 acts"
+        # (#11191 review r20, P2 — MEASURED false RED I INTRODUCED with the bare
+        # `#9548 replaced|superseded` form). A bare verbal branch makes EVERY phrase
+        # occurrence out of "#9548 superseded <anything>", and a phrase occurrence must be
+        # corrected or name the true tree — so ordinary, TRUE prose about #9548's
+        # supersession reds with a message accusing it of the census defect:
+        #   "#9548 superseded the census line, and the census at `ff6379eb2` returned 5
+        #    lines."                                          -> REFUSED at the bare form
+        #   "The census command that #9548 superseded returned 5 lines."  -> REFUSED
+        # (`abd6270dda` accepts all of them; the doc's own §G note says "#9548 SUPERSEDES
+        # that line", so this is prose a lane will actually write.) Requiring the tree NOUN
+        # before `#9548` — "the tree (that) #9548 replaced" — binds the branch to the
+        # proposition instead of to the verb, and `\b` cannot precede `#` (a non-word
+        # character), which is why the noun is part of the phrase rather than a lookbehind.
+        r"|\b(?:tree|commit|merge|sha|tip)\s+(?:that\s+)?#9548\s+"
+        r"(?:replaced|superseded)\b"
         r")"
     )
     #: A figure spelled in WORDS. Hoisted here so every arm that asks "is a figure stated"
@@ -5717,11 +5742,44 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 return False
             # 1. A REFUTATION of the predication — "… is false|wrong|…", or a
             #    demonstrative carrying it into the next clause ("— that is wrong").
-            if _REFUTED_AFTER.match(norm, phrase.start()):
+            # ⛔ THE SAME LATER-CLAUSE GUARD AS `_REFUTED_INVERTED` (#11191 review r20, P2 —
+            # MEASURED). This arm is the pre-existing one and it carries the identical hole:
+            # its refutation is a `_CORRECTION_CUE`, so it disables the co-reference veto and
+            # a later clause can re-assert the equivalence it just denied:
+            #   "The claim that `ff6379eb2` is the tree before #9548 is false; the tree is
+            #    `ff6379eb2`."                                    -> ACCEPTED (must refuse)
+            # A refutation stands only when nothing after it re-asserts the claim.
+            if _REFUTED_AFTER.match(norm, phrase.start()) and not _COREF_ASSERTS_FALSE.search(
+                norm[clause_end:]
+            ):
                 return True
             if _REFUTED_NEXT_CLAUSE.match(norm[clause_end:]):
                 return True
-            if _REFUTED_INVERTED.search(norm):
+            # ⛔ OCCURRENCE-SCOPED, NOT SENTENCE-SCOPED (#11191 review r20, P2 — MEASURED
+            # fail-open I INTRODUCED by searching `norm`). Read on the sentence, the arm
+            # fires at step 1 — before step 3's `_FALSE_SHA_ADJACENT` — and its own
+            # "is|was false|wrong" text is a `_CORRECTION_CUE`, so it switches off the
+            # co-reference veto for the very clause it sits in. A refutation therefore
+            # bought a SECOND, uncorrected assertion of the same equivalence:
+            #   "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is
+            #    `ff6379eb2`."                                    -> ACCEPTED (must refuse)
+            # `abd6270dda` refuses it, so this was a regression against main. `own` is the
+            # occurrence span every sibling arm is handed, and it covers both pinned
+            # refutation orders.
+            # ⛔ …AND A REFUTATION MAY NOT EXEMPT A SECOND, UNCORRECTED ASSERTION IN A LATER
+            # CLAUSE (#11191 review r20, P2 — MEASURED). Occurrence-scoping alone is not
+            # enough: the arm's own "is false" is a `_CORRECTION_CUE`, so it also switches
+            # the co-reference veto off, and a refutation then paid for the equivalence in
+            # the next clause:
+            #   "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is
+            #    `ff6379eb2`."                                    -> ACCEPTED (must refuse)
+            # This is the guard the CLEFT arm already carries (`… and not
+            # _FALSE_SHA_ADJACENT.search(clause)`), applied one clause further out: the
+            # refutation stands only when nothing AFTER it re-asserts the same
+            # equivalence. Both word orders are pinned by `_refuted_alibi` below.
+            if _REFUTED_INVERTED.search(own) and not _COREF_ASSERTS_FALSE.search(
+                norm[norm.find(own) + len(own) :]
+            ):
                 return True
             # ⛔ …AND THE SAME REFUTATION WHEN IT IS SPELLED `IS NOT TRUE` (#11191 review
             # r11, P1 — MEASURED false RED, and a regression against `origin/main`). The
@@ -6964,6 +7022,24 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "false-RED class this pin exists to avoid (#11191 review r19, P2):\n  "
         + "\n  ".join(_refutation_order_reds)
     )
+    # ⛔ …AND THE ARM LENDS ITS EXEMPTION TO NOTHING BUT ITS OWN OCCURRENCE (#11191 review
+    # r20, P2 — MEASURED fail-open, a REGRESSION against `abd6270dda` that the first cut of
+    # `_REFUTED_INVERTED` introduced). Read on the SENTENCE, the arm fires before step 3's
+    # `_FALSE_SHA_ADJACENT` and its own "is false" text switches off the co-reference veto,
+    # so a refutation paid for a SECOND, uncorrected assertion of the same equivalence.
+    # The arm is handed `own` — the occurrence span every sibling arm reads — and these two
+    # shapes are the ones it must still refuse.
+    _refuted_alibi = (
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is `ff6379eb2`.",
+        "The claim that `ff6379eb2` is the tree before #9548 is false; the tree is `ff6379eb2`.",
+    )
+    _refuted_alibi_passed = [s for s in _refuted_alibi if not _refuses_before_9548(s)]
+    assert not _refuted_alibi_passed, (
+        "a REFUTATION exempts a second, uncorrected assertion of the same equivalence — the "
+        "arm is reading the sentence instead of the occurrence, which is the A2/F5 "
+        "alibi class this file closes everywhere else (#11191 review r20, P2):\n  "
+        + "\n  ".join(_refuted_alibi_passed)
+    )
     # …and the closed SUBJECT still binds to the phrase through `that`, so a refutation of
     # something else in the sentence is not borrowed: without `_REFUTED_INVERTED`'s
     # `that`-binding this shape would be exempted by `reading`.
@@ -8187,16 +8263,69 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "RED direction of the r19 widening, and the class that gets a guard deleted "
         "(#11191 review r19):\n  " + "\n  ".join(_paraphrase_reds)
     )
+    # ⛔ …AND THE VERBAL FRAME IS A TREE CLAUSE, NOT ANY "#9548 superseded …" (#11191 review
+    # r20, P2 — MEASURED false RED that the bare verbal branch introduced, and a REGRESSION
+    # against `abd6270dda`). A bare branch turns every ordinary sentence about #9548's
+    # supersession into a phrase occurrence, and a phrase occurrence must be corrected —
+    # so TRUE prose reds with a message accusing it of the census defect. The doc's own §G
+    # note says "#9548 supersedes that line", i.e. this is prose a lane writes.
+    _supersession_prose = (
+        "#9548 superseded the census command.",
+        "#9548 superseded the census line, and the census at `ff6379eb2` returned 5 lines.",
+        "The census command that #9548 superseded returned 5 lines.",
+    )
+    _supersession_reds = [s for s in _supersession_prose if _refuses_before_9548(s)]
+    assert not _supersession_reds, (
+        "ordinary prose about #9548 superseding something is read as a census-tree "
+        "attribution — the verbal branch must require the tree NOUN, or it reds the "
+        "document's own vocabulary (#11191 review r20, P2):\n  "
+        + "\n  ".join(_supersession_reds)
+    )
+    # …and it must still catch the frame it was added for, in both word orders.
+    _supersession_false = (
+        f"The tree #9548 replaced was `{_FALSE_TREE}`.",
+        f"`{_FALSE_TREE}` is the tree that #9548 replaced.",
+        f"The tree #9548 superseded is `{_FALSE_TREE}`.",
+    )
+    _supersession_open = [s for s in _supersession_false if not _refuses_before_9548(s)]
+    assert not _supersession_open, (
+        "narrowing the verbal branch to a tree clause lost the frame it exists for — the "
+        "three false shapes below pass again (#11191 review r20):\n  "
+        + "\n  ".join(_supersession_open)
+    )
     # …and the arm that decides them is named, not merely "the suite": the verbal frame
     # `#9548 replaced was <sha>` is reached by `_INVERTED_FALSE`, and the pre-posed frame
     # `at <sha>, just ahead of #9548` by the referent rule. If either arm is deleted the
     # matching control above reds, so this pair is a discrimination test rather than two
     # independent assertions.
+    # ⚠️ ALSO DOCUMENTATION (same finding): deleting the verbal branch reds the
+    # refutation-orders control first, so this one is never the deciding assertion.
     assert _INVERTED_FALSE.search(
         "The tree #9548 replaced was `ff6379eb2`."
     ), (
         "the verbal-frame spelling is not decided by `_INVERTED_FALSE`, so the control "
         "above proves nothing about which arm reads it (#11191 review r19)"
+    )
+    # ⚠️ CHARACTERISATION, NOT CORRECTNESS (#11191 review r20, P3 — MEASURED). These five
+    # spellings of the SAME claim are ACCEPTED at this head **and at `abd6270dda`**: they
+    # are pre-existing residual, not a defect of the widening above, and "parent of #9548"
+    # is the very relation `_TRUE_TREE` is defined by. The productive fix is the structured
+    # claim on **#11301**, not another word in the alternation. Pinned so a future fix
+    # cannot move them silently — if one of these starts being REFUSED, the widening has
+    # grown into the false-RED class and the truthful controls above must be re-checked.
+    _anchor_known_open = (
+        f"The parent of #9548 is `{_FALSE_TREE}`.",
+        f"The tree that precedes #9548 is `{_FALSE_TREE}`.",
+        f"The tree immediately preceding #9548 is `{_FALSE_TREE}`.",
+        f"`{_FALSE_TREE}` precedes #9548.",
+        f"The tree #9548 was armed on top of is `{_FALSE_TREE}`.",
+    )
+    _anchor_now_refused = [s for s in _anchor_known_open if _refuses_before_9548(s)]
+    assert not _anchor_now_refused, (
+        "the anchor set now REFUSES a spelling it did not before — that is the false-RED "
+        "direction and it means the truthful controls above need re-measuring "
+        "(#11191 review r20, P3; the class is #11301):\n  "
+        + "\n  ".join(_anchor_now_refused)
     )
     # ⛔ AND THE ANCHOR IS ONE NON-CAPTURING GROUP. `_PHRASE_RE` is CONCATENATED into
     # `_INVERTED_FALSE`, `_INVERTED_TRUE` and `_FALSE_SHA_ADJACENT`, and `|` binds looser
@@ -8205,6 +8334,10 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # MEASURED with the first cut of this widening: this file's own pre-existing control
     # `…→ 5 lines at `ff6379eb2`, which is what "immediately before #9548" means.` went
     # GREEN, i.e. the widening SILENTLY WEAKENED three arms while adding one.
+    # ⚠️ DOCUMENTATION, NOT A PIN (#11191 review r20, P3 — MEASURED shadowed): removing
+    # the wrapper reds the PRE-EXISTING control `…→ 5 lines at `ff6379eb2` …` first, so this
+    # assertion can never be the deciding one for the property it names. It is kept for its
+    # diagnostic message; the discriminating coverage is that control's.
     assert re.match(r"\(\?:", _PHRASE_RE), (
         "`_PHRASE_RE` is no longer a single group, so every pattern that CONCATENATES it "
         "(`_INVERTED_FALSE`, `_INVERTED_TRUE`, `_FALSE_SHA_ADJACENT`) silently drops the "
