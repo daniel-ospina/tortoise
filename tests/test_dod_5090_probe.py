@@ -3861,9 +3861,13 @@ _COVERAGE = re.compile(r"\b(?:walk|visit|reach|report)(?:s|es|ed)?\b")
 # the honest "…, except when the outer method runs" — which is the real doc's
 # own argument, one rewording away (#11437 review, P3). Measured: the inverse
 # row still reds, the honest `except when` row greens.
+# ⛔ And the NEGATED PRIVATIVE — `never unvisited`, `not unreported` — is a
+# double negative that asserts coverage. #11443 measured two of these GREEN; the
+# `un…` list closes them without touching an honest "…are never visited".
 _AFFIRMED = re.compile(
     r"\binside the walk\b|\btherefore reported\b|\bskipped\b|\bexcept that\b"
-    r"|\bnot\s+(?:outside|exempt|excluded|omitted|left|out\s+of\s+scope|fail)")
+    r"|\bnot\s+(?:outside|exempt|excluded|omitted|left|out\s+of\s+scope|fail)"
+    r"|\b(?:not|never)\s+un(?:visited|reported|reached|walked|covered|mentioned|seen)\b")
 
 
 def _residual_sentences(s3: str) -> list[str]:
@@ -3880,8 +3884,17 @@ def _residual_sentences(s3: str) -> list[str]:
       walk, the closure, the mention scan and the retrieval walk, and
       `"Parameter defaults and decorators are not reported against the retrieval
       walk."` reds nothing while saying nothing about the body walk;
+    * a sentence about the INSTRUMENT'S OUTPUT rather than the walk's visit —
+      `report` is in the coverage list because §3's real clause says "and
+      therefore NOT reported", so `"This section has not reported on `def`
+      decorators or parameter defaults"` satisfies the pin (#11443, P2).
+      Dropping `report` would fix this decoy and red every honest "the scan
+      never reports …" rewording — a false block for a false pass, which is the
+      worse trade here only because the decoy needs a sentence about the DOC;
+      it is declared rather than paid for;
     * an inverse whose REVERSER is outside `_AFFIRMED`'s vocabulary — the list
-      is a class pattern now, not four literals, but it is still a list.
+      is a class pattern for negated reversers and negated privatives now, not
+      four literals, but it is still a list.
 
     FALSE-BLOCK (it reds the claim, stated honestly):
 
@@ -4151,6 +4164,15 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse():
         "inverse: not omitted from the walk":
             "a nested `def`'s decorators and parameter defaults are not omitted "
             "from the walk; the walk reports them",
+        # ⛔ The NEGATED PRIVATIVE — a double negative that asserts coverage.
+        # #11443 measured all three of these GREEN (#11437 review, P1); the
+        # `un…` alternation in `_AFFIRMED` closes them.
+        "inverse: never unvisited":
+            "a nested `def`'s decorators and parameter defaults are never "
+            "unvisited: the closure walk visited them",
+        "inverse: not unreported":
+            "a nested `def`'s decorators and parameter defaults are not "
+            "unreported: the walk reported them",
     }
     for label, sentence in must_red.items():
         assert sentence != original, f"row {label!r} merely restates the claim"
