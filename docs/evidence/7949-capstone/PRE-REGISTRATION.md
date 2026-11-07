@@ -1295,7 +1295,7 @@ The pins fence also carried **no** `a1_relation_families` and **no** A-row floor
 
 **New value.** Both now name **twelve**: the same seven, plus `A1, A2, A3, A4, A5` — appended as
 five §3.1 rows and as five `criteria[]` entries in `preregistration.json`, with their metric,
-denominator, threshold and threshold basis set out in prose in the new **§3.7**. **Seven** floors are
+denominator, threshold and threshold basis set out in prose in the new **§3.7**. **Nine** floors are
 pinned, and the two that are not population counts are called out because they are the ones a reader
 of a list of `30`s would miss: `denominator_floors.a1_objects` / `a2_candidates` /
 `a2_decided_candidates` / `a3_statements` / `a4_typed_statements` / `a5_points` / `a5_actors`, all

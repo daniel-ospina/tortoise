@@ -3675,6 +3675,11 @@ def test_a_refused_run_whose_RECORD_still_carries_a_measurement_is_not_exempt():
             ("e5_rescore", {"raw_recovery": 0.48}),
             ("e1_e2_artifact", {"after_share": 0.6}),
             ("errors", ["boom"]),
+            ("corpus_sha256", "7dff2436deadbeef"),
+            # #10982: the newest key the emitter grew. Without it this arm passed
+            # while a `REFUSED` table carrying only `a_row_census` was EXEMPTED
+            # from V12's CLOSED-blocker refusal (#10982 review round 4, F1).
+            ("a_row_census", {"A1": {"edges_total": 7}}),
     ):
         run = {"status": "REFUSED", key: value}
         assert cvc._blocker_exempt(run, "refusal", None, None) is False, (

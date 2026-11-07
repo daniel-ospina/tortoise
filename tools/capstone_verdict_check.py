@@ -185,6 +185,14 @@ _MEASUREMENT_RUN_KEYS = (
     "e1_e2_artifact",
     "errors",
     "corpus_sha256",
+    # #10982: the A-row census is written INTO the run block by the emitter
+    # (`capstone_measure.py:3515`), beside `e3_census`/`e4_receipt`. Omitting it
+    # here reopened the exact construction #10601 review round 2 closed: a
+    # `REFUSED` table with every other key nulled and a CLOSED blocker named was
+    # EXEMPTED from V12 while `a_row_census` still held produced numbers
+    # (`edges_total`, `by_type`, the `pointKind` histogram, the subject-family
+    # counts). A key set derived from the emitter may not grow without this one.
+    "a_row_census",
 )
 
 #: The nested blocks ``check()`` reads as OBJECTS. Declared so the type guard is

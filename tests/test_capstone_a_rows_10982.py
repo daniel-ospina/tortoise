@@ -89,6 +89,31 @@ def test_every_a_row_declares_its_floor_and_its_invisibility_ground():
             f"{row} is cited as a prior measurement, which falsifies its own `false`")
 
 
+def test_every_pinned_A_floor_names_its_own_value_so_none_can_be_lowered_silently():
+    """FAILS IF any `a*` floor's pinned VALUE moves, or one is dropped from the pin set.
+
+    ⛔ `a2_candidates` and `a5_points` are pinned floors that are **no row's** `floor:` cell, so the
+    per-row loop above never reads their value — a coordinated record edit lowering either to `5`
+    left every arm green while §3.7's "all **30**" went stale (#10982 review round 4, F3). §3.7
+    pins **nine** A floors: seven population floors of `30`, plus the two refusal boundaries that
+    are not population counts.
+    """
+    floors = _record()["denominator_floors"]
+    assert {k: v for k, v in floors.items() if k.startswith("a")} == {
+        "a1_objects": 30,
+        "a2_candidates": 30,
+        "a2_decided_candidates": 30,
+        "a3_statements": 30,
+        "a4_typed_statements": 30,
+        "a5_points": 30,
+        "a5_actors": 30,
+        "a1_rollup_queries": 1,
+        "a3_event_root_coverage": 0.5,
+    }, ("an A-row floor's pinned value moved, or the pin set changed shape — §3.7 pins NINE "
+        "(seven population floors of 30, plus a1_rollup_queries: 1 and "
+        "a3_event_root_coverage: 0.5)")
+
+
 def test_the_a_rows_are_registered_but_not_REQUIRED():
     """⛔ The load-bearing half: adding a row to the record is not adding it to the gate.
 
@@ -347,6 +372,20 @@ def test_the_pointkind_histogram_keeps_null_as_a_THIRD_state_and_drops_capture_r
     assert out["null"] == 13, "a blank kind is ABSENT, not typed"
     assert out["typed"] == 109 and out["typed_by_kind"] == {"constraint": 88, "preference": 21}
     assert out["claim_points"] == 150 + 13 + 109
+    # ⛔ THE FALSIFIER, which the canned rows above cannot supply. `_FakeGraph` matches on the
+    # substring `coalesce(n.pointKind, 'NULL')`, so it answers the SAME rows with BOTH exclusion
+    # predicates deleted — every number above stays put and the count silently swallows the 159
+    # turn-row Points again (#10982 review round 4, F2; the agent-infra#3442 shape: the guard
+    # exists, the mutant that reverts the fix does not reach it). Assert the query TEXT, the way
+    # the A5 and A1 siblings in this file already do.
+    histogram = [q for q in projection.g.queries if "AS k" in q]
+    assert len(histogram) == 1, f"expected ONE histogram query, got {len(histogram)}"
+    assert "NOT coalesce(n.is_episodic, false)" in histogram[0], (
+        "the histogram query dropped the is_episodic exclusion, so capture (turn) rows count as "
+        "typed claims — the ~45%-vs-0.6% fold this row exists to prevent")
+    assert "NOT coalesce(n.is_operator, false)" in histogram[0], (
+        "the histogram query dropped the is_operator exclusion, so operator Points count as typed "
+        "claims (#10982 review round 2: `tortoise/quota.py:1133` tests `is_episodic` alone)")
 
 
 def test_the_chain_join_denominator_is_STATEMENTS_only_and_the_cheap_rate_is_not_the_bar():
