@@ -177,7 +177,8 @@ medians are item 6 of the list at the top — taken on one box at `d51c7897d6`,
 re-takeable by the command there: resolution median **0.169 ms**, fingerprint
 median **0.166 ms**, and
 a warm `table_columns()` **0.341 ms** — i.e. the committed warm medians
-(0.332–0.353 ms) ARE those two halves summed, not the fingerprint alone. So the
+(0.332–0.353 ms) ARE those two halves summed plus the caller's own `dict` copy,
+not the fingerprint alone. So the
 residual is ≈**0.68 ms/record** (2 × 0.34), ≈0.33 ms resolution + ≈0.33 ms
 fingerprint. The known fix — compute the fingerprint once per plan build — saves
 ONE pass, **0.160–0.169 ms**, and **leaves the resolution half in place**, so #11388
