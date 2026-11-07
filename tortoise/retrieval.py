@@ -711,15 +711,15 @@ def session_key_of(hit: dict) -> str:
       (**#10540**). This is the spelling the product's own point fetch
       emits: ``tortoise_fts_query`` resolves a Point's session from
       ``n.sessionId`` / the snake prop / the ``:Session`` ``CONTAINS`` edge
-      and then POPs the snake key, so a hit for a captured turn carries the
-      CAMEL key ALONE (:func:`hit_session_id` names the same two sources).
-      Before this the authority read neither camel spelling, so every
-      product turn hit — the grain the C4 arm expands — keyed as a phantom
-      and ``seeded_sessions`` dropped it: re-injection could not fire on a
-      product graph at all, and ``reinjection_merge_order`` could not find
-      the session's own base ranks (the injected group fell to the
-      defensive tail). The arm #8713 measured was therefore inert on
-      exactly the surface it exists to enrich, and the identity the READER
+      and then POPs the snake key, so a TURN hit carries the CAMEL key
+      ALONE (:func:`hit_session_id` names the same two sources). Before
+      this the authority read neither camel spelling, so every product
+      TURN hit — the grain the C4 arm EXPANDS — keyed as a phantom and
+      ``seeded_sessions`` dropped it, so no turn hit could seed its own
+      session, and ``reinjection_merge_order`` could not find a turn-seeded
+      session's own base ranks (the injected group fell to the defensive
+      tail). The arm #8713 measured was therefore inert on the grain it
+      expands, and the identity the READER
       already renders (``hit_session_id``) was dropped one layer below it;
     * else the hit's OWN ``id`` ⇒ ``idx:point:{id}``: two identity-less hits
       are two DISTINCT entities and must not share a bucket. Before #3591
@@ -738,9 +738,9 @@ def session_key_of(hit: dict) -> str:
     :func:`tortoise.session_reinjection.seeded_sessions` drops it and
     ``coverage_loop.coverage_gap`` excludes it from the window census — a
     hit with no session identity cannot seed a session fetch. #3591 made
-    the phantom bucket PER-HIT; #10540 made the phantom branch *fetchable*
-    whenever the hit carries the wire identity, which is what a product hit
-    does.
+    the phantom bucket PER-HIT; #10540 keeps the phantom property and stops
+    hits from falling into it when they carry the wire identity — the key a
+    hit used to get IS the defect, not the bucket it names.
 
     Precedence — why ``sessionId`` sits AFTER the index bucket (#10540):
     every key that already exists stays BYTE-IDENTICAL. The eval's pool
@@ -831,18 +831,23 @@ def dedup_pool(annotated: list[dict], *,
                session_key: Callable[[dict], str] | None = None) -> list[dict]:
     """Per-session chunk cap (rank order): at most ``max_chunks_per_session``
     raw chunks per session survive in the pool (E2E-1 #1540). Bucket key =
-    :func:`session_key_of` (session_id, else the ``lme_session_index``
-    bucket, else — #3591 — a PER-HIT bucket for a hit with no session
-    identity) —
+    :func:`session_key_of` (``session_id``, else the ``lme_session_index``
+    bucket, else the camel ``sessionId`` the product's point fetch emits —
+    #10540 — else — #3591 — a PER-HIT bucket for a hit with no session
+    identity at all) —
     distinct sessions never share a bucket, and neither do two distinct
     identity-less hits. The only shared bucket left is ``idx:-1``, for a hit
     with nothing at all to key on (see :func:`session_key_of`).
     ``idx:point:`` keys are per-hit, so the cap does NOT bind across the
     identity-less population: the pool-wide budget is what bounds it.
+    ⚠️ #10540: a raw chunk carrying ONLY the camel ``sessionId`` used to be
+    exempt from this cap by accident (its phantom bucket was unique per
+    hit); it is now grouped by its real session, so the cap BINDS there.
     Points/turn points are never capped (compact epistemic surface, D3).
 
     ``session_key`` (#1987 Task 4, P2-20): optional per-hit key extractor.
-    Default None = the historical bucket key (session_id / lme index). The
+    Default None = the pool's own bucket key (:func:`session_key_of`:
+    ``session_id`` / ``lme`` index / camel ``sessionId`` / per-hit). The
     ASK lane passes :func:`ask_session_key` — the UNIQUE session identifier
     (``session_id``, else the camel ``sessionId`` the point fetch populates,
     else the annotated ``session_date``) — so distinct IDENTIFIED sessions

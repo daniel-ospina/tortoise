@@ -80,8 +80,10 @@ ONE bounded graph pass:
    product turn Point has no such prop (``capture_session`` writes
    content/kind/speaker/is_episodic and links ``Session-[:CONTAINS]->Point``),
    so a turn HIT keyed as the per-hit phantom ``idx:point:{id}`` and
-   :func:`seeded_sessions` dropped it — meaning the arm fired on NO product
-   graph at all, only on eval graphs whose hits carry snake ids.
+   :func:`seeded_sessions` dropped it — no TURN hit could seed its own
+   session, so the arm could fire only on a pool whose hits carried a real
+   id in a spelling the authority read (an extracted point still carrying
+   ``session_id``, or an eval hit).
 
    ``session_key_of`` now also reads the CAMEL wire identity ``sessionId``,
    which is the spelling the product's own point fetch emits: it resolves the

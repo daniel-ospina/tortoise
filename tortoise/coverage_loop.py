@@ -445,9 +445,11 @@ def _session_of(hit: dict, session_key: Callable[[dict], str] | None = None) -> 
     dependency stays one-way (no cycle under either import order).
 
     The camel ``sessionId`` leg is #10540: without it a product turn hit —
-    the only identity such a hit carries — censused as a phantom, so this
-    window census counted ZERO real sessions for a captured-session graph
-    (the same blindness #10632's instrument removed one layer up).
+    whose only identity is that camel key — censused as a phantom, so for a
+    captured-session pool of TURN hits this window census counted zero real
+    sessions (the same blindness #10632's instrument removed one layer up;
+    a hit whose session is present in a spelling the authority reads was
+    never affected).
     """
     if session_key is not None:
         return session_key(hit)
