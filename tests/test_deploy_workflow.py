@@ -5022,15 +5022,8 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     #: exemption, since read sentence-wide it exempted every occurrence in the sentence).
     #: All three were ADMITTED at the r6 head `382cbb0e007` and REFUSED by `origin/main` and
     #: by the pre-r6 head `b37a6c24abb`: a reversal AFTER the phrase, one in an EARLIER
-    #: sentence, and the `;` spelling. The exemption is read over `_clause_before_phrase`
-    #: (#11191 review r8, P2 — the r7 window was the phrase's SENTENCE, which still let a
-    #: reversal in a preceding COORDINATED clause of that sentence govern the phrase and
-    #: exempt every occurrence in it; `_clause_before_phrase` cuts at the coordinating
-    #: conjunctions too, so that spelling is refused here as `origin/main` refuses it). One
-    #: boundary set for the whole predicate is also the file's own doctrine.
-    #: MEASURED, at `be09daf2d4` + this fix: four coordinated spellings
-    #: ADMIT -> REFUSE (all four refused by `origin/main`), five pinned frame rows unchanged
-    #: ADMITTED, three r7 defect rows unchanged REFUSED.
+    #: sentence, and the `;` spelling. The exemption is now read over
+    #: `_sentence_before_phrase`, which is what makes these rows REFUSED again.
     _REVERSING_FRAME = re.compile(
         r"\bit(?:['\u2019]s\s+not\s+(?:the\s+case|true|correct)"
         r"|\s+is\s+(?:not\s+the\s+case|not\s+true|false|not\s+correct|untrue)"
@@ -5752,6 +5745,43 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
             # figure dated to the phrase and every truthful attribution went RED.
             return norm[start:pos]
 
+        def _sentence_before_phrase(norm: str, pos: int) -> str:
+            """The part of the phrase's OWN SENTENCE that sits BEFORE it.
+
+            ⛔ ONE BOUNDARY SET, AND IT IS COARSER THAN THE CLAUSE'S ON PURPOSE (#11191
+            review r7, P1 — MEASURED fail-open). `_REVERSING_FRAME` is read over THIS
+            window, not over the whole sentence and not over the phrase's clause:
+
+              - NOT THE WHOLE SENTENCE. The reversal must govern the reported frame, and
+                a reversal written AFTER the phrase, or in an EARLIER sentence, is a
+                different proposition. Read sentence-wide it disabled the veto for every
+                occurrence in the paragraph — the defect shape below was ADMITTED while
+                `origin/main` and the pre-r6 head `b37a6c24abb` both REFUSE it:
+                  "The note never says the tree immediately before #9548 was wrong, and it
+                   is not true that the census is 5 lines."
+                  "It is not true that the census is 5 lines. The note never says the tree
+                   immediately before #9548 was wrong."   (and the `;` spelling)
+              - NOT THE PHRASE'S CLAUSE EITHER. `_CLAUSE_DELIM` cuts at `and`/`so`/`since`,
+                so a reversal that governs a COORDINATED reported clause would be cut off
+                from it: "It is not the case that the row is a census, and that the note
+                never says the tree immediately before #9548 was wrong." is a truthful
+                denial of the conjunction and stays admitted here (measured).
+
+            `;` and the dashes ARE boundaries: `_CLAUSE_DELIM` already treats them as
+            clause breaks, and a reversal across one is a different proposition. The full
+            stop is abbreviation-protected with the same sentinel `_sentence_tail_hard`
+            uses — the substitution is LENGTH PRESERVING, so offsets stay valid.
+            """
+            sentinel = "\ue000"
+            src = _ABBREVIATION_PERIOD.sub(lambda _m: _m.group(1) + sentinel, norm)
+            start = 0
+            for _delim in re.finditer(r"[.;\u2014\u2013]", src):
+                if _delim.end() <= pos:
+                    start = _delim.end()
+                elif _delim.start() >= pos:
+                    break
+            return src[start:pos].replace(sentinel, ".")
+
         _ABBREVIATION_PERIOD = re.compile(r"\b(i\.e|e\.g|viz|cf|vs)\.", re.I)
 
         def _ends_a_sentence(text: str) -> bool:
@@ -6120,56 +6150,22 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
             # frame admits the three truthful rows, leaves "Nothing indicates …" refused, and
             # leaves the DEFECT-under-a-reversing-frame shape refused too (it has no
             # refutation term after the phrase, so this arm never bought it).
-            # ⛔ …AND THE EXEMPTION IS SCOPED TO THE PHRASE'S OWN CLAUSE (#11191 review r7,
-            # P1, then r8, P2 — MEASURED fail-open twice, both times a REGRESSION this arm
-            # created). r7 cut the window from the WHOLE SENTENCE down to
-            # "the phrase's sentence", which stopped a reversal written AFTER the phrase or
-            # in an EARLIER sentence from exempting it — but kept a reversal in a PRECEDING
-            # COORDINATED CLAUSE of the same sentence, which is a different proposition:
-            #   "It is not true that the census is 5 lines, and the note never says the tree
-            #    immediately before #9548 was wrong."        -> ADMITTED at `be09daf2d4`,
-            #   "It is not true that the census is 5 lines, but the note never says …"
-            #                                                      REFUSED by `origin/main`
-            # The r7 text defended that as a deliberate trade ("a truthful denial of the
-            # conjunction stays admitted"), and beside it the file claimed the opposite —
-            # "the reversal must govern the occurrence, so a reversal elsewhere is not one"
-            # — which is the line a future fixer reads. It was also wrong on the linguistics:
-            # denying a conjunction does not assert its second conjunct, so the sentence still
-            # reports the refutation and the veto must fire.
-            # The window is now the ONE boundary set every other arm in this predicate uses,
-            # `_clause_before_phrase` (a prior version read the frame over its own coarser
-            # window, `_sentence_before_phrase`, deleted here). ⛔ THAT DELETION ALSO MOVED
-            # THE ABBREVIATION TRADE, WHICH IS MEASURED AND STATED RATHER THAN LEFT IN A
-            # DELETED DOCSTRING: the old window was abbreviation-protected (it substituted a
-            # sentinel for `_ABBREVIATION_PERIOD`'s five members before cutting), and
-            # `_clause_before_phrase` cuts the raw text, so an abbreviation INSIDE the frame
-            # now splits its clause and the exemption is lost:
-            #   "It is not the case that, viz. as the row records, the note never says the
-            #    tree immediately before #9548 was wrong."     -> ADMITTED at `be09daf2d4`,
-            #   "It is not the case that, cf. the row, the note never says …"   REFUSED here,
-            #   "It is not the case that, as row vs. census records, the note never says …"
-            #                                                      REFUSED here
-            # …while the same propositions with no abbreviation stay ADMITTED. That is a
-            # verdict keyed on punctuation, in the REFUSE direction — and `origin/main`
-            # REFUSES all three, so the head moves TOWARD main's polarity rather than away
-            # from it. Not changed here: protecting abbreviations in `_clause_before_phrase`
-            # is a change to the primitive every arm in this predicate reads (27 call sites),
-            # which is not made blind. Filed with its measurement on #11301, which owns that
-            # structural fix.
-            # MEASURED at `be09daf2d4` + this change, one run: the four coordinated spellings
-            # (`, and`, `, but`, `, and` with no `that`, and the `, and that the note never
-            # says …` conjunction denial) flip ADMIT -> REFUSE, agreeing with `origin/main`
-            # on all four, while all five pinned `_REVERSING_FRAME` rows in
-            # `_asserted_refutation` stay ADMITTED (their frames are prefixes in the phrase's
-            # OWN clause) and the three r7 defect rows stay REFUSED. The four are pinned as
-            # REFUSED at `_reported_refutation`.
+            # ⛔ …AND THE EXEMPTION IS SCOPED TO THE OCCURRENCE'S SENTENCE, NOT THE SENTENCE
+            # ITSELF (#11191 review r7, P1 — MEASURED fail-open, 3/3 rows, a REGRESSION this
+            # arm created: read over `norm`, a reversal ANYWHERE in the sentence — including
+            # after the phrase — exempted every occurrence in it). `_sentence_before_phrase`
+            # carries the window, the two directions it must not cross, and the coordinated
+            # denial it must keep admitting. The three defect rows are pinned as REFUSED at
+            # `_reported_refutation`.
             if (
                 _REFUTED_AFTER.match(norm, phrase.start())
                 and _TRUE_TREE not in norm
                 and not _REVERSING_FRAME.search(
-                    _before_phrase := _clause_before_phrase(norm, phrase.start())
+                    _sentence_before_phrase(norm, phrase.start())
                 )
-                and _REPORTED_NOT_ASSERTED.search(_before_phrase)
+                and _REPORTED_NOT_ASSERTED.search(
+                    _clause_before_phrase(norm, phrase.start())
+                )
             ):
                 return False
 
@@ -9974,36 +9970,12 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "before #9548 was wrong.",
         "It is not true that the census is 5 lines; the note never says the tree immediately "
         "before #9548 was wrong.",
-        # ⛔ …AND THE WINDOW IS THE PHRASE'S CLAUSE, NOT ITS WHOLE SENTENCE (#11191 review r8,
-        # P2 — MEASURED fail-open, 4/4 rows, a REGRESSION the r7 window still carried: a
-        # reversal in a PRECEDING COORDINATED CLAUSE of the same sentence is a different
-        # proposition, but the sentence window let it govern the phrase and exempt the veto).
-        # All four were ADMITTED at `be09daf2d4` and are REFUSED by `origin/main`:
-        "It is not true that the census is 5 lines, and the note never says the tree "
-        "immediately before #9548 was wrong.",
-        "It is not true that the census is 5 lines, but the note never says the tree "
-        "immediately before #9548 was wrong.",
-        "It is not the case that the census is 5 lines, and the note never says the tree "
-        "immediately before #9548 was wrong.",
-        "It is not the case that the row is a census, and that the note never says the tree "
-        "immediately before #9548 was wrong.",
-        # ⚠️ DISCLOSED, NOT CLOSED (#11191 review r6, P2; SCOPE CORRECTED by review r7, P2;
-        # MECHANISM CORRECTED by review r8, P2 — the r6 text claimed the surviving class was
-        # ONE shape, `and`-coordinated, "a clause, not an aside", and the r7 text said the
-        # mechanism was `_CLAUSE_DELIM`, not coordination. Measured, BOTH are wrong — there is
-        # no single mechanism. The class is EVERY ASIDE WHOSE OWN TEXT ENDS THE REPORTING
-        # FRAME, and it has TWO deciding arms:
-        #   - a COORDINATOR or `;`/dash inside the aside -> `_CLAUSE_DELIM` cuts the clause
-        #     before the phrase, so the frame's complement is cut off from it;
-        #   - a `:` inside the aside -> NOT `_CLAUSE_DELIM` (`:4739` has no `:` member); the
-        #     deciding arm is `_REPORTED_NOT_ASSERTED`'s tail `[^.;:\u2014\u2013]*$`
-        #     (`:4993`), whose excluded `:` stops the gap. MEASURED by single-character
-        #     mutation: dropping `:` from that tail flips both `:` rows below to REFUSED and
-        #     leaves the coordinated rows ADMITTED.
-        # So the remedy this text used to point at (make clause cutting paren-depth aware)
-        # closes the FIRST arm only and leaves the `:` rows open. Each row below is ADMITTED
-        # here and REFUSED by `origin/main`, and each was ADMITTED at the pre-r6 head
-        # `b37a6c24abb` too:
+        # ⚠️ DISCLOSED, NOT CLOSED (#11191 review r6, P2; SCOPE CORRECTED by review r7, P2 —
+        # the r6 text claimed the surviving class was ONE shape, `and`-coordinated, "a clause,
+        # not an aside". Measured, that is false, so the disclosure is stated as it is: the
+        # class is EVERY ASIDE WHOSE OWN TEXT ENDS THE REPORTING FRAME, and the mechanism is
+        # `_CLAUSE_DELIM`, not coordination. Each row below is ADMITTED here and REFUSED by
+        # `origin/main`, and each was ADMITTED at the pre-r6 head `b37a6c24abb` too:
         #   "The note never says (and the row agrees) that the tree immediately before #9548
         #    was wrong."                                      -> ADMITTED here, main REFUSES
         #   "The note never says (but the row agrees) that the tree immediately before #9548
@@ -10014,27 +9986,7 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         #    immediately before #9548 was wrong."              -> same
         # The last one has NO coordinated clause at all: the `;` is INSIDE the aside, and
         # `_clause_before_phrase` cuts at `;` regardless of paren depth, so the aside's own
-        # interior ends the reporting frame. A `:` aside is the same class by the second arm
-        # above:
-        #   "The note never says (as the row records: nothing) that the tree immediately
-        #    before #9548 was wrong."                          -> ADMITTED here, main REFUSES
-        #   "The note never says, as the row records: nothing, that the tree immediately
-        #    before #9548 was wrong."                           -> same
-        # …and the `_REVERSING_FRAME` arm keys a few verdicts on the punctuation INSIDE the
-        # frame, in the REFUSE direction (r8, P3 — MEASURED, not changed by design; the
-        # abbreviation spellings the r8 window change DID move are stated at the veto itself):
-        # an em-dash
-        # incise or a decimal point splits the frame's clause, so
-        #   "It is not the case that — as the row records — the note never says … was wrong."
-        #      -> REFUSED here, and REFUSED by `origin/main` (as are its comma and
-        #         parenthetical twins, which this head ADMITS — the r6 fix's direction)
-        #   "It is not true that the census is 5.5 lines, and the note never says …"
-        #      -> REFUSED here, REFUSED by `origin/main`
-        # i.e. the dash is a CLAUSE break under `_CLAUSE_DELIM` and a decimal point is a full
-        # stop to its `[.;\u2014\u2013]` arm, both by existing doctrine, so this is not
-        # changed: it is stated, because a verdict keyed on a spelling is the pattern this
-        # predicate keeps closing and an unstated one is the same defect with better manners.
-        # Closing the class needs clause cutting to be
+        # interior ends the reporting frame. Closing the class needs clause cutting to be
         # paren-depth aware — a change to the primitive every arm in this predicate reads
         # (27 call sites), which is not made blind here. Filed with its measurement on
         # #11304, which owns the surviving-prose-families list; #11301 owns the structural
