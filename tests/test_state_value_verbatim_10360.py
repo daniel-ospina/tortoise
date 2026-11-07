@@ -1684,7 +1684,18 @@ _RESIDUAL_OPENNESS = (
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
     r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
     r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
-    r"(?<![n']t\s)(?<![n']t\sbeen\s)\bopen(?:s|ed|ing)?\s+again\b",
+    r"(?<![n']t\s)(?<![n']t\sbeen\s)"
+    # ⛔ THE ARM AND THIS RUN ARE ONE UNIT (#11258 review round 17 `P1`, MEASURED):
+    # widening the ARM to `open(?:s|ed|ing)?` without widening the RUN turned five
+    # honest closures into FALSE BLOCKS — `no longer opens again`, `is no longer
+    # opened again`, `is no longer opening again`, `hasn't yet opened again`,
+    # `hasn't ever opened again` were GREEN while the arm read only `open again`
+    # (no match at all) and RED the moment it read the inflection. An inflection
+    # added to the arm needs its own negation form HERE, and every form in this run
+    # has a must-stay-GREEN partner in `_RESIDUAL_TRUTHFUL_STATEMENTS`. The run is
+    # carried in BOTH sites because the two drift independently.
+    r"(?<!no longer\s)(?<![n']t\syet\s)(?<![n']t\sever\s)"
+    r"\bopen(?:s|ed|ing)?\s+again\b",
 )
 
 #: The ANCHORED arm: `<verb> … open` and the opening verb. ⛔ NO HYPHEN EXCEPTION —
@@ -1713,7 +1724,14 @@ _RESIDUAL_OPEN_VERBS = (
 _RESIDUAL_NEGATED_OPEN = (
     r"(?!\s*(?:\w+\s+)?(?:not|never)\s+"
     r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
-    r"completely|actually|wholly|truly|strictly)\s+)?(?:fail-)?open\b)"
+    r"completely|actually|wholly|truly|strictly)\s+)?"
+    # ⛔ AND THE PARTICIPLE, the OTHER half of the round-17 `P2` fix — in ALL THREE
+    # post-negator slots (`not`/`never`, `no longer`, `n't`), because a class fixed
+    # in one of three places is the defect rounds 11-12 were spent on. It sits
+    # AFTER the adverb slot, so every polarity flipper round 2's regression let
+    # through (`not only kept open`, `not merely held open`) still cannot reach
+    # `open` and stays RED — pinned as mutations, not asserted.
+    r"(?:(?:kept|held)\s+)?(?:fail-)?open\b)"
     # ⛔ `no longer` IS ITS OWN LOOKAHEAD, not a member of the `not|never` group
     # (#11258 review round 13 `P2`, MEASURED): it hard-coded `no\s+longer\s+`, so
     # `the ADJACENCY half is no longer open.` was GREEN (truthful, pinned) while
@@ -1732,10 +1750,24 @@ _RESIDUAL_NEGATED_OPEN = (
     r"(?![^.;]{0,25}?\b(?:merely|only|just|simply|far\s+from)\b)"
     r"[^.;]{0,25}?"
     r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
-    r"completely|actually|wholly|truly|strictly)\s+)?(?:fail-)?open\b)"
+    r"completely|actually|wholly|truly|strictly)\s+)?"
+    # ⛔ AND THE PARTICIPLE, the OTHER half of the round-17 `P2` fix — in ALL THREE
+    # post-negator slots (`not`/`never`, `no longer`, `n't`), because a class fixed
+    # in one of three places is the defect rounds 11-12 were spent on. It sits
+    # AFTER the adverb slot, so every polarity flipper round 2's regression let
+    # through (`not only kept open`, `not merely held open`) still cannot reach
+    # `open` and stays RED — pinned as mutations, not asserted.
+    r"(?:(?:kept|held)\s+)?(?:fail-)?open\b)"
     r"(?!\s*(?:\w+\s+)?n't\s+"
     r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
-    r"completely|actually|wholly|truly|strictly)\s+)?(?:fail-)?open\b)")
+    r"completely|actually|wholly|truly|strictly)\s+)?"
+    # ⛔ AND THE PARTICIPLE, the OTHER half of the round-17 `P2` fix — in ALL THREE
+    # post-negator slots (`not`/`never`, `no longer`, `n't`), because a class fixed
+    # in one of three places is the defect rounds 11-12 were spent on. It sits
+    # AFTER the adverb slot, so every polarity flipper round 2's regression let
+    # through (`not only kept open`, `not merely held open`) still cannot reach
+    # `open` and stays RED — pinned as mutations, not asserted.
+    r"(?:(?:kept|held)\s+)?(?:fail-)?open\b)")
 
 #: `fails open` (no hyphen) is the row's OWN vocabulary for the same thing, and it
 #: is read CLAUSE-anchored rather than by adding `fails?` to the verb list above:
@@ -1776,7 +1808,18 @@ _RESIDUAL_ANCHORED_OPENNESS = (
     # The lookbehind is a FIXED-WIDTH literal (`no longer ` is exactly 10 chars),
     # which a Python lookbehind requires — `\s+`/`\b` make the pattern
     # variable-width and `re` refuses it outright (measured).
-    r"(?<!no longer )\b(" + _RESIDUAL_OPEN_VERBS + r")\b"
+    # ⛔ ROUND 17 `P2`: that lookbehind covered `no longer` ONLY, and the pair of
+    # costs the ledger used to carry (`is not kept open.` / `is not held open.`)
+    # was RECORDED as unfixable — which was WRONG and is corrected here by
+    # measurement. The two halves are each INERT ALONE and ADDITIVE TOGETHER: the
+    # participle in the veto slot alone changes nothing (the match arrives through
+    # the PARTICIPLE as the verb, so the negator is on the wrong side of that
+    # slot), and `not`/`never` in front of the verb alone is not enough either —
+    # but the two together make both denials GREEN while `not only kept open` /
+    # `not merely held open` (which ASSERT openness) stay RED. Measured: 0
+    # mutations lose RED, 0 truthful statements go RED.
+    r"(?<!no longer )"
+    r"(?<!\bnot )(?<!\bnever )(?<![n']t )\b(" + _RESIDUAL_OPEN_VERBS + r")\b"
     + _RESIDUAL_NEGATED_OPEN
     + r"(?:(?!\b(?:and|but)\s+(?:\w+\s+){0,4}?"
     r"(?:is|are|was|were|fails?|stays?|remains?|keeps?|holds?)\b)[^.;]){0,40}?"
@@ -1822,7 +1865,18 @@ _SPELLING_FLOOR = (
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
     r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
     r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
-    r"(?<![n']t\s)(?<![n']t\sbeen\s)\bopen(?:s|ed|ing)?\s+again\b",
+    r"(?<![n']t\s)(?<![n']t\sbeen\s)"
+    # ⛔ THE ARM AND THIS RUN ARE ONE UNIT (#11258 review round 17 `P1`, MEASURED):
+    # widening the ARM to `open(?:s|ed|ing)?` without widening the RUN turned five
+    # honest closures into FALSE BLOCKS — `no longer opens again`, `is no longer
+    # opened again`, `is no longer opening again`, `hasn't yet opened again`,
+    # `hasn't ever opened again` were GREEN while the arm read only `open again`
+    # (no match at all) and RED the moment it read the inflection. An inflection
+    # added to the arm needs its own negation form HERE, and every form in this run
+    # has a must-stay-GREEN partner in `_RESIDUAL_TRUTHFUL_STATEMENTS`. The run is
+    # carried in BOTH sites because the two drift independently.
+    r"(?<!no longer\s)(?<![n']t\syet\s)(?<![n']t\sever\s)"
+    r"\bopen(?:s|ed|ing)?\s+again\b",
 )
 
 #: The row that FOLLOWS the residual list. The proof test anchors its append point
@@ -2065,7 +2119,7 @@ def _is_honest_spelling(text: str) -> bool:
     membership (adjacency, the time-unit spelling, the carve-out, the retention
     guarantee, the value class, the numeric side) PLUS the unit vocabulary
     (`units?`, `unit word`, `kg`, `mi`, `mos`, `millisec(s)`) and the bare
-    `(?<!['\u2019])\b[ms]\b` abbreviation alternative. The unit arms are not
+    `(?<!['’])\b[ms]\b` abbreviation alternative. The unit arms are not
     decoration: the row's surviving gap IS the unit-spelling class, so a waiver
     that read only the anchor let `the spelling gap is open because `kg` is no
     longer fused` through (#11258 review round 5 `P1`, measured). What the anchor
@@ -2497,25 +2551,37 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     "the SPELLING gap is no longer judged.",
     "the SPELLING gap is no longer retained.",
     # ⛔ THE `open again` ARM READ ONLY THE UNINFLECTED LEMMA (#11258 review round 16
-    # `P0`, MEASURED). `\bopen\s+again\b` is the phrase the row itself writes, so
-    # every inflected spelling of it was GREEN — `opens`, `has opened`, `is
-    # opening` — while `is open again` RED. One character class wide, and NOT one
-    # of the disclosed residuals: the disclosure names shapes phrased with NONE of
-    # this arm's words, and these are phrased with the arm's own word. Fixed at
-    # both sites (`_RESIDUAL_OPENNESS` and `_SPELLING_FLOOR`, which is the ONLY
-    # tuple the honest-`spelling` path runs).
-    # ⛔ AND EACH SITE NEEDS ITS OWN PIN, which those three were NOT (#11258 review
-    # round 17 `P1`, MEASURED): they name `the ADJACENCY gap`, so they carry the
-    # class anchor, so the waiver never fires and `_SPELLING_FLOOR` is never
-    # reached — narrowing the FLOOR's arm back to `\bopen\s+again\b` left the
-    # whole suite GREEN (103 passed). A `spelling`-subject sentence IS the only
-    # shape that runs the floor, so the next three are the floor's own falsifiers.
+    # `P0`, MEASURED). `\bopen\s+again\b` matched `is open again` and nothing else,
+    # so every inflected spelling was GREEN — `opens`, `has opened`, `is opening`.
+    # One character class wide, and NOT one of the disclosed residuals: the
+    # disclosure names shapes phrased with NONE of this arm's words, while these
+    # carry the arm's own word `open` (⛔ NOT "the row's own phrase" — round 17
+    # `P2` corrected that claim: `grep -ci 'open[- ]again' config/v4-mechanisms.yml`
+    # is **0**, the row writes `open`/`opens`/`fails open`/`open on purpose` and no
+    # form of `open again`; the argument rests on the WORD, not on the row).
+    # Fixed at both sites (`_RESIDUAL_OPENNESS` and `_SPELLING_FLOOR`, which is the
+    # ONLY tuple the honest-`spelling` path runs), and pinned at BOTH — round 17
+    # `P0` measured that reverting the second site alone left the whole file green.
     "the ADJACENCY gap opens again.",
     "the ADJACENCY gap has opened again.",
     "the ADJACENCY gap is opening again.",
+    # ⛔ AND THE SAME THREE ON THE WAIVED PATH (#11258 review round 17 `P0`, MEASURED).
+    # The three above are class-anchored, so they run `_RESIDUAL_OPENNESS`; a waived
+    # sentence runs `_SPELLING_FLOOR` ONLY. Reverting the second site alone left the
+    # WHOLE FILE green while `the SPELLING gap opens again.` went GREEN — the exact
+    # "an arm is deletable while both tests pass" failure this proof list exists to
+    # refuse, and the claim that the two sites were "pinned, one per inflection" was
+    # false until these three existed.
     "the SPELLING gap opens again.",
     "the SPELLING gap has opened again.",
     "the SPELLING gap is opening again.",
+    # ⛔ ROUND 17 `P2`: the participle in the negation veto must not swallow a
+    # POLARITY FLIPPER. These are the round-2 regression's own shapes, one verb
+    # over — `not only kept open` ASSERTS the gap is wide open, and the veto that
+    # makes `not kept open` an honest closure must not reach it.
+    "the ADJACENCY half is not only kept open.",
+    "the ADJACENCY half is not merely held open.",
+    "the ADJACENCY half isn't only kept open.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -2646,6 +2712,22 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     # needs its own measured partner or a later widening reds it silently.
     "the ADJACENCY half is not open again.",
     "the ADJACENCY half has not been opened again.",
+    # ⛔ ROUND 17 `P1`: the widened `open(?:s|ed|ing)?` arm needs the negation RUN
+    # widened with it, or these five honest closures are FALSE BLOCKS — they were
+    # GREEN when the arm read only `open again` (no match) and RED the moment it
+    # read the inflection. One partner per new negation form, because the run is a
+    # fixed-width enumeration and a form without a partner drifts silently.
+    "the ADJACENCY half no longer opens again.",
+    "the ADJACENCY half is no longer opened again.",
+    "the ADJACENCY half is no longer opening again.",
+    "the ADJACENCY half hasn't yet opened again.",
+    "the ADJACENCY half hasn't ever opened again.",
+    # round 17 `P2`: the two `not kept open` / `not held open` costs REPAIRED and
+    # moved here from `_RESIDUAL_REFUSED_TRUTHFUL` — the route that ledger's own
+    # instruction prescribes when a cost stops being paid.
+    "the ADJACENCY half is not kept open.",
+    "the ADJACENCY gap is not held open.",
+    "the ADJACENCY gap isn't kept open.",
 )
 
 #: ⛔ THE OVER-BLOCK LEDGER: truthful statements this pin REFUSES, each MEASURED
@@ -2720,22 +2802,16 @@ _RESIDUAL_REFUSED_TRUTHFUL = (
     "the ADJACENCY half is not merely closed, it is fused.",
     "the ADJACENCY half is not just closed but fused.",
     "the ADJACENCY half is not closed again since the tables landed.",
-    # ⛔ THE PARTICIPLE SLOT, BOTH DIRECTIONS (#11258 review round 16 `P1`,
-    # MEASURED). `_RESIDUAL_OPEN_VERBS` carries `keep`/`kept`/`hold`/`held`, so this
-    # file pins `the ADJACENCY gap is kept open.` and `… is held open.` as
-    # REOPENINGS; their plain negations are REFUSED while the `no longer` twin
-    # (`… is no longer kept open.`) is GREEN — an over-block recorded nowhere.
-    # ⛔ WHY IT IS RECORDED AND NOT FIXED, stated because the obvious fix does not
-    # work and was MEASURED: the negation veto in `_RESIDUAL_NEGATED_OPEN` sits
-    # AFTER the verb, and the match here arrives through the PARTICIPLE as the
-    # verb (`kept open`), so the negator is on the WRONG SIDE of the slot — adding
-    # `(?:(?:kept|held)\s+)?` to that veto changes nothing (measured: both still
-    # RED). Widening it to reach backwards means another fixed-width negator
-    # enumeration in front of the verb group, which is the shape of every
-    # coverage regression this loop has had to undo (rounds 2, 9, 10). The ledger
-    # is the recorded home for exactly this trade.
-    "the ADJACENCY half is not kept open.",
-    "the ADJACENCY gap is not held open.",
+    # ⛔ THE PARTICIPLE SLOT SAID "NOT FIXED" AND THAT WAS WRONG (#11258 review
+    # round 17 `P2`, MEASURED — this is the correction). Round 16 recorded
+    # `… is not kept open.` / `… is not held open.` here as an unfixable cost on
+    # the grounds that "the veto sits after the verb and the match arrives through
+    # the participle". The DIAGNOSIS was right and the CONCLUSION was not: each
+    # half alone is inert, and the two together fix both denials — a
+    # `not`/`never` lookbehind in front of the VERB group (so the participle
+    # cannot BE the verb when it is negated) plus the participle in the veto slot.
+    # Both now live in `_RESIDUAL_TRUTHFUL_STATEMENTS`, which is the route this
+    # ledger's own instruction prescribes when a cost stops being paid.
     # ⛔ `, so ` IS NOT A CLAUSE SPLIT (#11258 review round 16 `P1`, MEASURED). The
     # sentence names BOTH classes and closes the first, but `_RESIDUAL_CLAUSE_SPLIT`
     # does not break on `, so `, so the anchored `stays open` arm judges the union
@@ -2910,10 +2986,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 132, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 135, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (132), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (135), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
@@ -2922,10 +2998,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
         "A `>=` at the current length costs nothing on growth and refuses any "
         "shrinkage; raise it in the same commit that adds proofs.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 45, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 53, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (45 — raised in the commit AFTER the two contraction "
+        "CURRENT LENGTH (53 — raised in the commit AFTER the two contraction "
         "falsifiers landed, which is the 2-entry slack this closed), i.e. ZERO "
         "SLACK, the same rule the ledger and the "
         "mutation list carry: it was `>= 30` against a 33-entry list, so three "
@@ -2942,11 +3018,11 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         _RESIDUAL_REFUSED_TRUTHFUL), (
         "the over-block ledger has duplicate entries — a duplicate pays for a "
         "dropped cost while the count stays constant")
-    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 12, (
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 10, (
         "the over-block ledger SHRANK below its floor — each entry is a measured "
         "cost of a rule that cannot be widened without a coverage regression; "
         "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (12), i.e. ZERO SLACK: the round-11 entries are the "
+        "CURRENT LENGTH (10), i.e. ZERO SLACK: the round-11 entries are the "
         "`not … closed` cost, and slack above them is slack to delete it with")
     for required in (
             # the unit-token waiver cost — the one a lane actually meets, because
