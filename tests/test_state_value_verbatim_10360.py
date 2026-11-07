@@ -1699,7 +1699,22 @@ _RESIDUAL_OPENNESS = (
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
     r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
     r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
-    r"(?<![n']t\s)(?<![n']t\sbeen\s)"
+    # ⛔ THE APOSTROPHE CLASS CARRIES U+2019 (#11258 review round 22 `P2`,
+    # MEASURED): the contraction ARM already accepts the typographic apostrophe
+    # (`n['\u2019]?t`), and so does every other spelling arm — but the negation
+    # RUNS spelled only `'`, so `the ADJACENCY gap hasn’t been open again.` (the
+    # smart-quote form macOS supplies for free) was REFUSED while its ASCII twin
+    # stayed GREEN, and NO ledger entry re-measured the difference. That
+    # breaks this artifact's own rule — an over-block is acceptable only if
+    # RECORDED — and it is the false block that ends with the pin being deleted.
+    # ⛔ MEASURED at `6c3c18b8280f`: SEVEN truthful denials were GREEN/ASCII and
+    # RED/curly. Both characters therefore belong in the class at EVERY run site,
+    # and the invariant that keeps them there is
+    # `test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling`,
+    # which re-measures every proof-list shape in both spellings — so a site that
+    # loses `’` reds for the shape that exercises it. Fixed width is unchanged:
+    # `[n'’]t` is still three chars, so every lookbehind stays legal.
+    r"(?<![n'\u2019]t\s)(?<![n'\u2019]t\sbeen\s)"
     # ⛔ THE ARM AND THIS RUN ARE ONE UNIT (#11258 review round 17 `P1`, MEASURED):
     # widening the ARM to `open(?:s|ed|ing)?` without widening the RUN turned five
     # honest closures into FALSE BLOCKS — `no longer opens again`, `is no longer
@@ -1714,7 +1729,7 @@ _RESIDUAL_OPENNESS = (
     # deleting this site's copy left the whole file GREEN while five honest waived
     # denials went RED. The `the ADJACENCY half …` partners pin occurrence #1; the
     # `the SPELLING gap …` partners pin THIS one.
-    r"(?<!no longer\s)(?<![n']t\syet\s)(?<![n']t\sever\s)"
+    r"(?<!no longer\s)(?<![n'\u2019]t\syet\s)(?<![n'\u2019]t\sever\s)"
     r"\bopen(?:s|ed|ing)?\s+again\b",
 )
 
@@ -1778,7 +1793,17 @@ _RESIDUAL_NEGATED_OPEN = (
     # through (`not only kept open`, `not merely held open`) still cannot reach
     # `open` and stays RED — pinned as mutations, not asserted.
     r"(?:(?:kept|held)\s+)?(?:fail-)?open\b)"
-    r"(?!\s*(?:\w+\s+)?n't\s+"
+    # ⛔ `’` IS IN THE CLASS HERE FOR PARITY, and this site is NOT a falsifier
+    # (#11258 review round 22, MEASURED): a contraction attaches to its own
+    # auxiliary (`isn’t` = `isn` + `’t`), and `\b(is|are|…)\b` cannot match the
+    # `is` of `isn’t` for EITHER apostrophe — so this lookahead's `n't` branch
+    # cannot fire on well-formed English. The guard that actually keeps a
+    # contracted denial out of this arm is the `(?<![n'’]t )` LOOKBEHIND (it vetoes
+    # the participle verbs `kept`/`held` when the contraction precedes them), which
+    # is why `the ADJACENCY gap isn’t kept open.` is GREEN. The class is widened
+    # anyway so that a lane reading any one run site cannot conclude the
+    # typographic apostrophe is handled "somewhere else".
+    r"(?!\s*(?:\w+\s+)?n['\u2019]t\s+"
     r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
     r"completely|actually|wholly|truly|strictly)\s+)?"
     # ⛔ AND THE PARTICIPLE, the OTHER half of the round-17 `P2` fix — in ALL THREE
@@ -1842,7 +1867,9 @@ _RESIDUAL_ANCHORED_OPENNESS = (
     # `not merely held open` (which ASSERT openness) stay RED. Measured: 0
     # mutations lose RED, 0 truthful statements go RED.
     r"(?<!no longer )"
-    r"(?<!\bnot )(?<!\bnever )(?<![n']t )\b(" + _RESIDUAL_OPEN_VERBS + r")\b"
+    # ⛔ `’` IS IN THE CLASS HERE TOO — see the apostrophe note on the
+    # `_RESIDUAL_OPENNESS` negation run.
+    r"(?<!\bnot )(?<!\bnever )(?<![n'\u2019]t )\b(" + _RESIDUAL_OPEN_VERBS + r")\b"
     + _RESIDUAL_NEGATED_OPEN
     + r"(?:(?!\b(?:and|but)\s+(?:\w+\s+){0,4}?"
     r"(?:is|are|was|were|fails?|stays?|remains?|keeps?|holds?)\b)[^.;]){0,40}?"
@@ -1872,7 +1899,9 @@ _RESIDUAL_ANCHORED_OPENNESS = (
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
     r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
     r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
-    r"(?<![n']t\s)(?<![n']t\sbeen\s)\bre-?open",
+    # ⛔ `’` IS IN THE CLASS HERE TOO — see the apostrophe note on the
+    # `_RESIDUAL_OPENNESS` negation run.
+    r"(?<![n'\u2019]t\s)(?<![n'\u2019]t\sbeen\s)\bre-?open",
     *_RESIDUAL_CLOSED_VERDICT,
 )
 
@@ -1897,7 +1926,10 @@ _SPELLING_FLOOR = (
     r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
     r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
     r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
-    r"(?<![n']t\s)(?<![n']t\sbeen\s)"
+    # ⛔ `\u2019` HERE TOO — the apostrophe note on the `_RESIDUAL_OPENNESS` run
+    # applies to this copy verbatim, and this copy has drifted from that one once
+    # already (round 18 `P0`, MEASURED).
+    r"(?<![n'\u2019]t\s)(?<![n'\u2019]t\sbeen\s)"
     # ⛔ THE ARM AND THIS RUN ARE ONE UNIT (#11258 review round 17 `P1`, MEASURED):
     # widening the ARM to `open(?:s|ed|ing)?` without widening the RUN turned five
     # honest closures into FALSE BLOCKS — `no longer opens again`, `is no longer
@@ -1912,7 +1944,7 @@ _SPELLING_FLOOR = (
     # deleting this site's copy left the whole file GREEN while five honest waived
     # denials went RED. The `the ADJACENCY half …` partners pin occurrence #1; the
     # `the SPELLING gap …` partners pin THIS one.
-    r"(?<!no longer\s)(?<![n']t\syet\s)(?<![n']t\sever\s)"
+    r"(?<!no longer\s)(?<![n'\u2019]t\syet\s)(?<![n'\u2019]t\sever\s)"
     r"\bopen(?:s|ed|ing)?\s+again\b",
 )
 
@@ -2015,7 +2047,11 @@ _RESIDUAL_CLAUSE_SPLIT = (
     # segment, so `_RESIDUAL_CLOSED_VERDICT` reads it whole). The bar narrows WHO
     # may split at `yet`; the lookahead still decides WHERE it may not.
     r";|,?\s+(?:(?:and|but|while|whereas|although|though)\s+"
-    r"|(?<![n']t\s)(?<!\bnot\s)(?<!\bnever\s)yet\s+)"
+    # ⛔ `’` IS IN THE CLASS HERE TOO: the bar exists to keep a negator attached to
+    # its `yet`, and it was the round-18 `P1` fix — with the ASCII-only class the
+    # curly spelling severed it again, so the verdict depended on unrelated
+    # content in the sentence, which is exactly what that round removed.
+    r"|(?<![n'\u2019]t\s)(?<!\bnot\s)(?<!\bnever\s)yet\s+)"
     # ⛔ THE COORDINATOR MUST NOT BITE INSIDE A VERDICT'S OWN TEXT. `has yet to be
     # closed` splits at `yet` and `anything but closed` at `but`; severing them put
     # the two halves of `_RESIDUAL_CLOSED_VERDICT` in different segments, so after an
@@ -2024,44 +2060,6 @@ _RESIDUAL_CLAUSE_SPLIT = (
     # the half has yet to be closed, per the ADJACENCY row` was GREEN while the same
     # claim with the anchor first was RED (#11258 review round 7 `P1`, measured).
     r"(?!(?:to\s+be\s+closed|closed)\b)")
-
-def _match_is_honest_spelling_disclosure(sentence: str, match) -> bool:
-    """Is `match` a closed verdict INSIDE an honest SPELLING disclosure?
-
-    ⛔ CLAUSE CONTAINMENT, and that is only possible because the splitter no longer
-    bites inside these verdicts' own text (`has yet to be closed` used to split at
-    `yet`) — see `_RESIDUAL_CLAUSE_SPLIT`. The clause whose SPAN holds the match must
-    itself be an honest `spelling` disclosure: `the SPELLING gap has yet to be
-    closed, while the carve-out's ADJACENCY half is CLOSED` passes, and
-    `the SPELLING gap is open, and the half has yet to be closed, per the ADJACENCY
-    row` reds.
-
-    ⛔ IT WAS ONE-SIDED FOR A REVISION: the old test looked BACKWARDS for
-    `spelling` and only for an anchor before the match, so a verdict whose anchor
-    sat AFTER it read as an honest disclosure.
-
-    ⛔ AND THE FAIL-OPEN THAT JUSTIFIED THE FIX IS NOT WHAT IT BUYS — measured at
-    `474435d658`: with this helper defeated to `return True` (every match called an
-    honest disclosure) `the half has yet to be closed, per the ADJACENCY row` is
-    STILL RED, because `_RESIDUAL_OPENNESS` matches it independently; the helper's
-    claim only ever DUPLICATES a claim those arms already make (2 claims → 1 for
-    every closed-verdict shape probed), and all 103 tests stay green. So do not
-    read this as the guard that closes that hole.
-    What it IS load-bearing for is the OTHER direction, also measured: defeated to
-    always-`False`, `the SPELLING gap has yet to be closed, while the carve-out's
-    ADJACENCY half is CLOSED` goes from GREEN to RED — a FALSE BLOCK on a
-    disclosure that is true by this row's own text, `_RESIDUAL_TRUTHFUL_STATEMENTS`
-    catches it, and the suite reds. The clause-containment rule below is what keeps
-    the two verdicts apart; the fail-open reading of it is history, not coverage.
-    """
-    start = 0
-    for part in re.split(f"({_RESIDUAL_CLAUSE_SPLIT})", sentence):
-        end = start + len(part)
-        if start <= match.start() < end or (start <= match.end() <= end):
-            return _is_honest_spelling(part)
-        start = end
-    return False
-
 
 def _residual_reopening_claims(text: str) -> list[str]:
     """Every claim in the residual region that REOPENS a gap the row closed.
@@ -2098,30 +2096,32 @@ def _residual_reopening_claims(text: str) -> list[str]:
         # left is scanned.
         clauses = re.split(_RESIDUAL_CLAUSE_SPLIT, sentence)
         honest = [c for c in clauses if _is_honest_spelling(c)]
-        # ⛔ THE NEGATED CLOSED VERDICTS ARE SCANNED ON THE WHOLE SENTENCE, before any
-        # clause surgery, because their own text CONTAINS splitter words:
-        # `has yet to be closed` splits at `yet`, `anything but closed` at `but`,
-        # and removing an honest `spelling` clause then rejoins the pieces — so the
-        # pattern's two halves land in different segments and it never matches
-        # (`the SPELLING gap is open, and the time-unit half has yet to be closed`
-        # was GREEN, #11258 review round 5 `P2`, measured).
-        # ⚠️ AND THAT SENTENCE SCOPE OVER-BLOCKS, measured: it judges the union of
-        # both clauses, so `the SPELLING gap has never been closed, and the
-        # ADJACENCY half is closed by the tables` red even though the closed-
-        # verdict phrase sits inside the HONEST clause — and both halves are true
-        # by this row's own text (#11258 review round 6 `P2`). A match whose span
-        # is contained in an honest clause's own match is a disclosure, not a
-        # reopening, so it is dropped.
-        if _RESIDUAL_CLASS_ANCHOR.search(sentence):
-            for pattern in _RESIDUAL_CLOSED_VERDICT:
-                m = re.search(pattern, sentence)
-                if m is None:
-                    continue
-                if _match_is_honest_spelling_disclosure(sentence, m):
-                    continue
-                claims.append(
-                    f"{m.group(0)!r} in sentence {sentence.strip()!r}")
-                break
+        # ⛔ THE NEGATED CLOSED VERDICTS DO NOT NEED A SENTENCE-SCOPED PASS, and the
+        # one that sat HERE has been DELETED (#11258 review round 22 `P2`, MEASURED).
+        # Its job was round 5's `P2` (`has yet to be closed` splits at `yet`,
+        # `anything but closed` at `but`, and rejoining the pieces put the pattern's
+        # two halves in different segments). That job is now done by the SPLITTER's
+        # own lookahead, `(?!(?:to\s+be\s+closed|closed)\b)` in
+        # `_RESIDUAL_CLAUSE_SPLIT` (round 7), so this pass supplied nothing — and a
+        # review measured it DELETEABLE WHILE GREEN: removing the loop and its helper
+        # left 135/135 mutations RED, every truthful statement GREEN, 15/15 ledger
+        # entries refused and the row green. It is the class rounds 17/18 filed as
+        # `P0` (an arm deletable while green), so it is gone rather than left looking
+        # like coverage; its helper `_match_is_honest_spelling_disclosure` had no
+        # other caller and went with it.
+        # ⛔ WHY IT COULD NOT BE RESCUED WITH A FALSIFIER: `_RESIDUAL_CLOSED_VERDICT`
+        # also travels in `_RESIDUAL_ANCHORED_OPENNESS`, which runs on `scan`, and
+        # `_RESIDUAL_WAIVER_WITHHOLD` is a literal SUPERSET of
+        # `_RESIDUAL_CLASS_ANCHOR` — so a clause carrying an anchor can never be an
+        # honest one, therefore can never be the clause REMOVED, therefore the text
+        # a sentence-scoped pass would judge always reaches `scan` too. That is an
+        # argument, so it is also measured, both directions, at the head this note
+        # was written at: round 5's
+        # `the SPELLING gap is open, and the time-unit half has yet to be closed`
+        # still REDS, and round 6's over-block statement
+        # `the SPELLING gap has never been closed, and the ADJACENCY half is closed
+        # by the tables` is still GREEN (it is in `_RESIDUAL_TRUTHFUL_STATEMENTS`,
+        # which re-measures it on every run).
         if honest:
             if len(honest) == len(clauses):
                 for pattern in _SPELLING_FLOOR:
@@ -2824,6 +2824,19 @@ _RESIDUAL_TRUTHFUL_STATEMENTS = (
     # depend on an unrelated honest clause elsewhere in the sentence.
     "the SPELLING gap hasn't yet opened again.",
     "the SPELLING gap is open by design, and the ADJACENCY half has not yet opened again.",
+    # ⛔ ROUND 22 `P2`: THE SAME DENIALS SPELLED WITH THE TYPOGRAPHIC APOSTROPHE.
+    # The arms accepted `n’t` and the negation RUNS did not, so every sentence here
+    # was REFUSED while its ASCII twin above stayed GREEN and no ledger entry
+    # re-measured the difference — an unrecorded over-block, and the shape macOS
+    # supplies for free. One partner per run site, because the class is written at
+    # six patterns in two independently-drifting copies: dropping `\u2019` from
+    # any ONE of them reds one entry here.
+    "the ADJACENCY gap hasn’t been open again.",
+    "the ADJACENCY half isn’t yet opened again.",
+    "the ADJACENCY half hasn’t ever opened again.",
+    "the SPELLING gap hasn’t yet opened again.",
+    "the ADJACENCY gap isn’t kept open.",
+    "it doesn’t reopen (d)’s ADJACENCY result.",
 )
 
 #: ⛔ THE OVER-BLOCK LEDGER: truthful statements this pin REFUSES, each MEASURED
@@ -3124,11 +3137,12 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
         "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
         "A `>=` at the current length costs nothing on growth and refuses any "
         "shrinkage; raise it in the same commit that adds proofs.")
-    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 60, (
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 66, (
         "the truthful-statement proof list SHRANK below its floor — a false-block "
         "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
-        "CURRENT LENGTH (60 — raised in the commit AFTER the two contraction "
-        "falsifiers landed, which is the 2-entry slack this closed), i.e. ZERO "
+        "CURRENT LENGTH (66 — raised in the commit AFTER the two contraction "
+        "falsifiers landed, which is the 2-entry slack this closed; then raised "
+        "again with round 22's six typographic-apostrophe partners), i.e. ZERO "
         "SLACK, the same rule the ledger and the "
         "mutation list carry: it was `>= 30` against a 33-entry list, so three "
         "honest closures were deletable with both tests GREEN (the stale "
@@ -3475,6 +3489,58 @@ def test_the_fails_open_over_block_is_in_the_ledger_not_only_a_comment():
             f"{sentence!r} is no longer refused — that is an IMPROVEMENT, so move "
             "it into `_RESIDUAL_TRUTHFUL_STATEMENTS` rather than leaving a stale "
             "over-block entry behind")
+
+
+def test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling():
+    """The negation class reads the typographic apostrophe too (#11258 round 22 `P2`).
+
+    ⛔ MEASURED, and this is why the test exists: the contraction ARM and every
+    spelling arm already accepted `’`, while the negation RUNS spelled only `'` —
+    so SEVEN truthful denials in `_RESIDUAL_TRUTHFUL_STATEMENTS` were REFUSED in
+    the spelling macOS supplies for free and GREEN in ASCII, and NO ledger entry
+    re-measured the difference. An unrecorded over-block is the one this artifact
+    forbids: it ends with the pin being deleted rather than with the guard fixed.
+
+    ⛔ PRE-FIX BEHAVIOUR (measured at `6c3c18b8280f`): this test fails on exactly
+    those seven — `the ADJACENCY gap hasn't been open again.`, `… half isn't yet
+    opened again.`, `… hasn't yet opened again.`, `… hasn't ever opened again.`,
+    the two `the SPELLING gap …` twins and `the ADJACENCY gap isn't kept open.`
+    each flip GREEN → RED when ONLY the apostrophe changes.
+
+    THE INVARIANT, rather than a second list: a spelling must never decide a
+    verdict, so every shape in the three proof lists that contains `'` is
+    re-measured with `’` substituted for EVERY apostrophe in it and has to keep
+    its OWN verdict — mutations RED, truthful statements GREEN, ledger entries
+    refused. A hand-picked partner list would cover the shapes someone thought
+    of; this covers every apostrophe shape the proof surface already carries, and
+    a shape added later is covered the moment it lands.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    converted = 0
+    mismatches: list[tuple[str, str, str]] = []
+    for name, sentences in (("mutation", _RESIDUAL_REOPENING_MUTATIONS),
+                            ("truthful", _RESIDUAL_TRUTHFUL_STATEMENTS),
+                            ("ledger", _RESIDUAL_REFUSED_TRUTHFUL)):
+        for sentence in sentences:
+            if "'" not in sentence:
+                continue
+            converted += 1
+            curly = sentence.replace("'", "\u2019")
+            if _reds(_with_appended(text, curly)) != _reds(_with_appended(text, sentence)):
+                mismatches.append((name, sentence, curly))
+    assert mismatches == [], (
+        "the apostrophe SPELLING decided these verdicts — a lane writing one of "
+        "them with a typographic apostrophe gets a different answer than its own "
+        "proof list records, so one of the two is an UNRECORDED over-block: "
+        f"{mismatches}")
+    assert converted >= 19, (
+        f"only {converted} proof-list shapes carry an apostrophe — the invariant "
+        "above is measured on the shapes that exist, so a shrink here means the "
+        "surface it pins shrank. ⚠️ FLOOR IS THE CURRENT COUNT (19: 7 mutations + "
+        "12 truthful statements + 0 ledger entries at round 22), ZERO SLACK, the "
+        "same rule the two proof-list floors carry: raise it in the same commit "
+        "that adds shapes.")
 
 
 def test_the_suffix_comes_from_the_last_digit_run():
