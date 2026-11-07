@@ -73,9 +73,9 @@ ONE bounded graph pass:
    within the product every containing Session is a legitimate source
    session, but a seed shared across sessions widens the fetch.
 
-   ✅ SEED identity — CLOSED by #10540, and the closure is the whole point
-   of that change. The fetch TARGET was already product-real; the SEED gate
-   was blind, because the pool key authority
+   ✅ SEED identity — CLOSED by #10540 AT THE AUTHORITY, and the closure
+   is the whole point of that change. The fetch TARGET was already
+   product-real; the SEED gate was blind, because the pool key authority
    (``retrieval.session_key_of``) read the snake ``session_id`` prop ONLY and
    the product's point fetch POPS that prop from EVERY point hit it returns
    (turn and extracted alike — ``sdk.tortoise_fts_query`` builds the entry,
@@ -87,18 +87,42 @@ ONE bounded graph pass:
    join (that lane dedups with its own ``ask_session_key``, and the arm is
    off in the product).
 
+   ⛔ **TWO BOUNDS on that closure, named rather than implied** — the
+   authority now reads the wire spelling, but a pool that does not CARRY it
+   still cannot seed:
+
+   * **An id outside the render allowlist.** The wire value is sanitised at
+     the producer (``_safe_session_tag``, strip + allowlist), so a session
+     whose id fails it — e.g. a caller-supplied ``"session/2026-11-05
+     10:00"`` — arrives as ``sessionId: ""``. The reader calls it UNKNOWN
+     and the pool calls it a phantom, i.e. they AGREE, and such a session
+     is still unseedable. That is the render sanitiser's shape (and
+     #9599's padded/odd-id question), not this change's.
+   * **An ANNOTATED pool** (the eval pipeline's only shape).
+     ``tools/longmem_eval/retrieve.py::_annotate_hits`` emits
+     ``lme_session_index`` from ``p.get("lme_session_index", -1)`` — an
+     ABSENT prop is COERCED into an explicit ``-1`` — and stamps
+     ``session_id`` from the Point props. An absent index therefore keys
+     as ``idx:-1``, which OUTRANKS the camel leg (it must: the index leg is
+     what keeps #8713's census byte-identical), so the camel leg is
+     structurally unreachable there and the arm still seeds nothing on an
+     annotated product pool. Filed separately; fixing it is a change to the
+     annotation, not to this authority.
+
    ``session_key_of`` now also reads the CAMEL wire identity ``sessionId``,
    which is the spelling the product's own point fetch emits: it resolves the
    session from ``n.sessionId`` / the snake prop / the ``:Session CONTAINS``
    edge and then pops the snake key (``sdk.tortoise_fts_query``), i.e. the
    reader ALREADY saw the identity (``retrieval.hit_session_id`` → ``[session
-   A]``) while the pool one layer below it did not. So a turn hit seeds its
-   own session, and :func:`reinjection_merge_order` anchors that session's
-   injected group after its own base ranks. (The defensive tail is NOT the
-   pre-fix symptom and not a fallback either: a group only exists for a key
-   in ``seed_order``, whose own pool hit always supplies an anchor rank, so
-   an absent group key is DROPPED by the merge rather than tailed — see
-   :func:`source_session_chunk_pass`.) The GRAPH side is unchanged and that is
+   A]``) while the pool one layer below it did not. So a RAW turn hit seeds
+   its own session, and :func:`reinjection_merge_order` anchors that
+   session's injected group after its own base ranks. (The defensive tail is
+   NOT the pre-fix symptom and not a fallback either: a group only exists for
+   a key in ``seed_order``, whose own pool hit always supplies an anchor
+   rank, so an absent group key is DROPPED by the merge rather than tailed —
+   see :func:`source_session_chunk_pass`; pinned by
+   ``tests/test_session_reinjection_rules.py::test_an_unseeded_group_key_is_``
+   ``dropped_never_tailed``.) The GRAPH side is unchanged and that is
    deliberate: the fetch still scopes by ``(s:Session)-[:CONTAINS]->(p:Point)``
    and still RETURNs ``coalesce(p.session_id, s.id)``, because the Point
    property is what a *turn Point* does not have — only the PASSAGE-side hit

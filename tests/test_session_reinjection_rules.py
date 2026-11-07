@@ -444,6 +444,36 @@ def test_merge_empty_pool_is_a_noop():
         max_chunks_per_session=3) == []
 
 
+def test_an_unseeded_group_key_is_dropped_never_tailed():
+    """#10540: the merge DROPS a group whose key is not in ``seed_order``.
+
+    This is the EXCLUSION half of the corrected contract, and it is what
+    both ``source_session_chunk_pass`` and the module docstring now promise.
+    The sibling test above pins only the tail's ORDER when EVERY added key is
+    seeded, so a refactor that iterated ``added_by_session`` (or its union
+    with ``seed_order``) would keep that test green while making every
+    docstring in this module false again — and the graph fetch would have
+    charged the per-session/total budget for rows it then spliced in.
+
+    Red on such a refactor; green on the shipped code, which builds its
+    groups over ``order`` (``seed_order``) alone.
+    """
+    pool = [_point("a0", "s1"), _point("a1", "s1")]
+    added = {"s1": [_chunk("x1", "s1")], "s2": [_chunk("y1", "s2")]}
+    out = reinjection_merge_order(
+        pool, added, seed_order=["s1"], guard=False,
+        max_chunks_per_session=3)
+    # the SEEDED group splices after s1's last base rank ...
+    assert [h["id"] for h in out] == ["a0", "a1", "x1"]
+    # ... and the unseeded one is DROPPED — not tailed, not spliced
+    assert "y1" not in [h["id"] for h in out]
+    # dropping is TOTAL: an added key with no seeded sibling disappears too
+    only_unseeded = reinjection_merge_order(
+        pool, {"s2": [_chunk("y1", "s2")]}, seed_order=["s1"], guard=False,
+        max_chunks_per_session=3)
+    assert [h["id"] for h in only_unseeded] == ["a0", "a1"]
+
+
 def test_arm_conflict_is_raised_at_resolution_before_the_loop():
     """Run-level safety gate, moved here from the docker-lane E2E module so
     it executes on EVERY lane (the E2E module skips when the live FalkorDB
@@ -1039,10 +1069,22 @@ def test_wire_identity_is_stripped_like_the_reader_names_it():
     returned a ``SeededSession(session_id="  ")``: a seed, a graph fetch, and
     a census entry for a session the reader calls UNKNOWN. (At
     ``origin/main`` there is no camel leg at all, so the hit was a phantom —
-    that is the neighbouring test's baseline, not this one's.) And a padded
-    ``" S1 "`` keyed ``" S1 "`` where the reader named ``S1``, so the seed
-    could never equal the ``:Session`` id the fetch groups by. Both spend the
-    bounded fetch budget on a group the merge then drops.
+    that is the neighbouring test's baseline, not this one's.)
+
+    ⛔ Scope — what the strip does NOT do (corrected: the earlier wording
+    argued this backwards). The fetch groups by
+    ``coalesce(p.session_id, s.id)`` — the RAW STORED spelling. So if a
+    stored ``:Session`` id carried surrounding whitespace, the *stripped*
+    seed key is the one that could never equal it, and the strip would
+    CAUSE a charged-then-dropped group rather than prevent it. That
+    configuration is unreachable through every in-repo edge writer (an
+    indexed key with surrounding whitespace cannot be matched — #9599 —
+    so a padded ``:Session`` never gets the ``CONTAINS`` edge the fetch
+    traverses, hence no group key), and normalising both sides is #9599's
+    decision. On a REAL product hit the strip is also a no-op, because
+    ``sdk.tortoise_fts_query`` sanitises the wire value at the producer.
+    What this test therefore pins is exactly the hand-built half: the pool
+    and the reader agree on whether a hit HAS an identity, and on which.
 
     Stripping is not filtering: the reader's ALLOWLIST is deliberately not
     applied here (``session_key_of``'s docstring says why), so this pins the
