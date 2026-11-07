@@ -2926,6 +2926,39 @@ def _shipped_ledger_names() -> list[str]:
     return sorted(entries)
 
 
+def _names_the_ledger_empties(ledger: Path, gh_present: set[str]) -> set[str]:
+    """The names `ledger` removes from the payload — the app state it REQUIRES.
+
+    #11332 round 9 (P1): the fixture used to subtract only the entries' own names,
+    "every declared Fly secret LIVE minus whatever the ledger records". That models an
+    app the gate CORRECTLY refuses, because the payload does not merely copy env vars
+    into `ARGS`: it COMPOSES. `BACKUP_SWEEP_ENABLED=true` is staged only when a
+    nine-secret conjunction is present (a `workflow` declaration), so a ledger entry
+    for ANY member empties that flag from the payload too — and `flyctl secrets set`
+    is ADDITIVE, so leaving the flag live on Fly keeps the value the omission was for,
+    which the gate reports as `MITIGATION NOT IN EFFECT` (exit 1). Measured: 9 of the
+    48 ledgerable names reddened the sibling test, including both mitigations
+    `docs/infra-runbook.md` §8.1 recommends by name.
+
+    DERIVED, not restated: both halves are the SHIPPED gate's own
+    `payload_partition`, executed against the SHIPPED workflow once with `ledger` and
+    once with an EMPTY one. A copy of the rule here could disagree with the gate the
+    deploy runs, which is the divergence class this whole PR is about.
+    """
+    module = _drift_module()
+    blocks = module.extract_propagation_blocks(REAL_WORKFLOW.read_text())
+    with tempfile.TemporaryDirectory(prefix="ledger-effect-") as tmp:
+        empty = Path(tmp) / "empty-ledger.txt"
+        empty.write_text("# no entries\n")
+        a0, u0, live0, _ = module.payload_partition(
+            blocks, gh_present, ledger_override=empty
+        )
+        assigned, _, _, _ = module.payload_partition(
+            blocks, gh_present, ledger_override=ledger
+        )
+    return (a0 | u0 | live0) - assigned
+
+
 class TestTheMitigationLedger:
     """#11122 — a deliberate absence is a RECORDED state, enforced at sync time."""
 
@@ -3925,23 +3958,33 @@ class TestTheMitigationLedger:
         window the header tells the operator to write it in.
 
         The fixture is the Fly app the operator is told to produce: every declared Fly
-        secret LIVE **minus** whatever the shipped ledger records, so the assertion holds
-        for any future ledger content, empty or not. Today the ledger is entry-free and
-        the two cases coincide; the day an entry lands this test keeps meaning the same
-        thing without an edit.
+        secret LIVE **minus every name the shipped ledger empties from the payload** —
+        the entries themselves AND the `workflow`-composed values an entry empties (see
+        `_names_the_ledger_empties`). So the assertion holds for any future ledger
+        content, empty or not. Today the ledger is entry-free and the subtraction is a
+        no-op; the day an entry lands this test keeps meaning the same thing without an
+        edit — which is the point, because the `MITIGATION NOT IN EFFECT` arm it used to
+        trip on is the gate telling the operator to unset the composed flag.
 
         `FLY_MITIGATION_TODAY` is deliberately NOT pinned: this runs the gate exactly as
         the deploy does, so an entry that has LAPSED reds here as it reds the deploy.
         """
         ledgered = _shipped_ledger_names()
         declared = _manifest_fly_names(REAL_MANIFEST)
-        live = [n for n in declared if n not in set(ledgered)]
+        present = _declared_gh_names(REAL_MANIFEST)
+        # …minus every name the ledger removes from the PAYLOAD, which is not the same
+        # set as the entries themselves: the payload COMPOSES (see the helper).
+        # Subtracting only the entries modelled an app the gate correctly refuses, so
+        # the FIRST entry on any of the conjunction's nine members reddened this test
+        # for every PR (#11332 round 9, P1).
+        emptied = _names_the_ledger_empties(REAL_LEDGER, present)
+        live = [n for n in declared if n not in emptied]
         proc = _run(
             _secrets_file(live, "shipped-ledger-secrets.json"),
             manifest=REAL_MANIFEST,
             workflow=REAL_WORKFLOW,
             toml=REAL_FLY_TOML,
-            present=_declared_gh_names(REAL_MANIFEST),
+            present=present,
             extra_env={"FLY_MITIGATION_LEDGER": str(REAL_LEDGER)},
         )
         assert "LEDGER NOT HONOURED" not in proc.stdout, (
@@ -3984,6 +4027,96 @@ class TestTheMitigationLedger:
         )
         assert red.returncode == 2, red.stdout + red.stderr
         assert "LEDGER NOT HONOURED" in red.stdout, red.stdout
+
+    def test_a_ledgered_CONJUNCTION_member_models_the_app_the_gate_asks_for(self):
+        """#11332 round 9 (P1) — the first REAL entry, executed, not just reasoned about.
+
+        The sibling test reads the SHIPPED ledger, which is entry-free by design, so it
+        cannot exercise the case the mechanism exists for. This one drives the SHIPPED
+        workflow with a single entry on a member of the payload's own conjunction — the
+        entry shape `docs/infra-runbook.md` §8.1 recommends by name — and pins both
+        directions:
+
+        1. the app state the ledger REQUIRES (the member absent, and the composed flag it
+           empties absent too) is GREEN, where the ledger is honoured and the omission
+           has an effect; and
+        2. the app state the OLD fixture modelled (the member absent, the composed flag
+           still LIVE) is RED with `MITIGATION NOT IN EFFECT` — which is what makes
+           (1) a statement about the derivation rather than a relaxed assertion.
+
+        ⛔ (2) is not a hypothetical: `flyctl secrets set` is ADDITIVE, so on that app
+        the flag keeps its old `true` while the payload stops stating it, and the boot
+        then reads enabled-with-missing-secrets — the ConfigError
+        `tortoise/backup_config.py` raises and `alert_channel` swallows. The gate is
+        right to refuse it; the FIXTURE was wrong to model it.
+        """
+        # The entry's name is DERIVED from the shipped conjunction, so this cannot rot
+        # into a name the payload does not compose from.
+        run = REAL_WORKFLOW.read_text().splitlines(keepends=True)
+        start = next(
+            i
+            for i, line in enumerate(run)
+            if 'if [ -n "$TORTOISE_BACKUP_KEY" ] && [ -n "$R2_ACCOUNT_ID" ]' in line
+        )
+        end = next(i for i in range(start + 1, len(run)) if run[i].strip() == "fi")
+        conjunction = "".join(run[start : end + 1])
+        composed = re.search(r"ARGS\+=\((\w+)=", conjunction)
+        assert composed, (
+            "the shipped conjunction no longer stages a composed value — the anchor "
+            "drifted, so this fixture would prove nothing"
+        )
+        member = re.search(r'\[ -n "\$(\w+)" \]', conjunction)
+        assert member, "the shipped conjunction no longer reads a `$NAME` guard"
+        name, flag = member.group(1), composed.group(1)
+
+        declared = _manifest_fly_names(REAL_MANIFEST)
+        present = _declared_gh_names(REAL_MANIFEST)
+        assert name in declared, f"the conjunction reads {name}, which the manifest omits"
+        assert flag in declared, (
+            f"{flag} is composed by the payload but the manifest does not declare it — "
+            "the `workflow` arm this test reasons about would not run"
+        )
+
+        ledger = _ledger(_entry(name, expires=_TOMORROW), "conjunction-member.txt")
+        emptied = _names_the_ledger_empties(ledger, present)
+        assert {name, flag} <= emptied, (
+            f"a ledger entry for {name} should empty BOTH itself and the composed "
+            f"{flag} from the payload — got {sorted(emptied)}. Without the composed "
+            "half this test cannot tell a derived fixture from one that subtracts "
+            "the entries alone"
+        )
+
+        def drive(live: list[str]) -> subprocess.CompletedProcess[str]:
+            return _run(
+                _secrets_file(live, "conjunction-secrets.json"),
+                manifest=REAL_MANIFEST,
+                workflow=REAL_WORKFLOW,
+                toml=REAL_FLY_TOML,
+                present=present,
+                extra_env={"FLY_MITIGATION_LEDGER": str(ledger)},
+            )
+
+        # (1) The app the ledger requires: every declared Fly secret EXCEPT what the
+        # entry empties from the payload. This is the state §8.1 tells the operator to
+        # produce, and it must be a green deploy.
+        required = drive([n for n in declared if n not in emptied])
+        assert required.returncode == 0, required.stdout + required.stderr
+        assert "MITIGATION NOT IN EFFECT" not in required.stdout
+
+        # (2) Non-vacuity: hold the composed flag LIVE on Fly and the SAME run is
+        # refused. This is the old fixture's app state, and it is the one the gate is
+        # right to block — so (1) proves the derivation does the work.
+        stale = drive([n for n in declared if n != name])
+        assert stale.returncode == 1, stale.stdout + stale.stderr
+        assert "MITIGATION NOT IN EFFECT" in stale.stdout, stale.stdout
+        assert flag in stale.stdout, (
+            f"the refusal no longer names {flag}, so this arm is no longer about the "
+            "composed value"
+        )
+        assert "LEDGER NOT HONOURED" not in stale.stdout, (
+            "the entry is being reported as unhonoured rather than as a false record — "
+            "that is a different defect and the exit-2 class"
+        )
 
     def test_the_belt_is_SILENT_on_a_run_it_blocks(self):
         """The belt must not announce a CREATE on a run it then refuses.
