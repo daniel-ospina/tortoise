@@ -4937,8 +4937,19 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         #   inside "doesn't" (#11191 review r33-R3, P2 — MEASURED inert leg: the whole
         #   contraction family PASSED at every head). This uses the pattern the file already
         #   applies in `_DENIED_FIGURE`.
+        # ⛔ NO SLOT BETWEEN THE NEGATOR AND THE VERB (#11191 review r34-R6, P1 — MEASURED
+        # NEW FALSE RED, 4/4 rows). `(?:\s+\w+)?` let a POLARITY-REVERSING adverb bind the
+        # verb: "does not **only/merely/simply/just** say … was wrong" ASSERTS the
+        # refutation ("not merely X" entails X), so it is a truthful correction — and every
+        # spelling was REFUSED here while `origin/main` and the pre-patch head `ad4b94c9b91`
+        # ADMIT it, i.e. this arm created the class its own r33-R3 fix exists to prevent:
+        #   The note does not only say the tree immediately before #9548 was wrong.  -> admitted (pinned)
+        # The same proposition in PREFIX order ("It is not only the note that says … was
+        # wrong", pinned at :9770) was already admitted, so the slot graded one sentence two
+        # ways by word order. Measured: deleting the slot leaves `111 passed` and admits all
+        # four over-fire rows, and the `never`/`not` legs below are still pinned by name.
         r"(?:\b\w+n['\u2019]t\b"
-        r"|\b(?:never|not|no|nothing|none|nobody)\b(?:\s+\w+)?)"
+        r"|\b(?:never|not|no|nothing|none|nobody)\b)"
         r"\s*(?:that\s+)?"
         r"\b(?:says?|said|states?|stated|records?|recorded|claims?|claimed|notes?|noted|"
         r"asserts?|asserted|reports?|reported|suggests?|suggested|contends?|contended|"
@@ -4947,10 +4958,21 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         # not cross a clause boundary: `_PHRASE_RE` starts at `before #9548`, so the window
         # ends *inside* the clause ("… the tree immediately ") rather than at the verb.
         # Measured on the first cut, which anchored `$` to the verb: the veto never fired and
-        # all four defect shapes stayed ACCEPTED. A comma or a dash in the gap means the
-        # reporting frame has closed and a later refutation is the sentence's own, so the
-        # bound is punctuation, not length.
-        r"[^.,;:()\u2014\u2013]{0,60}$",
+        # all four defect shapes stayed ACCEPTED.
+        # ⛔ THE BOUND IS PUNCTUATION **AND** IT IS NOT LENGTH (#11191 review r34-R6, P1 —
+        # MEASURED fail-open). The first cut bounded the gap at `{0,60}` **as well as**
+        # excluding commas, and the false claim that "the bound is punctuation, not length"
+        # was written beside it. Both decisions were wrong, measured against `origin/main`:
+        #   a 98-character complement   -> admitted here, `origin/main` REFUSES
+        #   a comma aside ("never says, as the row records, that …") -> admitted here,
+        #                                 `origin/main` REFUSES
+        # i.e. the arm re-opened the fail-open one phrase-length out, in the direction this
+        # file treats as worse. The gap is now UNBOUNDED in length and may cross a COMMA (an
+        # aside is inside the clause), while a clause delimiter still ends the reporting
+        # frame: `_clause_before_phrase` has already cut the text at `;` `.` `—`, so the
+        # excluded set below cannot cross into another clause. Both shapes are pinned as
+        # REFUSED at `_reported_refutation` (:9768-9770).
+        r"[^.;:()\u2014\u2013]*$",
         re.I,
     )
     _REFUTED_NEXT_CLAUSE = re.compile(
@@ -9721,6 +9743,14 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "The row never records that the tree immediately before #9548 was false.",
         "Nothing indicates the tree immediately before #9548 was wrong.",
         "The note does not say the tree immediately before #9548 was wrong.",  # past main
+        # ⛔ …AND THE COMPLEMENT'S LENGTH AND ASIDES DO NOT DECIDE IT (#11191 review r34-R6,
+        # P1 — MEASURED fail-open vs `origin/main`, both shapes admitted pre-fix). A bound of
+        # 60 characters, or a comma exclusion, let the same claim through one phrase-length
+        # out. `origin/main` refuses both; so does this arm now.
+        "The note never says the census row in the epic doc at the appendix table in the "
+        "manifest item is 5 lines immediately before #9548 was wrong.",
+        "The note never says, as the row records, that the tree immediately before #9548 "
+        "was wrong.",
         # ⛔ THE CONTRACTION FAMILY (#11191 review r33-R3, P2 — MEASURED inert leg). The
         # first cut listed `n't` inside a `\b(?:…|n't)\b` alternation, which CANNOT match:
         # a word boundary cannot sit between `n` and `'` inside a contraction, so all three
@@ -9756,6 +9786,14 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "It is not only the note that says the tree immediately before #9548 was wrong.",
         "There is no question that the note says the tree immediately before #9548 was wrong.",
         "No one would dispute that the note records the tree immediately before #9548 was false.",
+        # ⛔ A POLARITY-REVERSING ADVERB MAKES THE REFUTATION THE SENTENCE'S OWN (#11191
+        # review r34-R6, P1 — MEASURED NEW FALSE RED). "not merely/only/simply/just X"
+        # ENTAILS X, so each of these ASSERTS the refutation and must stay admitted; the
+        # negator-with-one-word slot refused all four while `origin/main` admitted them.
+        "The note does not only say the tree immediately before #9548 was wrong.",
+        "The note does not merely say the tree immediately before #9548 was wrong.",
+        "The note does not simply say the tree immediately before #9548 was wrong.",
+        "The note does not just say the tree immediately before #9548 was wrong.",
         # ⛔ …AND A SENTENCE THAT NAMES THE TRUE TREE IS A CORRECTION (#11191 review r33-R3,
         # P1 — MEASURED NEW FALSE RED, 6/6 rows, a REGRESSION against `origin/main`): the veto
         # is occurrence-scoped, so a REPORTING clause in the second half vetoed a sentence
