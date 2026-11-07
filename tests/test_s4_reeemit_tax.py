@@ -1071,6 +1071,27 @@ def test_the_readme_figures_reproduce_from_the_committed_artifacts():
             "the verdict cell's collision count drifted")
         assert "all 266" not in flat_all, (
             "the refuted population reading is back in the document")
+        # ⛔ the "35 operators" figure was guarded in the INDEX row and nowhere a
+        # reader actually reads: 35 -> 36 left 36/36 green in all three README
+        # copies, which silently re-states the verdict cell's own 266-231
+        # arithmetic (#11385 review P2). Derived, not typed.
+        ops = lg["s2_items"] - 231
+        assert ops == 35, ops
+        assert f"so the {ops} `operators` items are never offered" in flat_all, ops
+        assert f"the {ops} `operators`" in flat_all
+        assert f"(the {ops} `operators` are never rendered, in production too" \
+            in flat_all, ops
+        # ⛔ two more artifact-derivable figures the index row claims are
+        # "re-derived": 29-49 -> 30-49 and 12/9 -> 12/8 were both green
+        # (#11385 review P3).
+        _items = [i["s2_items"] for i in pri["inputs"]]
+        assert (f"{min(_items)}–{max(_items)} items per session"
+                in flat_all), (min(_items), max(_items))
+        assert (f"legacy `added_by_s4` "
+                f"{pri['summary']['composition']['legacy']['added_by_s4']} "
+                f"(primary) / "
+                f"{rer['summary']['composition']['legacy']['added_by_s4']} "
+                f"(re-run)") in flat_all, "the gap-channel pair drifted"
         # the census-vs-mask divergence, as the SENTENCE that states it
         census = lg["corrected_by_s4"] - lg["verbatim_reemissions"]
         recorded = sum(a["legacy"]["corrected_items"]["recorded"]
@@ -1358,8 +1379,9 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     # ⛔ the README names the SLOT (`CAVEATS[3]`) that absorbed the population
     # fact, and a wrong slot index is the exact defect that fix repaired — yet
     # flipping it to `CAVEATS[2]` left 36/36 green (#11385 review P3).
-    _slot = next(i for i, c in enumerate(tool.CAVEATS) if "231 of the 266" in c)
-    assert "231 of the 266" in tool.CAVEATS[_slot]
+    _slots = [i for i, c in enumerate(tool.CAVEATS) if "231 of the 266" in c]
+    assert len(_slots) == 1, f"the population fact must live in ONE caveat, not {_slots}"
+    _slot = _slots[0]
     _readme = " ".join((_EVID / "README.md").read_text().split())
     assert f"`CAVEATS[{_slot}]`" in _readme, (_slot, "the README names a wrong slot")
     # ⛔ The COUNT was unpinned: appending a seventh entry to `tool.CAVEATS` left
@@ -1386,11 +1408,26 @@ def test_the_emitted_caveats_carry_the_corrected_population_and_direction():
     # counts nor the "ONE ADDED plus TWO EDITED" claim was enforced: `emits
     # **6**` → `**7**`, `carry **5**` → `**4**`, and reverting the
     # `CAVEATS[0]` edit all left 36/36 green (#11385 review P2).
+    # ⛔ the equality ALONE cannot see the mutation it claims to close: with the
+    # scoping absent, `replace` is a no-op and the equality still holds — a
+    # faithful revert of `CAVEATS[0]` stayed 36/36 green (#11385 review P2).
+    assert " (the 4 tax-surface sections)" in tool.CAVEATS[0], (
+        "CAVEATS[0] must carry the tax-surface scoping")
     assert tool.CAVEATS[0].replace(" (the 4 tax-surface sections)", "") == (
         _artifact_caveats[0]), "CAVEATS[0] must be artifact[0] plus the scoping"
     assert tool.CAVEATS[2] == _artifact_caveats[1], "CAVEATS[2] == artifact[1]"
     assert tool.CAVEATS[4:] == tuple(_artifact_caveats[3:]), (
         "the tail must be the artifacts' own entries, unchanged")
     assert "ONE ADDED plus TWO EDITED" in _readme, "the mapping sentence drifted"
-    assert f"they carry **{len(_artifact_caveats)}** entries" in _readme, _readme[:0]
+    assert f"they carry **{len(_artifact_caveats)}** entries" in _readme, (
+        f"the README must state {len(_artifact_caveats)} artifact caveats")
     assert f"emits **{len(tool.CAVEATS)}**" in _readme
+    # ⛔ the narrowing BREAKDOWN was unpinned while its total was: 7 -> 8 and
+    # 38 -> 39 both stayed green, though 266 + 7 + 38 = 311 is the document's
+    # own arithmetic. The two numbers need the source receipts, so they are
+    # pinned literally here (as 311 is), in both places that state them.
+    assert "chain_notes 7 and link_before_create 38" in caveats, caveats
+    assert "chain_notes 7 and link_before_create 38" in tool.CAVEATS[1], (
+        "the narrowing caveat must name both counts")
+    assert "the 35 operators" in caveats, (
+        "the emitted population caveat must name the 35 never-offered operators")
