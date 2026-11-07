@@ -7139,7 +7139,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     )
     # ⛔ … and the FALSE equivalence is refused EVEN WHEN the true sha is also named and
     # sits NEARER the phrase (#11191 review, P2). Every shape below predicated
-    # `ff6379eb2` of the phrase and merely APPENDED the true sha; the four marked
+    # `ff6379eb2` of the phrase and merely APPENDED the true sha; the rows marked
     # EMPHASIS/PARAPHRASE/APPOSITIVE were measured PASS under the token-path veto this
     # rewrite replaced, so they are the regression controls for THAT defect, not padding.
     _asserted_false_with_true_appended = (
@@ -7243,10 +7243,11 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     # one, and this is DOCUMENTED rather than guarded because the guard that closed it
     # could not tell the defect from the truth and began refusing truthful sentences
     # (#11191 review r4 → r6: three fix rounds, three false-RED regressions, all on this
-    # one shape). The two sentences below differ in NOTHING but whether the figure is the
-    # census's answer, so settling it needs the MEASURED count — the arm already has
-    # `_census_count_at` — not another regex. Until that lands, the fail-open is
-    # pre-existing (base and `origin/main` accept all four shapes). There is no assertion
+    # one shape). The rows below differ from the TRUTHFUL twin below them in NOTHING
+    # except the figure they state (and, one row, its separator), so settling it needs the
+    # MEASURED count — the arm already has `_census_count_at` — not another regex. Until
+    # that lands, the fail-open is pre-existing (base and `origin/main` accept every shape
+    # recorded here). There is no assertion
     # here because refusing this shape is the GOOD direction and must not red the suite.
     # Recorded verbatim:
     #     "`047c91f7a` is the arming commit; the census returns 3 lines immediately before
@@ -7869,7 +7870,7 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "catch (#11191 review, A1, P1)"
     )
     # ⛔ …AND A DENIED FIGURE IS NOT A READING (#11191 review r10, P2 — MEASURED at
-    # `870951926e0`: all three below were REFUSED while base and `origin/main` accept
+    # `870951926e0`: every row below was REFUSED while base and `origin/main` accept
     # them). The doc's OWN prose says "it was not one line either"; a fixer who writes
     # that inside the §A8 cell got a red for a true sentence, which is the false-RED
     # class that gets a pin deleted. The admission is the negator DIRECTLY in front of
@@ -9687,7 +9688,8 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
     #
     # (2) A FIGURE BOUND TO THE APPOSITIVE IS THE READING AT THAT TREE. Refusing any
     # figure between the phrase and a true-sha appositive read the binding backwards and
-    # was a REGRESSION against `origin/main` on all five. Pre-fix all five were REFUSED.
+    # was a REGRESSION against `origin/main` on every row below. Pre-fix every one was
+    # REFUSED.
     _figure_at_true_tree = (
         "The census immediately before #9548 returns 10 at `047c91f7a`.",
         "Measured immediately before #9548: 10 lines, at `047c91f7a`.",
