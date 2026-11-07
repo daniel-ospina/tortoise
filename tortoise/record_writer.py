@@ -2030,8 +2030,8 @@ def write_live_record(record: Mapping[str, Any], *,
 
     Measured through THIS door against a real Postgres 16 carrying the record
     migrations, 60 records after 5 warmup, ONE instrument run four times against
-    each tree: **51.7–53.1 → 243.6–260.8 records/s**, per-record mean
-    **18.8–19.3 → 3.83–4.10 ms**, `connect()` per record **1.00 → 0.00**, and
+    each tree: **49.7–52.9 → 255.7–261.6 records/s**, per-record mean
+    **18.9–20.1 → 3.82–3.91 ms**, `connect()` per record **1.00 → 0.00**, and
     the SERVER logged **66 → 2**
     authorized connections for the same 65 writes in every run (a count no
     client-side change could move). What remains is one transaction boundary per

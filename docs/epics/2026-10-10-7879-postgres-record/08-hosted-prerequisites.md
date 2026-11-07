@@ -883,12 +883,15 @@ on a per-file STAT identity — `(name, mtime_ns, size, inode, ctime_ns)`, NOT a
 content-preserving stat rewrite inside one inode-clock tick is the one shape it cannot see, and a
 digest was measured at ~25–40 % of the cache's own win and rejected), and the cost was MEASURED before
 and after with one instrument against two trees: **49.72–52.86 → 255.68–261.61 records/s**, per-record
-median **18.49–18.58 → 3.75–3.84 ms**, `connect` calls per record **1.00 → 0.00**, server-logged new
-connections over 65 records **+66 → +2** (`docs/evidence/9558-record-write-cost/`). ⚠️ Two residual
+mean **18.89–20.10 → 3.82–3.91 ms**, `connect` calls per record **1.00 → 0.00**, server-logged
+`connection authorized` **+66 → +2** (`docs/evidence/9558-record-write-cost/`, whose eight committed
+`runs/*.json` every figure is arithmetic on). ⚠️ The BEFORE tree is 164 commits behind the AFTER one's
+parent — 7 of them touching the measured files, which makes the delta conservative rather than
+controlled. ⚠️ Two residual
 facts a later lane should not re-derive: the column-map CALL count is unchanged at 1/record (the WORK
 dropped, not the call — a caller-held map is the deferred lifecycle change), and 0.27–0.33 ms/record of
 pure stat overhead remains because `replay_plan` drives both cached readers and each recomputes the
-fingerprint — the filed fix (#11388) saves ONE of those two passes (0.135–0.166 ms). Batching the per-record insert was explicitly deferred, not forgotten (see
+fingerprint — the filed fix (#11388) saves ONE of those two passes (0.160–0.169 ms). Batching the per-record insert was explicitly deferred, not forgotten (see
 above).
 **What it blocks:** capture latency at volume. **Not a first-customer gate** — hosted capture is off
 by owner ruling (2026-10-14) and the beta volume is unmeasured. **But it must land before the per-record cost of a real

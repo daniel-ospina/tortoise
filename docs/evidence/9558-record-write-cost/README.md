@@ -25,20 +25,35 @@ Probe: [`probe_record_write_cost.py`](./probe_record_write_cost.py).
 
 ```text
 tree   BEFORE  /tmp/before-9558          @ 1730570510  (origin/main, detached worktree)
-tree   AFTER   …/.worktrees/child-9558   @ the PR's head
+tree   AFTER   …/.worktrees/child-9558   @ 6ab6848b8b  (the sha each JSON records)
 dsn    postgresql://record:record@127.0.0.1:<ephemeral>/record
 pg     mirror.gcr.io/postgres:16, -c log_connections=on -c log_disconnections=on
 door   record_writer.write_live_record   (the production door: one record per call)
 n      60 timed records after 5 warmup, per run
 ```
 
-⛔ **Every number in this document is arithmetic on the eight JSON files committed
-beside it** (`runs/before-1..4.json`, `runs/after-1..4.json`). Re-derive any of
-them — `records_per_second`, `per_record_ms`, `per_timed_record`,
-`table_columns_isolated_ms` are the probe's own fields — instead of trusting the
-prose. Earlier revisions of this artifact quoted a run set whose JSON was not
-retained, which made its numbers unfalsifiable; that is what the `runs/` directory
-fixes.
+⛔ **Every number here is arithmetic on a committed file.** The eight
+`runs/{before,after}-1..4.json` carry `records_per_second`, `per_record_ms`,
+`per_timed_record` and `table_columns_isolated_ms` — the probe's own fields — and
+`fingerprint-cost.json` carries the two costs quoted without a probe field: one
+`_migrations_fingerprint` pass and the rejected blake2b digest
+(`fingerprint_cost.py` re-takes both). Re-derive instead of trusting the prose.
+
+The TWO items that are neither: the server-logged `connection authorized` counts
+(a `grep -c` delta on the container's log, taken beside each run and recorded in
+the table below) and the sweep-completion figure. Earlier revisions quoted a run
+set whose JSON was not kept, which made its numbers unfalsifiable — that is what
+`runs/` and `fingerprint-cost.json` fix, and `fingerprint_cost.py` exists because
+the first fix covered only the probe.
+
+⚠️ **The BEFORE tree is 164 commits behind the AFTER tree's parent**
+(`1730570510` is 2026-11-03; this branch's base is `23d227c534`, 2026-11-06), and
+**7 of those commits touch the two files under measurement** (+883/−25: per-statement
+`param_columns`, `Statement.__post_init__`, a per-write `_count_write_applied()`).
+So the delta is the pool plus the cache *plus* that drift. The direction is
+conservative — the drift ADDS per-record work to the AFTER tree, so the measured
+improvement is if anything understated — but it is a two-tree comparison whose
+base must be named, not a controlled experiment.
 
 | | BEFORE (4 runs) | AFTER (4 runs) | speed-up |
 |---|---|---|---|
@@ -64,7 +79,7 @@ The `connection authorized` row is the one no client-side change can move: a
 cost 66 authorizations before (1 admin probe connection + 5 warmup + 60 timed)
 and **2** after (the admin probe + the one pooled handle) — in every run.
 
-Per-run values, each a link to its committed JSON:
+Per-run values (**all eight are committed** as `runs/<run>.json`; the table is their transcription):
 
 | run | records/s | mean ms | median ms | p95 ms | connect/rec | `table_columns` alone | `connection authorized` |
 |---|---|---|---|---|---|---|---|
@@ -83,24 +98,31 @@ server's own log across one run, recorded beside the JSON.
 ## Reading the numbers honestly
 
 **(a) The connection half is ~92-94 % of the win, and it is now a REUSE, not a
-claim.** The saving is 18.89–20.10 → 3.82–3.91 ms, i.e. ~15–16 ms; the column-map
-half is ~1.0–1.1 ms of that (1.582–1.651 → 0.460–0.583), leaving the connection
-half ~13.9–14.9 ms. ⛔ An earlier revision said "~80-85 %": that is the connection
-half as a share of the BEFORE total, not of the WIN — the two are different
-denominators and only the second is the claim. `_default_connect` returns an idle handle when it has one, so the live
+claim.** The saving is 18.889–20.102 → 3.819–3.908 ms (means), i.e. 14.98–16.28 ms.
+The column-map half is **~1.2 ms** of that — and on the MEDIAN, because the warm
+cost is what the per-record path pays: the probe's 20-sample loop runs before the
+first write, so its single cache-miss sample sits in the mean (AFTER mean
+0.460–0.583 vs median 0.332–0.353; the BEFORE pair is 1.582–1.651 vs 1.546–1.588,
+a 1.5 % gap that shows the miss is an AFTER-tree artifact). 1.546–1.588 →
+0.332–0.353 ms = **1.193–1.256 ms**. The connection half is therefore the rest,
+~13.8–15.1 ms, i.e. **~92 %** of the win. ⛔ An earlier revision said "~80-85 %"
+(that is the connection half as a share of the BEFORE TOTAL, not of the win) and
+used the mean-based ~1.0–1.1 ms for the column half, whose upper end did not close
+against the win it was subtracted from. `_default_connect` returns an idle handle when it has one, so the live
 door's per-record "open, commit, close" became "borrow, commit, return". The
-remaining 3.8–4.1 ms/record is one transaction boundary (prologue + plan + COMMIT)
+remaining 3.82–3.91 ms/record is one transaction boundary (prologue + plan + COMMIT)
 plus plan materialisation — **plus, and this was under-stated in the first
-revision, 0.27–0.33 ms of stat overhead**: `replay_plan` drives BOTH cached
-readers, and each recomputes the fifteen-file fingerprint (0.135–0.166 ms per
-pass), so the cache is consulted twice per record. The known fix — compute the
-fingerprint once per plan build — therefore saves ONE pass, **0.135–0.166 ms**,
+revision, 0.32–0.34 ms of stat overhead**: `replay_plan` drives BOTH cached
+readers, and each recomputes the fifteen-file fingerprint (0.160–0.169 ms per
+pass, `fingerprint-cost.json`), so the cache is consulted twice per record. The
+known fix — compute the fingerprint once per plan build — therefore saves ONE
+pass, **0.160–0.169 ms**,
 and is filed as #11388 rather than hidden in "the work the record is for".
 ⛔ An earlier revision of this bullet said "≈0.9–1.0 ms of pure stat", which is
 2 x the WHOLE cached call (stat + the per-call dict copy), not 2 x the stat pass;
 the fix was consequently overstated **2.7–3.7× against the residual it described
 (0.9–1.0 vs 0.27–0.33 ms), or 5.4–7.4× against the one pass #11388 actually saves
-(0.9–1.0 vs 0.135–0.166 ms)** — whichever denominator the reader picks, it was
+(0.9–1.0 vs 0.160–0.169 ms)** — whichever denominator the reader picks, it was
 wrong, and the denominator is named here now. Corrected here and in the three
 places that had copied it.
 
@@ -145,13 +167,13 @@ applies on the DEFAULT filesystem.** On this box (**ext4**, `/dev/root`, in both
 `ctime_ns` **identical** (delta 0 ns), because inode-timestamp granularity is
 coarse on ordinary Linux filesystems. So a `cp -p` landing inside a single tick is
 still invisible. A content digest would close it and was measured and rejected:
-blake2b over the fifteen files (129 KB) costs **0.42–0.55 ms** per pass against
-the stat pass's **0.135–0.166 ms**, so it ADDS 0.25–0.42 ms (net of the pass it
-replaces) to a win of **~1.0–1.1 ms** (1.582–1.651 → 0.460–0.583) — i.e.
-**~25–40 % of the win**. ⛔ An earlier revision said "most of the ~0.5 ms the cache saves", which
+blake2b over the fifteen files (129,355 bytes) costs **0.543–0.593 ms** per pass
+against the stat pass's **0.160–0.169 ms** (`fingerprint-cost.json`), so it ADDS
+0.374–0.433 ms net of the pass it replaces, against a warm-column-map win of
+**1.193–1.256 ms** — i.e. **~31–36 % of the win**, about a third. ⛔ An earlier revision said "most of the ~0.5 ms the cache saves", which
 compared the digest against one stat pass instead of against the win and got the
 verdict's character wrong; the remaining figures here are the same measurement,
-re-derived. The decision (no digest) is unchanged: 20–35 % for a residual that
+re-derived. The decision (no digest) is unchanged: ~a third of the win for a residual that
 needs an archive extraction inside one inode-clock tick is not a trade worth
 taking, but it is a smaller cost than that revision claimed. The pin therefore **burns an inode-clock tick explicitly**
 before its same-size write, so the ctime arm always executes — the earlier version
@@ -196,7 +218,7 @@ measurement and stays labelled as such.
 PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("",0));print(s.getsockname()[1])')
 docker run -d --rm --name recpool-9558 -e POSTGRES_PASSWORD=record \
   -e POSTGRES_USER=record -e POSTGRES_DB=record -p 127.0.0.1:$PORT:5432 \
-  mirror.gcr.io/postgres:16 -c log_connections=on
+  mirror.gcr.io/postgres:16 -c log_connections=on -c log_disconnections=on
 
 # 2. the SAME instrument, both trees (it refuses a `--tree` it did not import)
 python docs/evidence/9558-record-write-cost/probe_record_write_cost.py \

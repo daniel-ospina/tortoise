@@ -1605,11 +1605,11 @@ def _migrations_fingerprint(base: Path) -> tuple:
     Closing it completely needs a content digest, and that was MEASURED and
     rejected — with the arithmetic quoted from the SAME measurement, because an
     earlier revision of this docstring compared the digest against one pass
-    instead of against the win: one fingerprint pass is 0.135–0.166 ms, blake2b
+    instead of against the win: one fingerprint pass is 0.160–0.169 ms (`fingerprint-cost.json`), blake2b
     over the same fifteen files (129 KB) is 0.42–0.55 ms, and the cached read it
-    would guard saves ~1.0–1.1 ms (uncached `table_columns()` 1.582–1.651 ms →
-    cached 0.460–0.583 ms, both from the committed run set), so a digest ADDS
-    0.25–0.42 ms net of the pass it replaces — **~25–40 % of the win** — real but
+    would guard saves ~1.2 ms (uncached `table_columns()` 1.546–1.588 ms → warm
+    cached 0.332–0.353 ms, medians from the committed run set), so a digest ADDS
+    0.374–0.433 ms net of the pass it replaces — **~31–36 % of the win** — real but
     not decisive, and not worth it for a residual that needs an archive extraction
     landing inside a single inode-clock tick. The trade is therefore explicit:
     covered for every writer except that one. The test reds it if the fingerprint
@@ -1635,8 +1635,8 @@ def _schema_entry(migrations_dir: Path | None) -> dict[str, Any]:
     """The cache entry for `migrations_dir`'s CURRENT contents (#9558).
 
     One stat pass (:func:`_migrations_fingerprint`) replaces "read and
-    regex-parse fifteen migration files" — measured at 1.582–1.651 ms per call
-    against a warm page cache, which the live record door paid ONCE PER JOURNAL RECORD
+    regex-parse fifteen migration files" — measured at 1.546–1.588 ms per call
+    (median) against a warm page cache, which the live record door paid ONCE PER JOURNAL RECORD
     (`replay_plan` calls :func:`table_columns` and :func:`refused_props_names`
     for every record).
 
@@ -2081,7 +2081,7 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     (:func:`_migrations_fingerprint`), so an edit, an addition or a removal is a
     cache MISS — the S6 surface's requirement that a cached column map cannot
     diverge from the live schema silently. Refreshing costs one stat pass
-    (0.135–0.166 ms of pure `stat` for the fifteen files; the whole cached call,
+    (0.160–0.169 ms of pure `stat` for the fifteen files; the whole cached call,
     which also copies the map, measures 0.460–0.583 ms) versus the read+parse+regex
     1.582–1.651 ms it replaces.
 
