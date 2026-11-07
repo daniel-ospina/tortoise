@@ -379,6 +379,18 @@ jobs:
           PROBE_CONNECT_TIMEOUT_S: '3'
           # Keep the attempt budget of the primary probe: three attempts ~10 s
           # apart before DOWN, so a single lossy runner network blip cannot page.
+          # ⚠️ STATED RESIDUAL (review round 2): this arm's total tolerance is
+          # 3x5 s + 2x10 s = 35 s, which is SHORTER than one machine restart
+          # (`fly.toml` `kill_timeout = 30` plus a cold boot). The API step above
+          # runs FIRST and owns the restart leg, so when it restarts the machine
+          # this step probes that same machine seconds later and files its OWN
+          # DOWN issue for the same restart window. That page is TRUE (nothing is
+          # serving) but DUPLICATE, and it is left in on purpose: the alternative
+          # — a longer bound here — is exactly the "status-only probe with a
+          # generous timeout" this step exists to replace, so silencing it would
+          # trade a duplicate page for the false green of #10892. The two arms own
+          # separate issues (their titles differ by label), so the operator sees
+          # "one machine restarting" rather than a merged, unattributable alert.
           PROBE_ATTEMPTS: '3'
           PROBE_RETRY_SLEEP_S: '10'
         run: bash .github/scripts/availability-watchdog.sh

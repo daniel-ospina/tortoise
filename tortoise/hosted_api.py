@@ -4160,9 +4160,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     # in it — a monitoring probe must not spend a customer's budget, and it must
     # not be refused for sharing an egress IP with anything else (GitHub Actions
     # runners are a SHARED egress address, so an unauthenticated probe there
-    # would bucket against every other job on that runner). A 429 is classified
-    # UP by the watchdog, but a probe that is *supposed* to prove a request can
-    # be served should not depend on a bucket staying empty.
+    # would bucket against every other job on that runner). Note what a 429 would
+    # mean on THIS arm: the probed step sets `PROBE_EXPECT_STATUS: '200'`, so a
+    # 429 is UNEXPECTED there (a DEGRADED incident for a non-fault), NOT `UP` —
+    # the blanket `429 -> UP` arm in `classify_code` only applies to a target
+    # with no expectation list. Either way, a probe that is *supposed* to prove
+    # a request can be served must not depend on a bucket staying empty.
     SKIP = {"/health", "/health/ready", "/liveness", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}  # noqa: RUF012
     # R-13: path → dedicated per-key limit. The commit endpoint's bucket is
     # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
@@ -6821,7 +6824,7 @@ _LIVENESS_LAST_COMPLETED_AT: float | None = None
 
 
 @app.get("/liveness")
-async def liveness():
+async def liveness(response: Response):
     """A liveness answer that can only be produced BY BEING SERVED (#10892).
 
     Contract, and why each part of it exists:
@@ -6844,6 +6847,16 @@ async def liveness():
     by the loop's timer/threads, so they keep answering exactly the question
     this endpoint exists to ask afresh — pinned by
     ``test_handler_reads_no_cached_state_and_cannot_be_a_state_read``.
+
+    ⛔ AND ITS ONE WRITE IS UNCACHEABLE, BY DIRECTIVE (review round 2). The
+    ``served`` counter is the provenance half of the answer, and a replay at any
+    intermediary would hand two probes the SAME number — the docstring's own
+    promise ("two probes must never see the same number") then becomes an
+    assumption instead of a property. `api.premiselabs.co` resolves straight to
+    Fly (`2a09:8280::/32`), so nothing caches it TODAY; the directive is what
+    keeps that true if a proxy is ever put in front of it, and it costs one
+    header. Same value the file already uses on its other non-cacheable
+    surfaces.
     """
     global _LIVENESS_SERVED_COUNT, _LIVENESS_LAST_COMPLETED_AT
     # One real trip through the loop's ready queue: this coroutine suspends and
@@ -6857,6 +6870,7 @@ async def liveness():
         _LIVENESS_SERVED_COUNT += 1
         served = _LIVENESS_SERVED_COUNT
         _LIVENESS_LAST_COMPLETED_AT = now
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return {"status": "ok", "served": served,
             "last_completed_age_ms": None if previous is None
             else round((now - previous) * 1000.0, 1)}

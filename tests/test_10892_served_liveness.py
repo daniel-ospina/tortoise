@@ -58,8 +58,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parent.parent
 HOSTED_API = REPO / "tortoise" / "hosted_api.py"
 
@@ -130,7 +128,7 @@ def _get(base_url: str, path: str, *, timeout: float):
     try:
         with httpx.Client(timeout=timeout) as client:
             return client.get(f"{base_url}{path}"), time.monotonic() - started
-    except Exception as exc:  # noqa: BLE001 — the exception IS the observation
+    except Exception as exc:  # the exception IS the observation
         return type(exc).__name__, time.monotonic() - started
 
 
@@ -242,7 +240,7 @@ def test_a_blocked_loop_cannot_serve_either_endpoint(monkeypatch):
             liveness_outcome, liveness_elapsed = _get(
                 base, "/liveness", timeout=PROBE_BUDGET_S)
 
-        after, after_elapsed = _get(base, "/liveness", timeout=PROBE_BUDGET_S)
+        after, _after_elapsed = _get(base, "/liveness", timeout=PROBE_BUDGET_S)
 
     # A blocked loop may answer with the outermost WaitBoundMiddleware's 504
     # (when it resumes) or not at all (while it holds). Both are "no usable
@@ -344,4 +342,9 @@ def test_the_served_endpoint_is_not_transport_bound_exempt():
         "legible would never be produced (see the exemption's own OVERRIDES "
         "block in hosted_api.py)")
     assert not "/liveness".startswith(ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX), (
-        "/liveness sits under the /v1/internal/ prefix exemption — that prefix is ")
+        "/liveness sits under the "
+        f"{ha._TRANSPORT_WAIT_BOUND_EXEMPT_PREFIX!r} prefix exemption — that "
+        "prefix is for internal-only routes (the operators that already hold "
+        "the bound themselves), and a probe that must RETURN cannot live under "
+        "it: exempting /liveness there would re-create the silent hang the "
+        "504 exists to make legible (#10892)")

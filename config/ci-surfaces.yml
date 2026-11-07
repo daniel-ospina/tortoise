@@ -3924,11 +3924,11 @@ surfaces:
   # `tests/test_sentry.py` carries none of those three, and it sits in the frozen
   # `_SELF_GUARD_DEBT` so a `sentry.py`-only diff does not run it either.
   - test_11092_sentry_loop_stall.py
+  - test_control_plane_offload_3498.py  # #3498: control-plane auth/session off-loop (dual: api)
   # #10892: the OTHER half of the served-liveness pair. `core` is the row that
   # covers the prober (`.github/**` matches no SOURCE_PATTERNS entry), and it is
   # also what a diff touching nothing but this test file falls through to.
   - test_10892_served_liveness.py
-
   - test_context_confinement.py  # #10612: one fresh contextvars.Context per invocation (dual: api)
   - test_org_create_pool_7678.py  # #7678: org-create control-plane pool + single membership read (dual: api)
   # #8920 (review P3): production pointers into `tests/` must resolve, and no
