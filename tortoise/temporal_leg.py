@@ -96,6 +96,21 @@ DEFAULT_TEMPORAL_LEG_BUCKET_CAP = 1
 #: 0.0 is the weight-off switch (``weight_disabled`` in the trace).
 DEFAULT_TEMPORAL_LEG_WEIGHT = 1.0
 
+#: #10538 NON-EVICTION GUARD — ON by default, and it is a HARD CONDITION of
+#: the shipped arm rather than a preference. Owner ruling 2026-11-07
+#: ("window-exit semantics"): *"expansion must never evict base evidence"*,
+#: with the three guards stated as conditions of the fix — dedupe to unique
+#: sessions, a per-session cap, never crop the anchor. The measurement that
+#: makes it a gate rather than a caveat: at the shipped geometry the UNGUARDED
+#: tail splice is net-zero on distinct evidence sessions and can trade a gold
+#: session for a non-gold one (``BASE distinct 3 / FUSED distinct 3``,
+#: ``EVICTED ['b1','c1']`` — #10538 comment 6574179020). ``False`` restores the
+#: pre-ruling splice BYTE-FOR-BYTE on the same pool, which is what keeps the
+#: committed retention receipt (`docs/scoping/receipts/2026-11-03-10538-*`)
+#: reproducible; the harness switch is
+#: ``TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION=0``.
+DEFAULT_TEMPORAL_LEG_NON_EVICTION = True
+
 #: Minimum anchor-token overlap fraction for an anchor to accept a match.
 #: Short anchors (1–2 content tokens, e.g. "received it") need one token;
 #: longer ones need half, so a single common word cannot claim an anchor.
@@ -262,6 +277,7 @@ def temporal_leg_order(
     head: int = 0,
     date_window: tuple[str, str] | None = None,
     window: int = 0,
+    targeting_trace: dict | None = None,
 ) -> list[str]:
     """Rank a temporal leg over already-ranked candidates → list of ids.
 
@@ -386,6 +402,18 @@ arm (``temporal_leg_replay.py --limit 1`` reproduces that row).
 Undated candidates are excluded from the leg (no date → no temporal
 signal; they keep their semantic score unfiltered). Returns ``[]`` when
 no candidate is dated, which the caller treats as "leg inert".
+
+``targeting_trace`` — optional mutable mapping that receives
+``{"targeting": "anchor" | "window" | "none"}``: WHICH target selected the
+picks. ``"window"`` means the #10538 date-range branch supplied them (no
+anchor matched, and the visible slots were session-clustered); ``"anchor"``
+means phase 1's comparison anchors did; ``"none"`` means no target existed.
+It exists because the two arms carry DIFFERENT contracts — the anchor path is
+the #2976 arm measured AS-IS, while the window path is the #10538 arm the
+non-eviction guard governs — so :func:`temporal_leg_fusion_order` must be able
+to tell them apart without re-implementing this function's targeting logic.
+An out-parameter, because the ``list[str]`` return is unpacked by a large
+pinned test surface.
     """
     if limit <= 0 or bucket_cap <= 0:
         return []
@@ -415,6 +443,8 @@ no candidate is dated, which the caller treats as "leg inert".
 
     picks: list[str] = []
     seen: set[str] = set()
+    #: #10538: which target selected the picks — see ``targeting_trace``.
+    targeting = "none"
     #: the ids phase 2 is allowed to spread over: every candidate sharing at
     #: least one content token with some anchor (phase 1), OR — when no anchor
     #: matched anything and the visible slots are session-clustered — every
@@ -489,6 +519,9 @@ no candidate is dated, which the caller treats as "leg inert".
     # correct rank-(k-1) gold on a question that was never starved.
     if not relevant:
         if date_window and _session_clustered(candidates, head, limit, window):
+            #: the DATE-RANGE branch is the #10538 arm — the one the
+            #: non-eviction guard governs — recorded before picks are built.
+            targeting = "window"
             relevant = {c["id"] for c in promotable
                         if _in_date_window(c.get("session_date"),
                                            date_window)}
@@ -537,6 +570,10 @@ no candidate is dated, which the caller treats as "leg inert".
                             for c in candidates[:max(head + 1, window)]}
         if not relevant:
             return []
+    else:
+        #: phase 1's comparison anchors selected the targets — the #2976 arm,
+        #: measured AS-IS and NOT the arm #10538's guard governs.
+        targeting = "anchor"
 
     # ── phase 2: date/session spread over ``relevant`` (anchor-relevant, or
     # #10538 in-window) evidence ──
@@ -563,6 +600,8 @@ no candidate is dated, which the caller treats as "leg inert".
                 seen.add(pid)
                 bucket_counts[key] = bucket_counts.get(key, 0) + 1
 
+    if targeting_trace is not None:
+        targeting_trace["targeting"] = targeting
     return picks[:limit]
 
 
@@ -585,13 +624,26 @@ def effective_promotion_budget(window: int, limit: int) -> int:
 
 def temporal_leg_empty_reason(*, dated: int, anchors: int, weight: float,
                               budget: int = 1,
-                              date_window: bool = False) -> str:
-    """The honest leg-trace reason for an EMPTY leg (the six causes).
+                              date_window: bool = False,
+                              guard_rejected: int = 0) -> str:
+    """The honest leg-trace reason for an EMPTY leg (the seven causes).
 
     ``budget_disabled``        — the effective promotion budget is 0
     ``no_dated_candidates``    — the pool carries no dated hit at all
     ``no_anchors``             — the question yielded no comparison phrase
     ``weight_disabled``        — the arm ran at weight <= 0 (picks dropped)
+    ``non_eviction_guard``     — #10538: the leg SELECTED picks and the
+        non-eviction guard rejected **every one of them** (``guard_rejected``
+        > 0). This is the ruling working, not a miss: the arm had candidates
+        to promote and promoting them would have cost the reader window an
+        evidence session, so it correctly left the fused order byte-identical
+        to the semantic one. Reported separately because the alternative is
+        that the guard's own refusals read as "the leg found nothing" — which
+        would make the guard invisible on exactly the surface an operator uses
+        to reconstruct ON/OFF, and would invite "fixing" a working guard.
+        Ordered AFTER ``weight_disabled`` (a weight-0 arm promotes nothing, so
+        it never reached the guard) and BEFORE the window/anchor branches (a
+        guard refusal is a true statement about the run whatever targeted it).
     ``no_promotable_anchor_match`` — anchors exist but none matched an
         eligible candidate (no match at all, or every match already sits
         inside the excluded visible head and therefore needs no lift)
@@ -614,7 +666,8 @@ def temporal_leg_empty_reason(*, dated: int, anchors: int, weight: float,
         (review cycle 8, #10549).
 
     ``budget`` defaults to 1 so a caller that does not track it keeps the
-    pre-budget behavior.
+    pre-budget behavior; ``guard_rejected`` defaults to 0 so a caller that
+    predates the #10538 guard keeps its pre-guard reasons.
     """
     if budget <= 0:
         return "budget_disabled"
@@ -625,6 +678,8 @@ def temporal_leg_empty_reason(*, dated: int, anchors: int, weight: float,
     # (review cycle 2, #10549).
     if weight <= 0:
         return "weight_disabled"
+    if guard_rejected > 0:
+        return "non_eviction_guard"
     if anchors <= 0 and date_window:
         return "no_window_candidates"
     if anchors <= 0:
@@ -642,6 +697,8 @@ def temporal_leg_fusion_order(
     weight: float = DEFAULT_TEMPORAL_LEG_WEIGHT,
     placement: str = "tail",
     date_window: tuple[str, str] | None = None,
+    non_eviction: bool = DEFAULT_TEMPORAL_LEG_NON_EVICTION,
+    guard_trace: dict | None = None,
 ) -> tuple[list[str], list[str]]:
     """Fuse the temporal leg into the existing RRF — the window-tail wiring.
 
@@ -664,9 +721,60 @@ def temporal_leg_fusion_order(
     near-ceiling proxy, rejected here on the structural argument in the
     module docstring).
 
+    ``non_eviction`` (#10538, owner ruling 2026-11-07 — **ON by default**) is
+    the guard that ruling made a HARD CONDITION of the arm, applied to the
+    SHIPPED ``tail`` placement **of the DATE-WINDOW arm** (the ``#10538``
+    branch: no anchor matched, the visible slots are session-clustered, and the
+    question's own range supplied the target): a pick may not cost the reader
+    window an evidence SESSION. Three conditions, evaluated per pick in the
+    leg's own deterministic order; a pick that fails any of them is DROPPED —
+    never re-placed and never swapped for another:
+
+    ⛔ **Scope, declared rather than implied:** the ANCHOR arm (``#2976``) is NOT
+    guarded. That arm is measured as-is and carries a published proxy table of
+    its own; the same defect is present there (a tail pick can evict a session),
+    but extending the guard across it would move numbers no decision covers and
+    would fold two arms into one attribution. It is recorded as remaining scope
+    on #10538, not silently changed here.
+
+    1. **Dedupe to unique sessions** — a pick whose session is already visible
+       in the reader window adds no new session and spends a slot, so it is
+       rejected (``session_already_visible``).
+    2. **Per-session cap** — two picks from one session are two deliveries of
+       one source; the later one is rejected (``duplicate_session``).
+    3. **Never crop the anchor / non-eviction** — the trial fusion is computed
+       and :func:`window_arm_retention` is asked whether ANY base-window
+       session would lose its last visible slot; if one would, the pick is
+       rejected (``evicts:<session_id>``).
+
+    Why the guard is the arm's GATE and not a caveat on it: measured at the
+    shipped geometry (``window=12``, ``limit=2`` → ceiling 10) the UNGUARDED
+    tail splice is **net-zero on distinct evidence sessions and can trade a
+    gold session for a non-gold one** — ``BASE distinct 3 / FUSED distinct 3``,
+    ``EVICTED ['b1','c1']``, the sole representatives of two sessions (#10538
+    comment ``6574179020``). The canonical expansion implementations forbid
+    exactly that (*"if a parent is truncated before its relevant child, the
+    expansion can perversely remove the very evidence that caused the
+    retrieval hit"*), and the comparable whose benchmark lead this issue cites
+    keeps source-episode material in its own bounded scope rather than
+    injecting it into the fact ranking. The guard is that rule, enforced.
+
+    ``placement="head"`` is EXEMPT: it is the rank-0 COUNTERFACTUAL the module
+    docstring parks on the eval lane, and it exists precisely to MEASURE the
+    displacement this guard forbids. Guarding it would answer the placement
+    question by construction and destroy the counterfactual's only purpose. It
+    is never the shipped arm, so no number produced under it ships.
+
+    ``guard_trace`` — optional mutable mapping the caller supplies to receive
+    the guard's telemetry (this module never reads it): ``{"on": bool,
+    "rejected": [{"id": …, "session": …, "reason": …}], "accepted": […]}}``.
+    An out-parameter on purpose: the ``(fused_id_order, picks)`` return tuple
+    is unpacked by a large pinned test surface, so widening it would break
+    callers for a diagnostic.
+
     Returns ``(fused_id_order, picks)`` — ``picks`` is empty when the leg
-    is inert, in which case ``fused_id_order`` is the untouched candidate
-    order.
+    is inert, or when the guard rejected every pick, in which case
+    ``fused_id_order`` is the untouched candidate order.
     """
     order_ids = [c["id"] for c in candidates]
     # Clamp the budget so no knob value can push the picks back to leg ranks
@@ -682,23 +790,114 @@ def temporal_leg_fusion_order(
     # double-counted in the fused leg list and cannot outrank the head.
     ceiling = max(window - limit, 0)
     head_excl = 0 if placement == "head" else ceiling
+    #: #10538: which arm supplied the picks. The guard governs the WINDOW arm
+    #: (``"window"``); the anchor arm is the #2976 path measured AS-IS, and
+    #: re-scoping its behaviour here would silently move a published table for
+    #: an arm no ruling covers — the same reason a fix carries its OWN
+    #: mechanism-level test rather than a batch number.
+    _targeting: dict[str, str] = {}
     picks = temporal_leg_order(
         candidates, anchors=anchors, limit=limit, bucket_cap=bucket_cap,
-        head=head_excl, date_window=date_window, window=window)
+        head=head_excl, date_window=date_window, window=window,
+        targeting_trace=_targeting)
     if not picks or weight <= 0:
+        if guard_trace is not None:
+            guard_trace.update({"on": bool(non_eviction), "rejected": [],
+                                "accepted": []})
         return order_ids, []
-    if placement == "head":
-        leg = [(pid, 0.0) for pid in picks]
-    else:
-        leg = ([(c["id"], 0.0) for c in candidates[:ceiling]]
-               + [(pid, 0.0) for pid in picks])
-    fused = rrf_fusion(
-        [[(pid, 0.0) for pid in order_ids], leg],
-        strategy_names=["semantic", "temporal"],
-        weights={"temporal": weight},
-    )
-    known = set(order_ids)
-    return [pid for pid in fused if pid in known], picks
+
+    def _fuse(selected: list[str]) -> list[str]:
+        if placement == "head":
+            leg = [(pid, 0.0) for pid in selected]
+        else:
+            leg = ([(c["id"], 0.0) for c in candidates[:ceiling]]
+                   + [(pid, 0.0) for pid in selected])
+        fused = rrf_fusion(
+            [[(pid, 0.0) for pid in order_ids], leg],
+            strategy_names=["semantic", "temporal"],
+            weights={"temporal": weight},
+        )
+        known = set(order_ids)
+        return [pid for pid in fused if pid in known]
+
+    # #10538: the non-eviction guard (owner ruling 2026-11-07) — the tail arm
+    # may widen the visible evidence-session SET, never trade one for another.
+    # Scoped to the DATE-WINDOW arm (``_targeting == "window"``) for the reason
+    # stated above it; ``placement="head"`` is exempt because it is the
+    # counterfactual that MEASURES the displacement this guard forbids.
+    _guard_runs = (non_eviction and placement != "head"
+                   and _targeting.get("targeting") == "window")
+    if _guard_runs:
+        picks = _non_eviction_filter(
+            candidates, picks, window=window, fuse=_fuse, trace=guard_trace)
+        if not picks:
+            return order_ids, []
+    elif guard_trace is not None:
+        guard_trace.update({"on": bool(non_eviction), "applied": False,
+                            "targeting": _targeting.get("targeting"),
+                            "rejected": [], "accepted": list(picks)})
+
+    return _fuse(picks), picks
+
+
+def _non_eviction_filter(
+    candidates: list[dict],
+    picks: list[str],
+    *,
+    window: int,
+    fuse,
+    trace: dict | None = None,
+) -> list[str]:
+    """Drop the picks that would cost the reader window an evidence SESSION.
+
+    The three conditions, and why they are the ruling's own words, are in
+    :func:`temporal_leg_fusion_order`'s docstring. This function only
+    MECHANICS them; it introduces no threshold of its own. ``window`` is the
+    reader's ``effective_top_k`` — the surface :func:`window_arm_retention`
+    measures — because the guard must judge the arm on what the READER
+    receives (post-chunk-cap), not on the pre-cap splice index space.
+
+    A rejected pick is DROPPED, in the leg's own pick order, and the remaining
+    picks are still evaluated — against the base window, which no acceptance
+    may narrow, so a rejection can never make a later pick look harmless.
+    """
+    session_of = {c["id"]: str(c.get("session_id") or "") for c in candidates}
+    base_window = _reader_order(
+        candidates, [c["id"] for c in candidates],
+        max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
+    )[:max(int(window), 0)]
+    visible_sessions = {session_of[i] for i in base_window} - {""}
+
+    accepted: list[str] = []
+    rejected: list[dict] = []
+    claimed: set[str] = set()
+    for pid in picks:
+        sid = session_of.get(pid, "")
+        reason = None
+        if sid and sid in visible_sessions:
+            # (1) dedupe to unique sessions: the reader already holds this
+            # source, so the slot buys nothing new.
+            reason = "session_already_visible"
+        elif sid and sid in claimed:
+            # (2) per-session cap: one session is one delivery.
+            reason = "duplicate_session"
+        else:
+            trial = [*accepted, pid]
+            retention = window_arm_retention(
+                candidates, fuse(trial), picks=trial, window=window)
+            if retention["deleted_sessions"]:
+                # (3) never crop the anchor — the slot is not spare.
+                reason = "evicts:" + ",".join(retention["deleted_sessions"])
+        if reason is not None:
+            rejected.append({"id": pid, "session": sid, "reason": reason})
+            continue
+        accepted.append(pid)
+        if sid:
+            claimed.add(sid)
+    if trace is not None:
+        trace.update({"on": True, "applied": True, "targeting": "window",
+                      "rejected": rejected, "accepted": accepted})
+    return accepted
 
 
 def _reader_order(

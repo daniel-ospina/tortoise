@@ -41,10 +41,27 @@ def _pool(spec):
     return baseline._pool(spec)
 
 
-def _fused(pool, *, window, limit=DEFAULT_TEMPORAL_LEG_LIMIT, placement="tail"):
+def _fused(pool, *, window, limit=DEFAULT_TEMPORAL_LEG_LIMIT, placement="tail",
+           non_eviction=False):
+    """The fused caller over this file's pools — the PRE-RULING splice by default.
+
+    ⛔ ``non_eviction=False`` is EXPLICIT and deliberate (#10538, owner ruling
+    2026-11-07). Every pin in this file measures the **retention instrument**
+    on the splice the committed receipt was built from, and the guard default
+    makes that splice unreachable on these pools — it refuses the picks, so
+    ``pick_ranks``/``evicted_ids``/``graded_by_recall_all_at_5`` would all
+    collapse to their inert values and the instrument would stop being
+    measured. Passing the switch here keeps the SUBJECT of this file (what a
+    pick does to the window) under test; the guard itself, and each of its
+    three conditions, is pinned in
+    ``tests/test_temporal_leg_non_eviction_10538.py`` — including a case that
+    runs one of these pools through BOTH arms and asserts the guarded arm is
+    the additive one.
+    """
     order, picks = temporal_leg_fusion_order(
         pool, anchors=(), window=window, limit=limit,
-        date_window=baseline.DATE_WINDOW, placement=placement)
+        date_window=baseline.DATE_WINDOW, placement=placement,
+        non_eviction=non_eviction)
     return order, picks
 
 
@@ -820,11 +837,21 @@ def test_the_unclustered_window_declines_at_every_geometry():
         assert order == [c["id"] for c in pool]
 
 
-def test_the_predicate_is_reported_but_never_enforced():
-    """``window_arm_retention`` is read-only instrumentation: computing it must
-    not change a single pick, and it must not mutate its inputs. Whether the
-    predicate may GATE a promotion is the open owner ruling on #10538 — a
-    function that quietly enforced it would be answering that ruling in code."""
+def test_the_predicate_is_reported_but_the_guarded_arm_is_what_ships():
+    """⛔ #10538 PREMISE RETIRED BY THE OWNER RULING (2026-11-07).
+
+    This pin used to be ``test_the_predicate_is_reported_but_never_enforced``,
+    asserting that ``additive`` is a REPORT the module would not turn into a
+    pick filter *"without an owner ruling"*. The ruling arrived (``window-exit``
+    — non-eviction a HARD CONDITION), so the predicate is now enforced on the
+    shipped tail arm and this pin carries the NEW contract.
+
+    What survives unchanged: ``window_arm_retention`` stays REPORT-ONLY (it
+    never gates; its callers decide), it is deterministic, and it mutates
+    nothing. What changed: the FUSED caller refuses the splice the predicate
+    calls non-additive, so the two arms differ — and that difference is the
+    guard's whole effect, asserted here as one comparison on one pool.
+    """
     pool = _pool([("sA", 10), ("sB", 1), ("sC", 1), ("sD", 1), ("sE", 1),
                   ("sF", 1)])
     before = [(c["id"], c["session_id"]) for c in pool]
@@ -834,10 +861,27 @@ def test_the_predicate_is_reported_but_never_enforced():
     first = window_arm_retention(pool, order, picks=picks, window=SHIPPED_WINDOW)
     second = window_arm_retention(pool, order, picks=picks, window=SHIPPED_WINDOW)
 
+    # the measurement is a pure REPORT: deterministic, non-mutating.
     assert first == second
     assert first["additive"] is False
+    assert first["deleted_sessions"]
     assert [(c["id"], c["session_id"]) for c in pool] == before
     assert order == order_snapshot and picks == picks_snapshot
     # ...and the arm that produced it is unchanged by having been measured.
     again_order, again_picks = _fused(pool, window=SHIPPED_WINDOW)
     assert (again_order, again_picks) == (order_snapshot, picks_snapshot)
+
+    # ...while the GUARDED arm on the SAME pool promotes nothing and is
+    # additive — the ruling's effect, in one comparison.
+    g_order, g_picks = _fused(pool, window=SHIPPED_WINDOW, non_eviction=True)
+    guarded = window_arm_retention(pool, g_order, picks=g_picks,
+                                   window=SHIPPED_WINDOW)
+    assert g_picks == [], (
+        "the guard must refuse every pick that trades a session away")
+    assert guarded["additive"] is True
+    assert guarded["deleted_sessions"] == []
+    assert guarded["pick_ranks"] == [], (
+        "a fully-refused arm reports no pick rank at all — never a stale rank "
+        "for a pick that was not promoted")
+    assert g_order == [c["id"] for c in pool], (
+        "a fully-refused arm must leave the fused order byte-identical")

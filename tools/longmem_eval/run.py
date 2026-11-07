@@ -1764,6 +1764,22 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     from .retrieve import resolve_temporal_leg_placement as _resolve_tl_place
     _tl_placement_env = _resolve_tl_place(
         None, os.environ.get("TORTOISE_LME_TEMPORAL_LEG_PLACEMENT"))
+    #: #10538 non-eviction guard — resolved from the SAME resolver/env the
+    #: shipped call resolves, so the fingerprint certifies the rule that ran.
+    #: CONDITIONAL presence: only stamped when it resolves OFF, because ON is
+    #: the default and every existing arm-ON checkpoint must still resume
+    #: byte-identically (the ``temporal_leg_placement`` precedent below, which
+    #: uses the same "absent at the default" shape). A guard-OFF checkpoint
+    #: must never resume under the guard ON: the promotion sets differ, so the
+    #: fused orders differ.
+    from .retrieve import (
+        DEFAULT_TEMPORAL_LEG_NON_EVICTION as _TL_NON_EVICTION_DEFAULT,
+    )
+    from .retrieve import (
+        resolve_temporal_leg_non_eviction as _resolve_tl_non_eviction,
+    )
+    _tl_non_eviction_env = _resolve_tl_non_eviction(
+        None, os.environ.get("TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION"))
     # #2976: the TR session-admission / completion arms are env-only from the
     # harness (the sibling #2976 temporal-leg precedent), so the fingerprint
     # reads the env. CONDITIONAL presence: OFF leaves both keys ABSENT, so the
@@ -1913,6 +1929,18 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
              _tl_placement_env
              if (_temporal_leg_on
                  and _tl_placement_env != _TL_PLACEMENT_DEFAULT) else None),
+            # #10538: the NON-EVICTION guard — stamped for the same reason as
+            # the placement above: it changes WHICH picks are promoted (the
+            # guard drops the ones that would evict a session), so a
+            # guard-OFF checkpoint and a guard-ON checkpoint are different
+            # arms and must not be resumed into one another. CONDITIONAL
+            # presence: absent at the default (ON), so every existing arm-ON
+            # checkpoint keeps resuming byte-identically.
+            ("temporal_leg_non_eviction",
+             _tl_non_eviction_env
+             if (_temporal_leg_on
+                 and _tl_non_eviction_env != _TL_NON_EVICTION_DEFAULT)
+             else None),
             # #2976: the TR session-admission arm — conditional presence ONLY
             # when it resolves ON (the default fingerprint stays
             # byte-identical), and the FOUR completion budgets are stamped with

@@ -371,7 +371,19 @@ def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
 
     order, picks = temporal_leg_fusion_order(
         pool, anchors=(), window=window, limit=limit,
-        date_window=DATE_WINDOW, placement=placement)
+        date_window=DATE_WINDOW, placement=placement,
+        # ⛔ #10538 (owner ruling 2026-11-07): the non-eviction guard is now the
+        # SHIPPED default, and it makes the tail arm inert on every pool where
+        # a pick would cost the reader window a session — including all of
+        # this instrument's pools. That is the ruling working, not a
+        # measurement defect, but it means this receipt measures the
+        # PRE-RULING splice. The switch is passed EXPLICITLY (never inherited
+        # from the environment) so the committed receipt stays a build
+        # artifact that reproduces byte-for-byte on any box; the GUARDED arm's
+        # behaviour is pinned mechanism-level in
+        # `tests/test_temporal_leg_non_eviction_10538.py`, where each of the
+        # three conditions has its own discriminating case.
+        non_eviction=False)
     # ``window_arm_retention``'s DEFAULT models the reader (the post-``dedup_pool``
     # pool the metric grades), so nothing here applies a chunk cap by hand: a row
     # measures whatever shape ``pool`` carries, and the shape is reported beside

@@ -7599,6 +7599,7 @@ surfaces:
   - test_temporal_leg_2976.py  # #2976: temporal retrieval leg — detector shapes, anchor co-presence + date spread, additive-fusion no-op (hermetic, no DB)
   - test_temporal_leg_date_window_10538.py  # #10538: a DATE-RANGE question widens the candidate set by session — window-as-target gating (session clustering), head-slice exclusion of the sessions the reader already holds, fused tail placement (hermetic, no DB)
   - test_window_arm_baseline_10538.py  # #10538: the window arm's RETENTION baseline — where a pick lands vs the graded top 5, whether the visible evidence-session SET widened or merely changed (net), and whether a displaced slot was a session's sole visible representative; pins the committed instrument receipt (hermetic, no DB/dataset/network)
+  - test_temporal_leg_non_eviction_10538.py  # #10538: the NON-EVICTION GUARD (owner ruling 2026-11-07) — dedupe to unique sessions, the per-session cap and never-crop-the-anchor as three separately-discriminating cases, the env off-switch, and the declared scope (the #2976 anchor arm and the head counterfactual are deliberately unguarded) (hermetic, no DB/network/dataset)
   - test_2976_session_admission.py  # #2976: TR session-level admission — token budget binds + session is the admission unit (gold at rank 45 admitted); render stays dated/contiguous (hermetic, pure functions)
   - test_sdk_ep.py
   - test_sdk_group3.py
@@ -7759,6 +7760,7 @@ surfaces:
   # class (surface audit: `... <- tortoise/embeddings.py`, registered: core).
   - test_7809_hosted_prewarm_warmup_flag.py
   - test_temporal_leg_placement_10538.py
+  - test_temporal_leg_non_eviction_10538.py  # #10538: the NON-EVICTION GUARD — `tortoise/temporal_leg.py` is the guarded module and `tools/longmem_eval/` is a SOURCE_PATTERNS entry of THIS surface, so a guard-only change selects `eval` and would otherwise skip the pins that describe it
   # #3094: DUAL-REGISTERED with `core` (below) and `onboarding`. The
   # empty-means-unset URI-read census
   # (`test_no_empty_default_tortoise_db_uri_reads`) scans `tests/**` AND
@@ -10685,6 +10687,7 @@ durations:
   # `tests/test_gmm_proofs.py`, so no new dependency is introduced.
   test_temporal_leg_placement_10538.py: 2.0  # new in #10538 — a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default (the #3400/#4348 trap). ⛔ The CASE COUNT is deliberately NOT quoted: `tools/ci_timing.py --refresh-durations` replaces this row from junit, and a hand-written count re-stales on every case a later round adds. What the weight covers: pure-unit, no DB/server/network/model — it imports `tools.longmem_eval.retrieve` + `tools.longmem_eval.run` and `tortoise.temporal_leg`, builds candidate lists in memory, reads the two source files with `ast`, and writes one checkpoint JSON into `tmp_path`. Local wall time on a loaded box: 3.5 s.
   test_temporal_leg_replay_wiring_10538.py: 2.0
+  test_temporal_leg_non_eviction_10538.py: 2.0  # new in #10538 (the non-eviction guard) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which the map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default. ⛔ The CASE COUNT is deliberately NOT quoted: `tools/ci_timing.py --refresh-durations` replaces this row from junit, and a hand-written count re-stales on every case a later round adds. What the weight covers: pure-unit and hermetic — it imports `tortoise.temporal_leg` (pure functions over in-memory candidate lists) and `tools.longmem_eval.retrieve`, reads two source files with `ast`, and touches no DB, no server, no network, no model and no dataset.
   # #2976: the three new surfaces take the header's flat `DEFAULT_FAST_WEIGHT`
   # (the #2818/#3419/#9121 convention), NOT a local timing. A file ADDED BY A
   # PR can never carry a CI junit measurement (the refresher samples
