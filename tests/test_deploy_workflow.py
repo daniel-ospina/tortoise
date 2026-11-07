@@ -5661,9 +5661,10 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         #: (`the commit for #9601 is `ff6379eb2``, `the #9601 merge is `ff6379eb2``), so the
         #: test is adjacency to a tree NOUN and nothing else.
         _NAMED_TREE = re.compile(
-            r"\b(?:tree|commit|merge|sha|revision|tip|branch|parent|child)"
-            r"\s+(?:for|of|in)?\s*#(\d+)\b"
-            r"|\b#(\d+)\b\s+(?:merge|commit|tree|sha|revision|tip|branch)\b",
+            r"(?:the\s+|that\s+|this\s+)?(?:tree|commit|merge|sha|revision|tip|branch|"
+            r"parent|child)\s+(?:for|of)?\s*#(\d+)\b"
+            r"|(?:the\s+|that\s+|this\s+)?#(\d+)\b\s+"
+            r"(?:merge|commit|tree|sha|revision|tip|branch)\b",
             re.I,
         )
 
@@ -5698,9 +5699,12 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                   only the FIRST match of each kind refused a tail carrying TWO quoted
                   re-denials — "…is false; the tree is `047c91f7a`, and the claim that the
                   tree before #9548 is `ff6379eb2` is false, and the claim that … is false"
-                  — which `origin/main` accepts). The span test is what keeps this from
-                  becoming a blank cheque: a later bare re-assertion is outside every span
-                  and still blocks.
+                  — which `origin/main` accepts).
+                  ⚠️ The SPAN test bounds this in principle, but it is NOT pinned: replacing
+                  it with a blank cheque (`if _refutations: continue`) leaves the whole file
+                  green (`#11191 review r23, P3` — MEASURED), because every alibi row is
+                  refused by another arm first. It is defence in depth, labelled as such
+                  rather than presented as a boundary the tests enforce.
               (c) a POSSESSIVE tail after the sha (`… is `ff6379eb2`'s descendant`)
                   predicates a RELATION of the false tree, which is not the equivalence.
                   Genitive-ONLY: a bare relation noun (`… is `ff6379eb2` merge commit`) is a
@@ -5732,9 +5736,34 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 # phrase the copula predicates the sha of — a tree noun joined to it
                 # (`the commit for #9601`, `#9601 merge`) — which is exactly the two-tree
                 # comparison that has to stay green.
-                _named = _NAMED_TREE.search(_hit.group(0))
+                # ⛔ …AND IT MUST BE THE SUBJECT (#11191 review r23, P1 — MEASURED
+                # fail-open still open after r22's adjacency rule). `search` accepts a tree
+                # noun + `#<n>` ANYWHERE in the span, so a parenthetical or an appositive
+                # supplied it and the equivalence was asserted anyway — each REFUSED by
+                # `origin/main` and ACCEPTED by r22:
+                #   "…is false; the tree (unlike commit #9601) is `ff6379eb2`."
+                #   "…is false; the tree, the #9601 merge, is `ff6379eb2`."
+                # `match` anchors at the co-reference's OWN subject, and the `for|of`
+                # restriction keeps a bare meta-reference (`the tree in #9601 is …`) from
+                # naming anything.
+                _named = _NAMED_TREE.match(_hit.group(0))
                 if _named and next(_g for _g in _named.groups() if _g) != "9548":
-                    continue  # (a) a different, named tree
+                    # ⛔ …AND THE CO-REFERENCE ITSELF MUST OPEN ITS CLAUSE (#11191 review
+                    # r23, P1 — MEASURED fail-open still open after the `match`
+                    # tightening). `_COREF_ASSERTS_FALSE` can start at an APPOSITIVE inside
+                    # the tail, so the named tree is 'the subject' of a co-reference that
+                    # is not the sentence's subject — an appositive that LABELS the false
+                    # tree, which is the equivalence, and `origin/main` refuses it:
+                    #   "…is false; the tree, the commit for #9601, is `ff6379eb2`."
+                    #   "…is false; the tree, the #9601 merge, is `ff6379eb2`."
+                    # Only a co-reference that OPENS its clause can carry a second tree.
+                    _before = tail[: _hit.start()]
+                    if not _before.strip() or re.search(
+                        r"(?:[;:]|,?\s*\b(?:and|but|so|because|since)\b|[\u2014\u2013])\s*$",
+                        _before,
+                        re.I,
+                    ):
+                        continue  # (a) a different, named tree
                 # ⛔ …AND THE RELATION GUARD IS GENITIVE-ONLY (#11191 review r22, P2 —
                 # MEASURED fail-open in the first cut). Admitting a bare relation NOUN
                 # after the sha made the verdict depend on a COMMA — the appositive label
@@ -5743,9 +5772,17 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
                 #   "…is false; the tree is `ff6379eb2` tree of record."        ACCEPTED
                 #   "…is false; the tree is `ff6379eb2`, the #9601 merge."       refused
                 # `origin/main` refuses all three. A possessive is the only spelling that
-                # PREDICATES a relation (`ff6379eb2`'s descendant); a bare noun after the
-                # sha is a label, i.e. the equivalence.
-                if re.match(r"['\u2019]s\b", tail[_hit.end() :]):
+                # PREDICATES a relation (`ff6379eb2`'s descendant) — and the relation set is
+                # CLOSED away from the SELF-REFERENTIAL nouns, because a commit's own tree
+                # or tip IS itself (#11191 review r23, P2 — MEASURED fail-open):
+                #   "…is false; the tree is `ff6379eb2`'s own tip."        ACCEPTED (main REFUSES)
+                #   "…is false; the tree is `ff6379eb2`'s tree."           ACCEPTED (main REFUSES)
+                if re.match(
+                    r"['\u2019]s\s+(?:parent|child|son|ancestor|descendant|successor|"
+                    r"predecessor)\b",
+                    tail[_hit.end() :],
+                    re.I,
+                ):
                     continue  # (c) a relation OF the false tree, not the false tree
                 return True
             return False
@@ -5897,6 +5934,10 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
             # _FALSE_SHA_ADJACENT.search(clause)`), applied one clause further out: the
             # refutation stands only when nothing AFTER it re-asserts the same
             # equivalence. Both word orders are pinned by `_refuted_alibi` below.
+            # ⚠️ `_own_at` is anchored at the CLAUSE start rather than at the first textual
+            # match (#11191 review r23, P3 — MEASURED unpinned: reverting it changes no
+            # verdict). Belt-and-braces against `own` recurring earlier in the sentence, not
+            # a pinned behaviour — it is labelled rather than sold as coverage.
             _own_at = norm.find(own, clause_end - len(clause))
             if _REFUTED_INVERTED.search(own) and not _tail_reasserts_equivalence(
                 norm[_own_at + len(own) :]
@@ -7220,6 +7261,18 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         # (a) an ASIDE naming the other tree is not the subject
         "The claim that the tree before #9548 is `ff6379eb2` is false; the tree (see "
         "#9601) is `ff6379eb2`.",
+        # …nor is a tree noun inside a parenthetical, nor a bare oblique (`tree in #9601`)
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree (unlike "
+        "commit #9601) is `ff6379eb2`.",
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree in #9601 "
+        "is `ff6379eb2`.",
+        # ⛔ …AND THE CO-REFERENCE MUST OPEN ITS CLAUSE (#11191 review r23, P1 — MEASURED:
+        # dropping the clause-start requirement ACCEPTS this row). `_COREF_ASSERTS_FALSE`
+        # can start at an APPOSITIVE inside the tail, so the named tree becomes the subject
+        # of a co-reference that is not the sentence's — an appositive LABELLING the false
+        # tree, i.e. the equivalence.
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree, the "
+        "commit for #9601, is `ff6379eb2`.",
         # …nor is a META-REFERENCE, nor a comparison that names the number in passing —
         # an ISSUE number is not a tree at all
         "The claim that the tree before #9548 is `ff6379eb2` is false; the tree per "
@@ -7237,12 +7290,21 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "`ff6379eb2` merge commit of #9601.",
         "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is "
         "`ff6379eb2` tree of record.",
+        # …and a POSSESSIVE of a SELF-REFERENTIAL noun is the equivalence, not a relation
+        # (#11191 review r23, P2 — MEASURED: a commit's own tree/tip IS itself)
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is "
+        "`ff6379eb2`'s own tip.",
+        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is "
+        "`ff6379eb2`'s tree.",
         # (b) is bounded to the quoted occurrence: a LATER bare re-assertion is not covered
         "The claim that the tree before #9548 is `ff6379eb2` is false; the claim that "
         "the tree before #9548 is `ff6379eb2` is false, but it is `ff6379eb2`.",
-        # …and a possessive tail does not shelter a later bare equivalence
-        "The claim that the tree before #9548 is `ff6379eb2` is false; the tree is "
-        "`ff6379eb2`'s descendant, and that tree is `ff6379eb2`.",
+        # …a POSSESSIVE tail bounds (c) the same way — REMOVED as a row (#11191 review r23,
+        # P3 — MEASURED: "…is false; the tree is `ff6379eb2`'s descendant, and that tree is
+        # `ff6379eb2`" is REFUSED at this head and under every mutation of the three
+        # exemptions, so it can never be the deciding one — presenting it as a pin would
+        # inflate coverage, and the row that DOES pin the possessive bound is
+        # `…'s own tip` / `…'s tree` in the block above).
         # …and naming the other tree does not license a re-assertion in the SAME clause
         "The claim that `ff6379eb2` is the tree before #9548 is false; the tree for "
         "#9601 is `ff6379eb2`, so the tree before #9548 is `ff6379eb2`.",
@@ -7280,6 +7342,25 @@ r"\b(?:not|never|rather\s+than)\s*[`*_]{0,3}" + re.escape(_FALSE_TREE)
         "if it is not, the aside is being read as prose by an arm that must not read it "
         "(#11191 review r22, P1):\n  "
         + "\n  ".join(_aside_meta_now_refused)
+    )
+    # ⚠️ …AND THE `, the #9601 merge,` APPOSITIVE IS THE SAME OPEN FAMILY (#11191 review
+    # r23, P1 — MEASURED: ACCEPTED here AND at `77ea7bc7f`, `origin/main` REFUSES it, and
+    # deleting exemption (a) does not change it — a different arm decides it). Pinned as
+    # open for the same reason as the row above: the near-boundary shape
+    # (`the tree, the commit for #9601, is …`) IS refused here and is pinned in
+    # `_refutation_tail_alibi`, so this row marks the residue that remains.
+    _comma_appositive_known_open = (
+        f"The claim that the tree before #9548 is `{_FALSE_TREE}` is false; the tree, "
+        f"the #9601 merge, is `{_FALSE_TREE}`.",
+    )
+    _comma_appositive_now_refused = [
+        s for s in _comma_appositive_known_open if _refuses_before_9548(s)
+    ]
+    assert not _comma_appositive_now_refused, (
+        "the comma-appositive alibi is now REFUSED — if that refusal is correct this "
+        "residual has been CLOSED and this characterisation should be inverted "
+        "(#11191 review r23, P1):\n  "
+        + "\n  ".join(_comma_appositive_now_refused)
     )
     # ⛔ …AND THE ARM READS THE OCCURRENCE, NOT THE SENTENCE (#11191 review r21 P3 / r22 P3
     # — MEASURED). r21 measured that reverting `_REFUTED_INVERTED.search(own)` to
