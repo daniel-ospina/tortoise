@@ -500,3 +500,101 @@ def test_a_guard_off_checkpoint_refuses_to_resume_a_guarded_run(monkeypatch):
             raise AssertionError(
                 "a guard-OFF run resumed a guard-ON checkpoint — the "
                 "aggregate would be a two-arm mixture (#10538)")
+
+def test_the_run_fingerprint_stamps_a_guarded_vs_unguarded_arm():
+    """A guard-OFF checkpoint must never resume under the guard ON: the
+    promotion sets differ, so the fused orders differ."""
+    src = (Path(r.__file__).parent / "run.py").read_text()
+    keys = {
+        node.value for node in ast.walk(ast.parse(src))
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+    }
+    assert "temporal_leg_non_eviction" in keys, (
+        "the run fingerprint does not stamp the non-eviction arm — the "
+        "ordinary way to flip the switch (env + the SAME --checkpoint) would "
+        "report a two-arm mixture as one arm (#10538)")
+
+
+# ── 10. the receipt's `applied` is the GUARD's answer, not the knob's ──────
+
+def test_the_receipt_reports_whether_the_guard_RAN_not_whether_it_was_ON():
+    """``non_eviction_applied`` must come from the guard's trace.
+
+    Re-deriving it from the knobs (``the switch resolved ON and the placement is
+    not 'head'``) reports enforcement on the two shapes where the guard is
+    scoped OUT and never ran: the ``#2976`` ANCHOR arm (unguarded by decision,
+    measured as-is) and an INERT leg (no picks, so the guard was never reached
+    and the trace carries no ``applied`` key at all).
+
+    Both shapes are built here from REAL fusion calls — the anchor arm's own
+    trace above, the inert leg's own trace — rather than hand-written dicts, so
+    a change to the guard's trace shape re-fails this pin instead of passing
+    silently.
+    """
+    pool = (
+        [{"id": "n0", "session_id": "n0", "session_date": "2023-04-10",
+          "content": "unrelated words"},
+         {"id": "n1", "session_id": "n1", "session_date": "2023-04-11",
+          "content": "unrelated words"},
+         {"id": "gold", "session_id": "g", "session_date": "2023-04-12",
+          "content": "smoker brisket"}]
+    )
+    anchor_trace: dict = {}
+    _, anchor_picks = tl.temporal_leg_fusion_order(
+        pool, anchors=("smoker brisket",), window=2, limit=1,
+        guard_trace=anchor_trace)
+    assert anchor_picks == ["gold"], anchor_picks
+    # the rule is ON and the placement is the shipped "tail" — the knob-derived
+    # answer would be True; the guard never ran.
+    assert anchor_trace["on"] is True
+    assert anchor_trace["applied"] is False
+    assert r.non_eviction_applied(anchor_trace) is False, (
+        "the receipt claims the guard was ENFORCED on the unguarded #2976 "
+        "anchor arm")
+
+    inert_trace: dict = {}
+    _, inert_picks = tl.temporal_leg_fusion_order(
+        pool, anchors=(), window=2, limit=1, guard_trace=inert_trace)
+    assert inert_picks == []
+    # ⚠️ This pin first asserted `"applied" not in inert_trace` (the inert path
+    # left the key absent). The inert path now STAMPS `applied: False` — the
+    # same answer, in a shape a receipt reader cannot mistake for a missing
+    # field — so the pin states the value instead of the absence. What must not
+    # change is the ANSWER: an inert leg never reached the guard.
+    assert inert_trace.get("applied") is False, inert_trace
+    assert r.non_eviction_applied(inert_trace) is False, (
+        "an inert leg never reached the guard, so it cannot report it applied")
+    assert r.non_eviction_applied(None) is False
+
+    # ...and the shapes where it DID run still report it, in both directions.
+    _, _, guarded_trace = _fuse(ISSUE_POOL)              # refused every pick
+    assert guarded_trace["applied"] is True
+    assert r.non_eviction_applied(guarded_trace) is True
+    _, _, off_trace = _fuse(ISSUE_POOL, non_eviction=False)
+    assert off_trace["applied"] is False
+    assert r.non_eviction_applied(off_trace) is False
+
+
+def test_the_retention_measure_does_not_still_claim_it_never_gates():
+    """The measurement's docstring is the file a bypass gets argued from.
+
+    ``window_arm_retention`` carried a hard "it never gates / nothing in this
+    module branches on any value it returns" promise, written while the
+    ``window-exit`` vs ``ab-head-ab`` question was OPEN. The owner ruled
+    ``window-exit`` on 2026-11-07, so ``_non_eviction_filter`` now branches on
+    ``deleted_sessions`` — and a docstring still promising the opposite tells a
+    later lane that the gating it can see is a bug to be removed.
+    """
+    doc = tl.window_arm_retention.__doc__ or ""
+    assert "never gates" not in doc, (
+        "the retention docstring still promises this measure never gates, but "
+        "_non_eviction_filter branches on deleted_sessions under the "
+        "2026-11-07 ruling")
+    assert "Nothing in this module branches" not in doc
+    assert "_non_eviction_filter" in doc, (
+        "the docstring must NAME its one gating consumer, so the scope is read "
+        "from the measurement it is justified by")
+    # the gate is real, not just documented: the issue's own pool is refused.
+    _, g_picks, g_trace = _fuse(ISSUE_POOL)
+    assert g_picks == [] and g_trace["applied"] is True

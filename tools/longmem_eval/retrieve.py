@@ -431,6 +431,32 @@ def resolve_temporal_leg_non_eviction(explicit: bool | None = None,
     return str(env).strip().lower() not in _TEMPORAL_LEG_NON_EVICTION_FALSY
 
 
+def non_eviction_applied(trace: dict | None) -> bool:
+    """Did the #10538 guard ACTUALLY run on this row? — the GUARD's own answer.
+
+    ``temporal_leg_fusion_order``'s ``guard_trace["applied"]`` is the only
+    source. Deriving it from the knobs instead ("the switch resolved ON and the
+    placement is not ``head``") reports ``True`` on two shapes where the guard
+    never ran, because the guard is scoped to the DATE-WINDOW arm's tail
+    placement and to nothing else:
+
+    * the ``#2976`` ANCHOR arm — measured AS-IS, deliberately unguarded, and the
+      trace says so (``applied: False``, ``targeting: "anchor"``);
+    * an INERT leg — no picks, so the guard was never reached and the trace
+      carries no ``applied`` key at all (which is the same answer: ``False``).
+
+    The receipt is the ON/OFF reconstruction surface, so a field claiming
+    ENFORCEMENT on a row where nothing was enforced is exactly the false PASS
+    the deliberate scope declaration in ``temporal_leg_fusion_order`` exists to
+    prevent — a reader would take the anchor arm's published numbers as
+    guard-clean when they are unguarded by decision.
+
+    ``on`` (the resolved switch) stays reported separately, because the two
+    facts differ: the rule can be ON and not have applied to this arm.
+    """
+    return bool((trace or {}).get("applied"))
+
+
 def resolve_temporal_leg_placement(explicit: str | None = None,
                                    env: str | None = None) -> str:
     """Resolve the temporal leg's placement: explicit arg > env > ``"tail"``.
@@ -2260,16 +2286,24 @@ def retrieve_for_question(
             # refused, with which of the three conditions refused it. The
             # rejection list is the guard's own evidence: an empty leg whose
             # cause is the guard reads ``non_eviction_guard`` below, and this
-            # block is where the ids come from. ``on`` is the RESOLVED switch
-            # (true even on the anchor arm and the head counterfactual, where
-            # the guard does not run); ⛔ ``applied`` is the field that says
-            # whether it RAN on this row, and it comes from the guard's own
-            # trace — never recomputed here, or a row where the guard was
-            # scoped away would be indistinguishable from one where it ran and
-            # admitted every pick.
+            # block is where the ids come from.
+            #
+            # The two fields answer DIFFERENT questions and must not be
+            # collapsed: ``non_eviction`` is the RESOLVED SWITCH (the rule's
+            # state — True on the ``head`` counterfactual too, because the rule
+            # is ON there as well), while ``non_eviction_applied`` is whether
+            # the rule actually RAN on this row. It is read from the guard's
+            # own trace, never re-derived from the knobs: the guard runs only
+            # on the DATE-WINDOW arm's tail placement, so a knob-derived value
+            # would claim enforcement on the unguarded ``#2976`` anchor arm and
+            # on an inert leg. See :func:`non_eviction_applied`.
             "non_eviction": _tl_non_eviction,
-            "non_eviction_applied": bool(
-                _tl_guard_trace.get("applied", False)),
+            "non_eviction_applied": non_eviction_applied(_tl_guard_trace),
+            # WHICH target selected the picks — ``"window"`` (the #10538 arm the
+            # guard governs), ``"anchor"`` (the #2976 arm, unguarded by
+            # decision) or ``"none"``. It is what makes ``applied: False``
+            # legible: without it a scoped-out row and a row whose guard ran
+            # and admitted everything look the same in the receipt.
             "non_eviction_targeting": _tl_guard_trace.get("targeting"),
             "non_eviction_rejected": list(
                 _tl_guard_trace.get("rejected") or []),

@@ -987,17 +987,28 @@ def window_arm_retention(
     ``tools/longmem_eval/window_arm_baseline.py``, which is the reproducible
     instrument over this function).
 
-    ⛔ **This function itself never gates — one named caller does.** Nothing in
-    this function branches on any value it returns; the ONLY place the predicate
-    is enforced is :func:`_non_eviction_filter`, called from
-    :func:`temporal_leg_fusion_order` under the owner ruling of 2026-11-07
-    (``window-exit``: expansion may widen the reader window and may never evict
-    a session from it), on the DATE-WINDOW arm only. That filter reads
-    ``deleted_sessions`` from THIS function, so the measurement here and the
-    gate there are computed on one surface by construction — if you change the
-    window/reader modelling below, you change the guard's verdict too. No other
-    caller may gate on these values; a second enforcer would be a second
-    definition of "eviction".
+    ⛔ **This function MEASURES; it does not itself decide.** Read the scope
+    exactly, because this paragraph used to promise the opposite and a stale
+    "it does not gate" claim is how a bypass gets argued later: the question it
+    was written under — whether an arm MAY pay for a slot by evicting base
+    evidence inside the reader window (``window-exit`` vs ``ab-head-ab``) —
+    **has been answered**. The owner ruled ``window-exit`` on 2026-11-07
+    (#10538, comment ``6711158625``): expansion may WIDEN the window and may
+    never remove evidence the reader already had, with the three conditions
+    stated as conditions of the fix.
+
+    So exactly ONE consumer branches on a value returned here —
+    :func:`_non_eviction_filter`, which refuses a promotion when
+    ``deleted_sessions`` is non-empty, under that ruling and on that arm
+    only (see :func:`temporal_leg_fusion_order`'s scope declaration).
+    Everything else here is still REPORT-ONLY, and turning a **different**
+    field into a gate — ``net``, ``evicted_ids``, ``additive`` as a proxy for a
+    rule this ruling does not state — still needs its own ruling, because none
+    of them says which session left. :func:`_non_eviction_filter` is
+    deliberately written against ``deleted_sessions`` for that reason: it is
+    the one field whose definition ("a session absent from the fused window")
+    IS the ruling's words, so the gate cannot drift from the measurement it is
+    justified by.
 
     ``candidates`` is the caller's semantic pool in rank order; ``fused_ids`` is
     what :func:`temporal_leg_fusion_order` returned; ``picks`` is its second
