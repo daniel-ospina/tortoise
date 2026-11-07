@@ -4,7 +4,7 @@ type: plan
 domain: planning
 doc_status: draft
 created: 2026-11-05
-updated: 2026-11-05
+updated: 2026-11-06
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #5090, embed gate, exemption register, vector index inventory, test-design, capstone"
@@ -168,12 +168,25 @@ duplicate keys (a duplicated declaration must not silently win), and the census 
 unreadable catalogue rather than reporting an empty population.
 
 **6.4 Surface statement (⛔ the hard rule).** Nothing here adds or removes an MCP tool or public SDK method.
-**S3 is the one place that could**: removing the `Object`/`Event` vectors makes
-`entity_type='object'` / `'event'` return **zero rows** where they return rows today (`Source`/`Subject`
-carry no vector INDEX, and the 2026-09-24 count found none there — though both labels' writers do store
-`embedding`, so the census measures the live population — §12.1b). That is a surface
-change and **requires Daniel's approval before it is implemented** — so it is carried in the child's body as
-a request, with the census as its evidence.
+**S3 is the one place that could**: removing the embeddings held by the labels that have no vector index
+empties the **dense leg** for those labels, so a query that matched only by meaning returns **zero rows**.
+
+⚠️ **CORRECTED 2026-11-06 (`#11088`, measured)** — two things this paragraph used to get wrong:
+
+1. **The population.** It named `entity_type='object'` / `'event'` — two values. The census measures
+   **FOUR labels / FIVE `entity_type` values**: `:Event`, `:Object`, `:Source`, `:Subject` →
+   `event`, `object`, `document`, `source`, `subject` — **on the population it ran on**; the affected
+   set is whatever `--census` prints for the graph a removal applies to, because a label holding no
+   vectors cannot be affected. Stating it for two of five under-reports the
+   change, and under-reporting is the direction that matters for an approval request
+   (`S3-VECTOR-CENSUS.md` §4.1/§7).
+2. **The consequence.** It said those queries "return zero rows" — false while the FTS leg answers
+   (`classify_query` turns every leg on for a text query), which is why the loss is **semantic recall**
+   (`S3-VECTOR-CENSUS.md` §3.1; §7 scopes the `:Source` caveat).
+
+(`Source`/`Subject` carry no vector INDEX, though both labels' writers do store `embedding`, so the census
+measures the live population — §12.1b.) That is a surface change and **requires Daniel's approval before
+it is implemented** — so it is carried in the child's body as a request, with the census as its evidence.
 
 ---
 
