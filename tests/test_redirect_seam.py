@@ -740,10 +740,10 @@ def _thread_start_stamp_violations() -> list[str]:
         module body re-captured that global on `importlib.reload` and so named
         a stale copy of this wrapper (measured before #11217:
         `_ORIG_THREAD_START is <the pre-reload wrapper>`); the body now keeps
-        the captured original (#11217), and the property is asserted directly
-        by `test_the_ORIGINAL_the_stamp_reads_is_not_itself_a_stamp` and
-        observed across a real reload by
-        `test_a_RELOAD_keeps_the_REAL_Thread_start`, both OUTSIDE this walk.
+        the captured original (#11217), and the property is asserted OUTSIDE
+        this walk by `test_a_RELOAD_keeps_the_REAL_Thread_start`, which checks
+        it directly in a subprocess (`_ORIG_THREAD_START` IS the real
+        `Thread.start`) across a real reload.
         What no arm here can see is a state where `Thread.start` is the CURRENT
         wrapper while `_ORIG_THREAD_START` holds a stale copy.
 
@@ -1088,45 +1088,6 @@ def test_the_stamp_delegate_graph_is_checked_by_REACHABILITY(shape):
     two_stack = _stamp_problems(second)
     assert any("double wrap" in p for p in two_stack), two_stack
     assert len(two_stack) == len(set(two_stack)), f"duplicate violations: {two_stack}"
-
-
-def test_the_ORIGINAL_the_stamp_reads_is_not_itself_a_stamp():
-    """#11217: `_ORIG_THREAD_START` must be the REAL `Thread.start`, not our stamp.
-
-    This closes the blind spot `_thread_start_stamp_violations` states about
-    itself: that walk follows `__wrapped__` links, and our wrapper is a plain
-    ``def`` that publishes none, so the chain stops at it and the delegate is
-    NEVER inspected. A delegate that IS a stamp is not "still one layer" — it is
-    UNBOUNDED: the stamp reads `_ORIG_THREAD_START` at CALL time, so it calls
-    itself and every `Thread.start()` raises `RecursionError`.
-
-    That state is reachable, which is why it is pinned rather than reasoned
-    about: `importlib.reload` re-executes the module body into its EXISTING
-    dict, so a bare `_ORIG_THREAD_START = threading.Thread.start` on a reload
-    rebinds the name to whatever the class attribute is THEN — the stamp.
-    `tortoise/projection/__init__.py` therefore keeps the captured original
-    (``globals().get("_ORIG_THREAD_START") or threading.Thread.start``), and
-    `test_a_RELOAD_keeps_the_REAL_Thread_start` observes that across a real
-    reload in a subprocess.
-
-    Read from the MODULE's dict, never from the installed function's
-    `__globals__`: with a third-party layer on top (sentry's `@wraps` wrapper)
-    that namespace is the WRAPPER's, which is the reading that made the removed
-    identity assertion wrong in the first place (#11430). `_is_stamp` is the
-    right predicate for the same reason — a `__name__` comparison reports a
-    vendor wrapper as a stamp (a FALSE RED); `_is_stamp` reads
-    ``__globals__['__name__']``, which `functools.wraps` cannot forge.
-    """
-    from tortoise import projection as proj_mod
-
-    original = proj_mod.__dict__.get("_ORIG_THREAD_START")
-    assert original is not None, (
-        "tortoise.projection has no `_ORIG_THREAD_START` — the stamp's original "
-        "capture is gone, so a reload rebinds it to the stamp")
-    assert not _is_stamp(original), (
-        "Thread.start's stamp reads another STAMP as the original — the reload "
-        "re-bound `_ORIG_THREAD_START` instead of keeping the real one, so every "
-        f"thread creation recurses ({original!r})")
 
 
 def test_a_RELOAD_keeps_the_REAL_Thread_start():
