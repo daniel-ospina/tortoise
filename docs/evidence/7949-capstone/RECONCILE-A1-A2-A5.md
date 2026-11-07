@@ -218,7 +218,7 @@ arm=before metric=real_facts count=90
 arm=after-vet-shipped metric=real_facts count=90
 ```
 
-Against the registered bar (`PRE-REGISTRATION.md:266-267`, `after_share <= 0.50 × before_share`,
+Against the registered bar (`PRE-REGISTRATION.md` §3.1, the E1/E1b rows; `after_share <= 0.50 × before_share`,
 `>= 90 of 90`):
 
 - **E1: `0.600000 <= 0.300000` → FALSE.** The share does not move at all (`reduction=-0.000000` is

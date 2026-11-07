@@ -1206,6 +1206,60 @@ def test_the_2684_census_is_selected_on_every_surface_that_moves_it():
         )
 
 
+def test_7949_c2_door_runs_on_both_surfaces_that_can_move_it():
+    """#10983 review round 11: the DOOR pin must run on EVERY diff that moves it.
+
+    `tests/test_7949_c2_door.py` pins the fleet's capture lane:
+    `hosted_api._capture_lane()` -> `sdk._extract_session_v2` ->
+    `extractor_v2.extract_session_v2`. Two modules can move that lane and they
+    fall on DIFFERENT surfaces:
+
+      * `tortoise/hosted_api.py` is an EXACT `SOURCE_PATTERNS["api"]` entry that
+        REPLACES the `core` fallback in `select()` (measured: surfaces
+        `['api','onboarding']`), so the file's `core` registration alone runs on
+        NO leg — a diff flipping `else "v2"` to another lane would ship green
+        with the assertion that names the door never executed;
+      * `tortoise/extractor_v2.py` matches no SOURCE_PATTERN and falls through to
+        `core` (measured: surfaces `['core']`).
+
+    MEASURED before the fix, on the head this pin was added at:
+    `--changed-files tortoise/hosted_api.py` -> the file is NOT in
+    `slow_selected` and NOT in `test_files`, i.e. the #1349/#2938 silent-drop
+    class in its harmful direction, and nothing else in `tests/` reds on that
+    mutation.
+
+    The second assertion is not cosmetic: the file is named by TWO surfaces, so
+    it must stay in the FAST pool. A `slow_files` entry named by a second
+    surface is dropped from the fast set AND never re-added to `slow_selected`
+    (first-match ownership — #6234, `test_every_slow_file_a_second_surface_
+    names_runs_for_that_surface`), so "register the `api` row" taken alone
+    would have moved the hole from the `hosted_api.py` diff to the
+    `extractor_v2.py` one. Asserting BOTH surfaces here is what makes a
+    partial fix red.
+    """
+    door = "test_7949_c2_door.py"
+    assert door not in set(load_manifest()["slow_files"]), (
+        f"{door} is back in `slow_files` while named by two surfaces — it will "
+        "run on NEITHER leg for one of them (#6234)"
+    )
+    for changed, surface in (
+            ("tortoise/hosted_api.py", "api"),
+            ("tortoise/extractor_v2.py", "core")):
+        assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+        r = _sel([changed])
+        assert surface in r["surfaces"], (
+            f"{changed} selects {r['surfaces']}, not {surface} — the premise "
+            "of this pin changed; re-derive it"
+        )
+        selected = set(r["test_files"]) if r["test_files"] != "ALL" else set()
+        selected |= set(r["slow_selected"])
+        assert door in selected, (
+            f"{changed} does not run the door pin {door} — the pin that names "
+            "the capture lane sleeps on a diff that can move it "
+            f"(surfaces={r['surfaces']}, selected slow={r['slow_selected']})"
+        )
+
+
 def test_the_9572_seed_surface_pins_are_selected_on_their_own_modules():
     """#9572 review P2-2: a seed-surface pin must run on the module it pins.
 
