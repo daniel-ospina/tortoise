@@ -83,9 +83,10 @@ ONE bounded graph pass:
    hit's only identity. So a product pool hit keyed as the per-hit phantom
    ``idx:point:{id}`` and :func:`seeded_sessions` dropped it: on the raw
    search pool the arm could seed nothing at all, and an ASK-lane pool only
-   where ``annotate_ask_hits`` had re-attached a snake id from its ``:Event``
-   join (that lane dedups with its own ``ask_session_key``, and the arm is
-   off in the product).
+   where ``annotate_ask_hits`` had re-attached a snake id — from the
+   ``:Event``'s ``sessionId`` or from the Point's own prop, since it sets
+   ``"session_id": ev_session or n_session`` (that lane dedups with its own
+   ``ask_session_key``, and the arm is off in the product).
 
    ``session_key_of`` now also reads the CAMEL wire identity ``sessionId``,
    which is the spelling the product's own point fetch emits: it resolves the

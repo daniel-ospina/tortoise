@@ -769,10 +769,10 @@ def session_key_of(hit: dict) -> str:
     ``lme_session_index`` keeps its index bucket (the eval's pool hits carry
     BOTH, ``tools/longmem_eval/retrieve.py``, so a census measured before
     this change — #8713's, which this arm must not disturb — cannot move).
-    The keys that DO change are exactly the PHANTOM ones
-    (``idx:point:{id}``), which is the defect: a hit that reaches that
-    branch today falls back only because it carries no identity in a
-    spelling this function reads.
+    The keys that DO change are exactly the PHANTOM ones — ``idx:point:{id}``,
+    and the ``idx:-1`` bucket that a hit carrying no ``id`` falls to — which
+    is the defect: a hit that reaches that branch today falls back only
+    because it carries no identity in a spelling this function reads.
 
     ⛔ Not FILTERED — but the camel leg IS ``strip()``ped, and the two are
     different questions. ⚠️ On a REAL product hit this ``strip()`` is a

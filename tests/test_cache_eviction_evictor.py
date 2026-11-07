@@ -85,10 +85,10 @@ class _Record:
 @pytest.fixture()
 def lane():
     """A dedicated graph on the live lane container, dropped afterwards."""
+    import os
+
     import redis
     from falkordb import FalkorDB
-
-    from tests._embedded import _journal_append
 
     host = _live_utils.service_host()
     port = _live_utils.docker_port()
@@ -98,48 +98,21 @@ def lane():
         decode_responses=True, socket_connect_timeout=10, socket_timeout=120,
     )
     db = FalkorDB(host=host, port=port, password=password)
-    # Epic #1647 (T7, cycle-6 P1-3 / cycle-8 P2-2): a raw client bypasses
-    # `_assert_test_graph` AND the per-test wipe scope, so this handle has to
-    # carry all three halves of the one ownership contract:
+    graph_name = f"test_evict_{os.urandom(6).hex()}"
+    # #5128-class hygiene (cycle-6 P1-3 / cycle-8 P2-2): the raw client bypasses
+    # `_assert_test_graph` AND the per-test wipe scope, so a per-test-unique name
+    # alone still leaks one empty graph per run. Journaling the name is the
+    # ownership contract the session-end sweep reads — without it the graph is
+    # UNOWNED and the sweep can never drop it.
     #
-    # (a) per-test-UNIQUE — a per-run `urandom` suffix; a fixed literal would
-    #     let concurrent sessions DETACH each other's live writes;
-    # (b) inside `_SWEEP_OWNED_PREFIXES` (the `test_` stem) — the session-end
-    #     sweep's name gate is FAIL-CLOSED (#7795), so a journaled name outside
-    #     that family is PRESERVED rather than dropped and one empty graph
-    #     leaks per run (the #8746 cache-churn pressure). The pre-#11167
-    #     `evict_<hex>` spelling was outside it: journaling alone would NOT
-    #     have made it reapable. `main` repaired that independently (#11392,
-    #     to `test_evict_<hex>`), so the `10976_` infix here is a RENAME on
-    #     top of that repair, not a second fix;
-    # (c) JOURNALLED (`_journal_append`) — the record that tells a live PEER's
-    #     `scope=None` sweep this graph is in use, without which a peer may
-    #     `GRAPH.DELETE` it MID-TEST (#3074/#3214). The `finally:` teardown
-    #     below covers only this lane's own clean exit and does not run at all
-    #     if the process dies.
-    #
-    # What
-    # `tests/test_derived_names.py::test_raw_falkordb_client_detach_uses_per_test_unique_graph`
-    # actually pins here, stated exactly (#11182):
-    #
-    #   (c) IS pinned — the census requires a real `_journal_append` CALL in the
-    #   enclosing block, matched on a MASKED copy, so a comment, an import, or a
-    #   `def` shadow cannot satisfy it.
-    #
-    #   (a) is pinned INCIDENTALLY at best. Its uniqueness leg is still a RAW
-    #   substring sniff over the UNMASKED block, so prose satisfies it — and
-    #   prose naming the token would satisfy it here. This comment therefore
-    #   does not spell that token: the sole occurrence in this block is the real
-    #   call, so reverting (a) to a non-unique name REDS the census instead of
-    #   sliding through on a comment. The leg remains prose-satisfiable in
-    #   general — that is the remaining half of #11182, recorded there rather
-    #   than fixed here.
-    #
-    #   (b) is NOT pinned at all: reverting the `test_` stem to a bare
-    #   `evict_<hex>` leaves the census GREEN (measured — the census's own
-    #   non-vacuity arm pins a `g_<hex>` name and asserts no violations). It is
-    #   carried here deliberately; do not read that guard's green as covering it.
-    graph_name = f"test_10976_evict_{os.urandom(6).hex()}"
+    # The `test_` prefix is LOAD-BEARING, not decoration: the sweep's name gate
+    # (`tests/_embedded.py::owns_by_ownership_record`) admits only
+    # `_SWEEP_OWNED_PREFIXES = ("test_", "tortoise_test", "team_", "org_")`,
+    # so a journal entry named `evict_…` is PRESERVED rather than dropped —
+    # journaling it would look like the fix while leaking the graph anyway, and
+    # it would additionally be reported as a "preserved" name, the signal that
+    # means "a test drove PRODUCT code at a shared path".
+    from tests._embedded import _journal_append
     _journal_append(graph_name)
     graph = db.select_graph(graph_name)
     graph.query("MATCH (n) DETACH DELETE n")
