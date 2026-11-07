@@ -5057,7 +5057,8 @@ def _pin_shipped_ingest_allowance(monkeypatch) -> None:
 
 class Test4051ChargeCoversTheLoopShape:
     """#4051 §3.1 — the ingest charge is never cheaper than the write, on the
-    two shapes the issue's own reproduction uses.
+    `points: []` shape the issue's own reproduction uses and on the flat
+    collection lanes §3.3 names.
 
     **Why this class exists.** For a `points: []` payload the only org-level
     bound that can bind is the per-org ingest window
@@ -5073,10 +5074,13 @@ class Test4051ChargeCoversTheLoopShape:
     That invariant is pinned by `TestCommitOrgIngestBound::
     test_the_charge_is_never_cheaper_than_the_write` and `::
     test_a_mitigates_operator_is_charged_for_its_second_event` for the
-    `points[]` and `operators[]` lanes. It was **not** pinned for the two shapes
-    #4051's own repro uses, and `supersessions[]` is still pinned only against
-    the formula (`TestDeclaredCommitWriteCount::
-    test_each_collection_entry_is_charged_once`) rather than against the graph:
+    `points[]` and `operators[]` lanes. It was **not** pinned for the shapes
+    below. ⚠️ Nor is `supersessions[]` pinned by anything, against the graph OR
+    against the formula: `_COMMIT_SUPERSESSION_ENTRY_NODES` is referenced by no
+    test, and `TestDeclaredCommitWriteCount::
+    test_each_collection_entry_is_charged_once` — whose docstring names the
+    "`supersessions[]` TWO" rate — carries no `supersessions[]` entry in its
+    payload. That is a live coverage gap, recorded here rather than closed here.
 
     * the **`points: []` shape** — nothing but the fixed chain (`:CommitRecord`,
       `:Session`, transcript `:Source`, AgentSession `:Event`), which is the
@@ -5183,8 +5187,8 @@ class Test4051ChargeCoversTheLoopShape:
 
         `declared_commit_write_count` charges `_COMMIT_FLAT_NODE_LANES` one node
         per entry, an assumption no test covered: the existing invariant legs
-        measure `points[]` and `operators[]` only (`supersessions[]` is pinned
-        against the formula, never against the graph). An entry
+        measure `points[]` and `operators[]` only, and `supersessions[]` is
+        pinned by nothing at all (see this class's docstring). An entry
         that minted a node AND a durability `:GraphEvent` would make that rate a
         2× fail-open — the same defect review cycles 2 and 3 found on the points
         and operator lanes, one lane over. Measured: declared 7 / minted 7 for
@@ -5250,21 +5254,25 @@ class Test4051ChargeCoversTheLoopShape:
 
     def test_the_throttles_residual_reach_is_a_number_not_an_adjective(
             self, client, monkeypatch):
-        """#4051 §4's residual, measured from the SHIPPED constant + real charge.
+        """#4051 §4's residual, read from the ADMISSION PREDICATE — not derived.
 
-        The issue record has carried this figure loosely ("unbounded"), which
-        understates it, and it has been re-derived three times across the
-        issue's comments. It is finite and it is arithmetic: a `points: []`
-        commit is charged the node floor, the allowance is
-        `MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG`, so the window admits
-        `allowance // charge` of them and each mints `minted` nodes.
+        The issue record carries this figure twice and the two disagree:
+        ≈**7,680 nodes/min ≈ 460,800/h** (comment of 2026-11-02T18:57, from a
+        3-node delta that omits the `:CommitRecord` every commit mints) and
+        ≈**13,000 nodes/min** (2026-11-02T20:31, from a 5-node chain). Neither is
+        the shipped figure, and no comment states one. This leg is the
+        measurement that supersedes both, so the next lane does not have to
+        adjudicate three numbers.
 
-        ⛔ This asserts the DERIVATION, not a policy. Both operands are read from
-        the shipped code plus a measured commit, so a retune of the documented
-        default or a change to the chain REDS these literals — the red is the
-        point (it forces the issue record to be updated), which is why the
-        ambient env knob is pinned out rather than read. It does not claim the
-        total is bounded — it is not, and that is §4.
+        ⚠️ It drives `quota.commit_ingest_admit` — the real predicate — instead
+        of dividing the allowance by the charge. The derivation happens to agree
+        today (the comparison is inclusive, `used + charge <= limit`), but a
+        derivation would stay green through an inclusive→exclusive change while
+        the enforced count moved to 2,559, which is exactly the stale-pinned-
+        number failure this leg exists to prevent.
+
+        ⛔ This does not claim the total is bounded — it is not, and that is §4.
+        It states the RATE that is the only bound, in numbers.
         """
         import tortoise.quota as quota_mod
 
@@ -5281,19 +5289,32 @@ class Test4051ChargeCoversTheLoopShape:
             0, session_id="s4051ChargeResid", points=[], entities=[],
             provenance_refs=[]))
 
-        commits_per_window = (
-            quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN // charge)
-        nodes_per_window = commits_per_window * minted
+        # Drain the window through the PRODUCT's own predicate, on a clean
+        # window (the fixture resets it per test; reset here too so the loop
+        # does not inherit this test's own commits).
+        quota_mod._reset_commit_ingest_budget_for_tests()
+        admitted = 0
+        while quota_mod.commit_ingest_admit(TEST_ORG_ID, charge).allowed:
+            admitted += 1
+            assert admitted <= 10_000, (
+                "the ingest window admitted 10,000 `points: []` commits — the "
+                "throttle is not binding at all")
+        nodes_per_window = admitted * minted
+        # The drain spent the window; hand it back before the real commits
+        # below, which are measured against a fresh minute.
+        quota_mod._reset_commit_ingest_budget_for_tests()
 
         assert charge == declared * 1024
-        assert commits_per_window == 2560, (
-            f"the 60 s window admits {commits_per_window} `points: []` commits "
+        assert admitted == 2560, (
+            f"the 60 s window admits {admitted} `points: []` commits "
             f"({charge} B each against the shipped "
             f"{quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN} B default) — "
             "#4051's record states 2,560; update the record if it moved")
         assert nodes_per_window == 10240, (
-            f"the window admits {nodes_per_window} nodes/org/min, not the "
-            "10,240 #4051's record states")
+            f"the window admits {nodes_per_window} nodes/org/min, not 10,240 "
+            "— #4051's record states 7,680 (a 3-node delta that omits the "
+            ":CommitRecord`) and ≈13,000 (a 5-node chain); this leg supersedes "
+            "both, so update the record rather than the assertion")
 
         # Why this is a RATE and not a bound, re-measured rather than asserted:
         # the nodes the window admits are invisible to the count the commit
