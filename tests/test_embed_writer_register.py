@@ -678,12 +678,16 @@ INVISIBLE_SHAPES = {
     # `embedding =` or `set_embedding_clause(`, and `_writes_an_embedding`'s AST pass inspects
     # ASSIGNMENT targets only (`ast.Assign`/`AugAssign`/`AnnAssign` -> a `Subscript` with a
     # `Constant` slice), so an `ast.Dict` handed to a CALL is invisible to both passes. Measured:
-    # the writer below is ABSENT from the map entirely. Two live carriers keep it from being
+    # the writer below is ABSENT from the map entirely. Two carriers keep it from being
     # hypothetical — `sdk::_session_event_write` and `sdk::_embedding_repair_attempt` emit
     # `**{**payload, "embedding": embedding}` into the journaled payload — and BOTH are in the
     # discovered map as `unresolved_write` for a DIFFERENT reason (their bodies also call
     # `set_embedding_clause(`), which is exactly the "visible for another door" case the register
-    # draws for `sdk::_journal_event_raw_write`.
+    # draws for `sdk::_journal_event_raw_write`. They are NAMED INSTANCES, not the population: the
+    # same blind class is spelled `params={…, "embedding": …}` in
+    # `projection.entities::_event_plain_merge` (also `unresolved_write` off its own
+    # `set_embedding_clause(` call) and in the `gated`-by-CALL `projection.entities::_upsert_*`
+    # writers, so a reader must not take two as the complete set.
     "dict_literal_embedding_key": (
         'def w(rec, props, v):\n'
         '    rec._emit_event("X", **{**props, "embedding": v})\n'

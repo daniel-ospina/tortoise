@@ -134,12 +134,16 @@ all); by contrast the computed key in `tortoise.sdk::update_point` is in the ins
 **discovered map** (`embedding_writers()`) as `gated` — it carries no `WRITER_CENSUS` row at all,
 and that table's class vocabulary (`recognised_producer`/`exempt`/`bypass`) cannot spell `gated` —
 while `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
-`set_embedding_clause`, NOT off its whole-node replace. The dict literal has visible carriers for
-the SAME reason of another door: `tortoise.sdk::_session_event_write` and
-`tortoise.sdk::_embedding_repair_attempt` hold it and are in the discovered map as
-`unresolved_write`, because their bodies ALSO call `set_embedding_clause(` — so their membership is
-not evidence the literal was seen, exactly the distinction the `sdk::_journal_event_raw_write`
-bullet below draws. The authority for SHAPES is
+`set_embedding_clause`, NOT off its whole-node replace. The dict literal has carriers through
+ANOTHER door too, and they are INSTANCES, not the population: `tortoise.sdk::_session_event_write`
+and `tortoise.sdk::_embedding_repair_attempt` hold the `**{**…, "embedding": …}` spelling and are in
+the discovered map as `unresolved_write` because their bodies ALSO call `set_embedding_clause(`, so
+their membership is not evidence the literal was seen — exactly the distinction the
+`sdk::_journal_event_raw_write` bullet below draws. The same blind class is spelled
+`params={…, "embedding": …}` in `tortoise.projection.entities::_event_plain_merge`
+(`unresolved_write` off its own `set_embedding_clause(` call) and in the `gated`-by-CALL
+`projection.entities::_upsert_*` writers; a reader must not take two as the complete set — the
+SHAPE, not the instance list, is what this paragraph names. The authority for SHAPES is
 `tests/test_embed_writer_register.py::INVISIBLE_SHAPES`, which holds both the shapes neither pass can
 spell AND the SCOPES the walk never enters: a count written
 here re-stales with every shape added, so this paragraph names forms and instances and does not
