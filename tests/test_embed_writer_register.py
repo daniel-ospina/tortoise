@@ -754,13 +754,16 @@ def test_every_declaration_cites_a_seam_and_an_owning_issue():
     assert _resolve_module("tortoise.projection") == (
         REPO_ROOT / "tortoise" / "projection" / "__init__.py"
     ), "a package must win over a same-named module — `tortoise/projection.py` is a shim"
-    # ⛔ NO second arm on `tortoise.config` (round-17 review). It was written as "the module is the
-    # only candidate", but no edit to the resolver can move it: an order revert reds the
-    # `tortoise.projection` arm above first (that is the arm with two candidates), and the tree
-    # change it nominally guards — gaining `tortoise/config/__init__.py` — cannot be reached at all
-    # now (`tests/conftest.py` fails at import, `cannot import name 'RELATIVE_PATH_ERROR'`). An
-    # assertion no mutation of this artifact can red is dead weight, so the ORDER is pinned by the
-    # arm that has two candidates, and nothing else.
+    # ⛔ NO second arm on `tortoise.config` (round-17 review, reason corrected round-18). It was
+    # written as "the module is the only candidate", and the round-17 justification for dropping it
+    # was wrong: a resolver edit CAN move it (`for candidate in (base / "__init__.py",)` makes it
+    # return None). The true reason is REDUNDANCY, not unkillability: every such edit reds the
+    # citation loop above FIRST, with a coarser message (`tortoise.sdk is not a module in this
+    # tree`, :728), so this row could never be the FAILING row a reader attributes a break to —
+    # measured. And the question it was actually written for, the `.py`-vs-package ORDER, is pinned
+    # by the `tortoise.projection` arm above, the only arm with TWO candidates. (The tree change it
+    # also named is unreachable in this repo: gaining `tortoise/config/__init__.py` fails
+    # `tests/conftest.py` at import, `cannot import name 'RELATIVE_PATH_ERROR'`.)
 
 
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():
@@ -953,14 +956,24 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
         "cover' block together; the register cites two of these by name as pinned"
     )
     # The register cites shapes BY NAME ("pinned as `INVISIBLE_SHAPES`' `module_scope_container_key`
-    # and `class_scope_container_key`"), so READ the citation out of the artifact and require it to
-    # land on an entry. Derived rather than restated here: a name added to the prose with no pin
+    # and `class_scope_container_key`"), so READ the citation out of the artifact and require each
+    # name it cites to land on an entry. The window is the CLAUSE under `INVISIBLE_SHAPES`, not the
+    # whole docstring and not a `*_key` suffix filter: 6 of the table's 10 names do not end in `_key`
+    # (`map_merge`, `container_helper`, `module_constant_clause`, …), so a suffix filter leaves most
+    # of the name space uncoupled — measured round-18, a docstring citing `phantom_scope_shape`
+    # stayed green under it — while scanning the whole docstring would sweep in the hundreds of
+    # writer and function symbols it legitimately names. A name added to that clause with no pin
     # reds this row, and so does a pin deleted while the prose keeps citing it.
-    cited = set(re.findall(r"`([a-z][a-z0-9_]*_key)`", register.__doc__))
+    _CITATION_TOKEN = re.compile(r"`([a-z][a-z0-9_]*)`")
+    cited: set[str] = set()
+    for _mention in re.finditer(r"INVISIBLE_SHAPES", register.__doc__):
+        _tail = register.__doc__[_mention.end() : _mention.end() + 400]
+        _stop = re.search(r"\.\s", _tail)
+        cited |= set(_CITATION_TOKEN.findall(_tail[: _stop.start() + 1] if _stop else _tail))
     assert cited, (
-        "the register's docstring no longer cites a `*_key` blind shape by name — if that citation "
-        "was removed deliberately, remove this row with it; leaving it means nothing couples the "
-        "prose to `INVISIBLE_SHAPES`"
+        "the register's docstring no longer cites a blind shape by name in its `INVISIBLE_SHAPES` "
+        "clause — if that citation was removed deliberately, remove this row with it; leaving it "
+        "means nothing couples the prose to `INVISIBLE_SHAPES`"
     )
     assert cited <= set(INVISIBLE_SHAPES), (
         f"the register cites {sorted(cited - set(INVISIBLE_SHAPES))} as pinned by "
