@@ -4069,12 +4069,21 @@ def test_docs_job_guards_tracked_generated_artifacts_on_every_pr():
         # one that checks out at `fetch-depth: 0` (#5086 review P1-1). It is
         # listed INSIDE the exact list rather than exempted — the exactness of
         # this assertion is the whole point.
-        "python3 tools/substrate_map_check.py --check"
+        "python3 tools/substrate_map_check.py --check\n"
+        # #11084: the #5090 test-design surface map's own guard is the FIFTH
+        # invocation, and it takes NO `--check` (it verifies by default) — which
+        # is exactly why an expectation whose text said "the four `--check`
+        # commands" could not absorb it. The `docs` job itself stays GREEN (it
+        # runs all five); what this stale pin reds is the required `test`
+        # matrix, in every PR, at two nodeids (#11412 Root 2). The next addition
+        # must extend this list, not be exempted.
+        "python3 tools/test_design_map_check.py"
     )
     assert code.strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the four "
-        "`--check` commands — no shell operator, no wrapper, no trailing "
-        f"anything, or a real failure reports green (#2656); got {code!r}"
+        "the drift step must invoke EXACTLY the installer plus the five guard "
+        "commands (four take `--check`, `test_design_map_check.py` verifies by "
+        "default) — no shell operator, no wrapper, no trailing anything, or a "
+        f"real failure reports green (#2656); got {code!r}"
     )
     # The step may carry only the keys that cannot silence it. Enumerating the
     # silencing keys one at a time is what left the next one open, so the rule is
