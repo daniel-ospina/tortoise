@@ -973,8 +973,13 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     # shape this whole census exists to prevent (measured: `SystemExit(0)`
     # satisfied `_guard_or_fail` and every attribution assertion). Shape-generic
     # on purpose: it stays silent about WHICH non-zero code a file chooses
-    # (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare` pins the three
-    # sites where that choice is a contract decision, not a style one).
+    # (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare` pins it for the
+    # three files this PR guards, because which code each can spare is a per-tool
+    # contract decision). Other corpus guards still refuse with a bare
+    # `SystemExit(<message>)` — exit 1 — where 1 is also the tool's own
+    # DRIFT/failure code, `tools/bridge_table.py`, `tools/mcp_rename_table.py`
+    # and `tools/sdk_surface.py` among them; that residue predates this PR and is
+    # not pinned here.
     #
     # The status is DERIVED, not read off `.code`: `SystemExit()`, `SystemExit(None)`
     # and `SystemExit(False)` all exit 0 while `.code` is `None`/`None`/`False`, so
@@ -993,12 +998,12 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
     exec(code, namespace)  # at the floor the guard must be inert
 
 
-#: The refusal code each of the three `#4053`/`#11342` sites CHOOSES, and the
-#: verdict code it spares. `SystemExit(<message>)` exits 1 in CPython, so for two
-#: of these files an old interpreter was reported as the tool's own verdict —
-#: `gen_placement_table --check` prints `STALE` and returns 1, and
-#: `test_design_map_check` documents 1 as "violations" while reserving 2 for the
-#: map that could not be read. `cache_evict` is the exception BECAUSE its 1 is
+#: The refusal code each of the three files this PR guards CHOOSES (`#4053`,
+#: `#11342`), and the verdict code it spares. `SystemExit(<message>)` exits 1 in
+#: CPython, so for two of these files an old interpreter was reported as the
+#: tool's own verdict — `gen_placement_table --check` prints `STALE` and returns
+#: 1, and `test_design_map_check` documents 1 as "violations" while reserving 2
+#: for the map that could not be read. `cache_evict` is the exception BECAUSE its 1 is
 #: already a usage code (`CACHE_EVICTION_EXIT_USAGE`), its verdicts being 2/3/4.
 #:
 #: The census above cannot assert this: which non-zero code a file picks is a
