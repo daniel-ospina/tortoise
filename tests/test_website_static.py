@@ -4304,29 +4304,97 @@ class TestSiteIconAndSocialPreviewContract:
                 expected, filters)
 
     @staticmethod
-    def _jpeg_encoded_length(data: bytes) -> int:
-        """The ENCODED image's length — up to the EOI, not the file's length.
+    def _jpeg_stream_length(data: bytes) -> int:
+        """The bytes up to the EOI that ENDS THE SCAN — not the last `FFD9` in the file.
 
-        ⛔ A PADDED FILE IS NOT A CARD, and file length cannot tell. Measured: a flat
-        1200x630 JPEG is 4,723 B, and the SAME image padded with ~36 KB of trailing
-        zeros cleared a 40 KB floor with every other assertion — dimensions, type,
-        magic bytes — still green, so a blank card could be shipped past the one check
-        written to reject it. `0xFFD9` inside entropy-coded data is stuffed (`FF00`),
-        so the last EOI is the end of the image and bytes after it are not drawn on.
+        ⛔ A PADDED FILE IS NOT A CARD, and file length cannot tell: a flat 1200x630
+        JPEG is 4,723 B, and the SAME image padded with ~36 KB of trailing zeros cleared
+        a 40 KB floor with every other assertion — dimensions, type, magic bytes — still
+        green.
+
+        ⛔ AND `rfind(b"\\xff\\xd9")` CANNOT TELL EITHER. Byte-stuffing makes FFD9
+        unambiguous only INSIDE an entropy-coded scan (`FF` is always followed by `00` or
+        a restart marker there); bytes appended AFTER the image are inside no stream, so
+        padding closed with a two-byte trailer measured as if it had been painted on —
+        measured: 4,723 B + zeros + `FF D9` = 41,500 B and the floor cleared. So the walk
+        follows the segment chain from SOI to SOS and then the scan itself, and stops at
+        the FIRST EOI it meets. A real card's stream ends there; anything after it is
+        padding and does not count.
 
         Residual, accepted and named: an in-band metadata block (an EXIF thumbnail, a
         large ICC packet) sits BEFORE the EOI and still counts toward the floor. That is
-        the residual the floor has always had — it bounds encoded bulk, never whether
-        the card DEPICTS the right thing — and closing it would mean decoding the JPEG,
-        which this fast-lane guard deliberately does not do.
+        the residual the floor has always had — it bounds encoded bulk, never whether the
+        card DEPICTS the right thing — and closing it would mean decoding the JPEG, which
+        this fast-lane guard deliberately does not do.
         """
-        end = data.rfind(b"\xff\xd9")
-        return len(data) if end < 0 else end + 2
+        n = len(data)
+        i = 2
+        while i + 4 <= n:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker == 0xFF:
+                i += 1
+                continue
+            if marker == 0xD9:  # EOI with no scan (header-only or empty image)
+                return i + 2
+            if marker == 0xDA:  # SOS: entropy-coded data follows
+                j = i + 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+                while j + 1 < n:
+                    if data[j] == 0xFF:
+                        nxt = data[j + 1]
+                        if nxt == 0xD9:
+                            return j + 2
+                        if nxt == 0x00 or 0xD0 <= nxt <= 0xD7:  # stuffing / restart
+                            j += 2
+                            continue
+                    j += 1
+                return n
+            i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+        return n
+
+    @staticmethod
+    def _png_stream_length(data: bytes) -> int:
+        """The bytes up to the end of the IEND chunk — a PNG's image IS its chunks.
+
+        The JPEG walk above must never be applied to a PNG: `FF D9` inside IDAT is
+        ordinary compressed data, so it would measure the card by a random interior byte
+        pair. MEASURED on `website/logo.png` (35,670 B, whose IDAT happens to contain
+        `FF D9`): the JPEG scan reads 29,390 B — 6,280 B short — which would falsely
+        refuse a legitimate PNG card, and the reverse direction (a padded flat PNG) would
+        falsely accept one.
+        """
+        n = len(data)
+        pos = 8
+        while pos + 8 <= n:
+            (length,) = struct.unpack(">I", data[pos:pos + 4])
+            kind = data[pos + 4:pos + 8]
+            if kind == b"IEND":
+                return min(pos + 12 + length, n)
+            if length > n:  # malformed length: do not walk off the end
+                return n
+            pos += 12 + length
+        return n
+
+    @classmethod
+    def _encoded_length(cls, data: bytes) -> int:
+        """How many bytes of this card are actually IMAGE, dispatched on its magic.
+
+        A format with no reader here is measured as its file length — the only honest
+        statement the guard can make without parsing it, and the floor is a bulk check,
+        not a format check (`_card_size` owns the declared-type dispatch).
+        """
+        if data[:2] == b"\xff\xd8":
+            return cls._jpeg_stream_length(data)
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return cls._png_stream_length(data)
+        return len(data)
 
     @classmethod
     def _card_floor_violation(cls, page: str, path: Path, data: bytes) -> str | None:
         """Why an encoded card is too small to BE a card — None when it clears."""
-        encoded = cls._jpeg_encoded_length(data)
+        encoded = cls._encoded_length(data)
         if encoded >= cls.CARD_MIN_BYTES:
             return None
         return (f"{page}'s card {path.name} holds only {encoded} bytes of encoded image "
@@ -4878,16 +4946,43 @@ class TestSiteIconAndSocialPreviewContract:
                 # the square slot — and a filename test cannot see
                 # `assets/premiselabs-logo.png`, which is 160x98 and is the same wordmark
                 # by another name (measured: it passed this guard while `logo.png` was
-                # refused). Read the bytes instead, so any non-square PNG used as an
-                # icon reds whatever it is called.
+                # refused). Read the bytes instead.
+                # ⛔ AND THE BYTES ARE READ FOR EVERY FORMAT, NOT JUST `.png`: gating on
+                # one extension is the same one-rule-wide hole one level down — measured,
+                # `rel="icon" href="/assets/og-tortoise.jpg"` (1200x630) passed every
+                # icon assertion, and so did a href naming a file that does not exist.
                 path_part = urlsplit(href).path
-                if path_part.endswith(".png"):
-                    target = self.WEB / path_part.lstrip("/")
-                    if target.is_file():
-                        w, h = self._png_size(target.read_bytes())
-                        assert w == h, (
-                            f"{page.name} uses a {w}x{h} non-square image as a tab icon "
-                            f"({path_part}) — the tab squashes it into a square")
+                if path_part.endswith(".svg"):
+                    # A vector icon has no intrinsic pixel box to squash — the tab sizes
+                    # it from the viewBox — so it is EXEMPT BY NAME rather than skipped
+                    # silently by an extension filter.
+                    continue
+                target = self.WEB / path_part.lstrip("/")
+                assert target.is_file(), (
+                    f"{page.name} links an icon this site does not serve ({path_part}) — "
+                    "the tab draws nothing")
+                raw = target.read_bytes()
+                if raw[:8] == b"\x89PNG\r\n\x1a\n":
+                    w, h = self._png_size(raw)
+                elif raw[:2] == b"\xff\xd8":
+                    w, h = self._jpeg_size(raw)
+                elif raw[:4] == b"\x00\x00\x01\x00":
+                    # The ICO's directory entries are the slots a renderer reserves, so
+                    # each of them must be square too.
+                    for entry in self._ico_entries(raw):
+                        assert entry["declared"][0] == entry["declared"][1], (
+                            f"{page.name} uses {path_part} as a tab icon and its "
+                            f"{entry['declared'][0]}x{entry['declared'][1]} directory "
+                            "entry is not square — that icon is drawn squashed")
+                    continue
+                else:
+                    raise AssertionError(
+                        f"{page.name} uses {path_part} as a tab icon; this guard reads "
+                        "PNG, JPEG and ICO, and exempts only .svg — add a reader rather "
+                        "than leaving the tab unchecked")
+                assert w == h, (
+                    f"{page.name} uses a {w}x{h} non-square image as a tab icon "
+                    f"({path_part}) — the tab squashes it into a square")
 
     # --- 2. the preview resolves and is the size it claims ---------------
 
@@ -5245,6 +5340,42 @@ class TestSiteIconAndSocialPreviewContract:
                                           shipped) is None, (
             f"the shipped card ({len(shipped)} B) no longer clears the floor — look at "
             "it, then re-measure before touching CARD_MIN_BYTES")
+
+        # ⛔ AND A TRAILING `FF D9` IN THE PADDING RE-OPENED THE HOLE. `rfind` finds the
+        # last EOI in the FILE, and the two bytes that close padding are indistinguishable
+        # from an image's end once you are outside any scan — measured: the same 4,723 B
+        # flat card + zeros + `FF D9` = 41,500 B cleared the floor green. The walk now
+        # stops at the EOI that ends the SCAN, so the trailer is not paint.
+        trailer = (flat_card[:2] + b"\x00" * (self.FLAT_CARD_BYTES - 4) + b"\xff\xd9"
+                   + b"\x00" * (self.CARD_MIN_BYTES + 1_000 - self.FLAT_CARD_BYTES)
+                   + b"\xff\xd9")
+        assert len(trailer) > self.CARD_MIN_BYTES, "the trailer fixture is not past the floor"
+        assert self._card_floor_violation("page.html", Path("card.jpg"), trailer), (
+            "a flat card padded and CLOSED WITH FF D9 cleared the floor — the measure is "
+            "taking the last EOI in the file instead of the one that ends the image")
+
+        # ⛔ AND THE MEASURE IS FORMAT-AWARE. A PNG's image ends at its IEND chunk; `FF D9`
+        # inside IDAT is ordinary compressed data, so the JPEG walk both FALSE-PASSES a
+        # padded PNG card and FALSE-FAILS a real one. `website/logo.png` is the real
+        # witness: 35,670 B, its IDAT happens to contain `FF D9`, and a JPEG-only scan
+        # reads it 6,280 B short.
+        padded_png = self._flat_png(64)
+        padded_png += b"\x00" * (self.CARD_MIN_BYTES + 1_000 - len(padded_png))
+        assert self._card_floor_violation("page.html", Path("card.png"), padded_png), (
+            "a flat PNG padded past the floor cleared it — the floor measured the file, "
+            "not the PNG's chunks")
+        in_tree_png = (self.WEB / "logo.png").read_bytes()
+        assert b"\xff\xd9" in in_tree_png, (
+            "website/logo.png no longer contains an FF D9 byte pair, so it no longer "
+            "isolates the JPEG-delimiter bug it was chosen for — pick another PNG (or "
+            "state that this witness is gone)")
+        assert self._encoded_length(in_tree_png) == len(in_tree_png), (
+            f"website/logo.png ({len(in_tree_png)} B) measures "
+            f"{self._encoded_length(in_tree_png)} B — a JPEG scan is being applied to a "
+            "PNG, which reads an interior FF D9 as the end of the image")
+        assert self._encoded_length(shipped) == len(shipped), (
+            f"the shipped JPEG ({len(shipped)} B) measures "
+            f"{self._encoded_length(shipped)} B — its stream must end at its own EOF")
 
         # The VALUE readers accept honest markup. A reordered attribute and a
         # cache-busting query are identical to a browser and to every scraper; the

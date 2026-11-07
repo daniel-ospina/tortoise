@@ -1961,13 +1961,35 @@ console.log("the blog's link preview and icon");
   // 40 KB sits 1.82x above a flat one and 2.35x below the real card.
   const CARD_MIN_BYTES = 40000;
   const FLAT_CARD_BYTES = 22016;
-  // ⛔ THE ENCODED IMAGE, NOT THE FILE. File length can be inflated past any floor
-  // without drawing a pixel: measured on the Python twin, a flat 4,723 B card padded
-  // with trailing zeros cleared a 40 KB file-length floor green. `0xFFD9` inside
-  // entropy-coded data is stuffed (`FF00`), so the last EOI ends the image.
+  // ⛔ THE SCAN, NOT THE FILE. An earlier cut measured with `lastIndexOf(FF D9)`, which
+  // finds the last EOI in the FILE — and a padded trailer closed with those two bytes is
+  // indistinguishable from an image's end once you are outside any scan (measured: a
+  // 4,723 B flat card + zeros + `FF D9` cleared a 40 KB floor green). Walk the segments
+  // from SOI, then the entropy-coded scan, and stop at the FIRST EOI: that is where a
+  // real card's stream ends, and anything after it is padding, not paint.
   const encodedJpegLength = (buf) => {
-    const end = buf.lastIndexOf(Buffer.from([0xff, 0xd9]));
-    return end < 0 ? buf.length : end + 2;
+    const n = buf.length;
+    let i = 2;
+    while (i + 4 <= n) {
+      if (buf[i] !== 0xff) { i += 1; continue; }
+      const marker = buf[i + 1];
+      if (marker === 0xff) { i += 1; continue; }
+      if (marker === 0xd9) return i + 2;
+      if (marker === 0xda) {
+        let j = i + 2 + buf.readUInt16BE(i + 2);
+        while (j + 1 < n) {
+          if (buf[j] === 0xff) {
+            const nxt = buf[j + 1];
+            if (nxt === 0xd9) return j + 2;
+            if (nxt === 0x00 || (nxt >= 0xd0 && nxt <= 0xd7)) { j += 2; continue; }
+          }
+          j += 1;
+        }
+        return n;
+      }
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+    return n;
   };
   const cardFloorViolation = (buf) =>
     encodedJpegLength(buf) < CARD_MIN_BYTES
@@ -1997,6 +2019,16 @@ console.log("the blog's link preview and icon");
   assert(cardFloorViolation(paddedFlat) !== null,
     "a flat card PADDED past the floor cleared it — the floor is measuring the file, " +
     "not the encoded image, and trailing bytes are not paint");
+  // ...and a trailer that LOOKS like an EOI must not re-open it, which is exactly what a
+  // `lastIndexOf(FF D9)` measure lets through.
+  const trailingEoi = Buffer.concat([
+    flatCard, Buffer.alloc(CARD_MIN_BYTES + 1000 - FLAT_CARD_BYTES), Buffer.from([0xff, 0xd9]),
+  ]);
+  assert(cardFloorViolation(trailingEoi) !== null,
+    "a flat card padded and CLOSED WITH FF D9 cleared the floor — the measure is taking " +
+    "the last EOI in the file instead of the one that ends the image");
+  assertEq(encodedJpegLength(card), card.length,
+    "the shipped card's stream ends at its own EOF, so the floor measures all of it");
 
   // The type is declared for the authored card and NOT for a post cover — the same
   // rule as the dimensions, for the same reason: a cover's format is the author's.
