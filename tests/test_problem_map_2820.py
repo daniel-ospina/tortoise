@@ -813,6 +813,60 @@ def test_an_unreadable_parent_directory_is_a_state_error_not_drift(monkeypatch):
     assert report.code == 2
 
 
+def test_an_unreadable_index_is_reported_ONCE_not_twice(monkeypatch):
+    """One unreadable index is ONE fault.
+
+    The stat guard and the read guard are different layers, and both can fire for
+    the same `chmod 000`: the branch must dispatch on the FULL `_path_state`
+    result, or the run reports `could not be examined` and then `could not be
+    read` for a single fault (#11384 review round 16). Patching `Path.exists`
+    (not `read_text`) is what reaches the new branch — the existing unreadable-
+    index control patches the read, so it cannot see this.
+    """
+    # BOTH layers must fail, or the control cannot see the double-report: the
+    # STAT alone leaves the READ succeeding, so the fall-through records nothing
+    # (measured — a stat-only version passed with the fix reverted).
+    _refuse_stat_of(monkeypatch, REPO / pmc.INDEX_REL)
+    _refuse_read_of(monkeypatch, REPO / pmc.INDEX_REL)
+    report = pmc.run(REPO, DOC)
+    assert report.errors == [], report.errors
+    assert len(report.state_errors) == 1, report.state_errors
+    assert report.code == 2
+
+
+def test_a_document_path_that_is_a_DIRECTORY_is_recorded_not_agreeable(tmp_path):
+    """`check_registration` defends DIRECT callers, so its doc arm must fail closed.
+
+    A directory at the document path must reach the READ guard and be recorded;
+    short-circuiting it to `text = ""` made the call return `[]` — identical to
+    "registered and the counts agree" — for a document nothing measured
+    (#11384 review round 16). The `report=None` arm must not turn that into
+    silence either.
+    """
+    # The NAME must be the real one, or registration fails on "not listed" before
+    # the doc arm is ever reached (which is what the first draft of this control
+    # silently proved).
+    docdir = tmp_path / DOC.name
+    docdir.mkdir()
+    report = pmc.Report()
+    assert pmc.check_registration(REPO, docdir, None, report) == []
+    assert any("could not be read" in e for e in report.state_errors), report.state_errors
+    assert pmc.check_registration(REPO, docdir, None) != [], "no-report caller saw silence"
+
+
+def test_a_MISSING_document_is_a_state_error_for_a_direct_caller(tmp_path):
+    """The index arm fails closed when the index is missing; the doc arm must too.
+
+    `[]` reads as "agrees", and a path that is not there has been measured by
+    nothing (#11384 review round 16).
+    """
+    missing = tmp_path / DOC.name  # a name the index DOES carry, so the arm is reached
+    report = pmc.Report()
+    pmc.check_registration(REPO, missing, None, report)
+    assert any("does not exist" in e for e in report.state_errors), report.state_errors
+    assert pmc.check_registration(REPO, missing, None) != [], "no-report caller saw silence"
+
+
 def test_an_unreadable_INDEX_is_a_state_error_not_drift(monkeypatch):
     """`check_registration`'s index read was the SECOND unguarded read of the run.
 

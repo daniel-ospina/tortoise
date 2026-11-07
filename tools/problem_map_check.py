@@ -574,7 +574,15 @@ def check_registration(
             message = f"{doc} could not be examined — nothing was measured"
             return errors if report is not None else [message]
         if state == "missing":
-            text = ""
+            # The INDEX arm fails closed on its own `missing` case, so this arm
+            # must too: `[]` is byte-identical to "registered, counts agree", and
+            # a document that is not there has been measured by nothing
+            # (#11384 review round 16).
+            message = f"{doc} does not exist — nothing was measured"
+            if report is not None:
+                report.state_errors.append(message)
+                return errors
+            return [message]
         else:
             # `not-file` deliberately falls into the read: a directory at the
             # document path must hit the read guard and be recorded, not silently

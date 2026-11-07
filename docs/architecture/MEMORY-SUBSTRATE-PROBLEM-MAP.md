@@ -327,16 +327,17 @@ The checker re-measures, offline and without network access:
    module actually contains a `def test_` (a pin whose file survives but whose
    assertions were deleted pins nothing). A pin outside that shape — a JS test
    module, a shipped symbol, a document — is checked for existence, NOT content.
-   A pin that the checker **reads** — a `tests/*.py` module — is the one case where
-   an unreadable artifact is a state error: exists as a file but cannot be read
-   (`chmod 000`, or an unreadable parent directory) is reported as UNVERIFIED
-   (exit 2), never as drift: the guard has not measured it, so "the map disagrees
+   A pin the checker **reads** — a `tests/*.py` module — that exists as a file
+   but cannot be read (`chmod 000`) is reported as NO ANSWER (a state error,
+   exit 2), never as drift: the guard has not measured it, so "the map disagrees
    with the tree" would be the wrong diagnosis on the code a reader is told means
-   the document is wrong. A pin outside that shape is never read (it is checked
-   for existence only), so an unreadable one is *not* a state error — the check
-   that would have parsed it does not exist. A **directory** at a pin path is the
-   third case and stays DRIFT (the case above): it pins nothing, and the guard CAN
-   tell — calling that unreadable would excuse a row that fails no assertion.
+   the document is wrong. A pin outside that shape is existence-checked only, so
+   an unreadable *file* of that shape is not a state error — nothing would have
+   parsed it. But a pin the guard cannot even **stat** (an unreadable parent
+   directory) is a state error for **every** shape, because existence itself is
+   then unmeasured. A **directory** at a pin path is the third case and stays
+   DRIFT (the case above): it pins nothing, and the guard CAN tell — calling that
+   unreadable would excuse a row that fails no assertion.
 5. **Summary counts** — the numbers in §2 equal the rows that follow. A summary
    that drifts from its own table is the same defect class as the missing
    `content_hash` this map's Pattern 1 names.
@@ -347,7 +348,8 @@ The checker re-measures, offline and without network access:
    elsewhere is a cross-reference, not a registration). The index is the half
    most readers meet first, and it said `22 fixed · 4 open` on this page's first
    landing while §2 said something else. Like a pin, an index that cannot be
-   **read** (a directory at that path, an unreadable file) is UNVERIFIED rather
+   **read** (a directory at that path, an unreadable file) is NO ANSWER (a state
+   error, exit 2) rather
    than drift, because registration was never checked.
 
 **What is deliberately NOT guarded — and each one is a real residual, not a
