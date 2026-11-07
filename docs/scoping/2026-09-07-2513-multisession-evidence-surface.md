@@ -84,15 +84,20 @@ mechanisms converge across independent lines of work:
 | **(c) Completeness loop (retrieve→check→expand) instead of one top-k shot** | — | ✅ **Selector/Adder iterative evidence-complete loop** (independent convergence) | ✅ BFS land-and-expand from seeded hits | — | — |
 | **(d) Raw episodes reachable from semantic units (non-lossy backlink)** | ✅ sessions retained under decomposed units | — | ✅ episodes (raw) are a first-class scope | ✅ **inject the source chunk when a memory hits** | ✅ **return the whole session on a turn-level hit** |
 
-**In-repo anchors:** (a) turn/point units + per-point `search_keys` (E3 #1535) are already
+**In-repo anchors (as of 2026-09-07, when this plan was written — §10.2 carries the current landing
+state of each):** (a) turn/point units + per-point `search_keys` (E3 #1535) are already
 written at ingest (`extractor_v2`), indexed as `content ∪ search_keys`, and an additive
 query-time expansion hook exists (`build_or_query(expansion_terms=…)`, R2 #1541; the ask
 lane's A4 PRF harvests top-5 hits' `search_keys` — `tortoise/sdk.py`); (b) the graph has
 entities, `aboutSubject`, and write-time entity resolution (E7 #1539, closed) — the join
-substrate exists; (c) **no completeness loop exists anywhere in the product or harness**;
+substrate exists; (c) **no completeness loop existed anywhere in the product or harness**;
 (d) raw `session-transcript` chunks already sit in the same pool (R1 #1540, C5 per-session
-cap 3) and the reader context is rank-interleaved (C1 #1745) — the backlink material is
-there but nothing re-injects a *whole source session* once a semantic unit hits.
+cap 3) and the reader context is rank-interleaved (C1 #1745) — the backlink material was
+there but nothing re-injected a *whole source session* once a semantic unit hit.
+
+⚠️ **(c) and (d) have both landed since** — `tortoise/coverage_loop.py` (#2608, C3) and
+`tortoise/session_reinjection.py` (#3577, C4) — and both are armed from the **eval lane only**,
+not the product. §10.2 is the authoritative row-by-row state; do not read (c)/(d) as current.
 
 ## 3. Open space (we would be inventing)
 
