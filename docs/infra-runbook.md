@@ -2804,6 +2804,21 @@ undone.
   window and hold deploys to `main` until it merges. The reverse order is not a fix
   either — an entry for a name still on Fly fails the deploy
   (`MITIGATION NOT IN EFFECT`).
+- **A failed run can leave a PENDING stage — detected, but in the bypassable class.**
+  The sync step uses `flyctl secrets set --stage`, so a run that stages a name and then
+  fails before `flyctl deploy` leaves the change pending. **Settled** (the ledger header
+  recorded this as `Unverified`): `flyctl secrets list --json` — the source this gate
+  reads — lists a staged secret as present, with a `Staged` deployment status
+  ([fly secrets list](https://fly.io/docs/flyctl/secrets-list/)), so the gate's
+  presence check SEES it and an entry for that name fails the run with `MITIGATION NOT
+  IN EFFECT`. That red lands before the stage can be applied, because the provenance
+  gate runs ahead of `flyctl deploy` in the same `deploy-api` job, and ahead of the
+  `Set all app secrets on Fly.io` staging step. ⛔ But it is **exit 1**, the `skip-fly-secret-provenance` class: an
+  operator arming that bypass for an unrelated stale declaration applies the pending
+  value silently, and the entry also freezes rotation while it stands. Clear the stage
+  before re-running (`flyctl secrets unset <NAME> -a tortoise-y4mjjq`, then confirm
+  `flyctl secrets list` shows no `Staged` entry for the name) instead of bypassing.
+  Nothing in this repo reads or clears pending staged state.
 - **`reason` is a review note, never the value.** The ledger is tracked and public,
   and the gate prints every entry's `reason` on each deploy.
 - **A lapsed entry KEEPS suppressing on purpose.** Silently re-arming on a date

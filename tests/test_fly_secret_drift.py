@@ -1844,8 +1844,11 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         # illegal — so the operator writing one mid-incident would have to edit
         # tests before the mitigation could land, and the cheapest green is to
         # weaken the assertion that models production. The ledger gets its own tests
-        # (`TestTheMitigationLedger`, which drives the SHIPPED artifacts over the
-        # shipped ledger); here it is pinned out of the way.
+        # (`TestTheMitigationLedger` — it drives the SHIPPED workflow over a non-empty
+        # ledger FIXTURE, and parses the shipped ledger against the shipped manifest;
+        # the joint case, shipped workflow over the SHIPPED ledger, is
+        # `test_the_shipped_workflow_honours_the_shipped_ledger` — #11372); here it is
+        # pinned out of the way.
         extra_env={"FLY_MITIGATION_LEDGER": str(_fixture("no-ledger.txt", "# empty\n"))},
     )
     assert "STALE DECLARATION" not in r.stdout, r.stdout
@@ -2789,6 +2792,32 @@ def _manifest_fly_names(path: Path) -> list[str]:
     return sorted(set(names))
 
 
+def _drift_module():
+    """`check-fly-secret-drift.py` loaded by path (it is a script, not a module).
+
+    Loaded fresh per call so a test can read the SHIPPED ledger through the
+    gate's OWN parser — a fixture that re-implemented the grammar could disagree
+    with the reader the deploy uses, which is the divergence #11122 is about.
+    """
+    sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("check_fly_secret_drift", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _shipped_ledger_names() -> list[str]:
+    """The names `.github/scripts/fly-secret-mitigations.txt` records (via the gate)."""
+    module = _drift_module()
+    entries = module.read_mitigation_ledger(
+        REAL_LEDGER, module.read_manifest(REAL_MANIFEST)
+    )
+    return sorted(entries)
+
+
 class TestTheMitigationLedger:
     """#11122 — a deliberate absence is a RECORDED state, enforced at sync time."""
 
@@ -3172,6 +3201,74 @@ class TestTheMitigationLedger:
         for line in suppressed.stdout.splitlines():
             if "will CREATE" in line:
                 assert "SENTRY_DSN" not in line
+
+    def test_the_shipped_workflow_honours_the_shipped_ledger(self):
+        """#11372 — the JOINT case: the SHIPPED workflow driven by the SHIPPED ledger.
+
+        No test covered the pair. The sibling end-to-end test pins the ledger EMPTY (a
+        real entry means `MITIGATION NOT IN EFFECT` against its all-names-live fixture),
+        the non-empty test uses a ledger FIXTURE, and the shipped-ledger test only
+        PARSES it. So the first real entry could be first validated by a blocked
+        production deploy — exit 2, never bypassable — during exactly the incident
+        window the header tells the operator to write it in.
+
+        The fixture is the Fly app the operator is told to produce: every declared Fly
+        secret LIVE **minus** whatever the shipped ledger records, so the assertion holds
+        for any future ledger content, empty or not. Today the ledger is entry-free and
+        the two cases coincide; the day an entry lands this test keeps meaning the same
+        thing without an edit.
+
+        `FLY_MITIGATION_TODAY` is deliberately NOT pinned: this runs the gate exactly as
+        the deploy does, so an entry that has LAPSED reds here as it reds the deploy.
+        """
+        ledgered = _shipped_ledger_names()
+        declared = _manifest_fly_names(REAL_MANIFEST)
+        live = [n for n in declared if n not in set(ledgered)]
+        proc = _run(
+            _secrets_file(live, "shipped-ledger-secrets.json"),
+            manifest=REAL_MANIFEST,
+            workflow=REAL_WORKFLOW,
+            toml=REAL_FLY_TOML,
+            present=_declared_gh_names(REAL_MANIFEST),
+            extra_env={"FLY_MITIGATION_LEDGER": str(REAL_LEDGER)},
+        )
+        assert "LEDGER NOT HONOURED" not in proc.stdout, (
+            "the shipped ledger records a name the shipped `Set all app secrets on "
+            "Fly.io` step still stages — the deploy would re-arm the mitigation. "
+            + proc.stdout
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        # …and it READ the shipped ledger rather than falling back to something else:
+        # the gate names the file it read and how many entries it acted on.
+        assert f"{len(ledgered)} mitigated by {REAL_LEDGER.name}" in proc.stdout, proc.stdout
+
+        # ── non-vacuity: the same assertion about the SAME real workflow, with only
+        # the shipped filter removed, must go RED. Without this the test above would
+        # also pass on a payload that stages nothing, or on a gate that silently read
+        # no ledger at all.
+        unfiltered = _fixture(
+            "real-workflow-unfiltered.yml",
+            REAL_WORKFLOW.read_text().replace(_LEDGER_FILTER, ""),
+        )
+        assert unfiltered.read_text() != REAL_WORKFLOW.read_text(), (
+            "the shipped ledger block was not removed from the copy — the anchors in "
+            "`_real_ledger_filter` drifted, so the arm below would prove nothing"
+        )
+        target = ledgered[0] if ledgered else "SENTRY_DSN"
+        assert target in declared, f"the real manifest no longer declares {target}"
+        red = _run(
+            _secrets_file([n for n in declared if n != target], "real-unfiltered-secrets.json"),
+            manifest=REAL_MANIFEST,
+            workflow=unfiltered,
+            toml=REAL_FLY_TOML,
+            present=_declared_gh_names(REAL_MANIFEST),
+            extra_env={
+                "FLY_MITIGATION_LEDGER": str(_ledger(_entry(target, expires=_TOMORROW))),
+                "FLY_MITIGATION_TODAY": "2026-11-07",
+            },
+        )
+        assert red.returncode == 2, red.stdout + red.stderr
+        assert "LEDGER NOT HONOURED" in red.stdout, red.stdout
 
     def test_the_shipped_ledger_exists_and_parses(self):
         """The tracked contract: a missing/rotted file hard-blocks every deploy."""
