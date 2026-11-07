@@ -2059,12 +2059,19 @@ def _is_honest_spelling(text: str) -> bool:
     waiver is only ever granted to a span that names NO class anchor, so it can
     never travel to a claim about the gap this row closed.
 
-    ⛔ The withholding set is `_RESIDUAL_CLASS_ANCHOR` in full — `adjacency`, a
-    unit token or its abbreviation, `time-unit`, the carve-out, the retention
-    guarantee, the value class, the numeric side. It is that WHOLE set and not a
-    hand-picked subset because a subset is what let one word defeat the gate: with
-    `carve-out` dropped, `the SPELLING carve-out is open again` was waived and the
-    same sentence without `spelling` red (#11258 review round 3 `P1`, measured).
+    ⛔ The withholding set is `_RESIDUAL_WAIVER_WITHHOLD` — NOT
+    `_RESIDUAL_CLASS_ANCHOR` "in full", which is what this docstring said until
+    #11258 review round 17 `P2` measured that false at the head. The anchor's
+    membership (adjacency, the time-unit spelling, the carve-out, the retention
+    guarantee, the value class, the numeric side) PLUS the unit vocabulary
+    (`units?`, `unit word`, `kg`, `mi`, `mos`, `millisec(s)`) and the bare
+    `(?<!['\u2019])\b[ms]\b` abbreviation alternative. The unit arms are not
+    decoration: the row's surviving gap IS the unit-spelling class, so a waiver
+    that read only the anchor let `the spelling gap is open because `kg` is no
+    longer fused` through (#11258 review round 5 `P1`, measured). What the anchor
+    alone must keep out is unchanged: with `carve-out` dropped from it, `the
+    SPELLING carve-out is open again` was waived and the same sentence without
+    `spelling` red (round 3 `P1`, measured).
 
     ⛔ The cost, named rather than implied: a clause naming BOTH `spelling` and the
     carve-out gets no waiver, so honest prose of that shape is refused. That is an
@@ -2496,11 +2503,19 @@ _RESIDUAL_REOPENING_MUTATIONS = (
     # of the disclosed residuals: the disclosure names shapes phrased with NONE of
     # this arm's words, and these are phrased with the arm's own word. Fixed at
     # both sites (`_RESIDUAL_OPENNESS` and `_SPELLING_FLOOR`, which is the ONLY
-    # tuple the honest-`spelling` path runs) and pinned here, one per inflection,
-    # because the two sites drift independently.
+    # tuple the honest-`spelling` path runs).
+    # ⛔ AND EACH SITE NEEDS ITS OWN PIN, which those three were NOT (#11258 review
+    # round 17 `P1`, MEASURED): they name `the ADJACENCY gap`, so they carry the
+    # class anchor, so the waiver never fires and `_SPELLING_FLOOR` is never
+    # reached — narrowing the FLOOR's arm back to `\bopen\s+again\b` left the
+    # whole suite GREEN (103 passed). A `spelling`-subject sentence IS the only
+    # shape that runs the floor, so the next three are the floor's own falsifiers.
     "the ADJACENCY gap opens again.",
     "the ADJACENCY gap has opened again.",
     "the ADJACENCY gap is opening again.",
+    "the SPELLING gap opens again.",
+    "the SPELLING gap has opened again.",
+    "the SPELLING gap is opening again.",
 )
 
 #: Truthful statements that must stay GREEN. Each is a shape the row itself uses
@@ -2895,10 +2910,10 @@ def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
     assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
         _RESIDUAL_TRUTHFUL_STATEMENTS), (
         "the truthful-statement proof list has duplicate entries — see above")
-    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 129, (
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 132, (
         "the reopening proof list SHRANK below its floor — re-derive the count "
         "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
-        "THE CURRENT LENGTH (129), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
+        "THE CURRENT LENGTH (132), i.e. ZERO SLACK: at `>= 81` against an 88-entry "
         "list the slack was SEVEN mutations, which is more than the SIX exclusive "
         "proofs of the `no longer …` arm — so that pattern and all six of its "
         "proofs could be deleted with both tests GREEN, and "
